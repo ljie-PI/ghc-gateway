@@ -12,6 +12,8 @@ import type {
 } from "../../../web/src/types.js";
 
 const NOW = "2026-09-03T12:00:00.000Z";
+export const ADMIN_FIXTURE_NOW_MS = Date.parse(NOW);
+const DEVICE_POLL_INTERVAL_MS = 5_000;
 
 export interface AdminFixture {
   readonly requests: Request[];
@@ -31,6 +33,11 @@ export interface AdminFixture {
     conflictHistory: boolean;
     conflictModel: boolean;
     failAccountRemoval: boolean;
+    devicePollStates: Array<"pending" | "complete" | "expired" | "denied" | "failed" | "network">;
+    devicePollDelayMs: number;
+    deviceNowMs: number;
+    accountsDelayMs: number;
+    cancelCompletesDeviceFlow: boolean;
     streamBodies: string[];
     streamDelaysMs: number[];
     streamHoldsMs: number[];
@@ -85,6 +92,11 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       conflictHistory: false,
       conflictModel: false,
       failAccountRemoval: false,
+      devicePollStates: ["pending", "complete"],
+      devicePollDelayMs: 0,
+      deviceNowMs: ADMIN_FIXTURE_NOW_MS,
+      accountsDelayMs: 0,
+      cancelCompletesDeviceFlow: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
       streamDelaysMs: [],
       streamHoldsMs: [],
@@ -163,17 +175,53 @@ async function handle(route: Route, fixture: AdminFixture): Promise<void> {
       },
     });
   }
-  if (path === "/accounts") return json(route, 200, fixture.state.accounts);
+  if (path === "/accounts") {
+    const accounts = structuredClone(fixture.state.accounts);
+    if (fixture.state.accountsDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, fixture.state.accountsDelayMs));
+    }
+    return json(route, 200, accounts);
+  }
   if (path === "/device-flows" && request.method() === "POST") {
+    const now = fixture.state.deviceNowMs;
     return json(route, 201, {
       flowId: "flow-1",
       userCode: "ABCD-1234",
       verificationUri: "https://github.invalid/login/device",
-      expiresAt: "2026-09-03T12:10:00.000Z",
-      pollIntervalSeconds: 1,
+      expiresAt: new Date(now + 10 * 60_000).toISOString(),
+      pollIntervalSeconds: DEVICE_POLL_INTERVAL_MS / 1_000,
+      nextPollAt: new Date(now + DEVICE_POLL_INTERVAL_MS).toISOString(),
     });
   }
-  if (path === "/device-flows/flow-1") {
+  if (path === "/device-flows/flow-1" && request.method() === "DELETE") {
+    if (fixture.state.cancelCompletesDeviceFlow) {
+      const ghes = account("ghes:2", "github.example.test", "enterprise");
+      if (!fixture.state.accounts.items.some((item) => item.accountId === ghes.accountId)) {
+        fixture.state.accounts = {
+          ...fixture.state.accounts,
+          items: [...fixture.state.accounts.items, ghes],
+        };
+      }
+      return json(route, 200, { state: "complete", account: ghes });
+    }
+    return json(route, 200, { state: "canceled" });
+  }
+  if (path === "/device-flows/flow-1" && request.method() === "GET") {
+    if (fixture.state.devicePollDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, fixture.state.devicePollDelayMs));
+    }
+    const state = fixture.state.devicePollStates.shift() ?? "pending";
+    if (state === "network") return route.abort("connectionfailed");
+    if (state === "pending") {
+      return json(route, 200, {
+        state,
+        pollIntervalSeconds: 10,
+        nextPollAt: new Date(fixture.state.deviceNowMs + 10_000).toISOString(),
+      });
+    }
+    if (state === "expired" || state === "denied" || state === "failed") {
+      return json(route, 200, { state });
+    }
     const ghes = account("ghes:2", "github.example.test", "enterprise");
     if (!fixture.state.accounts.items.some((item) => item.accountId === ghes.accountId)) {
       fixture.state.accounts = {

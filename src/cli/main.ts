@@ -18,6 +18,8 @@ import {
 } from "../daemon/runtime.js";
 import { composeLazyProductionDaemonGateway } from "../daemon/production_gateway.js";
 
+const INTERACTIVE_LOGIN_CLEANUP_TIMEOUT_MS = 1_000;
+
 export interface RunCliOptions {
   readonly argv?: readonly string[];
   readonly env?: NodeJS.ProcessEnv;
@@ -124,24 +126,66 @@ async function runInteractiveLogin(
     dataDir: context.dataDir,
     signal: localSignal.signal,
   };
+  let flowId: string | null = null;
+  let authenticatedAccountId: string | null = null;
+  let failure: unknown = null;
   try {
     const started = await client.request("auth.login.start", args, controlContext);
+    flowId = started.flowId;
     stdout.write(`Code: ${started.userCode}\n`);
     stdout.write(`Open: ${started.verificationUri}\n`);
+    const expiresAtMs = Date.parse(started.expiresAt);
+    let pollIntervalSeconds = started.pollIntervalSeconds;
+    let nextPollAtMs = validDate(started.nextPollAt)
+      ?? Date.now() + pollIntervalSeconds * 1000;
     for (;;) {
+      const delayMs = options.pollDelayMs
+        ?? Math.max(0, Math.min(nextPollAtMs, expiresAtMs) - Date.now());
+      await sleep(delayMs, localSignal.signal);
       const result = await client.request("auth.login.poll", { flowId: started.flowId }, controlContext);
       if (result.state === "complete") {
-        stdout.write(`Authenticated: ${result.account.accountId}\n`);
-        return 0;
+        authenticatedAccountId = result.account.accountId;
+        break;
       }
       if (result.state !== "pending") {
-        throw new CliError("remote_error");
+        throw new CliError(result.state === "expired"
+          ? "authorization_expired"
+          : result.state === "denied"
+            ? "authorization_denied"
+            : "authorization_failed");
       }
-      await sleep(options.pollDelayMs ?? started.pollIntervalSeconds * 1000, localSignal.signal);
+      pollIntervalSeconds = result.pollIntervalSeconds ?? pollIntervalSeconds;
+      nextPollAtMs = validDate(result.nextPollAt)
+        ?? Date.now() + pollIntervalSeconds * 1000;
     }
-  } finally {
-    localSignal.dispose();
+
+  } catch (error: unknown) {
+    failure = error;
   }
+  localSignal.dispose();
+  if (flowId !== null && authenticatedAccountId === null) {
+    try {
+      const canceled = await client.request("auth.login.cancel", { flowId }, {
+        dataDir: context.dataDir,
+        timeoutMs: INTERACTIVE_LOGIN_CLEANUP_TIMEOUT_MS,
+      });
+      if (canceled.state === "complete") authenticatedAccountId = canceled.accountId;
+    } catch (error: unknown) {
+      if (failure === null) failure = error;
+    }
+  }
+  if (authenticatedAccountId !== null) {
+    stdout.write(`Authenticated: ${authenticatedAccountId}\n`);
+    return 0;
+  }
+  if (failure !== null) throw failure;
+  throw new CliError("internal_error");
+}
+
+function validDate(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function processSignal(): { readonly signal: AbortSignal; readonly dispose: () => void } {

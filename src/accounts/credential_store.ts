@@ -13,9 +13,14 @@ export interface SecretCredential {
 
 export interface CredentialStore {
   readGeneration(accountId: AccountId, generation: number): Promise<SecretCredential | null>;
-  putGeneration(accountId: AccountId, generation: number, value: SecretCredential): Promise<void>;
+  putGeneration(
+    accountId: AccountId,
+    generation: number,
+    value: SecretCredential,
+    signal?: AbortSignal,
+  ): Promise<void>;
   removeAccount(accountId: AccountId): Promise<void>;
-  prune(references: ReadonlyMap<AccountId, number>): Promise<void>;
+  prune(references: ReadonlyMap<AccountId, number>, signal?: AbortSignal): Promise<void>;
 }
 
 interface FileDocument {
@@ -30,17 +35,25 @@ export class MemoryCredentialStore implements CredentialStore {
     return this.data.get(accountId)?.get(generation) ?? null;
   }
 
-  async putGeneration(accountId: AccountId, generation: number, value: SecretCredential): Promise<void> {
+  async putGeneration(
+    accountId: AccountId,
+    generation: number,
+    value: SecretCredential,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     const current = this.data.get(accountId) ?? new Map<number, SecretCredential>();
     current.set(generation, value);
     this.data.set(accountId, current);
+    signal?.throwIfAborted();
   }
 
   async removeAccount(accountId: AccountId): Promise<void> {
     this.data.delete(accountId);
   }
 
-  async prune(references: ReadonlyMap<AccountId, number>): Promise<void> {
+  async prune(references: ReadonlyMap<AccountId, number>, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     for (const [accountId, generations] of this.data) {
       const keep = references.get(accountId);
       if (keep === undefined) {
@@ -52,6 +65,7 @@ export class MemoryCredentialStore implements CredentialStore {
           generations.delete(generation);
         }
       }
+      signal?.throwIfAborted();
     }
   }
 }
@@ -66,7 +80,13 @@ export class FileCredentialStore implements CredentialStore {
     return document.credentials[accountId]?.[String(generation)] ?? null;
   }
 
-  async putGeneration(accountId: AccountId, generation: number, value: SecretCredential): Promise<void> {
+  async putGeneration(
+    accountId: AccountId,
+    generation: number,
+    value: SecretCredential,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
     const document = readDocument(this.filePath);
     const account = document.credentials[accountId] ?? {};
     account[String(generation)] = value;
@@ -74,6 +94,7 @@ export class FileCredentialStore implements CredentialStore {
       version: 1,
       credentials: { ...document.credentials, [accountId]: account },
     });
+    signal?.throwIfAborted();
   }
 
   async removeAccount(accountId: AccountId): Promise<void> {
@@ -83,7 +104,8 @@ export class FileCredentialStore implements CredentialStore {
     writeDocument(this.filePath, { version: 1, credentials: next });
   }
 
-  async prune(references: ReadonlyMap<AccountId, number>): Promise<void> {
+  async prune(references: ReadonlyMap<AccountId, number>, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const document = readDocument(this.filePath);
     const next: FileDocument["credentials"] = {};
     for (const [accountId, generation] of references) {
@@ -93,6 +115,7 @@ export class FileCredentialStore implements CredentialStore {
       }
     }
     writeDocument(this.filePath, { version: 1, credentials: next });
+    signal?.throwIfAborted();
   }
 }
 

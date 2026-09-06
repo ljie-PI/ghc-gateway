@@ -100,6 +100,9 @@ Admin security defaults:
 - bounded, replayable SSE monitoring with no WebSocket or remote Admin access
 
 The six views are Overview, Accounts, Models, Configuration, Responses History, and Events.
+The Accounts view checks an active device authorization automatically at GitHub's required interval. Keep that
+view open until it reports completion; closing or leaving it stops browser polling, and no device code or token is
+stored in browser storage.
 
 ## HTTP Interfaces
 

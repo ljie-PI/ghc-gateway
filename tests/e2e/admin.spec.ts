@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  ADMIN_FIXTURE_NOW_MS,
   installAdminFixture,
   operationalEvent,
   sse,
@@ -56,6 +57,21 @@ async function recordAccessibilityEvidence(page: Page): Promise<void> {
   }, null, 2)}\n`, "utf8");
 }
 
+async function advanceDeviceClock(
+  page: Page,
+  fixture: Awaited<ReturnType<typeof installAdminFixture>>,
+  milliseconds: number,
+): Promise<void> {
+  fixture.state.deviceNowMs += milliseconds;
+  await page.clock.fastForward(milliseconds);
+}
+
+function devicePollRequests(fixture: Awaited<ReturnType<typeof installAdminFixture>>) {
+  return fixture.requests.filter((request) => (
+    request.method() === "GET" && request.url().endsWith("/device-flows/flow-1")
+  ));
+}
+
 test("bootstrap-and-session-expiry", async ({ page }) => {
   const fixture = await openAdmin(page);
   await expect(page).toHaveURL(/\/admin\/$/);
@@ -76,13 +92,19 @@ test("bootstrap-and-session-expiry", async ({ page }) => {
 });
 
 test("github-and-ghes-account-lifecycle", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
   const fixture = await openAdmin(page);
   await keyboardNavigate(page, "Accounts");
   await page.getByLabel("GitHub host").fill("github.example.test");
   await page.getByRole("button", { name: "Start login" }).click();
   await expect(page.getByText("ABCD-1234")).toBeVisible();
-  await page.getByRole("button", { name: "I've authorized" }).click();
+  await expect(page.getByText("checking automatically")).toBeVisible();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect.poll(() => devicePollRequests(fixture).length).toBe(1);
+  await advanceDeviceClock(page, fixture, 10_000);
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Current default is @octo");
+  expect(fixture.state.accounts.defaultAccountId).toBe("github:1");
   fixture.state.conflictAccount = true;
   await page.getByRole("button", { name: "Make default" }).click();
   await expect(page.getByRole("alert")).toContainText("changed elsewhere");
@@ -106,6 +128,144 @@ test("github-and-ghes-account-lifecycle", async ({ page }) => {
     .click();
   await expect(page.getByRole("article").filter({ hasText: "Enterprise Admin" }).getByText("removed"))
     .toBeVisible();
+});
+
+test("device-flow disposal and terminal failures clean up polling", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+  const fixture = await openAdmin(page);
+  await page.getByRole("button", { name: "Accounts" }).click();
+  await page.getByRole("button", { name: "Start login" }).click();
+  await page.getByRole("button", { name: "Check now" }).click();
+  expect(devicePollRequests(fixture)).toHaveLength(0);
+  await page.getByRole("button", { name: "Replace login" }).click();
+  await expect.poll(() => fixture.requests.filter((request) => request.url().endsWith("/device-flows")).length)
+    .toBe(2);
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect.poll(() => devicePollRequests(fixture).length).toBe(1);
+  await page.getByRole("button", { name: "Models" }).click();
+  await advanceDeviceClock(page, fixture, 20_000);
+  expect(devicePollRequests(fixture)).toHaveLength(1);
+
+  fixture.state.devicePollStates = ["denied"];
+  await page.getByRole("button", { name: "Accounts" }).click();
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect(page.getByRole("alert")).toContainText("denied in GitHub");
+  await expect(page.getByText("ABCD-1234")).toHaveCount(0);
+
+  fixture.state.devicePollStates = ["expired"];
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect(page.getByRole("alert")).toContainText("Authorization expired");
+
+  fixture.state.devicePollStates = ["pending"];
+  await page.getByRole("button", { name: "Start login" }).click();
+  fixture.state.authenticated = false;
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect(page.getByRole("heading", { name: "Control room locked" })).toBeFocused();
+  await advanceDeviceClock(page, fixture, 20_000);
+  expect(devicePollRequests(fixture)).toHaveLength(4);
+});
+
+test("device-flow retries network failures without accepting stale responses", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+  const fixture = await openAdmin(page);
+  fixture.state.devicePollStates = ["network", "complete"];
+  await page.getByRole("button", { name: "Accounts" }).click();
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect(page.getByRole("alert")).toContainText("gateway is unreachable");
+  await expect(page.getByText("retrying automatically")).toBeVisible();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect(page.getByText("Enterprise Admin")).toBeVisible();
+
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: fixture.state.accounts.items.filter((account) => account.login !== "enterprise"),
+  };
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
+  fixture.state.devicePollStates = ["complete"];
+  fixture.state.devicePollDelayMs = 100;
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.waitForTimeout(150);
+  await expect(page.getByText("ABCD-1234")).toHaveCount(0);
+  await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
+
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: fixture.state.accounts.items.filter((account) => account.login !== "enterprise"),
+  };
+  fixture.state.devicePollDelayMs = 0;
+  fixture.state.accountsDelayMs = 1_000;
+  const staleRefreshCount = fixture.requests.filter((request) => request.url().endsWith("/accounts")).length;
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => fixture.requests.filter((request) => request.url().endsWith("/accounts")).length)
+    .toBeGreaterThan(staleRefreshCount);
+  fixture.state.accountsDelayMs = 0;
+  fixture.state.devicePollStates = ["complete"];
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect(page.getByText("Enterprise Admin")).toBeVisible();
+  await page.waitForTimeout(1_100);
+  await expect(page.getByText("Enterprise Admin")).toBeVisible();
+
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: fixture.state.accounts.items.filter((account) => account.login !== "enterprise"),
+  };
+  fixture.state.accountsDelayMs = 0;
+  const clearingRequestCount = fixture.requests.filter((request) => request.url().endsWith("/accounts")).length;
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => fixture.requests.filter((request) => request.url().endsWith("/accounts")).length)
+    .toBeGreaterThan(clearingRequestCount);
+  await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
+  fixture.state.accountsDelayMs = 1_000;
+  fixture.state.devicePollStates = ["complete"];
+  const accountRequestsBefore = fixture.requests.filter((request) => request.url().endsWith("/accounts")).length;
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect.poll(() => fixture.requests.filter((request) => request.url().endsWith("/accounts")).length)
+    .toBeGreaterThan(accountRequestsBefore);
+  await page.getByRole("button", { name: "Start login" }).click();
+  await page.waitForTimeout(1_100);
+  await expect(page.getByText("ABCD-1234")).toBeVisible();
+  await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(page.getByText("Octo Admin")).toBeVisible();
+  await expect(page.locator(".loading-line")).toHaveCount(0);
+});
+
+test("device-flow expiry aborts a hanging browser poll", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+  const fixture = await openAdmin(page);
+  fixture.state.devicePollStates = ["pending"];
+  fixture.state.devicePollDelayMs = 1_000;
+  await page.getByRole("button", { name: "Accounts" }).click();
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect.poll(() => devicePollRequests(fixture).length).toBe(1);
+  await advanceDeviceClock(page, fixture, 595_000);
+  await expect(page.getByRole("alert")).toContainText("Authorization expired");
+  await expect(page.getByText("ABCD-1234")).toHaveCount(0);
+});
+
+test("device-flow expiry reconciles a raced completion", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+  const fixture = await openAdmin(page);
+  fixture.state.devicePollStates = ["pending"];
+  fixture.state.devicePollDelayMs = 1_000;
+  fixture.state.cancelCompletesDeviceFlow = true;
+  await page.getByRole("button", { name: "Accounts" }).click();
+  await page.getByRole("button", { name: "Start login" }).click();
+  await advanceDeviceClock(page, fixture, 5_000);
+  await expect.poll(() => devicePollRequests(fixture).length).toBe(1);
+  await advanceDeviceClock(page, fixture, 595_000);
+  await expect(page.getByText("Enterprise Admin")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Connected @enterprise");
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("model-refresh-invalidates-preference", async ({ page }) => {
