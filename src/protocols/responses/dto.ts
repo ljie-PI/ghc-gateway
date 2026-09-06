@@ -37,6 +37,7 @@ export function withResponsesRequestInput(
     if (member.key !== "input") {
       return member;
     }
+
     replaced = true;
     return { key: member.key, value: input };
   });
@@ -53,5 +54,23 @@ export function withResponsesRequestInput(
     ...(request.previousResponseId === undefined
       ? {}
       : { previousResponseId: request.previousResponseId }),
+  };
+}
+
+export function consumeResponsesPreviousResponseId(
+  request: Readonly<ResponsesRequest>,
+): ResponsesRequest {
+  if (request.previousResponseId === undefined) {
+    return request as ResponsesRequest;
+  }
+  return {
+    body: {
+      kind: "object",
+      members: request.body.members.filter((member) => member.key !== "previous_response_id"),
+    },
+    ...(request.model === undefined ? {} : { model: request.model }),
+    stream: request.stream,
+    ...(request.store === undefined ? {} : { store: request.store }),
+    ...(request.input === undefined ? {} : { input: request.input }),
   };
 }

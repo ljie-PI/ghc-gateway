@@ -57,7 +57,9 @@ describe("Admin API", () => {
         revision: 1, ranges: { "limits.requestBodyBytes": { min: 1_048_576, max: 67_108_864, unit: "bytes" } },
       });
       expect((await read(harness.gateway, "/admin/api/v1/history", session.cookie)).data).toEqual({
-        revision: 0, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512,
+        revision: 0, count: 0, receiptCount: 0, legacyCount: 0,
+        untrackedContinuationBlocked: false,
+        oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512, maxReceipts: 2048,
       });
       expect((await read(harness.gateway, "/admin/api/v1/usage?limit=1", session.cookie)).data).toMatchObject({ items: [], nextCursor: null });
       expect((await read(harness.gateway, "/admin/api/v1/events?severity=info", session.cookie)).data).toEqual({ items: [], nextCursor: null });
@@ -82,7 +84,18 @@ describe("Admin API", () => {
       const conflict = await mutate(harness.gateway, "DELETE", "/admin/api/v1/history", session, { expectedRevision: 9 });
       expect(conflict.status).toBe(409);
       const cleared = await mutate(harness.gateway, "DELETE", "/admin/api/v1/history", session, { expectedRevision: 0 });
-      expect(await cleared.json()).toEqual({ data: { revision: 0, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512 } });
+      expect(await cleared.json()).toEqual({ data: {
+        revision: 0,
+        count: 0,
+        receiptCount: 0,
+        legacyCount: 0,
+        untrackedContinuationBlocked: false,
+        oldestAt: null,
+        newestAt: null,
+        ttlDays: 7,
+        maxResponses: 512,
+        maxReceipts: 2048,
+      } });
 
       const unknownModel = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
         accountId: "github.com/42", modelId: "missing", expectedRevision: 0,

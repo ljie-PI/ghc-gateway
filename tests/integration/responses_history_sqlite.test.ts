@@ -5,46 +5,59 @@ import { describe, expect, it } from "vitest";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
+import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
+import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import {
   ResponsesHistoryAdminError,
   SqliteResponsesHistory,
+  type ResponsesContinuationOwnership,
   type ResponsesHistoryRecord,
 } from "../../src/protocols/responses/history.js";
-import {
-  isWireJsonArray,
-  isWireJsonObject,
-  memberValues,
-  parseWireJson,
-  type WireJson,
-  type WireJsonObject,
-} from "../../src/serialization/wire_json.js";
+import { parseWireJson, type WireJson } from "../../src/serialization/wire_json.js";
+import { AccountDirectory } from "../../src/accounts/account_directory.js";
+import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 
-const LIMITS = { maxBytes: 8192, maxDepth: 32 } as const;
 const DAY_MS = 86_400_000;
+const SIGNAL = new AbortController().signal;
 
-function objectFromJson(json: string): WireJsonObject {
-  const value = parseWireJson(new TextEncoder().encode(json), LIMITS);
-  expect(isWireJsonObject(value)).toBe(true);
-  return value as WireJsonObject;
+function ownership(accountId: string, modelId = "gpt"): ResponsesContinuationOwnership {
+  return {
+    accountId,
+    modelId,
+    upstreamOrigin: "https://api.githubcopilot.com",
+    owner: "converted",
+    upstreamProtocol: "chat",
+    conversionVersion: "responses-chat-v1",
+  };
 }
 
-function outputFromJson(json: string): readonly WireJson[] {
-  const value = parseWireJson(new TextEncoder().encode(json), LIMITS);
-  expect(isWireJsonArray(value)).toBe(true);
-  return (value as { items: readonly WireJson[] }).items;
+function nativeOwnership(accountId: string, modelId = "native"): ResponsesContinuationOwnership {
+  return {
+    accountId,
+    modelId,
+    upstreamOrigin: "https://api.githubcopilot.com",
+    owner: "native",
+    upstreamProtocol: "responses",
+    conversionVersion: null,
+  };
 }
 
 function record(responseId: string, callId: string): ResponsesHistoryRecord {
   return {
     responseId,
-    output: outputFromJson([
-      "[{\"type\":\"function_call\",\"call_id\":\"",
-      callId,
-      "\",\"name\":\"fn\",\"arguments\":\"{}\"}]",
-    ].join("")),
+    output: outputFromJson(
+      `[{"type":"function_call","call_id":"${callId}","name":"fn","arguments":"{}"}]`,
+    ),
   };
+}
+
+function outputFromJson(json: string): readonly WireJson[] {
+  const value = parseWireJson(new TextEncoder().encode(json), { maxBytes: 8192, maxDepth: 32 });
+  if (typeof value !== "object" || value === null || !("kind" in value) || value.kind !== "array") {
+    throw new Error("expected array");
+  }
+  return value.items;
 }
 
 async function dbPath(name: string): Promise<string> {
@@ -54,54 +67,59 @@ async function dbPath(name: string): Promise<string> {
   return path.join(dir, "state.db");
 }
 
-function openHistory(db: string, nowMs: () => number, ttlDays = 7): {
+function openHistory(
+  db: string,
+  nowMs: () => number,
+  options: { readonly ttlDays?: number; readonly maxResponses?: number; readonly maxReceipts?: number } = {},
+): {
   readonly database: ReturnType<typeof openDatabase>;
   readonly store: SqliteResponsesHistory;
 } {
   const database = openDatabase({
     path: db,
-    migrations: [embedMigration(runtimeConfigMigration), embedMigration(responsesHistoryMigration)],
+    migrations: [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(accountsMigration),
+      embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
+    ],
     nowMs,
   });
   return {
     database,
-    store: new SqliteResponsesHistory(database, { nowMs, ttlDays }),
+    store: new SqliteResponsesHistory(database, { nowMs, ...options }),
   };
 }
 
-async function enrichCallName(store: SqliteResponsesHistory, callId: string): Promise<string | undefined> {
-  const enriched = await store.enrich(decodeResponsesRequest(objectFromJson([
-    "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",",
-    "\"call_id\":\"",
-    callId,
-    "\",\"output\":\"ok\"}}",
-  ].join(""))), new AbortController().signal);
-  if (!isWireJsonArray(enriched.input)) {
-    return undefined;
-  }
-  const call = enriched.input.items[0];
-  return isWireJsonObject(call) ? memberValues(call, "name")[0] as string | undefined : undefined;
-}
-
 describe("Responses history SQLite", () => {
-  it("recovers after restart and evicts by global insertion order", async () => {
-    const file = await dbPath("restart-evict");
-    let now = 1_700_000_000_000;
-    const first = openHistory(file, () => now);
+  it("recovers scoped ownership and checkpoints after restart", async () => {
+    const file = await dbPath("restart");
+    const now = () => 1_700_000_000_000;
+    const first = openHistory(file, now);
     try {
-      await first.store.record(record("resp_first", "call_first"), new AbortController().signal);
-      for (let index = 0; index < 512; index += 1) {
-        await first.store.record(record(`resp_${index}`, `call_${index}`), new AbortController().signal);
-      }
-      expect(first.store.inspect().count).toBe(512);
+      await first.store.recordCheckpoint(
+        record("resp_restart", "call_restart"),
+        ownership("github.com/1"),
+        "complete",
+        SIGNAL,
+      );
       closeDatabase(first.database);
 
-      now += 1_000;
-      const reopened = openHistory(file, () => now);
+      const reopened = openHistory(file, now);
       try {
-        expect(await enrichCallName(reopened.store, "call_first")).toBeUndefined();
-        expect(await enrichCallName(reopened.store, "call_511")).toBe("fn");
-        expect(reopened.store.inspect().count).toBe(512);
+        await expect(reopened.store.resolve("resp_restart", "github.com/1", SIGNAL))
+          .resolves.toMatchObject({
+            kind: "owned",
+            receipt: {
+              accountId: "github.com/1",
+              modelId: "gpt",
+              upstreamProtocol: "chat",
+              checkpointState: "complete",
+            },
+          });
+        await expect(reopened.store.resolve("resp_restart", "github.com/2", SIGNAL))
+          .resolves.toEqual({ kind: "owned_by_another_account" });
+        expect(reopened.store.inspect()).toMatchObject({ count: 1, receiptCount: 1 });
       } finally {
         closeDatabase(reopened.database);
       }
@@ -110,25 +128,25 @@ describe("Responses history SQLite", () => {
     }
   });
 
-  it("cleans seven-day TTL at startup, lookup, and record without sliding expiry", async () => {
-    const file = await dbPath("ttl");
-    let now = 1_700_000_000_000;
-    const first = openHistory(file, () => now);
+  it("persists expiry as an unusable tombstone across restart", async () => {
+    const file = await dbPath("expiry");
+    let current = 1_700_000_000_000;
+    const first = openHistory(file, () => current);
     try {
-      await first.store.record(record("resp_old", "call_old"), new AbortController().signal);
-      now += 7 * DAY_MS + 1;
-      expect(await enrichCallName(first.store, "call_old")).toBeUndefined();
-      const afterLookupRevision = first.store.inspect().revision;
-      expect(afterLookupRevision).toBe(2);
-      await first.store.record(record("resp_new", "call_new"), new AbortController().signal);
-      expect(first.store.inspect().count).toBe(1);
+      await first.store.recordCheckpoint(
+        record("resp_expired", "call_expired"),
+        ownership("github.com/1"),
+        "partial",
+        SIGNAL,
+      );
       closeDatabase(first.database);
+      current += 7 * DAY_MS + 1;
 
-      now += 7 * DAY_MS + 1;
-      const reopened = openHistory(file, () => now);
+      const reopened = openHistory(file, () => current);
       try {
-        expect(reopened.store.inspect().count).toBe(0);
-        expect(reopened.store.inspect().revision).toBe(4);
+        await expect(reopened.store.resolve("resp_expired", "github.com/1", SIGNAL))
+          .resolves.toEqual({ kind: "expired" });
+        expect(reopened.store.inspect()).toMatchObject({ count: 0, receiptCount: 1 });
       } finally {
         closeDatabase(reopened.database);
       }
@@ -137,39 +155,230 @@ describe("Responses history SQLite", () => {
     }
   });
 
-  it("keeps revision-safe admin clear separate from inference operations", async () => {
-    const file = await dbPath("admin-clear");
-    const opened = openHistory(file, () => 1_700_000_000_000);
+  it("fails closed for external native IDs after receipt eviction loses exact ownership", async () => {
+    const file = await dbPath("eviction-uncertainty");
+    let current = 1_700_000_000_000;
+    const opened = openHistory(file, () => current, { maxReceipts: 1 });
     try {
-      expect(opened.store.inspect().revision).toBe(0);
-      expect(opened.store.clear(0).revision).toBe(0);
-      await opened.store.record(record("resp_one", "call_one"), new AbortController().signal);
-      const afterRecord = opened.store.inspect();
-      expect(afterRecord.revision).toBe(1);
-      expect(afterRecord.count).toBe(1);
-      expect(afterRecord.oldestAt).toBe(1_700_000_000_000);
-      expect(afterRecord.newestAt).toBe(1_700_000_000_000);
-      expect(afterRecord.ttlDays).toBe(7);
-      expect(afterRecord.maxResponses).toBe(512);
-      expect(() => opened.store.clear(0)).toThrow(ResponsesHistoryAdminError);
-      const afterClear = opened.store.clear(afterRecord.revision);
-      expect(afterClear.revision).toBe(2);
-      expect(afterClear.count).toBe(0);
-      expect(afterClear.oldestAt).toBeNull();
-      expect(afterClear.newestAt).toBeNull();
-      await opened.store.record(record("resp_two", "call_two"), new AbortController().signal);
-      expect(opened.store.inspect().count).toBe(1);
+      await opened.store.recordReceipt({
+        ...nativeOwnership("github.com/1"),
+        responseId: "resp_expired",
+        checkpointState: "complete",
+      }, SIGNAL);
+      current += 7 * DAY_MS + 1;
+      await expect(opened.store.resolve("resp_expired", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "expired" });
+      await opened.store.recordReceipt({
+        ...nativeOwnership("github.com/1"),
+        responseId: "resp_current",
+        checkpointState: "complete",
+      }, SIGNAL);
+
+      await expect(opened.store.resolve("resp_expired", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "untracked_blocked" });
+      await expect(opened.store.resolve("external_native", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "untracked_blocked" });
+      closeDatabase(opened.database);
+
+      const reopened = openHistory(file, () => current, { maxReceipts: 1 });
+      try {
+        await expect(reopened.store.resolve("resp_expired", "github.com/1", SIGNAL))
+          .resolves.toEqual({ kind: "untracked_blocked" });
+      } finally {
+        closeDatabase(reopened.database);
+      }
+    } finally {
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("expires legacy rows while retaining bounded fail-closed uncertainty", async () => {
+    const file = await dbPath("legacy-expiry");
+    let current = 1_700_000_000_000;
+    const opened = openHistory(file, () => current);
+    try {
+      opened.database.prepare(
+        "INSERT INTO responses (response_id, insertion_seq, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?)",
+      ).run("resp_legacy", 1, current, current + 7 * DAY_MS);
+      current += 7 * DAY_MS + 1;
+
+      await expect(opened.store.resolve("resp_legacy", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "untracked_blocked" });
+      expect(opened.store.inspect()).toMatchObject({ count: 0, legacyCount: 0 });
     } finally {
       closeDatabase(opened.database);
       await rm(path.dirname(file), { recursive: true, force: true });
     }
   });
 
-  it("rolls back failed records and rejects aborted operations", async () => {
-    const file = await dbPath("rollback-abort");
+  it("bounds receipts separately without evicting tool checkpoints", async () => {
+    const file = await dbPath("capacity");
+    const opened = openHistory(file, () => 1_700_000_000_000, {
+      maxResponses: 2,
+      maxReceipts: 3,
+    });
+    try {
+      await opened.store.recordCheckpoint(record("resp_tool_1", "call_1"), ownership("github.com/1"), "complete", SIGNAL);
+      await opened.store.recordCheckpoint(record("resp_tool_2", "call_2"), ownership("github.com/1"), "complete", SIGNAL);
+      for (let index = 0; index < 8; index += 1) {
+        await opened.store.recordReceipt({
+          ...nativeOwnership("github.com/1"),
+          responseId: `resp_native_${index}`,
+          checkpointState: "complete",
+        }, SIGNAL);
+      }
+
+      expect(opened.store.inspect()).toMatchObject({ count: 2, receiptCount: 3 });
+      await expect(opened.store.resolve("resp_tool_1", "github.com/1", SIGNAL))
+        .resolves.toMatchObject({ kind: "owned" });
+      await expect(opened.store.resolve("resp_tool_2", "github.com/1", SIGNAL))
+        .resolves.toMatchObject({ kind: "owned" });
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("removes one account's receipts and checkpoints without touching another account", async () => {
+    const file = await dbPath("account-removal");
     const opened = openHistory(file, () => 1_700_000_000_000);
     try {
-      await expect(opened.store.record({
+      opened.store.clearAccount("github.com/unused");
+      expect(opened.store.inspect().untrackedContinuationBlocked).toBe(false);
+      await opened.store.recordCheckpoint(record("resp_same", "call_1"), ownership("github.com/1"), "complete", SIGNAL);
+      await opened.store.recordCheckpoint(record("resp_same", "call_2"), ownership("github.com/2"), "complete", SIGNAL);
+      opened.store.clearAccount("github.com/1");
+
+      await expect(opened.store.resolve("resp_same", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "owned_by_another_account" });
+      await expect(opened.store.resolve("resp_same", "github.com/2", SIGNAL))
+        .resolves.toMatchObject({ kind: "owned" });
+      expect(opened.store.inspect()).toMatchObject({ count: 1, receiptCount: 1 });
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("cleans scoped continuation state in the account-removal transaction", async () => {
+    const file = await dbPath("directory-removal");
+    const opened = openHistory(file, () => 1_700_000_000_000);
+    try {
+      const directory = new AccountDirectory(
+        opened.database,
+        new MemoryCredentialStore(),
+        () => 1_700_000_000_000,
+        8,
+        (accountId) => opened.store.clearAccount(accountId),
+      );
+      const account = await directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "token" },
+      });
+
+      await opened.store.recordCheckpoint(
+        record("resp_removed", "call_removed"),
+        ownership(account.accountId),
+        "complete",
+        SIGNAL,
+      );
+      const revision = directory.list()[0]?.revision;
+      if (revision === undefined) {
+        throw new Error("expected account revision");
+      }
+      await directory.remove(account.accountId, revision, SIGNAL);
+
+      await expect(opened.store.resolve("resp_removed", account.accountId, SIGNAL))
+        .resolves.toEqual({ kind: "untracked_blocked" });
+      expect(opened.store.inspect()).toMatchObject({
+        count: 0,
+        receiptCount: 0,
+        untrackedContinuationBlocked: true,
+      });
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a late persistence barrier after the bound account is removed", async () => {
+    const file = await dbPath("late-account-write");
+    const opened = openHistory(file, () => 1_700_000_000_000);
+    try {
+      const credentials = new MemoryCredentialStore();
+      const directory = new AccountDirectory(
+        opened.database,
+        credentials,
+        () => 1_700_000_000_000,
+      );
+      const account = await directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "token" },
+      });
+      const guarded = new SqliteResponsesHistory(opened.database, {
+        nowMs: () => 1_700_000_000_000,
+        accountIsActive: (accountId) => {
+          const row = opened.database.prepare(
+            "SELECT credential_state FROM accounts WHERE account_id = ?",
+          ).get(accountId) as { credential_state: string } | undefined;
+          return row?.credential_state === "active";
+        },
+      });
+      const revision = directory.list()[0]?.revision;
+      if (revision === undefined) {
+        throw new Error("expected account revision");
+      }
+      await directory.remove(account.accountId, revision, SIGNAL);
+
+      await expect(guarded.recordReceipt({
+        ...nativeOwnership(account.accountId),
+        responseId: "resp_late",
+        checkpointState: "complete",
+      }, SIGNAL)).rejects.toMatchObject({ code: "checkpoint_unavailable" });
+      expect(guarded.inspect()).toMatchObject({ count: 0, receiptCount: 0 });
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("keeps revision-safe Admin clear and reports receipts separately", async () => {
+    const file = await dbPath("admin");
+    const opened = openHistory(file, () => 1_700_000_000_000);
+    try {
+      await opened.store.recordReceipt({
+        ...nativeOwnership("github.com/1"),
+        responseId: "resp_native",
+        checkpointState: "complete",
+      }, SIGNAL);
+      const afterReceipt = opened.store.inspect();
+      expect(afterReceipt).toMatchObject({
+        revision: 1,
+        count: 0,
+        receiptCount: 1,
+        legacyCount: 0,
+        maxResponses: 512,
+        maxReceipts: 2048,
+      });
+      expect(() => opened.store.clear(0)).toThrow(ResponsesHistoryAdminError);
+      expect(opened.store.clear(afterReceipt.revision)).toMatchObject({
+        revision: 2,
+        count: 0,
+        receiptCount: 0,
+      });
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back invalid checkpoint records and records bounded timing samples", async () => {
+    const file = await dbPath("rollback-benchmark");
+    const opened = openHistory(file, () => 1_700_000_000_000);
+    try {
+      await expect(opened.store.recordCheckpoint({
         responseId: "resp_bad",
         output: [{
           kind: "object",
@@ -179,34 +388,20 @@ describe("Responses history SQLite", () => {
             { key: "arguments", value: { kind: "number", lexeme: "01" } },
           ],
         }],
-      }, new AbortController().signal)).rejects.toThrow();
-      expect(opened.store.inspect().revision).toBe(0);
-      expect(opened.store.inspect().count).toBe(0);
+      }, ownership("github.com/1"), "complete", SIGNAL)).rejects.toThrow();
+      expect(opened.store.inspect()).toMatchObject({ revision: 0, count: 0, receiptCount: 0 });
 
-      const controller = new AbortController();
-      controller.abort();
-      await expect(opened.store.record(record("resp_aborted", "call_aborted"), controller.signal))
-        .rejects.toThrow(/aborted/u);
-      await expect(opened.store.enrich(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\"}")), controller.signal))
-        .rejects.toThrow(/aborted/u);
-      expect(opened.store.inspect().count).toBe(0);
-    } finally {
-      closeDatabase(opened.database);
-      await rm(path.dirname(file), { recursive: true, force: true });
-    }
-  });
-
-  it("records Semantic Checkpoint-sized commit timing samples", async () => {
-    const file = await dbPath("checkpoint-bench");
-    const opened = openHistory(file, () => 1_700_000_000_000);
-    try {
       const samples: number[] = [];
       for (let index = 0; index < 30; index += 1) {
         const started = performance.now();
-        await opened.store.record(record(`resp_bench_${index}`, `call_bench_${index}`), new AbortController().signal);
+        await opened.store.recordCheckpoint(
+          record(`resp_bench_${index}`, `call_bench_${index}`),
+          ownership("github.com/1"),
+          "complete",
+          SIGNAL,
+        );
         samples.push(performance.now() - started);
       }
-      expect(samples).toHaveLength(30);
       expect(samples.every((sample) => Number.isFinite(sample) && sample >= 0)).toBe(true);
     } finally {
       closeDatabase(opened.database);

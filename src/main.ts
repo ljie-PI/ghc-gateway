@@ -163,12 +163,24 @@ export async function createProductionApplicationContext(
   const runtime = new RuntimeConfigStore(database);
   const snapshot = runtime.seedIfEmpty(env);
   const overrides = new SqliteModelCapabilityOverrides(database);
+  const history = new SqliteResponsesHistory(database, {
+    ttlDays: snapshot.history.ttlDays,
+    accountIsActive: (accountId) => {
+      const row = database.prepare(
+        "SELECT credential_state FROM accounts WHERE account_id = ?",
+      ).get(accountId) as { credential_state: string } | undefined;
+      return row?.credential_state === "active";
+    },
+  });
   const directory = new SqliteAccountDirectory(
     database,
     credentials,
     Date.now,
     snapshot.accounts.maxAuthenticated,
-    (accountId) => overrides.clearAccount(accountId),
+    (accountId) => {
+      overrides.clearAccount(accountId);
+      history.clearAccount(accountId);
+    },
   );
   await directory.reconcile();
   const fetchDiscovery = createCopilotEndpointDiscovery(credentials);
@@ -199,9 +211,6 @@ export async function createProductionApplicationContext(
     snapshot.events.retentionDays,
   );
   const telemetryRuntime = new TelemetryRuntime(telemetry);
-  const history = new SqliteResponsesHistory(database, {
-    ttlDays: snapshot.history.ttlDays,
-  });
   let databaseClosed = false;
   const closeDatabaseOnce = (): void => {
     if (!databaseClosed) {

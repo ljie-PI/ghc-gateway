@@ -119,6 +119,7 @@ export async function* normalizeNativeResponsesStream(
   eventLimitBytes: number,
   observeEvent?: (event: Readonly<WireJsonObject>) => void,
   performanceObserver?: ProtocolPerformanceObserver,
+  beforeEvent?: (event: Readonly<WireJsonObject>) => Promise<void>,
 ): AsyncIterable<Uint8Array> {
   const stableIds = new Map<number, string>();
   let terminal = false;
@@ -128,6 +129,7 @@ export async function* normalizeNativeResponsesStream(
     if (type === undefined || type.length === 0 || (event.eventName !== undefined && event.eventName !== type)) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response" });
     }
+    await beforeEvent?.(payload);
     const encoded = measureEvent(performanceObserver, () => {
       const normalized = normalizeNativeResponsesEvent(payload, stableIds, type);
       try {

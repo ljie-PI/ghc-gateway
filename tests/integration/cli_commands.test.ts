@@ -24,6 +24,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { bootstrapGateway, createPublicRouteRegistrations } from "../../src/main.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
 import { windowsCmdCommandLine } from "../../scripts/tooling/windows_cmd.js";
@@ -915,6 +916,7 @@ async function dispatcherHarness(options: {
       embedMigration(accountsMigration),
       embedMigration(telemetryMigration),
       embedMigration(historyMigration),
+      embedMigration(continuationMigration),
     ],
     nowMs: now,
   });

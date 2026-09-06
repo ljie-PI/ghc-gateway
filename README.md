@@ -182,7 +182,11 @@ The default data directory is `~/.ghc-gateway` and contains:
 
 Credentials and daemon identity use protected atomic files. Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors.
 
-Responses History stores only completed bridge checkpoints, at most 512 responses, with a seven-day default TTL. Usage is content-free and retained for 90 days by default. Operational Events retain at most 512 sanitized entries for seven days by default.
+Responses History stores only minimal bridge tool checkpoints, at most 512 responses, with a seven-day default TTL. Separate content-free route receipts bind observed response IDs to the account, resolved model, trusted upstream origin, native or converted protocol owner, conversion version, and checkpoint state. Receipts are independently bounded at 2048 and do not consume the Admin tool-history count.
+
+Known continuations keep their original compatible route under the currently bound account; the gateway never switches accounts to follow a response ID. Untracked native IDs are passed through only on a direct native Responses route so the upstream can authorize them. If bounded cleanup or account removal has discarded exact ownership evidence, untracked continuation fails closed until Responses History is explicitly cleared. Legacy unscoped history remains visible as unowned data after migration and cannot be used for new continuation; start a new conversation instead.
+
+Usage is content-free and retained for 90 days by default. Operational Events retain at most 512 sanitized entries for seven days by default.
 
 ## Existing Installations
 

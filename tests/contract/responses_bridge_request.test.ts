@@ -148,6 +148,17 @@ describe("Responses bridge request conversion", () => {
       kind: "chat_bridge",
       originalRequest: request,
       resolvedModel: resolved("gpt"),
+      continuation: {
+        accountId: "github.com/1",
+        responseId: "resp_previous",
+        modelId: "gpt",
+        upstreamOrigin: "https://api.githubcopilot.com",
+        owner: "converted",
+        upstreamProtocol: "chat",
+        conversionVersion: "responses-chat-v1",
+        checkpointState: "complete",
+        expiresAt: 1_700_604_800_000,
+      },
     };
     const converted = await buildChatBridgeRequest(plan, {
       async enrich(_input) {
@@ -161,7 +172,13 @@ describe("Responses bridge request conversion", () => {
           tools: [{ type: "function", name: "late", parameters: {} }],
         }));
       },
-      async record() {
+      async resolve() {
+        return { kind: "none" };
+      },
+      async recordReceipt() {
+        throw new Error("recordReceipt must not be called by request conversion");
+      },
+      async recordCheckpoint() {
         throw new Error("record must not be called by request conversion");
       },
     }, { reasoningConfig: null }, new AbortController().signal);

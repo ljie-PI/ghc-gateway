@@ -30,6 +30,7 @@ import type {
 } from "../../src/copilot/upstream_types.js";
 import {
   SqliteResponsesHistory,
+  type ResponsesContinuationOwnership,
   type ResponsesHistoryRecord,
 } from "../../src/protocols/responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
@@ -209,9 +210,14 @@ class MeasuredHistory extends SqliteResponsesHistory {
   readonly valuesMs: number[] = [];
   measuring = false;
 
-  override async record(record: Readonly<ResponsesHistoryRecord>, signal: AbortSignal): Promise<void> {
+  override async recordCheckpoint(
+    record: Readonly<ResponsesHistoryRecord>,
+    ownership: Readonly<ResponsesContinuationOwnership>,
+    checkpointState: "partial" | "complete",
+    signal: AbortSignal,
+  ): Promise<void> {
     const started = performance.now();
-    await super.record(record, signal);
+    await super.recordCheckpoint(record, ownership, checkpointState, signal);
     if (this.measuring) {
       this.valuesMs.push(elapsedMs(started));
     }

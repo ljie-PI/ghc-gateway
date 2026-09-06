@@ -71,23 +71,22 @@ describe("Responses request decoder", () => {
     ]);
   });
 
-  it("validates stream but preserves store and previous_response_id without schema failure", () => {
+  it("validates stream and continuation controls without coercion", () => {
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"stream\":true}")).stream).toBe(true);
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"store\":false}")).store).toBe(false);
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"resp_1\"}"))
       .previousResponseId).toBe("resp_1");
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\" resp_1 \"}"))
       .previousResponseId).toBe(" resp_1 ");
-    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"\"}"))
-      .previousResponseId).toBe("");
+    expect(expectDecodeError("{\"model\":\"gpt\",\"previous_response_id\":\"\"}").field)
+      .toBe("previous_response_id");
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":\"true\"}").field).toBe("stream");
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":null}").field).toBe("stream");
     const rawStore = decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"store\":{\"raw\":true}}"));
     expect(rawStore.store).toBeUndefined();
     expect(rawStore.body.members[1]?.key).toBe("store");
-    const numericPrevious = decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":8}"));
-    expect(numericPrevious.previousResponseId).toBeUndefined();
-    expect(numericPrevious.body.members[1]?.key).toBe("previous_response_id");
+    expect(expectDecodeError("{\"model\":\"gpt\",\"previous_response_id\":8}").field)
+      .toBe("previous_response_id");
   });
 
   it("rejects duplicate top-level unknown fields but preserves nested duplicates and number lexemes", () => {

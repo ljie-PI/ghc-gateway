@@ -20,6 +20,7 @@ import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { convertChatResponse as convertAnthropicChatResponse } from "../../src/protocols/anthropic_messages/bridge.js";
 import { convertAnthropicRequest } from "../../src/protocols/anthropic_messages/request.js";
 import { createAnthropicStreamResponse } from "../../src/protocols/anthropic_messages/stream.js";
@@ -329,17 +330,33 @@ async function expectedResponsesHistoryFixture(entry: FixtureManifestEntry): Pro
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-history-fixture-"));
   const database = openDatabase({
     path: path.join(dir, "state.db"),
-    migrations: [embedMigration(runtimeConfigMigration), embedMigration(responsesHistoryMigration)],
+    migrations: [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
+    ],
     nowMs: () => 1_700_000_000_000,
   });
   try {
     const history = new SqliteResponsesHistory(database, { nowMs: () => 1_700_000_000_000 });
-    await history.record({
+    const ownership = {
+      accountId: "github.com/1",
+      modelId: "gpt",
+      upstreamOrigin: "https://api.githubcopilot.com",
+      owner: "converted",
+      upstreamProtocol: "chat",
+      conversionVersion: "responses-chat-v1",
+    } as const;
+    await history.recordCheckpoint({
       responseId: "resp_previous",
       output: [wireObjectFromValue({ type: "function_call", call_id: "call_a", name: "lookup", arguments: "{}" })],
-    }, new AbortController().signal);
+    }, ownership, "complete", new AbortController().signal);
     const request = decodeResponsesRequest(await readWireObject(path.join(fixtureFamilyRoot(entry), entry.input)));
-    const enriched = await history.enrich(request, new AbortController().signal);
+    const resolution = await history.resolve("resp_previous", ownership.accountId, new AbortController().signal);
+    if (resolution.kind !== "owned") {
+      throw new Error("expected owned fixture continuation");
+    }
+    const enriched = await history.enrich(request, resolution.receipt, new AbortController().signal);
     return `${JSON.stringify(JSON.parse(decodeBytes(serializeWireJson(enriched.body))), null, 2)}\n`;
   } finally {
     closeDatabase(database);
@@ -560,12 +577,25 @@ async function expectedResponsesBridgeRequestFixture(entry: FixtureManifestEntry
       kind: "chat_bridge",
       originalRequest: request,
       resolvedModel: responsesResolvedModel("gpt", ["chat"]),
+      continuation: {
+        accountId: "github.com/1",
+        responseId: request.previousResponseId ?? "resp_previous",
+        modelId: "gpt",
+        upstreamOrigin: "https://api.githubcopilot.com",
+        owner: "converted",
+        upstreamProtocol: "chat",
+        conversionVersion: "responses-chat-v1",
+        checkpointState: "complete",
+        expiresAt: 1_700_604_800_000,
+      },
     };
     const history: ResponsesHistory = {
       async enrich() {
         return responsesRequestFromJson("{\"model\":\"gpt\",\"input\":[{\"type\":\"function_call\",\"call_id\":\"call_restored\",\"name\":\"lookup\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_restored\",\"output\":\"ok\"}],\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{}}]}");
       },
-      async record() {},
+      async resolve() { return { kind: "none" }; },
+      async recordReceipt() {},
+      async recordCheckpoint() {},
     };
     return decodeBytes(serializeWireJson(await buildChatBridgeRequest(plan, history, {
       reasoningConfig: null,
@@ -717,6 +747,7 @@ async function createResponsesFixtureGateway(backend = new ScriptedCopilotBacken
       embedMigration(runtimeConfigMigration),
       embedMigration(accountsMigration),
       embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
     ],
     nowMs: () => 1_700_000_000_000,
   });

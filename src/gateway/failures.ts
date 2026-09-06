@@ -44,6 +44,9 @@ export type GatewayFailure =
   | ({ readonly kind: "authentication" } & GatewayFailureDetails)
   | ({ readonly kind: "permission" } & GatewayFailureDetails)
   | ({ readonly kind: "model_not_found" } & GatewayFailureDetails)
+  | ({ readonly kind: "continuation_conflict" } & GatewayFailureDetails)
+  | ({ readonly kind: "continuation_unavailable" } & GatewayFailureDetails)
+  | ({ readonly kind: "continuation_persistence" } & GatewayFailureDetails)
   | ({ readonly kind: "queue_full" } & GatewayFailureDetails)
   | ({ readonly kind: "queue_timeout" } & GatewayFailureDetails)
   | ({
@@ -86,6 +89,9 @@ const FAILURE_POLICY: Readonly<Record<StaticGatewayFailureKind, GatewayFailurePo
   authentication: { status: 401, message: "authentication failed", outcome: "authentication_error" },
   permission: { status: 403, message: "permission denied", outcome: "authentication_error" },
   model_not_found: { status: 404, message: "model not found", outcome: "client_error" },
+  continuation_conflict: { status: 409, message: "response continuation is incompatible", outcome: "client_error" },
+  continuation_unavailable: { status: 409, message: "response continuation is unavailable", outcome: "client_error" },
+  continuation_persistence: { status: 500, message: "response continuation could not be saved", outcome: "internal_error" },
   queue_full: { status: 503, message: "server overloaded", outcome: "overloaded" },
   queue_timeout: { status: 503, message: "server overloaded", outcome: "overloaded" },
   upstream_timeout: { status: 504, message: "upstream timeout", outcome: "timeout" },

@@ -34,8 +34,22 @@ import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js"
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
 import { prepareChatBridgeRequest } from "./bridge_request.js";
 import { convertChatStream, type ResponsesStreamEmission } from "./bridge_stream.js";
+import {
+  continuationModel,
+  continuationOwnership,
+  isTerminalResponsesEvent,
+  ownedContinuationReceipt,
+  persistContinuation,
+  resolveResponsesContinuation,
+  responseIdFromPayload,
+  validateContinuationTarget,
+  validateExternalContinuation,
+} from "./continuation.js";
 import { decodeResponsesRequest, ResponsesRequestDecodeError } from "./decoder.js";
-import type { ResponsesHistory } from "./history.js";
+import {
+  type ResponsesContinuationOwnership,
+  type ResponsesHistory,
+} from "./history.js";
 import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
 import { planResponsesExecution, type ChatBridgePlan } from "./planner.js";
 import {
@@ -95,24 +109,50 @@ async function executeResponses(
   }
   const account = await bindAccount(dependencies.directory, scope.signal);
   usage.setAccount(account.accountId);
+  const continuation = await resolveResponsesContinuation(
+    dependencies.history,
+    decoded.previousResponseId,
+    account.accountId,
+    scope.signal,
+  );
+  const continuationReceipt = ownedContinuationReceipt(continuation);
+  const requestedModel = continuationModel(decoded.model, continuationReceipt);
   const preference = dependencies.preferences.get(account.accountId);
   const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
-  const resolved = resolveModel(catalog, decoded.model, preference);
+  const resolved = resolveModel(catalog, requestedModel, preference);
   if ("kind" in resolved) {
+    if (continuationReceipt !== undefined) {
+      throw new GatewayFailureError({
+        kind: "continuation_conflict",
+        source: "continuation",
+        phase: "resume",
+      });
+    }
     throw new GatewayFailureError({ kind: resolved.kind });
   }
   usage.setResolvedModel(resolved.upstreamModel);
   const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
-  const plan = planResponsesExecution(decoded, resolved, bound.target);
+  validateContinuationTarget(continuationReceipt, bound.target.endpoint);
+  const plan = planResponsesExecution(decoded, resolved, bound.target, continuationReceipt);
+  validateExternalContinuation(decoded.previousResponseId, continuation, plan.kind);
   usage.setProtocol(plan.kind === "native_responses" ? "openai_responses_native" : "openai_responses_bridge");
+  const ownership = continuationOwnership(account.accountId, resolved.upstreamModel, bound.target.endpoint, plan.kind);
   if (plan.kind === "native_responses") {
     return decoded.stream
-      ? await nativeStreamResponse(bound, plan, scope, usage, dependencies.performanceObserver)
-      : await nativeNonstreamResponse(bound, plan, scope, usage);
+      ? await nativeStreamResponse(
+        dependencies.history,
+        ownership,
+        bound,
+        plan,
+        scope,
+        usage,
+        dependencies.performanceObserver,
+      )
+      : await nativeNonstreamResponse(dependencies.history, ownership, bound, plan, scope, usage);
   }
   return decoded.stream
-    ? await bridgeStreamResponse(dependencies, bound, plan, scope, usage)
-    : await bridgeNonstreamResponse(dependencies, bound, plan, scope, usage);
+    ? await bridgeStreamResponse(dependencies, ownership, bound, plan, scope, usage)
+    : await bridgeNonstreamResponse(dependencies, ownership, bound, plan, scope, usage);
 }
 
 function decodeRequest(body: WireJsonObject) {
@@ -127,6 +167,8 @@ function decodeRequest(body: WireJsonObject) {
 }
 
 async function nativeNonstreamResponse(
+  history: ResponsesHistory,
+  ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Parameters<typeof completeNativeResponses>[1],
   scope: Readonly<RequestScope>,
@@ -137,8 +179,19 @@ async function nativeNonstreamResponse(
     scope.signal,
   );
   assertUpstreamSuccess(upstream);
+  const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+  const responseId = responseIdFromPayload(payload);
+  if (responseId !== undefined) {
+    await persistContinuation(
+      async () => await history.recordReceipt({
+        ...ownership,
+        responseId,
+        checkpointState: "complete",
+      }, scope.signal),
+      scope.signal,
+    );
+  }
   if (usage.enabled) {
-    const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
     usage.finish(nativeOutcome(payload), responsesUsage(payload));
   }
   return new Response(Buffer.from(upstream.body), {
@@ -148,6 +201,8 @@ async function nativeNonstreamResponse(
 }
 
 async function nativeStreamResponse(
+  history: ResponsesHistory,
+  ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Parameters<typeof openNativeResponsesStream>[1],
   scope: Readonly<RequestScope>,
@@ -172,7 +227,26 @@ async function nativeStreamResponse(
   );
   const observed = usage.enabled ? createNativeStreamObservation(usage) : undefined;
   return await streamBytesResponse(
-    normalizeNativeResponsesStream(bytes, scope.config.limits.sseEventBytes, observed?.observe, performanceObserver),
+    normalizeNativeResponsesStream(
+      bytes,
+      scope.config.limits.sseEventBytes,
+      observed?.observe,
+      performanceObserver,
+      async (event) => {
+        const responseId = responseIdFromPayload(event);
+        if (responseId === undefined) {
+          return;
+        }
+        await persistContinuation(
+          async () => await history.recordReceipt({
+            ...ownership,
+            responseId,
+            checkpointState: isTerminalResponsesEvent(event) ? "complete" : "route_only",
+          }, scope.signal),
+          scope.signal,
+        );
+      },
+    ),
     upstream,
     scope,
     usage.failure,
@@ -182,6 +256,7 @@ async function nativeStreamResponse(
 
 async function bridgeNonstreamResponse(
   dependencies: ResponsesRouteDependencies,
+  ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: ChatBridgePlan,
   scope: Readonly<RequestScope>,
@@ -205,7 +280,15 @@ async function bridgeNonstreamResponse(
     });
     return { converted, bytes: Buffer.from(serializeWireJson(converted.response)) };
   });
-  await dependencies.history.record(measured.converted.historyRecord, scope.signal);
+  await persistContinuation(
+    async () => await dependencies.history.recordCheckpoint(
+      measured.converted.historyRecord,
+      ownership,
+      memberValue(measured.converted.response, "status") === "completed" ? "complete" : "partial",
+      scope.signal,
+    ),
+    scope.signal,
+  );
   usage.success(responsesUsage(measured.converted.response));
   return new Response(measured.bytes, {
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
@@ -214,6 +297,7 @@ async function bridgeNonstreamResponse(
 
 async function bridgeStreamResponse(
   dependencies: ResponsesRouteDependencies,
+  ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: ChatBridgePlan,
   scope: Readonly<RequestScope>,
@@ -252,6 +336,7 @@ async function bridgeStreamResponse(
   return await streamEmissionsResponse(
     emissions,
     dependencies.history,
+    ownership,
     upstream,
     scope,
     usage,
@@ -263,6 +348,7 @@ async function bridgeStreamResponse(
 async function streamEmissionsResponse(
   emissions: AsyncIterable<ResponsesStreamEmission>,
   history: ResponsesHistory,
+  ownership: Readonly<ResponsesContinuationOwnership>,
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
@@ -274,11 +360,36 @@ async function streamEmissionsResponse(
       if (scope.signal.aborted) {
         return;
       }
+      if (memberValue(emission.event, "type") === "response.created") {
+        const responseId = responseIdFromPayload(emission.event);
+        if (responseId !== undefined) {
+          await measureAsync(
+            performanceObserver,
+            "checkpoint",
+            async () => await persistContinuation(
+              async () => await history.recordReceipt({
+                ...ownership,
+                responseId,
+                checkpointState: "route_only",
+              }, scope.signal),
+              scope.signal,
+            ),
+          );
+        }
+      }
       if (emission.kind === "checkpoint") {
         await measureAsync(
           performanceObserver,
           "checkpoint",
-          async () => await history.record(emission.historyRecord, scope.signal),
+          async () => await persistContinuation(
+            async () => await history.recordCheckpoint(
+              emission.historyRecord,
+              ownership,
+              memberValue(emission.event, "type") === "response.completed" ? "complete" : "partial",
+              scope.signal,
+            ),
+            scope.signal,
+          ),
         );
       }
       if (usage.enabled) {

@@ -157,10 +157,14 @@ export interface AdminRuntimeConfig {
 export interface AdminHistorySummary {
   readonly revision: number;
   readonly count: number;
+  readonly receiptCount: number;
+  readonly legacyCount: number;
+  readonly untrackedContinuationBlocked: boolean;
   readonly oldestAt: string | null;
   readonly newestAt: string | null;
   readonly ttlDays: number;
   readonly maxResponses: number;
+  readonly maxReceipts: number;
 }
 
 export interface AdminAccountDirectory {
@@ -356,10 +360,14 @@ export interface AdminHistory {
   inspect(): {
     readonly revision: number;
     readonly count: number;
+    readonly receiptCount: number;
+    readonly legacyCount: number;
+    readonly untrackedContinuationBlocked: boolean;
     readonly oldestAt: number | null;
     readonly newestAt: number | null;
     readonly ttlDays: number;
     readonly maxResponses: number;
+    readonly maxReceipts: number;
   };
   clear(expectedRevision: number, signal?: AbortSignal): void;
 }
@@ -661,10 +669,14 @@ export class AdminManagementApi {
     return {
       revision: history.revision,
       count: history.count,
+      receiptCount: history.receiptCount,
+      legacyCount: history.legacyCount,
+      untrackedContinuationBlocked: history.untrackedContinuationBlocked,
       oldestAt: nullableIso(history.oldestAt),
       newestAt: nullableIso(history.newestAt),
       ttlDays: history.ttlDays,
       maxResponses: history.maxResponses,
+      maxReceipts: history.maxReceipts,
     };
   }
 
