@@ -721,6 +721,60 @@ describe("shared conversion response codecs", () => {
       }
     }).rejects.toThrow();
 
+    const largeInitialTool = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_large",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "call_1",
+          name: "lookup",
+          input: { value: "x".repeat(2048) },
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(largeInitialTool)),
+        { ...streamContext("messages", "responses"), accumulatorBytes: 512 },
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+
+    const largeItemId = responseEvent(0, "response.output_item.added", {
+      output_index: 0,
+      item: {
+        id: `fc_${"x".repeat(2048)}`,
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "",
+        status: "in_progress",
+      },
+    });
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(largeItemId)),
+        { ...streamContext("responses", "chat"), accumulatorBytes: 512 },
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+
     const contentIndexes = Array.from({ length: 10 }, (_, index) => responseEvent(
       index,
       "response.output_text.done",
@@ -778,6 +832,36 @@ describe("shared conversion response codecs", () => {
         void _emission;
       }
     }).rejects.toThrow();
+  });
+
+  it("rejects malformed final-only Responses output values", async () => {
+    for (const output of [
+      [false],
+      [{
+        id: "msg_bad",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [false],
+      }],
+    ]) {
+      const source = responseEvent(0, "response.completed", {
+        response: {
+          id: "resp_bad",
+          object: "response",
+          status: "completed",
+          output,
+        },
+      });
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)),
+          streamContext("responses", "chat"),
+        )) {
+          void _emission;
+        }
+      }).rejects.toThrow();
+    }
   });
 
   it("uses one absolute first-semantic deadline across usage-only emissions", async () => {

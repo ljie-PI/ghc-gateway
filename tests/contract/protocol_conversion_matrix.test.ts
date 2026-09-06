@@ -187,6 +187,29 @@ describe("protocol conversion matrix", () => {
       await harness.close();
     }
   });
+
+  it("keeps the existing Responses-to-Chat custom tool adapter connected", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+        tool_choice: { type: "custom", name: "render" },
+      }));
+      expect(response.status).toBe(200);
+      const payload = await response.json() as { output?: unknown[] };
+      expect(payload.output).toEqual(expect.arrayContaining([expect.objectContaining({
+          type: "custom_tool_call",
+          call_id: "call_custom",
+          name: "render",
+          input: "hello",
+      })]));
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 interface MatrixHarness {
@@ -236,6 +259,10 @@ async function matrixGateway(): Promise<MatrixHarness> {
   const backend = new ScriptedCopilotBackend({
     chat(request) {
       chatBodies.push(request.body);
+      const captured = JSON.parse(decoder.decode(request.body)) as {
+        tools?: Array<{ function?: { name?: string } }>;
+      };
+      const custom = captured.tools?.some((tool) => tool.function?.name === "render") === true;
       return {
         status: 200,
         headers: new Headers(),
@@ -244,7 +271,21 @@ async function matrixGateway(): Promise<MatrixHarness> {
           object: "chat.completion",
           created: 1_700_000_000,
           model: "matrix",
-          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          choices: [{
+            index: 0,
+            message: custom
+              ? {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "call_custom",
+                  type: "function",
+                  function: { name: "render", arguments: "{\"input\":\"hello\"}" },
+                }],
+              }
+              : { role: "assistant", content: "ok" },
+            finish_reason: custom ? "tool_calls" : "stop",
+          }],
           usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
         })),
       };

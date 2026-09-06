@@ -261,13 +261,17 @@ async function* decodeMessagesStream(
         }
         const key = `messages:${index}`;
         const input = objectMember(block, "input");
+        const initialArguments = input === undefined
+          ? undefined
+          : new TextDecoder().decode(serializeWireJson(input));
+        if (initialArguments !== undefined) {
+          budget.reserve(initialArguments);
+        }
         blocks.set(index, {
           kind: "tool",
           key,
           closed: false,
-          initialArguments: input === undefined
-            ? undefined
-            : new TextDecoder().decode(serializeWireJson(input)),
+          initialArguments,
           sawArgumentsDelta: false,
         });
         budget.reserve(callId);
@@ -300,6 +304,10 @@ async function* decodeMessagesStream(
           delta: stringMember(delta, "refusal") ?? stringMember(delta, "text") ?? "",
         };
       } else if (block.kind === "tool" && deltaType === "input_json_delta" && block.key !== undefined) {
+        if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
+          budget.release(block.initialArguments);
+          block.initialArguments = undefined;
+        }
         block.sawArgumentsDelta = true;
         yield {
           kind: "tool_arguments_delta",
@@ -328,6 +336,8 @@ async function* decodeMessagesStream(
             key: block.key,
             delta: block.initialArguments,
           };
+          budget.release(block.initialArguments);
+          block.initialArguments = undefined;
         }
         yield { kind: "tool_done", key: block.key };
       }
@@ -425,6 +435,9 @@ async function* decodeResponsesStream(
         toolsByIndex.set(outputIndex, identity);
         budget.reserve(callId);
         budget.reserve(name);
+        if (identity.itemId !== undefined) {
+          budget.reserve(identity.itemId);
+        }
         yield {
           kind: "tool_start",
           key,
@@ -714,13 +727,14 @@ function* finalResponseEvents(
 ): Iterable<SemanticStreamEvent> {
   const output = arrayMember(response, "output");
   if (output === undefined) {
-    return;
+    invalid();
   }
   for (let index = 0; index < output.items.length; index += 1) {
     const item = output.items[index];
-    if (isWireJsonObject(item)) {
-      yield* finalItemEvents(item, index, toolsByIndex);
+    if (!isWireJsonObject(item)) {
+      invalid();
     }
+    yield* finalItemEvents(item, index, toolsByIndex);
   }
 }
 
@@ -733,14 +747,14 @@ function* finalItemEvents(
   if (type === "message") {
     const content = arrayMember(item, "content");
     if (content === undefined) {
-      return;
+      invalid();
     }
-    for (const part of content.items) {
+    for (let contentIndex = 0; contentIndex < content.items.length; contentIndex += 1) {
+      const part = content.items[contentIndex];
       if (!isWireJsonObject(part)) {
-        continue;
+        invalid();
       }
       const partType = stringMember(part, "type");
-      const contentIndex = content.items.indexOf(part);
       if (partType === "output_text") {
         yield {
           kind: "text_done",
@@ -815,7 +829,7 @@ type MessageBlockState =
   | {
     readonly kind: "tool";
     readonly key: string;
-    readonly initialArguments?: string | undefined;
+    initialArguments?: string | undefined;
     sawArgumentsDelta: boolean;
     closed: boolean;
   };
@@ -1016,6 +1030,10 @@ class DecoderBudget {
   reserveEntry(): void {
     this.used += 64;
     this.assertBounded();
+  }
+
+  release(value: string): void {
+    this.used = Math.max(0, this.used - this.encoder.encode(value).byteLength);
   }
 
   private assertBounded(): void {

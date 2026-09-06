@@ -1,11 +1,12 @@
 import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
-import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
+import { iterateChatFrames, type BoundCopilot, type CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import {
   normalizeAccountBindingFailure,
   normalizeCatalogFailure,
+  normalizeChatFrames,
   normalizeCopilotBindingFailure,
   normalizeTransportFailure,
 } from "../../copilot/failures.js";
@@ -26,8 +27,9 @@ import {
   nextWithDeadline,
   withByteIdleDeadlines,
 } from "../../gateway/stream_execution.js";
-import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
+import { duplicateMemberNames, isWireJsonArray, isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
+import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import {
@@ -43,12 +45,17 @@ import {
 } from "./continuation.js";
 import { decodeResponsesRequest, ResponsesRequestDecodeError } from "./decoder.js";
 import { consumeResponsesPreviousResponseId } from "./dto.js";
+import { convertChatResponseToResponses } from "./bridge_nonstream.js";
+import { prepareChatBridgeRequest } from "./bridge_request.js";
+import { convertChatStream, type ResponsesStreamEmission } from "./bridge_stream.js";
 import {
   type ResponsesContinuationOwnership,
   type ResponsesHistory,
 } from "./history.js";
 import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
+import type { ChatBridgePlan } from "./planner.js";
 import {
+  encodeResponsesSseEvent,
   RESPONSES_JSON_HEADERS,
   RESPONSES_STREAM_HEADERS,
 } from "./wire.js";
@@ -160,6 +167,31 @@ async function executeResponses(
     }
   }
   const forcedTarget = continuationReceipt?.upstreamProtocol;
+  const protocols = resolved.capability.protocols.value;
+  const extendedChat = hasExtendedResponsesTools(planningRequest.body)
+    && (forcedTarget === "chat"
+      || (forcedTarget === undefined
+        && protocols?.includes("responses") !== true
+        && protocols?.includes("chat") === true));
+  if (extendedChat) {
+    validateExtendedResponsesRequest(planningRequest.body);
+    validateExternalContinuation(decoded.previousResponseId, continuation, "chat_bridge");
+    usage.setProtocol("openai_responses_bridge");
+    const ownership = continuationOwnership(
+      account.accountId,
+      resolved.upstreamModel,
+      bound.target.endpoint,
+      "chat_bridge",
+    );
+    const extendedPlan: ChatBridgePlan = {
+      kind: "chat_bridge",
+      originalRequest: planningRequest,
+      resolvedModel: resolved,
+    };
+    return decoded.stream
+      ? await extendedBridgeStreamResponse(dependencies, ownership, bound, extendedPlan, scope, usage)
+      : await extendedBridgeNonstreamResponse(dependencies, ownership, bound, extendedPlan, scope, usage);
+  }
   const plan = planProtocolExecution({
     source: "responses",
     body: planningRequest.body,
@@ -302,6 +334,153 @@ async function nativeStreamResponse(
     usage.failure,
     cancelExchange,
   );
+}
+
+async function extendedBridgeNonstreamResponse(
+  dependencies: ResponsesRouteDependencies,
+  ownership: Readonly<ResponsesContinuationOwnership>,
+  bound: BoundCopilot,
+  plan: ChatBridgePlan,
+  scope: Readonly<RequestScope>,
+  usage: RequestAttempt,
+): Promise<Response> {
+  const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
+    reasoningConfig: null,
+    chatOutputTokenField: plan.resolvedModel.capability.profile.chatOutputTokenField.value,
+  }, scope.signal);
+  const request = extendedChatRequest(prepared.body, plan.resolvedModel.upstreamModel, false, scope);
+  const upstream = await transportCall(() => bound.completeChat(request), request.signal);
+  assertUpstreamSuccess(upstream);
+  const measured = measure(dependencies.performanceObserver, "buffered", () => {
+    const chat = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+    const converted = convertChatResponseToResponses(chat, {
+      originalRequest: plan.originalRequest,
+      toolContext: prepared.toolContext,
+      customLlmProvider: "github_copilot",
+      modelId: plan.resolvedModel.upstreamModel,
+      createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+    });
+    return { converted, bytes: Buffer.from(serializeWireJson(converted.response)) };
+  });
+  await persistContinuation(
+    async () => await dependencies.history.recordCheckpoint(
+      measured.converted.historyRecord,
+      ownership,
+      memberValue(measured.converted.response, "status") === "completed" ? "complete" : "partial",
+      scope.signal,
+    ),
+    scope.signal,
+  );
+  usage.success(responsesUsage(measured.converted.response));
+  return new Response(measured.bytes, {
+    headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
+  });
+}
+
+async function extendedBridgeStreamResponse(
+  dependencies: ResponsesRouteDependencies,
+  ownership: Readonly<ResponsesContinuationOwnership>,
+  bound: BoundCopilot,
+  plan: ChatBridgePlan,
+  scope: Readonly<RequestScope>,
+  usage: RequestAttempt,
+): Promise<Response> {
+  const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
+    reasoningConfig: null,
+    chatOutputTokenField: plan.resolvedModel.capability.profile.chatOutputTokenField.value,
+  }, scope.signal);
+  const request = extendedChatRequest(prepared.body, plan.resolvedModel.upstreamModel, true, scope);
+  const upstream = await transportCall(() => bound.openChatStream(request), request.signal);
+  if (upstream.status < 200 || upstream.status >= 300) {
+    await boundedCleanup(upstream.cancel());
+  }
+  assertUpstreamSuccess(upstream);
+  const cancelExchange = createExchangeCancellation(upstream);
+  const timedUpstream = {
+    ...upstream,
+    bytes: withByteIdleDeadlines(
+      upstream.bytes,
+      scope.signal,
+      scope.config.timeouts.firstByteMs,
+      scope.config.timeouts.streamIdleMs,
+      cancelExchange,
+    ),
+  };
+  const emissions = convertChatStream(normalizeChatFrames(iterateChatFrames(timedUpstream), scope.signal), {
+    originalRequest: plan.originalRequest,
+    toolContext: prepared.toolContext,
+    model: plan.resolvedModel.upstreamModel,
+    nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+    uuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+    customLlmProvider: "github_copilot",
+    modelId: plan.resolvedModel.upstreamModel,
+  });
+  return await extendedStreamEmissionsResponse(
+    emissions,
+    dependencies.history,
+    ownership,
+    upstream,
+    scope,
+    usage,
+    dependencies.performanceObserver,
+    cancelExchange,
+  );
+}
+
+async function extendedStreamEmissionsResponse(
+  emissions: AsyncIterable<ResponsesStreamEmission>,
+  history: ResponsesHistory,
+  ownership: Readonly<ResponsesContinuationOwnership>,
+  upstream: UpstreamByteStream,
+  scope: Readonly<RequestScope>,
+  usage: RequestAttempt,
+  performanceObserver?: ProtocolPerformanceObserver,
+  cancelExchange?: () => Promise<void>,
+): Promise<Response> {
+  const bytes = (async function* (): AsyncIterable<Uint8Array> {
+    for await (const emission of emissions) {
+      if (scope.signal.aborted) {
+        return;
+      }
+      if (memberValue(emission.event, "type") === "response.created") {
+        const responseId = responseIdFromPayload(emission.event);
+        if (responseId !== undefined) {
+          await measureAsync(
+            performanceObserver,
+            "checkpoint",
+            async () => await persistContinuation(
+              async () => await history.recordReceipt({
+                ...ownership,
+                responseId,
+                checkpointState: "route_only",
+              }, scope.signal),
+              scope.signal,
+            ),
+          );
+        }
+      }
+      if (emission.kind === "checkpoint") {
+        await measureAsync(
+          performanceObserver,
+          "checkpoint",
+          async () => await persistContinuation(
+            async () => await history.recordCheckpoint(
+              emission.historyRecord,
+              ownership,
+              memberValue(emission.event, "type") === "response.completed" ? "complete" : "partial",
+              scope.signal,
+            ),
+            scope.signal,
+          ),
+        );
+      }
+      if (usage.enabled) {
+        observeExtendedBridgeEvent(usage, emission.event);
+      }
+      yield measure(performanceObserver, "event", () => encodeResponsesSseEvent(emission.event));
+    }
+  })();
+  return await streamBytesResponse(bytes, upstream, scope, usage.failure, cancelExchange);
 }
 
 async function convertedNonstreamResponse(
@@ -485,6 +664,25 @@ async function streamBytesResponse(
   return writer.response;
 }
 
+function extendedChatRequest(
+  body: WireJsonObject,
+  model: string,
+  stream: boolean,
+  scope: Readonly<RequestScope>,
+): ChatRequest {
+  const bytes = serializeWireJson(body);
+  return {
+    model,
+    body: bytes,
+    stream,
+    hasVisionInput: new TextDecoder().decode(bytes).includes("\"image_url\""),
+    nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
+    connectTimeoutMs: scope.config.timeouts.connectMs,
+    firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
+    signal: scope.signal,
+  };
+}
+
 function nativeOptions(scope: Readonly<RequestScope>) {
   return {
     requestId: scope.requestId,
@@ -493,6 +691,119 @@ function nativeOptions(scope: Readonly<RequestScope>) {
     firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
     signal: scope.signal,
   };
+}
+
+const EXTENDED_RESPONSES_KEYS = new Set([
+  "model",
+  "instructions",
+  "input",
+  "stream",
+  "stream_options",
+  "max_output_tokens",
+  "max_tokens",
+  "max_completion_tokens",
+  "temperature",
+  "top_p",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "reasoning",
+  "text",
+  "response_format",
+  "previous_response_id",
+  "store",
+  "background",
+  "n",
+  "metadata",
+]);
+
+function hasExtendedResponsesTools(body: WireJsonObject): boolean {
+  const tools = memberValue(body, "tools");
+  return isWireJsonArray(tools) && tools.items.some((tool) => (
+    isWireJsonObject(tool) && memberValue(tool, "type") !== "function"
+  ));
+}
+
+function validateExtendedResponsesRequest(body: WireJsonObject): void {
+  if (
+    duplicateMemberNames(body).length > 0
+    || body.members.some((member) => !EXTENDED_RESPONSES_KEYS.has(member.key))
+  ) {
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      source: "converter",
+      phase: "convert",
+    });
+  }
+  const background = memberValue(body, "background");
+  const store = memberValue(body, "store");
+  if (
+    (background !== undefined && background !== false)
+    || (store !== undefined && store !== false)
+  ) {
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      source: "converter",
+      phase: "convert",
+    });
+  }
+  const n = observedInteger(memberValue(body, "n"));
+  if (memberValue(body, "n") !== undefined && n !== 1) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  const tools = memberValue(body, "tools");
+  if (!isWireJsonArray(tools)) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  for (const tool of tools.items) {
+    if (!isWireJsonObject(tool) || duplicateMemberNames(tool).length > 0) {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    }
+    const type = memberValue(tool, "type");
+    if (type === "function") {
+      continue;
+    }
+    if (type === "custom") {
+      assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
+      assertExtendedToolName(tool);
+      continue;
+    }
+    if (type === "namespace") {
+      assertExtendedToolKeys(tool, new Set(["type", "name", "description", "tools", "children"]));
+      assertExtendedToolName(tool);
+      const children = memberValue(tool, "tools") ?? memberValue(tool, "children");
+      if (!isWireJsonArray(children) || children.items.length === 0) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+      }
+      continue;
+    }
+    if (type === "tool_search") {
+      assertExtendedToolKeys(tool, new Set(["type"]));
+      continue;
+    }
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      source: "converter",
+      phase: "convert",
+    });
+  }
+}
+
+function assertExtendedToolKeys(tool: WireJsonObject, allowed: ReadonlySet<string>): void {
+  if (tool.members.some((member) => !allowed.has(member.key))) {
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      source: "converter",
+      phase: "convert",
+    });
+  }
+}
+
+function assertExtendedToolName(tool: WireJsonObject): void {
+  const name = memberValue(tool, "name");
+  if (typeof name !== "string" || name.length === 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
 }
 
 function attemptUsage(value: Readonly<SemanticUsage>): AttemptUsage {
@@ -655,6 +966,22 @@ function createNativeStreamObservation(usage: RequestAttempt): { readonly observ
         });
       }
     },
+  };
+}
+
+function observeExtendedBridgeEvent(usage: RequestAttempt, event: WireJsonObject): void {
+  if (memberValue(event, "type") === "response.completed") {
+    usage.finish("success", extendedChatUsage(objectMember(event, "response")));
+  }
+}
+
+function extendedChatUsage(response: WireJsonObject | undefined): UsageTokens {
+  const usage = objectMember(response, "usage");
+  const details = objectMember(usage, "prompt_tokens_details");
+  return {
+    inputTokens: observedInteger(memberValue(usage, "prompt_tokens")) ?? 0,
+    outputTokens: observedInteger(memberValue(usage, "completion_tokens")) ?? 0,
+    cacheTokens: observedInteger(memberValue(details, "cached_tokens")) ?? 0,
   };
 }
 

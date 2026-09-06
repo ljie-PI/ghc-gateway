@@ -46,6 +46,9 @@ export class SemanticItemLedger {
       invalid();
     }
     this.reserve(input.key);
+    if (input.itemId !== undefined) {
+      this.reserve(input.itemId);
+    }
     this.reserve(input.callId);
     this.reserve(input.name);
     this.tools.set(input.key, { ...input, argumentsJson: "", done: false });
