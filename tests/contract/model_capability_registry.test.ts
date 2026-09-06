@@ -318,6 +318,29 @@ describe("model capability registry", () => {
     expect(refreshed).toMatchObject({ effective: 8_000, valid: false });
     expect(() => chooseOutputTokenBudget(undefined, refreshed)).toThrow(TypeError);
   });
+
+  it("supersedes snapshots on override changes and stamps one account revision on previews", async () => {
+    const harness = await createHarness({
+      "github.com/1": [
+        model("one", { supported_endpoints: ["/chat/completions"] }),
+        model("two", { supported_endpoints: ["/responses"] }),
+      ],
+    });
+    const initial = await harness.registry.get(harness.account1, signal);
+    expect(harness.registry.isCurrent(initial)).toBe(true);
+    const preview = await harness.registry.previewOverride(
+      harness.account1,
+      "one",
+      { enabled: false, protocols: ["chat"] },
+      0,
+      signal,
+    );
+    expect(preview.capabilityRevision).toBe(1);
+    expect(preview.models.map((item) => item.revision.overrideRevision)).toEqual([1, 1]);
+    harness.overrides.set("github.com/1", "one", { enabled: false, protocols: ["chat"] }, 0);
+    expect(harness.registry.isCurrent(initial)).toBe(false);
+    expect(harness.registry.isCurrent(preview)).toBe(true);
+  });
 });
 
 async function createHarness(

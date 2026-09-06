@@ -152,7 +152,7 @@ export class ModelCapabilityRegistry {
       snapshot.accountId,
       snapshot.catalogGeneration,
       snapshot.credentialGeneration,
-    );
+    ) && this.overrides.revision(snapshot.accountId) === snapshot.capabilityRevision;
   }
 
   async close(): Promise<void> {
@@ -167,10 +167,16 @@ export class ModelCapabilityRegistry {
   ): CapabilityCatalogSnapshot {
     const overrides = new Map(configured.map((item) => [item.modelId, item]));
     const discoveredIds = new Set(catalog.models.map((model) => model.id));
-    const models = catalog.models.map((model) => this.effective(account, catalog, model, overrides.get(model.id)));
+    const models = catalog.models.map((model) => this.effective(
+      account,
+      catalog,
+      model,
+      overrides.get(model.id),
+      capabilityRevision,
+    ));
     for (const stored of configured) {
       if (!discoveredIds.has(stored.modelId)) {
-        models.push(this.effective(account, catalog, undefined, stored));
+        models.push(this.effective(account, catalog, undefined, stored, capabilityRevision));
       }
     }
     return deepFreeze({
@@ -188,6 +194,7 @@ export class ModelCapabilityRegistry {
     catalog: Readonly<CatalogSnapshot>,
     model: Readonly<CopilotCatalogModel> | undefined,
     stored: Readonly<StoredModelCapabilityOverride> | undefined,
+    capabilityRevision: number,
   ): EffectiveModelCapabilitySnapshot {
     const override = stored?.value ?? null;
     const live = model?.capabilities ?? UNKNOWN_DECLARATIONS;
@@ -239,7 +246,7 @@ export class ModelCapabilityRegistry {
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
-        overrideRevision: stored?.revision ?? this.overrides.get(account.accountId, model?.id ?? "").revision,
+        overrideRevision: capabilityRevision,
         builtinRevision: builtin?.revision ?? null,
       },
     });
