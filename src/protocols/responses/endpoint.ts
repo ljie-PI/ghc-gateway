@@ -356,6 +356,14 @@ async function extendedBridgeNonstreamResponse(
   const upstream = await transportCall(() => bound.completeChat(request), request.signal);
   assertUpstreamSuccess(upstream);
   const measured = measure(dependencies.performanceObserver, "buffered", () => {
+    convertBufferedResponse(upstream.body, {
+      source: "chat",
+      target: "responses",
+      model: plan.resolvedModel.upstreamModel,
+      maxBytes: scope.config.limits.nonstreamBodyBytes,
+      createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+      nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+    });
     const chat = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
     const converted = convertChatResponseToResponses(chat, {
       originalRequest: plan.originalRequest,
@@ -664,6 +672,10 @@ function validateExtendedResponsesRequest(
     }
     const type = memberValue(tool, "type");
     if (type === "function") {
+      const shape = memberValue(tool, "function");
+      const functionObject = isWireJsonObject(shape) ? shape : tool;
+      assertExtendedToolName(functionObject);
+      toolNames.add(memberValue(functionObject, "name") as string);
       continue;
     }
     if (type === "custom") {
@@ -679,6 +691,19 @@ function validateExtendedResponsesRequest(
       if (!isWireJsonArray(children) || children.items.length === 0) {
         throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
       }
+      for (const child of children.items) {
+        if (!isWireJsonObject(child) || memberValue(child, "type") !== "function") {
+          throw new GatewayFailureError({
+            kind: "unsupported_semantics",
+            source: "converter",
+            phase: "convert",
+          });
+        }
+        const shape = memberValue(child, "function");
+        const functionObject = isWireJsonObject(shape) ? shape : child;
+        assertExtendedToolName(functionObject);
+        toolNames.add(memberValue(functionObject, "name") as string);
+      }
       continue;
     }
     if (type === "tool_search") {
@@ -686,38 +711,16 @@ function validateExtendedResponsesRequest(
       toolNames.add("tool_search");
       continue;
     }
-    validateExtendedToolChoice(memberValue(body, "tool_choice"), toolNames);
-    const parallel = memberValue(body, "parallel_tool_calls");
-    if (parallel !== undefined && typeof parallel !== "boolean") {
-      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-    }
     throw new GatewayFailureError({
       kind: "unsupported_semantics",
       source: "converter",
       phase: "convert",
     });
   }
-
-  function validateExtendedToolChoice(value: WireJson | undefined, names: ReadonlySet<string>): void {
-    if (value === undefined) {
-      return;
-    }
-    if (value === "auto" || value === "none" || value === "required") {
-      return;
-    }
-    if (!isWireJsonObject(value) || duplicateMemberNames(value).length > 0) {
-      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-    }
-    assertExtendedToolKeys(value, new Set(["type", "name", "namespace"]));
-    const type = memberValue(value, "type");
-    const name = memberValue(value, "name");
-    if (
-      (type !== "custom" && type !== "function" && type !== "tool_search")
-      || typeof name !== "string"
-      || !names.has(name)
-    ) {
-      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-    }
+  validateExtendedToolChoice(memberValue(body, "tool_choice"), toolNames);
+  const parallel = memberValue(body, "parallel_tool_calls");
+  if (parallel !== undefined && typeof parallel !== "boolean") {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
   if (memberValue(body, "text") !== undefined || memberValue(body, "response_format") !== undefined) {
     throw new GatewayFailureError({
@@ -728,13 +731,92 @@ function validateExtendedResponsesRequest(
   }
   const sanitized: WireJsonObject = {
     kind: "object",
-    members: body.members.filter((member) => (
-      member.key !== "tools"
-      && member.key !== "tool_choice"
-      && member.key !== "parallel_tool_calls"
-    )),
+    members: body.members
+      .filter((member) => (
+        member.key !== "tools"
+        && member.key !== "tool_choice"
+        && member.key !== "parallel_tool_calls"
+        && member.key !== "input"
+      ))
+      .concat({ key: "input", value: sanitizedExtendedInput(memberValue(body, "input")) }),
   };
   prepareConvertedRequest("responses", "chat", sanitized, model, capability);
+}
+
+function validateExtendedToolChoice(value: WireJson | undefined, names: ReadonlySet<string>): void {
+  if (value === undefined) {
+    return;
+  }
+  if (value === "auto" || value === "none" || value === "required") {
+    return;
+  }
+  if (!isWireJsonObject(value) || duplicateMemberNames(value).length > 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  assertExtendedToolKeys(value, new Set(["type", "name", "namespace"]));
+  const type = memberValue(value, "type");
+  const name = memberValue(value, "name");
+  if (
+    (type !== "custom" && type !== "function" && type !== "tool_search")
+    || typeof name !== "string"
+    || !names.has(name)
+  ) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+}
+
+function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
+  if (!isWireJsonArray(value)) {
+    return value ?? { kind: "array", items: [] };
+  }
+  const ordinary: WireJson[] = [];
+  const calls = new Set<string>();
+  for (const item of value.items) {
+    if (!isWireJsonObject(item)) {
+      ordinary.push(item);
+      continue;
+    }
+    const type = memberValue(item, "type");
+    if (type === "custom_tool_call" || type === "tool_search_call") {
+      assertExtendedToolKeys(
+        item,
+        type === "custom_tool_call"
+          ? new Set(["type", "id", "call_id", "name", "input", "status"])
+          : new Set(["type", "id", "call_id", "arguments", "status", "execution"]),
+      );
+      const callId = memberValue(item, "call_id");
+      if (typeof callId !== "string" || callId.length === 0 || calls.has(callId)) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+      }
+      if (type === "custom_tool_call") {
+        if (
+          typeof memberValue(item, "name") !== "string"
+          || typeof memberValue(item, "input") !== "string"
+        ) {
+          throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+        }
+      }
+      calls.add(callId);
+      continue;
+    }
+    if (type === "custom_tool_call_output" || type === "tool_search_output") {
+      assertExtendedToolKeys(item, new Set(["type", "id", "call_id", "output", "status", "tools"]));
+      const callId = memberValue(item, "call_id");
+      if (
+        typeof callId !== "string"
+        || memberValue(item, "output") === undefined
+        || !calls.delete(callId)
+      ) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+      }
+      continue;
+    }
+    ordinary.push(item);
+  }
+  if (calls.size > 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  return { kind: "array", items: ordinary };
 }
 
 function assertExtendedToolKeys(tool: WireJsonObject, allowed: ReadonlySet<string>): void {

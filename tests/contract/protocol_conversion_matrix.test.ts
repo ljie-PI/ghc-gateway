@@ -67,6 +67,38 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("round-trips a buffered custom tool through scoped Responses history", async () => {
+    const harness = await matrixGateway();
+    try {
+      const first = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      const firstBody = await first.json() as {
+        id: string;
+        output: Array<{ type: string; call_id?: string }>;
+      };
+      const call = firstBody.output.find((item) => item.type === "custom_tool_call");
+      expect(call?.call_id).toBe("call_custom");
+      const second = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        previous_response_id: firstBody.id,
+        input: [{
+          type: "custom_tool_call_output",
+          call_id: "call_custom",
+          output: "done",
+        }],
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      expect(second.status).toBe(200);
+      expect(await second.text()).toContain("ok");
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat", "chat"]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it.each([
     ["chat", "native-chat", "chat-stream", "[DONE]"],
     ["chat", "native-messages", "messages-stream", "[DONE]"],
@@ -281,8 +313,10 @@ async function matrixGateway(): Promise<MatrixHarness> {
     chat(request) {
       chatBodies.push(request.body);
       const captured = JSON.parse(decoder.decode(request.body)) as {
+        messages?: Array<{ role?: string }>;
         tools?: Array<{ function?: { name?: string } }>;
       };
+      const hasToolResult = captured.messages?.some((message) => message.role === "tool") === true;
       const custom = captured.tools?.some((tool) => tool.function?.name === "render") === true;
       return {
         status: 200,
@@ -294,7 +328,7 @@ async function matrixGateway(): Promise<MatrixHarness> {
           model: "matrix",
           choices: [{
             index: 0,
-            message: custom
+            message: custom && !hasToolResult
               ? {
                 role: "assistant",
                 content: null,
@@ -305,7 +339,7 @@ async function matrixGateway(): Promise<MatrixHarness> {
                 }],
               }
               : { role: "assistant", content: "ok" },
-            finish_reason: custom ? "tool_calls" : "stop",
+            finish_reason: custom && !hasToolResult ? "tool_calls" : "stop",
           }],
           usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
         })),
