@@ -55,6 +55,13 @@ describe("CAPI parse and cache", () => {
       mode: "chat",
       max_input_tokens: 128_000,
       max_output_tokens: 64_000,
+      chat_output_token_field: "max_tokens",
+    });
+    expect(productionModelInfoLookup.get("gpt-4o")).toEqual({
+      mode: "chat",
+      max_input_tokens: 64_000,
+      max_output_tokens: 4_096,
+      chat_output_token_field: "max_tokens",
     });
     expect(productionModelInfoLookup.get("gpt-5.3-codex")).toEqual({
       mode: "responses",
@@ -158,6 +165,33 @@ describe("CAPI parse and cache", () => {
     }
     await vi.waitFor(() => expect(aborts).toBe(20));
     expect(fetches).toBe(20);
+    await catalog.close();
+  });
+
+  it("does not let an aborted orphan poison the next catalog request", async () => {
+    let fetches = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch(_accountId, signal) {
+        fetches += 1;
+        if (fetches > 1) {
+          return { data: [] };
+        }
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            setTimeout(() => reject(new DOMException("aborted", "AbortError")), 20);
+          }, { once: true });
+        });
+        return { data: [] };
+      },
+    });
+    const controller = new AbortController();
+    const first = catalog.get("github.com/1", controller.signal);
+    controller.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(catalog.get("github.com/1", new AbortController().signal)).resolves.toMatchObject({
+      models: [],
+    });
+    expect(fetches).toBe(2);
     await catalog.close();
   });
 

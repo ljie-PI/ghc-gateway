@@ -45,6 +45,7 @@ interface CacheEntry {
 }
 
 interface InflightEntry {
+  readonly accountId: string;
   readonly generation: number;
   readonly credentialGeneration: number;
   readonly promise: Promise<CatalogSnapshot>;
@@ -85,6 +86,7 @@ export class CopilotModelCatalog {
     const generation = this.generations.get(accountId) ?? 0;
     const pending = this.inflight.get(accountId);
     if (pending !== undefined
+      && !pending.controller.signal.aborted
       && pending.generation === generation
       && pending.credentialGeneration === credentialGeneration) {
       return await this.waitForInflight(pending, signal);
@@ -92,6 +94,7 @@ export class CopilotModelCatalog {
     const controller = new AbortController();
     const promise = this.fetchCatalog(accountId, generation, credentialGeneration, controller.signal);
     const entry: InflightEntry = {
+      accountId,
       generation,
       credentialGeneration,
       promise,
@@ -118,6 +121,9 @@ export class CopilotModelCatalog {
     } finally {
       entry.waiters -= 1;
       if (entry.waiters === 0 && !entry.settled) {
+        if (this.inflight.get(entry.accountId) === entry) {
+          this.inflight.delete(entry.accountId);
+        }
         entry.controller.abort();
       }
     }

@@ -55,36 +55,36 @@ function coerceTokenLimit(value: unknown): number | undefined {
 
 // Pinned LiteLLM getModelInfo data for the GitHub Copilot provider.
 const PRODUCTION_MODEL_INFO: Readonly<Record<string, RawModelInfo>> = {
-  "claude-haiku-4.5": info("chat", 128_000, 16_000, ["/v1/chat/completions"]),
-  "claude-opus-4.5": info("chat", 128_000, 16_000, ["/v1/chat/completions"]),
-  "claude-opus-4.6-fast": info("chat", 128_000, 16_000, ["/v1/chat/completions"]),
-  "claude-opus-41": info("chat", 80_000, 16_000, ["/v1/chat/completions"]),
-  "claude-sonnet-4": info("chat", 128_000, 16_000, ["/v1/chat/completions"]),
-  "claude-sonnet-4.5": info("chat", 128_000, 16_000, ["/v1/chat/completions"]),
-  "gemini-2.5-pro": info("chat", 128_000, 64_000),
-  "gemini-3-pro-preview": info("chat", 128_000, 64_000),
-  "gpt-3.5-turbo": info("chat", 16_384, 4_096),
-  "gpt-3.5-turbo-0613": info("chat", 16_384, 4_096),
-  "gpt-4": info("chat", 32_768, 4_096),
-  "gpt-4-0613": info("chat", 32_768, 4_096),
-  "gpt-4-o-preview": info("chat", 64_000, 4_096),
-  "gpt-4.1": info("chat", 128_000, 16_384),
-  "gpt-4.1-2025-04-14": info("chat", 128_000, 16_384),
+  "claude-haiku-4.5": chatInfo(128_000, 16_000, ["/v1/chat/completions"]),
+  "claude-opus-4.5": chatInfo(128_000, 16_000, ["/v1/chat/completions"]),
+  "claude-opus-4.6-fast": chatInfo(128_000, 16_000, ["/v1/chat/completions"]),
+  "claude-opus-41": chatInfo(80_000, 16_000, ["/v1/chat/completions"]),
+  "claude-sonnet-4": chatInfo(128_000, 16_000, ["/v1/chat/completions"]),
+  "claude-sonnet-4.5": chatInfo(128_000, 16_000, ["/v1/chat/completions"]),
+  "gemini-2.5-pro": chatInfo(128_000, 64_000),
+  "gemini-3-pro-preview": chatInfo(128_000, 64_000),
+  "gpt-3.5-turbo": chatInfo(16_384, 4_096),
+  "gpt-3.5-turbo-0613": chatInfo(16_384, 4_096),
+  "gpt-4": chatInfo(32_768, 4_096),
+  "gpt-4-0613": chatInfo(32_768, 4_096),
+  "gpt-4-o-preview": chatInfo(64_000, 4_096),
+  "gpt-4.1": chatInfo(128_000, 16_384),
+  "gpt-4.1-2025-04-14": chatInfo(128_000, 16_384),
   "gpt-41-copilot": info("completion"),
-  "gpt-4o": info("chat", 64_000, 4_096),
-  "gpt-4o-2024-05-13": info("chat", 64_000, 4_096),
-  "gpt-4o-2024-08-06": info("chat", 64_000, 16_384),
-  "gpt-4o-2024-11-20": info("chat", 64_000, 16_384),
-  "gpt-4o-mini": info("chat", 64_000, 4_096),
-  "gpt-4o-mini-2024-07-18": info("chat", 64_000, 4_096),
-  "gpt-5": info("chat", 128_000, 128_000, ["/v1/chat/completions", "/v1/responses"]),
-  "gpt-5-mini": info("chat", 128_000, 64_000),
-  "gpt-5.1": info("chat", 128_000, 64_000, ["/v1/chat/completions", "/v1/responses"]),
-  "gpt-5.1-codex-max": info("responses", 128_000, 128_000, ["/v1/responses"]),
-  "gpt-5.2": info("chat", 128_000, 64_000, ["/v1/chat/completions", "/v1/responses"]),
-  "gpt-5.3-codex": info("responses", 128_000, 128_000, ["/v1/responses"]),
-  "mai-code-1-flash": info("chat", 128_000, 64_000, ["/v1/chat/completions"]),
-  "mai-code-1-flash-internal": info("chat", 128_000, 64_000, ["/v1/chat/completions"]),
+  "gpt-4o": chatInfo(64_000, 4_096),
+  "gpt-4o-2024-05-13": chatInfo(64_000, 4_096),
+  "gpt-4o-2024-08-06": chatInfo(64_000, 16_384),
+  "gpt-4o-2024-11-20": chatInfo(64_000, 16_384),
+  "gpt-4o-mini": chatInfo(64_000, 4_096),
+  "gpt-4o-mini-2024-07-18": chatInfo(64_000, 4_096),
+  "gpt-5": chatInfo(128_000, 128_000, ["/v1/chat/completions", "/v1/responses"]),
+  "gpt-5-mini": chatInfo(128_000, 64_000),
+  "gpt-5.1": chatInfo(128_000, 64_000, ["/v1/chat/completions", "/v1/responses"]),
+  "gpt-5.1-codex-max": responsesInfo(128_000, 128_000, ["/v1/responses"]),
+  "gpt-5.2": chatInfo(128_000, 64_000, ["/v1/chat/completions", "/v1/responses"]),
+  "gpt-5.3-codex": responsesInfo(128_000, 128_000, ["/v1/responses"]),
+  "mai-code-1-flash": chatInfo(128_000, 64_000, ["/v1/chat/completions"]),
+  "mai-code-1-flash-internal": chatInfo(128_000, 64_000, ["/v1/chat/completions"]),
   "text-embedding-3-small": info("embedding", 8_191),
   "text-embedding-3-small-inference": info("embedding", 8_191),
   "text-embedding-ada-002": info("embedding", 8_191),
@@ -108,6 +108,25 @@ export const productionBuiltinModelCapabilities: BuiltinModelCapabilityLookup = 
   },
 };
 
+function chatInfo(
+  maxInputTokens?: number,
+  maxOutputTokens?: number,
+  supportedEndpoints?: readonly string[],
+): RawModelInfo {
+  return {
+    ...info("chat", maxInputTokens, maxOutputTokens, supportedEndpoints),
+    chat_output_token_field: "max_tokens",
+  };
+}
+
+function responsesInfo(
+  maxInputTokens?: number,
+  maxOutputTokens?: number,
+  supportedEndpoints?: readonly string[],
+): RawModelInfo {
+  return info("responses", maxInputTokens, maxOutputTokens, supportedEndpoints);
+}
+
 function info(
   mode: string,
   maxInputTokens?: number,
@@ -119,8 +138,5 @@ function info(
     ...(maxInputTokens === undefined ? {} : { max_input_tokens: maxInputTokens }),
     ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }),
     ...(supportedEndpoints === undefined ? {} : { supported_endpoints: supportedEndpoints }),
-    ...(supportedEndpoints?.some((endpoint) => endpoint === "/v1/chat/completions") === true
-      ? { chat_output_token_field: "max_tokens" as const }
-      : {}),
   };
 }
