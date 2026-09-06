@@ -112,14 +112,17 @@ describe("package entrypoints and toolchain", () => {
     const command = ["scripts/tooling/bootstrap.mjs", "scripts/tooling/require_opt_in.ts"];
 
     await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
+      windowsHide: true,
       env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "" },
     })).rejects.toMatchObject({ code: 2 });
 
     await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_LIVE_TESTS"], {
+      windowsHide: true,
       env: { ...process.env, GHC_GATEWAY_LIVE_TESTS: "" },
     })).rejects.toMatchObject({ code: 2 });
 
     await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
+      windowsHide: true,
       env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "1" },
     })).resolves.toMatchObject({ stdout: "" });
   });
@@ -185,6 +188,7 @@ describe("package entrypoints and toolchain", () => {
       "--eval",
       "fetch('https://github.com').catch((error) => { console.error(error.message); process.exit(2); })",
     ], {
+      windowsHide: true,
       env: { ...process.env, GHC_GATEWAY_CI_NETWORK_GUARD: "1" },
     })).rejects.toMatchObject({ code: 2 });
   });

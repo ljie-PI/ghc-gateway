@@ -180,10 +180,10 @@ function protectFile(filePath: string): void {
 function restrictWindowsAcl(target: string): void {
   const current = currentWindowsIdentity();
   const grant = isDirectory(target) ? `*${current.sid}:(OI)(CI)(F)` : `*${current.sid}:(F)`;
-  execFileSync("icacls", [target, "/inheritance:r", "/grant:r", grant], { stdio: "ignore" });
+  execFileSync("icacls", [target, "/inheritance:r", "/grant:r", grant], { stdio: "ignore", windowsHide: true });
   for (const identity of windowsAclIdentities(target)) {
     if (!isCurrentWindowsIdentity(identity, current)) {
-      execFileSync("icacls", [target, "/remove:g", identity], { stdio: "ignore" });
+      execFileSync("icacls", [target, "/remove:g", identity], { stdio: "ignore", windowsHide: true });
     }
   }
 }
@@ -197,7 +197,7 @@ function assertWindowsAclCurrentUserOnly(target: string): void {
 }
 
 function currentWindowsIdentity(): { readonly name: string; readonly sid: string } {
-  const csv = execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim();
+  const csv = execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).trim();
   const match = /^"([^"]+)","([^"]+)"$/u.exec(csv);
   if (match === null || match[1] === undefined || match[2] === undefined) {
     throw new Error("unable to resolve current Windows identity");
@@ -206,7 +206,7 @@ function currentWindowsIdentity(): { readonly name: string; readonly sid: string
 }
 
 function windowsAclIdentities(target: string): readonly string[] {
-  const output = execFileSync("icacls", [target], { encoding: "utf8" });
+  const output = execFileSync("icacls", [target], { encoding: "utf8", windowsHide: true });
   const identities: string[] = [];
   for (const rawLine of output.split(/\r?\n/u)) {
     const line = rawLine.trim();

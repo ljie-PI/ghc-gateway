@@ -54,7 +54,7 @@ describe("Copilot transport", () => {
         "--eval",
         source,
         dataDir,
-      ], { cwd: process.cwd(), env: { ...process.env, NODE_OPTIONS: "" } });
+      ], { cwd: process.cwd(), windowsHide: true, env: { ...process.env, NODE_OPTIONS: "" } });
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }
