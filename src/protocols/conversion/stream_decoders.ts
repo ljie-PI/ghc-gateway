@@ -18,6 +18,7 @@ import type {
   SemanticUsage,
 } from "./types.js";
 import { decodeSseRecords } from "./sse.js";
+import { mergeMessagesUsage } from "./usage.js";
 
 export function decodeProtocolStream(
   source: InferenceProtocol,
@@ -61,7 +62,10 @@ async function* decodeChatStream(
         if (pendingFinish === "length" || pendingFinish === "content_filter") {
           continue;
         }
-        if (!tool.started || tool.done) {
+        if (!tool.started) {
+          invalid();
+        }
+        if (tool.done) {
           continue;
         }
         tool.done = true;
@@ -69,7 +73,9 @@ async function* decodeChatStream(
       }
       yield {
         kind: "terminal",
-        status: pendingFinish === "length" || pendingFinish === "content_filter" ? "incomplete" : "completed",
+        status: pendingFinish === "length" || pendingFinish === "content_filter" || pendingFinish === "refusal"
+          ? "incomplete"
+          : "completed",
         finishReason: pendingFinish,
       };
       return;
@@ -134,6 +140,9 @@ async function* decodeChatStream(
           const fn = objectMember(value, "function");
           const nameDelta = stringMember(fn, "name");
           if (nameDelta !== undefined) {
+            if (tool.started && nameDelta.length > 0) {
+              invalid();
+            }
             budget.reserve(nameDelta);
             tool.name += nameDelta;
           }
@@ -143,7 +152,12 @@ async function* decodeChatStream(
             tool.pendingArguments += argumentsDelta;
           }
           tools.set(index, tool);
-          if (!tool.started && tool.id.length > 0 && tool.name.length > 0) {
+          if (
+            !tool.started
+            && argumentsDelta !== undefined
+            && tool.id.length > 0
+            && tool.name.length > 0
+          ) {
             tool.started = true;
             yield {
               kind: "tool_start",
@@ -163,6 +177,23 @@ async function* decodeChatStream(
     const finish = singleMember(choice, "finish_reason");
     if (finish !== undefined && finish !== null) {
       pendingFinish = chatFinish(finish);
+      for (const [index, tool] of tools) {
+        if (tool.started || tool.id.length === 0 || tool.name.length === 0) {
+          continue;
+        }
+        tool.started = true;
+        yield {
+          kind: "tool_start",
+          key: `chat:${index}`,
+          callId: tool.id,
+          name: tool.name,
+        };
+        if (tool.pendingArguments.length > 0) {
+          const pending = tool.pendingArguments;
+          tool.pendingArguments = "";
+          yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
+        }
+      }
     }
   }
   invalidTruncated();
@@ -305,7 +336,9 @@ async function* decodeMessagesStream(
       }
       yield {
         kind: "terminal",
-        status: pendingFinish === "length" || pendingFinish === "content_filter" ? "incomplete" : "completed",
+        status: pendingFinish === "length" || pendingFinish === "content_filter" || pendingFinish === "refusal"
+          ? "incomplete"
+          : "completed",
         finishReason: pendingFinish,
       };
       return;
@@ -324,7 +357,7 @@ async function* decodeResponsesStream(
   accumulatorBytes: number,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
-  const toolsByIndex = new Map<number, string>();
+  const toolsByIndex = new Map<number, ResponseToolIdentity>();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
     if (record.data === "[DONE]") {
@@ -355,14 +388,20 @@ async function* decodeResponsesStream(
         if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0) {
           invalid();
         }
-        toolsByIndex.set(outputIndex, key);
+        const identity = {
+          key,
+          itemId: stringMember(item, "id"),
+          callId,
+          name,
+        };
+        toolsByIndex.set(outputIndex, identity);
         budget.reserveEntry();
         budget.reserve(callId);
         budget.reserve(name);
         yield {
           kind: "tool_start",
           key,
-          itemId: stringMember(item, "id"),
+          itemId: identity.itemId,
           callId,
           name,
         };
@@ -407,20 +446,20 @@ async function* decodeResponsesStream(
     }
     if (type === "response.function_call_arguments.delta") {
       const outputIndex = integerMember(payload, "output_index");
-      const key = outputIndex === undefined ? undefined : toolsByIndex.get(outputIndex);
-      if (key === undefined) {
+      const identity = outputIndex === undefined ? undefined : toolsByIndex.get(outputIndex);
+      if (identity === undefined) {
         invalid();
       }
-      yield { kind: "tool_arguments_delta", key, delta: stringMember(payload, "delta") ?? "" };
+      yield { kind: "tool_arguments_delta", key: identity.key, delta: stringMember(payload, "delta") ?? "" };
       continue;
     }
     if (type === "response.function_call_arguments.done") {
       const outputIndex = integerMember(payload, "output_index");
-      const key = outputIndex === undefined ? undefined : toolsByIndex.get(outputIndex);
-      if (key === undefined) {
+      const identity = outputIndex === undefined ? undefined : toolsByIndex.get(outputIndex);
+      if (identity === undefined) {
         invalid();
       }
-      yield { kind: "tool_done", key, argumentsJson: stringMember(payload, "arguments") };
+      yield { kind: "tool_done", key: identity.key, argumentsJson: stringMember(payload, "arguments") };
       continue;
     }
     if (type === "response.output_item.done") {
@@ -484,7 +523,7 @@ async function* decodeResponsesStream(
 
 function* finalResponseEvents(
   response: WireJsonObject,
-  toolsByIndex: Map<number, string>,
+  toolsByIndex: Map<number, ResponseToolIdentity>,
 ): Iterable<SemanticStreamEvent> {
   const output = arrayMember(response, "output");
   if (output === undefined) {
@@ -501,7 +540,7 @@ function* finalResponseEvents(
 function* finalItemEvents(
   item: WireJsonObject,
   outputIndex: number,
-  toolsByIndex: Map<number, string>,
+  toolsByIndex: Map<number, ResponseToolIdentity>,
 ): Iterable<SemanticStreamEvent> {
   const type = stringMember(item, "type");
   if (type === "message") {
@@ -534,30 +573,54 @@ function* finalItemEvents(
     return;
   }
   if (type === "function_call") {
-    let key = toolsByIndex.get(outputIndex);
-    if (key === undefined) {
+    let identity = toolsByIndex.get(outputIndex);
+    if (identity === undefined) {
       const callId = stringMember(item, "call_id");
       const name = stringMember(item, "name");
       if (callId === undefined || name === undefined) {
         invalid();
       }
-      key = `responses:${outputIndex}`;
-      toolsByIndex.set(outputIndex, key);
-      yield {
-        kind: "tool_start",
-        key,
+      identity = {
+        key: `responses:${outputIndex}`,
         itemId: stringMember(item, "id"),
         callId,
         name,
       };
+      toolsByIndex.set(outputIndex, identity);
+      yield {
+        kind: "tool_start",
+        key: identity.key,
+        itemId: identity.itemId,
+        callId,
+        name,
+      };
+    } else {
+      const finalCallId = stringMember(item, "call_id");
+      const finalName = stringMember(item, "name");
+      const finalItemId = stringMember(item, "id");
+      if (
+        (finalCallId !== undefined && finalCallId !== identity.callId)
+        || (finalName !== undefined && finalName !== identity.name)
+        || (identity.itemId !== undefined && finalItemId !== undefined && finalItemId !== identity.itemId)
+      ) {
+        invalid();
+      }
     }
-    yield { kind: "tool_done", key, argumentsJson: stringMember(item, "arguments") };
+    yield { kind: "tool_done", key: identity.key, argumentsJson: stringMember(item, "arguments") };
     return;
   }
+
   if (type === "reasoning") {
     return;
   }
   invalid();
+}
+
+interface ResponseToolIdentity {
+  readonly key: string;
+  readonly itemId?: string | undefined;
+  readonly callId: string;
+  readonly name: string;
 }
 
 function parseEventObject(data: string, eventLimitBytes: number): WireJsonObject {
@@ -622,17 +685,12 @@ function chatUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): Sem
 }
 
 function messagesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
-  const read = optionalNonnegativeIntegerMember(value, "cache_read_input_tokens") ?? current.cacheReadTokens;
-  const write = optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens") ?? current.cacheWriteTokens;
-  const currentNoncache = Math.max(0, current.inputTokens - current.cacheReadTokens - current.cacheWriteTokens);
-  const noncache = optionalNonnegativeIntegerMember(value, "input_tokens") ?? currentNoncache;
-  return {
-    inputTokens: noncache + read + write,
-    outputTokens: optionalNonnegativeIntegerMember(value, "output_tokens") ?? current.outputTokens,
-    cacheReadTokens: read,
-    cacheWriteTokens: write,
-    reasoningTokens: 0,
-  };
+  return mergeMessagesUsage(current, {
+    inputTokens: optionalNonnegativeIntegerMember(value, "input_tokens"),
+    outputTokens: optionalNonnegativeIntegerMember(value, "output_tokens"),
+    cacheReadTokens: optionalNonnegativeIntegerMember(value, "cache_read_input_tokens"),
+    cacheWriteTokens: optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens"),
+  });
 }
 
 function responsesUsage(value: WireJsonObject): SemanticUsage {

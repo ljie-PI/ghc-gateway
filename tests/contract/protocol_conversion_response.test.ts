@@ -126,6 +126,7 @@ describe("shared conversion response codecs", () => {
         input_tokens_details: { cached_tokens: 3, cache_write_tokens: 1 },
       },
     });
+
     expect(converted.observations.usage).toEqual({
       inputTokens: 11,
       outputTokens: 2,
@@ -133,6 +134,28 @@ describe("shared conversion response codecs", () => {
       cacheWriteTokens: 1,
       reasoningTokens: 0,
     });
+  });
+
+  it("maps a Messages refusal to a restricted Responses result", () => {
+    const converted = convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "msg_refusal",
+      type: "message",
+      role: "assistant",
+      model: "source",
+      content: [{ type: "text", text: "cannot comply" }],
+      stop_reason: "refusal",
+      stop_sequence: null,
+      usage: { input_tokens: 2, output_tokens: 1 },
+    })), context("messages", "responses"));
+    expect(decoded(converted.bytes)).toMatchObject({
+      status: "incomplete",
+      incomplete_details: { reason: "content_filter" },
+      output: [{
+        type: "message",
+        content: [{ type: "refusal", refusal: "cannot comply" }],
+      }],
+    });
+    expect(converted.checkpoint).toMatchObject({ state: "route_only", output: [] });
   });
 
   it.each([
@@ -304,6 +327,174 @@ describe("shared conversion response codecs", () => {
     expect(text).toContain("response.incomplete");
     expect(text).toContain("\"arguments\":\"{\\\"q\\\":\"");
     expect(text).not.toContain("response.function_call_arguments.done");
+    expect(emissions.filter((item) => item.kind === "checkpoint")).toMatchObject([
+      { intent: { state: "route_only", output: [] } },
+    ]);
+  });
+
+  it("assembles late Chat tool-name fragments and rejects unresolved tool metadata", async () => {
+    const complete = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"look\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"up\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const emissions = await collectStream("chat", "responses", chunks(encoder.encode(complete)));
+    expect(wireText(emissions)).toContain("\"name\":\"lookup\"");
+
+    const missing = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(missing)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("rejects conflicting Responses tool identity snapshots", async () => {
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "fc_1",
+          type: "function_call",
+          call_id: "call_a",
+          name: "lookup",
+          arguments: "",
+          status: "in_progress",
+        },
+      }),
+      responseEvent(1, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "fc_1",
+          type: "function_call",
+          call_id: "call_b",
+          name: "delete",
+          arguments: "{}",
+          status: "completed",
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("preserves text/tool/text item order in Messages-to-Responses streams", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_order",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "before" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "input_json_delta", partial_json: "{}" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 2,
+        content_block: { type: "text", text: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 2,
+        delta: { type: "text_delta", text: "after" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 2 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: 2 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const events = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
+    const terminal = events
+      .split(/\r?\n/u)
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>)
+      .find((event) => event.type === "response.completed");
+    const response = terminal?.response as { output?: Array<Record<string, unknown>> };
+    expect(response.output?.map((item) => item.type)).toEqual(["message", "function_call", "message"]);
+    expect(response.output?.[0]).toMatchObject({ content: [{ text: "before" }] });
+    expect(response.output?.[2]).toMatchObject({ content: [{ text: "after" }] });
+  });
+
+  it("marks a late Messages refusal as incomplete without rewriting emitted text", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_refusal",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "cannot comply" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "refusal" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const text = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
+    expect(text).toContain("response.incomplete");
+    expect(text).toContain("\"reason\":\"content_filter\"");
+    expect(text).toContain("cannot comply");
+    expect(text).not.toContain("response.completed");
   });
 
   it("rejects unsupported substantive final output rather than returning empty success", async () => {
@@ -408,13 +599,13 @@ describe("shared conversion response codecs", () => {
             model: "native",
             stop_reason: null,
             stop_sequence: null,
-            usage: { input_tokens: 1, output_tokens: 0 },
+            usage: { input_tokens: 4, output_tokens: 0 },
           },
         }),
         messageEvent("message_delta", {
           type: "message_delta",
           delta: { stop_reason: "end_turn" },
-          usage: { output_tokens: 1 },
+          usage: { output_tokens: 1, cache_read_input_tokens: 2 },
         }),
         messageEvent("message_stop", { type: "message_stop" }),
       ].join("").replace(/\n/gu, "\r\n");
@@ -448,9 +639,64 @@ describe("shared conversion response codecs", () => {
       onTerminal: (value) => result.push(value),
     });
     const text = await response.text();
-    expect(text).toContain("event: message_stop");
+    const expected = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_native",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "native",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 4, output_tokens: 0 },
+        },
+      }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 1, cache_read_input_tokens: 2 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("").replace(/\n/gu, "\r\n");
+    expect(text).toBe(expected);
     expect(cancelled).toBe(true);
-    expect(result).toMatchObject([{ kind: "success" }]);
+    expect(result).toMatchObject([{
+      kind: "success",
+      usage: { inputTokens: 6, outputTokens: 1, cacheReadTokens: 2 },
+    }]);
+  });
+
+  it("bounds native Messages pre-semantic buffering", async () => {
+    let cancelled = false;
+    const config = defaultRuntimeConfigSnapshot();
+    await expect(createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: chunks(encoder.encode(": comment larger than the captured accumulator\n\n")),
+        async cancel() {
+          cancelled = true;
+        },
+      },
+      scope: {
+        requestId: "req_native_limit",
+        signal: new AbortController().signal,
+        deliverySignal: new AbortController().signal,
+        config: {
+          ...config,
+          limits: { ...config.limits, accumulatorBytes: 8 },
+        },
+        attempt: createRequestAttempt({
+          requestId: "req_native_limit",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    })).rejects.toThrow();
+    expect(cancelled).toBe(true);
   });
 });
 

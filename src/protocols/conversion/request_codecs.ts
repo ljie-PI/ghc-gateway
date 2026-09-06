@@ -4,6 +4,7 @@ import {
   isWireJsonArray,
   isWireJsonObject,
   parseWireJson,
+  serializeWireJson,
   type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
@@ -762,6 +763,24 @@ function decodeToolResultContent(
     ) {
       return [imageContent(trimmed, undefined, "REQ-MEDIA-DATA-URL")];
     }
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const bytes = new TextEncoder().encode(trimmed);
+        const parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 32 });
+        const extracted = extractEmbeddedToolMedia(parsed);
+        if (extracted.media.length > 0) {
+          return [
+            {
+              type: "text",
+              text: new TextDecoder().decode(serializeWireJson(extracted.value)),
+            },
+            ...extracted.media,
+          ];
+        }
+      } catch {
+        // A non-protocol JSON-looking string remains ordinary tool text.
+      }
+    }
     return [{ type: "text", text: value }];
   }
   if (isWireJsonObject(value)) {
@@ -782,10 +801,70 @@ function decodeToolResultContent(
         "REQ-TOOL-RESULT-IMAGE",
       )];
     }
+    const extracted = extractEmbeddedToolMedia(value);
     return [{
       type: "text",
-      text: new TextDecoder().decode(encodeWireObject(value)),
-    }];
+      text: new TextDecoder().decode(serializeWireJson(extracted.value)),
+    }, ...extracted.media];
+  }
+
+  function extractEmbeddedToolMedia(
+    value: WireJson,
+    depth = 0,
+  ): { readonly value: WireJson; readonly media: readonly SemanticImage[] } {
+    if (depth > 32) {
+      return { value, media: [] };
+    }
+    if (isWireJsonArray(value)) {
+      const items: WireJson[] = [];
+      const media: SemanticImage[] = [];
+      for (const item of value.items) {
+        const extracted = extractEmbeddedToolMedia(item, depth + 1);
+        items.push(extracted.value);
+        media.push(...extracted.media);
+      }
+      return { value: { kind: "array", items }, media };
+    }
+    if (!isWireJsonObject(value)) {
+      return { value, media: [] };
+    }
+    const type = oneMember(value, "type", "REQ-TOOL-RESULT-EMBEDDED-TYPE");
+    if (type === "image") {
+      assertAllowedKeys(value, new Set(["type", "source"]), "REQ-TOOL-RESULT-EMBEDDED-IMAGE");
+      return {
+        value: "[cc-switch: tool result media moved to the following user message]",
+        media: [decodeMessagesImage(oneMember(value, "source", "REQ-TOOL-RESULT-EMBEDDED-IMAGE"))],
+      };
+    }
+    if (type === "input_image") {
+      assertAllowedKeys(value, new Set(["type", "image_url", "detail"]), "REQ-TOOL-RESULT-EMBEDDED-IMAGE");
+      return {
+        value: "[cc-switch: tool result media moved to the following user message]",
+        media: [imageContent(
+          requiredString(
+            oneMember(value, "image_url", "REQ-TOOL-RESULT-EMBEDDED-URL"),
+            "REQ-TOOL-RESULT-EMBEDDED-URL",
+          ),
+          optionalString(
+            oneMember(value, "detail", "REQ-TOOL-RESULT-EMBEDDED-DETAIL"),
+            "REQ-TOOL-RESULT-EMBEDDED-DETAIL",
+          ),
+          "REQ-TOOL-RESULT-EMBEDDED-IMAGE",
+        )],
+      };
+    }
+    const members: Array<{ key: string; value: WireJson }> = [];
+    const media: SemanticImage[] = [];
+    for (const member of value.members) {
+      if (member.key !== "content") {
+        members.push(member);
+        continue;
+      }
+      const extracted = extractEmbeddedToolMedia(member.value, depth + 1);
+      members.push({ key: member.key, value: extracted.value });
+      media.push(...extracted.media);
+    }
+    return { value: { kind: "object", members }, media };
   }
   const array = requiredArray(value, "REQ-TOOL-RESULT-CONTENT");
   return array.items.map((item) => {
@@ -797,6 +876,7 @@ function decodeToolResultContent(
     if (type === "text" || type === "input_text") {
       assertAllowedKeys(block, new Set(["type", "text", "cache_control"]), "REQ-TOOL-RESULT-TEXT");
       if (oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE") !== undefined) {
+        validateCacheControl(oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE"));
         degradations.add("cache.control_omitted");
       }
       return {
@@ -809,9 +889,15 @@ function decodeToolResultContent(
       } as const;
     }
     if (type === "image") {
+      assertAllowedKeys(block, new Set(["type", "source", "cache_control"]), "REQ-TOOL-RESULT-IMAGE");
+      if (oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE") !== undefined) {
+        validateCacheControl(oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE"));
+        degradations.add("cache.control_omitted");
+      }
       return decodeMessagesImage(oneMember(block, "source", "REQ-TOOL-RESULT-IMAGE"));
     }
     if (type === "input_image") {
+      assertAllowedKeys(block, new Set(["type", "image_url", "detail"]), "REQ-TOOL-RESULT-IMAGE");
       return imageContent(
         requiredString(
           oneMember(block, "image_url", "REQ-TOOL-RESULT-IMAGE-URL"),
@@ -1155,6 +1241,9 @@ function encodeMessagesRequest(
       || request.metadata.members.some((member) => member.key !== "user_id"))
   ) {
     unsupported("REQ-TARGET-M-METADATA");
+  }
+  if (request.outputFormat?.kind === "json_object") {
+    unsupported("REQ-TARGET-M-JSON-OBJECT");
   }
   const budget = outputBudget(request.maxOutputTokens, context.capability);
   const split = splitMessagesInstructions(request);
@@ -1522,8 +1611,8 @@ function encodeMessagesOutputConfig(
     ["format", format === undefined
       ? undefined
       : format.kind === "json_object"
-        ? wireObject([["type", "json_object"]])
-        : wireObject([["type", "json_schema"], ...namedSchemaEntries(format)])],
+        ? undefined
+        : wireObject([["type", "json_schema"], ["schema", format.schema]])],
   ]);
 }
 

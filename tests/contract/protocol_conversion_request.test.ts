@@ -97,9 +97,7 @@ describe("shared conversion request codecs", () => {
         effort: "high",
         format: {
           type: "json_schema",
-          name: "answer",
           schema: { type: "object", properties: { _business: { type: "integer" } } },
-          strict: true,
         },
       },
     });
@@ -198,15 +196,22 @@ describe("shared conversion request codecs", () => {
           type: "function",
           function: { name: "lookup", arguments: "{}" },
         }],
+      }, {
+        role: "tool",
+        tool_call_id: "call_1",
+        content: "ok",
       }],
     }), "target", capability(["responses"]));
     expect(decoded(converted.bytes)).toMatchObject({
-      input: [{
-        type: "function_call",
-        call_id: "call_1",
-        name: "lookup",
-        arguments: "{}",
-      }],
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "lookup",
+          arguments: "{}",
+        },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
     });
   });
 
@@ -374,6 +379,25 @@ describe("shared conversion request codecs", () => {
       model: "source",
       input: [{ type: "reasoning", summary: [], unknown: null }],
     }],
+    ["unknown tool-result image key", {
+      model: "source",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: [{
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: "QUJD" },
+              unknown: null,
+            }],
+          }],
+        },
+      ],
+      max_tokens: 8,
+    }],
   ])("rejects strict nested protocol shape: %s", (_name, request) => {
     const source = "input" in request ? "responses" : "messages";
     expect(() => prepareConvertedRequest(
@@ -383,6 +407,41 @@ describe("shared conversion request codecs", () => {
       "target",
       capability([source === "messages" ? "chat" : "messages"]),
     )).toThrow();
+  });
+
+  it("rejects an unclosed Responses tool round before converting to Messages", () => {
+    expect(() => prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "unrelated" }] },
+      ],
+    }), "target", capability(["messages"]))).toThrow();
+  });
+
+  it("extracts documented JSON-encoded content media without scanning unrelated business keys", () => {
+    const embedded = JSON.stringify({
+      content: [{
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "QUJD" },
+      }],
+      business: { image: "not protocol media" },
+    });
+    const converted = prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_1", content: embedded }],
+        },
+      ],
+      max_tokens: 8,
+    }), "target", capability(["chat"]));
+    const output = JSON.stringify(decoded(converted.bytes));
+    expect(output).toContain("image_url");
+    expect(output).toContain("not protocol media");
   });
 
   it("uses UTF-8 byte thresholds only for complete raw tool-result image data URLs", () => {

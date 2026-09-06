@@ -35,6 +35,20 @@ export async function* decodeSseRecords(
       }
     }
     pending += decoder.decode();
+    for (;;) {
+      const extracted = takeSseRecord(pending, true);
+      if (extracted === undefined) {
+        break;
+      }
+      if (new TextEncoder().encode(extracted.consumed).byteLength > eventLimitBytes) {
+        throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+      }
+      pending = extracted.rest;
+      const parsed = parseRecord(normalizeSseNewlines(extracted.raw));
+      if (parsed !== undefined) {
+        yield parsed;
+      }
+    }
   } catch (error: unknown) {
     if (error instanceof GatewayFailureError || error instanceof ChatSseError) {
       throw error;
@@ -53,17 +67,17 @@ export async function* decodeSseRecords(
   }
 }
 
-export function takeSseRecord(value: string): {
+export function takeSseRecord(value: string, final = false): {
   readonly raw: string;
   readonly consumed: string;
   readonly rest: string;
 } | undefined {
   for (let index = 0; index < value.length; index += 1) {
-    const first = lineBreakLength(value, index);
+    const first = lineBreakLength(value, index, final);
     if (first === 0) {
       continue;
     }
-    const second = lineBreakLength(value, index + first);
+    const second = lineBreakLength(value, index + first, final);
     if (second === 0) {
       continue;
     }
@@ -77,12 +91,15 @@ export function takeSseRecord(value: string): {
   return undefined;
 }
 
-function lineBreakLength(value: string, index: number): number {
+function lineBreakLength(value: string, index: number, final: boolean): number {
   if (value[index] === "\n") {
     return 1;
   }
   if (value[index] !== "\r") {
     return 0;
+  }
+  if (index + 1 >= value.length) {
+    return final ? 1 : 0;
   }
   return value[index + 1] === "\n" ? 2 : 1;
 }

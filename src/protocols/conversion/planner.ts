@@ -135,12 +135,20 @@ function validateSemanticBindings(request: Readonly<SemanticRequest>): void {
 
   const calls = new Set<string>();
   const results = new Set<string>();
+  const openCalls = new Set<string>();
   for (const item of request.items) {
+    if (item.type === "message") {
+      if (openCalls.size > 0) {
+        throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-ORDER");
+      }
+      continue;
+    }
     if (item.type === "tool_call") {
       if (calls.has(item.callId)) {
         throw new ConversionContractError("invalid_request", "REQ-TOOL-DUPLICATE-CALL-ID");
       }
       calls.add(item.callId);
+      openCalls.add(item.callId);
       continue;
     }
     if (item.type === "tool_result") {
@@ -148,7 +156,11 @@ function validateSemanticBindings(request: Readonly<SemanticRequest>): void {
         throw new ConversionContractError("invalid_request", "REQ-TOOL-RESULT-BINDING");
       }
       results.add(item.callId);
+      openCalls.delete(item.callId);
     }
+  }
+  if (openCalls.size > 0) {
+    throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-INCOMPLETE");
   }
 }
 

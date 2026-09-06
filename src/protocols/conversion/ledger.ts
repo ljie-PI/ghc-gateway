@@ -117,7 +117,7 @@ export class SemanticItemLedger {
           ...(message.refusal.length === 0 ? [] : [{ type: "refusal", text: message.refusal } as const]),
         ];
         if (content.length > 0) {
-          items.push({ type: "message", content });
+          items.push({ type: "message", key: entry.key, content });
         }
         continue;
       }

@@ -19,6 +19,7 @@ import {
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { SemanticUsage } from "../conversion/types.js";
 import { takeSseRecord } from "../conversion/sse.js";
+import { mergeMessagesUsage } from "../conversion/usage.js";
 
 export function serializeNativeMessagesRequest(body: WireJsonObject, model: string): Uint8Array {
   let replaced = false;
@@ -101,10 +102,19 @@ export async function createNativeMessagesStreamResponse(input: {
   const cleanupUpstream = createOwnedStreamCleanup(input.upstream, iterator, 1_000, cancelExchange);
   const observer = new NativeMessagesObserver(input.scope.config.limits.sseEventBytes);
   const prefetched: Uint8Array[] = [];
+  let prefetchedBytes = 0;
   const startedAt = Date.now();
   try {
     while (!observer.hasSemantic) {
-      const remaining = Math.max(1, input.scope.config.timeouts.firstByteMs - (Date.now() - startedAt));
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= input.scope.config.timeouts.firstByteMs) {
+        throw new GatewayFailureError({
+          kind: "upstream_timeout",
+          source: "parser",
+          phase: "stream",
+        });
+      }
+      const remaining = input.scope.config.timeouts.firstByteMs - elapsed;
       const next = await nextWithDeadline(
         iterator,
         remaining,
@@ -115,6 +125,10 @@ export async function createNativeMessagesStreamResponse(input: {
         throw truncated();
       }
       prefetched.push(next.value);
+      prefetchedBytes += next.value.byteLength;
+      if (prefetchedBytes > input.scope.config.limits.accumulatorBytes) {
+        invalid();
+      }
       observer.consume(next.value);
     }
   } catch (error: unknown) {
@@ -232,16 +246,16 @@ class NativeMessagesObserver {
 
   finish(): SemanticUsage {
     this.pending += this.decoder.decode();
-    this.drain();
+    this.drain(true);
     if (this.pending.trim().length > 0 || !this.terminal) {
       throw truncated();
     }
     return this.usage;
   }
 
-  private drain(): void {
+  private drain(final = false): void {
     for (;;) {
-      const extracted = takeSseRecord(this.pending);
+      const extracted = takeSseRecord(this.pending, final);
       if (extracted === undefined) {
         if (new TextEncoder().encode(this.pending).byteLength > this.eventLimitBytes) {
           invalid();
@@ -301,15 +315,12 @@ class NativeMessagesObserver {
     if (value === undefined) {
       return;
     }
-    const read = integerMember(value, "cache_read_input_tokens");
-    const write = integerMember(value, "cache_creation_input_tokens");
-    this.usage = {
-      inputTokens: integerMember(value, "input_tokens") + read + write || this.usage.inputTokens,
-      outputTokens: integerMember(value, "output_tokens") || this.usage.outputTokens,
-      cacheReadTokens: read || this.usage.cacheReadTokens,
-      cacheWriteTokens: write || this.usage.cacheWriteTokens,
-      reasoningTokens: 0,
-    };
+    this.usage = mergeMessagesUsage(this.usage, {
+      inputTokens: optionalIntegerMember(value, "input_tokens"),
+      outputTokens: optionalIntegerMember(value, "output_tokens"),
+      cacheReadTokens: optionalIntegerMember(value, "cache_read_input_tokens"),
+      cacheWriteTokens: optionalIntegerMember(value, "cache_creation_input_tokens"),
+    });
   }
 }
 
@@ -327,12 +338,16 @@ function objectMember(object: WireJsonObject | undefined, key: string): WireJson
 }
 
 function integerMember(object: WireJsonObject, key: string): number {
+  return optionalIntegerMember(object, key) ?? 0;
+}
+
+function optionalIntegerMember(object: WireJsonObject, key: string): number | undefined {
   const value = memberValues(object, key)[0];
   if (!isWireJsonNumber(value)) {
-    return 0;
+    return undefined;
   }
   const parsed = Number(value.lexeme);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function observe(

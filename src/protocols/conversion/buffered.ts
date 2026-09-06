@@ -206,10 +206,22 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
   }
   flushMessage();
   const finishReason = messagesFinishReason(singleMember(payload, "stop_reason"));
+  const responseItems = finishReason === "refusal"
+    ? items.map((item): SemanticResponseItem => item.type === "message"
+      ? {
+        type: "message",
+        content: item.content.map((part) => (
+          part.type === "text" ? { type: "refusal", text: part.text } : part
+        )),
+      }
+      : item)
+    : items;
   return {
     source: "messages",
-    items,
-    status: finishReason === "length" || finishReason === "content_filter" ? "incomplete" : "completed",
+    items: responseItems,
+    status: finishReason === "length" || finishReason === "content_filter" || finishReason === "refusal"
+      ? "incomplete"
+      : "completed",
     finishReason,
     usage: messagesUsage(objectMember(payload, "usage")),
   };
@@ -454,7 +466,9 @@ function responsesEnvelope(
     ["status", response.status],
     ["error", null],
     ["incomplete_details", response.status === "incomplete"
-      ? wireObject([["reason", response.finishReason === "content_filter" ? "content_filter" : "max_output_tokens"]])
+      ? wireObject([["reason", response.finishReason === "content_filter" || response.finishReason === "refusal"
+        ? "content_filter"
+        : "max_output_tokens"]])
       : null],
     ["instructions", null],
     ["metadata", wireObject([])],
@@ -483,8 +497,8 @@ function responseCheckpoint(body: WireJsonObject) {
   }
   return {
     responseId,
-    output: output.items,
-    state: status === "completed" ? "complete" as const : "partial" as const,
+    output: status === "completed" ? output.items : [],
+    state: status === "completed" ? "complete" as const : "route_only" as const,
   };
 }
 

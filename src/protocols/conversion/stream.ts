@@ -67,27 +67,27 @@ export async function* convertProtocolStream(
     }
     if (event.kind === "text_delta") {
       ledger.appendText(event.key, event.delta);
-      yield* emitter.textDelta(event.delta);
+      yield* emitter.textDelta(event.key, event.delta);
       continue;
     }
     if (event.kind === "text_done") {
       const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
       if (suffix.length > 0) {
         ledger.appendText(event.key, suffix);
-        yield* emitter.textDelta(suffix);
+        yield* emitter.textDelta(event.key, suffix);
       }
       continue;
     }
     if (event.kind === "refusal_delta") {
       ledger.appendRefusal(event.key, event.delta);
-      yield* emitter.refusalDelta(event.delta);
+      yield* emitter.refusalDelta(event.key, event.delta);
       continue;
     }
     if (event.kind === "refusal_done") {
       const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
       if (suffix.length > 0) {
         ledger.appendRefusal(event.key, suffix);
-        yield* emitter.refusalDelta(suffix);
+        yield* emitter.refusalDelta(event.key, suffix);
       }
       continue;
     }
@@ -130,8 +130,8 @@ export async function* convertProtocolStream(
 
 interface StreamEmitter {
   start(): Iterable<ConvertedStreamEmission>;
-  textDelta(delta: string): Iterable<ConvertedStreamEmission>;
-  refusalDelta(delta: string): Iterable<ConvertedStreamEmission>;
+  textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission>;
+  refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission>;
   toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission>;
   toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission>;
   toolDone(key: string, argumentsJson: string): Iterable<ConvertedStreamEmission>;
@@ -165,7 +165,7 @@ class ChatEmitter implements StreamEmitter {
 
   *start(): Iterable<ConvertedStreamEmission> {}
 
-  *textDelta(delta: string): Iterable<ConvertedStreamEmission> {
+  *textDelta(_key: string, delta: string): Iterable<ConvertedStreamEmission> {
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
       ["content", delta],
@@ -173,7 +173,7 @@ class ChatEmitter implements StreamEmitter {
     this.roleSent = true;
   }
 
-  *refusalDelta(delta: string): Iterable<ConvertedStreamEmission> {
+  *refusalDelta(_key: string, delta: string): Iterable<ConvertedStreamEmission> {
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
       ["refusal", delta],
@@ -255,8 +255,8 @@ class ChatEmitter implements StreamEmitter {
 class MessagesEmitter implements StreamEmitter {
   private readonly id: string;
   private nextIndex = 0;
-  private textIndex: number | undefined;
-  private refusalIndex: number | undefined;
+  private readonly textIndexes = new Map<string, number>();
+  private readonly refusalIndexes = new Map<string, number>();
   private readonly toolIndexes = new Map<string, number>();
   private readonly openIndexes = new Set<number>();
 
@@ -285,34 +285,38 @@ class MessagesEmitter implements StreamEmitter {
     });
   }
 
-  *textDelta(delta: string): Iterable<ConvertedStreamEmission> {
-    if (this.textIndex === undefined) {
-      this.textIndex = this.open({ type: "text", text: "" });
+  *textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    let index = this.textIndexes.get(key);
+    if (index === undefined) {
+      index = this.open({ type: "text", text: "" });
+      this.textIndexes.set(key, index);
       yield this.event({
         type: "content_block_start",
-        index: this.textIndex,
+        index,
         content_block: { type: "text", text: "" },
       });
     }
     yield this.event({
       type: "content_block_delta",
-      index: this.textIndex,
+      index,
       delta: { type: "text_delta", text: delta },
     });
   }
 
-  *refusalDelta(delta: string): Iterable<ConvertedStreamEmission> {
-    if (this.refusalIndex === undefined) {
-      this.refusalIndex = this.open({ type: "refusal", refusal: "" });
+  *refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    let index = this.refusalIndexes.get(key);
+    if (index === undefined) {
+      index = this.open({ type: "refusal", refusal: "" });
+      this.refusalIndexes.set(key, index);
       yield this.event({
         type: "content_block_start",
-        index: this.refusalIndex,
+        index,
         content_block: { type: "refusal", refusal: "" },
       });
     }
     yield this.event({
       type: "content_block_delta",
-      index: this.refusalIndex,
+      index,
       delta: { type: "refusal_delta", refusal: delta },
     });
   }
@@ -378,14 +382,14 @@ class ResponsesEmitter implements StreamEmitter {
   private readonly createdAt: number;
   private sequence = 0;
   private nextOutputIndex = 0;
-  private message: {
+  private readonly messages = new Map<string, {
     readonly id: string;
     readonly outputIndex: number;
     itemAdded: boolean;
     nextContentIndex: number;
     textIndex?: number;
     refusalIndex?: number;
-  } | undefined;
+  }>();
   private readonly tools = new Map<string, {
     readonly itemId: string;
     readonly callId: string;
@@ -409,8 +413,8 @@ class ResponsesEmitter implements StreamEmitter {
     yield this.responseEvent("response.in_progress", "in_progress", []);
   }
 
-  *textDelta(delta: string): Iterable<ConvertedStreamEmission> {
-    const message = this.ensureMessage();
+  *textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    const message = this.ensureMessage(key);
     if (!message.itemAdded) {
       message.itemAdded = true;
       yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));
@@ -429,8 +433,8 @@ class ResponsesEmitter implements StreamEmitter {
     ]));
   }
 
-  *refusalDelta(delta: string): Iterable<ConvertedStreamEmission> {
-    const message = this.ensureMessage();
+  *refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    const message = this.ensureMessage(key);
     if (!message.itemAdded) {
       message.itemAdded = true;
       yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));
@@ -515,68 +519,71 @@ class ResponsesEmitter implements StreamEmitter {
     usage: Readonly<SemanticUsage>,
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
-    const output = responseOutput(items, terminal.status, this.message, this.tools);
-    yield {
-      kind: "checkpoint",
-      intent: { responseId: this.responseId, output, state: terminal.status === "completed" ? "complete" : "partial" },
-    };
-    if (this.message?.itemAdded === true) {
-      const text = items
-        .filter((item) => item.type === "message")
-        .flatMap((item) => item.content)
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("");
-      const refused = items
-        .filter((item) => item.type === "message")
-        .flatMap((item) => item.content)
-        .filter((part) => part.type === "refusal")
-        .map((part) => part.text)
-        .join("");
+    const output = responseOutput(items, terminal.status, this.messages, this.tools);
+    if (terminal.status === "completed") {
+      yield {
+        kind: "checkpoint",
+        intent: { responseId: this.responseId, output, state: "complete" },
+      };
+    }
+    for (const item of items) {
+      if (item.type !== "message" || item.key === undefined) {
+        continue;
+      }
+      const message = this.messages.get(item.key);
+      if (message?.itemAdded !== true) {
+        continue;
+      }
+      const text = item.content.filter((part) => part.type === "text").map((part) => part.text).join("");
+      const refused = item.content.filter((part) => part.type === "refusal").map((part) => part.text).join("");
       this.completed.set(
-        this.message.outputIndex,
-        responseMessage(this.message, terminal.status, text, refused),
+        message.outputIndex,
+        responseMessage(message, terminal.status, text, refused),
       );
-      if (this.message.textIndex !== undefined) {
+      if (message.textIndex !== undefined) {
         yield this.event(wireObject([
           ["type", "response.output_text.done"],
           ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", this.message.id],
-          ["output_index", wireNumber(this.message.outputIndex)],
-          ["content_index", wireNumber(this.message.textIndex)],
+          ["item_id", message.id],
+          ["output_index", wireNumber(message.outputIndex)],
+          ["content_index", wireNumber(message.textIndex)],
           ["text", text],
         ]));
-        yield this.contentEvent("response.content_part.done", this.message, this.message.textIndex, outputText(text));
+        yield this.contentEvent("response.content_part.done", message, message.textIndex, outputText(text));
       }
-      if (this.message.refusalIndex !== undefined) {
+      if (message.refusalIndex !== undefined) {
         yield this.event(wireObject([
           ["type", "response.refusal.done"],
           ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", this.message.id],
-          ["output_index", wireNumber(this.message.outputIndex)],
-          ["content_index", wireNumber(this.message.refusalIndex)],
+          ["item_id", message.id],
+          ["output_index", wireNumber(message.outputIndex)],
+          ["content_index", wireNumber(message.refusalIndex)],
           ["refusal", refused],
         ]));
-        yield this.contentEvent("response.content_part.done", this.message, this.message.refusalIndex, refusal(refused));
+        yield this.contentEvent("response.content_part.done", message, message.refusalIndex, refusal(refused));
       }
       yield this.itemEvent(
         "response.output_item.done",
-        this.message.outputIndex,
-        responseMessage(this.message, terminal.status, text, refused),
+        message.outputIndex,
+        responseMessage(message, terminal.status, text, refused),
       );
     }
     const finalType = terminal.status === "completed" ? "response.completed" : "response.incomplete";
     yield this.responseEvent(finalType, terminal.status, output, usage, terminal.finishReason);
   }
 
-  private ensureMessage() {
-    this.message ??= {
-      id: `msg_${this.context.createUuid()}`,
-      outputIndex: this.nextOutputIndex++,
-      itemAdded: false,
-      nextContentIndex: 0,
-    };
-    return this.message;
+  private ensureMessage(key: string) {
+    let message = this.messages.get(key);
+    if (message === undefined) {
+      message = {
+        id: `msg_${this.context.createUuid()}`,
+        outputIndex: this.nextOutputIndex++,
+        itemAdded: false,
+        nextContentIndex: 0,
+      };
+      this.messages.set(key, message);
+    }
+    return message;
   }
 
   private completedOutput(): readonly ReturnType<typeof wireObject>[] {
@@ -644,12 +651,12 @@ class ResponsesEmitter implements StreamEmitter {
 function responseOutput(
   items: readonly SemanticResponseItem[],
   status: "completed" | "incomplete",
-  message: {
+  messages: ReadonlyMap<string, {
     readonly id: string;
     readonly outputIndex: number;
     readonly textIndex?: number;
     readonly refusalIndex?: number;
-  } | undefined,
+  }>,
   tools: ReadonlyMap<string, {
     readonly itemId: string;
     readonly callId: string;
@@ -658,19 +665,17 @@ function responseOutput(
   }>,
 ): ReturnType<typeof wireObject>[] {
   const indexed: Array<{ readonly index: number; readonly item: ReturnType<typeof wireObject> }> = [];
-  if (message !== undefined) {
-    const content = items
-      .filter((item) => item.type === "message")
-      .flatMap((item) => item.content);
-    const text = content.filter((part) => part.type === "text").map((part) => part.text).join("");
-    const refused = content.filter((part) => part.type === "refusal").map((part) => part.text).join("");
-    indexed.push({
-      index: message.outputIndex,
-      item: responseMessage(message, status, text, refused),
-    });
-  }
   for (const item of items) {
-    if (item.type !== "tool_call") {
+    if (item.type === "message") {
+      const message = item.key === undefined ? undefined : messages.get(item.key);
+      if (message !== undefined) {
+        const text = item.content.filter((part) => part.type === "text").map((part) => part.text).join("");
+        const refused = item.content.filter((part) => part.type === "refusal").map((part) => part.text).join("");
+        indexed.push({
+          index: message.outputIndex,
+          item: responseMessage(message, status, text, refused),
+        });
+      }
       continue;
     }
     const tool = [...tools.values()].find((candidate) => candidate.callId === item.callId);
@@ -697,7 +702,9 @@ function responseSnapshot(
     ["status", status],
     ["error", null],
     ["incomplete_details", status === "incomplete"
-      ? wireObject([["reason", finishReason === "content_filter" ? "content_filter" : "max_output_tokens"]])
+      ? wireObject([["reason", finishReason === "content_filter" || finishReason === "refusal"
+        ? "content_filter"
+        : "max_output_tokens"]])
       : null],
     ["instructions", null],
     ["metadata", wireObject([])],
