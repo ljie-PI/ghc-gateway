@@ -12,11 +12,26 @@ import type {
 } from "../../../web/src/types.js";
 
 const NOW = "2026-09-03T12:00:00.000Z";
+export const ADMIN_FIXTURE_NOW_MS = Date.parse(NOW);
+const DEVICE_POLL_INTERVAL_MS = 5_000;
+
+interface DevicePollHold {
+  readonly started: Promise<void>;
+  readonly responseFinished: Promise<void>;
+  release(): void;
+}
+
+interface HeldDevicePoll {
+  markStarted(): void;
+  markResponseFinished(): void;
+  readonly released: Promise<void>;
+}
 
 export interface AdminFixture {
   readonly requests: Request[];
   readonly streamRequests: Request[];
   readonly streamRequestHeaders: Array<Record<string, string | string[] | undefined>>;
+  holdNextDevicePoll(): DevicePollHold;
   readonly state: {
     authenticated: boolean;
     accounts: AdminAccounts;
@@ -31,6 +46,11 @@ export interface AdminFixture {
     conflictHistory: boolean;
     conflictModel: boolean;
     failAccountRemoval: boolean;
+    devicePollStates: Array<"pending" | "complete" | "expired" | "denied" | "failed" | "network">;
+    devicePollDelayMs: number;
+    deviceNowMs: number;
+    accountsDelayMs: number;
+    cancelCompletesDeviceFlow: boolean;
     streamBodies: string[];
     streamDelaysMs: number[];
     streamHoldsMs: number[];
@@ -39,10 +59,28 @@ export interface AdminFixture {
 
 export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   const github = account("github:1", "github.com", "octo");
+  let heldDevicePoll: HeldDevicePoll | null = null;
   const fixture: AdminFixture = {
     requests: [],
     streamRequests: [],
     streamRequestHeaders: [],
+    holdNextDevicePoll() {
+      if (heldDevicePoll !== null) throw new Error("A device poll is already held");
+      let markStarted!: () => void;
+      let markResponseFinished!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      const responseFinished = new Promise<void>((resolve) => {
+        markResponseFinished = resolve;
+      });
+      const released = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      heldDevicePoll = { markStarted, markResponseFinished, released };
+      return { started, responseFinished, release };
+    },
     state: {
       authenticated: false,
       accounts: { defaultRevision: 1, defaultAccountId: github.accountId, items: [github] },
@@ -85,6 +123,11 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       conflictHistory: false,
       conflictModel: false,
       failAccountRemoval: false,
+      devicePollStates: ["pending", "complete"],
+      devicePollDelayMs: 0,
+      deviceNowMs: ADMIN_FIXTURE_NOW_MS,
+      accountsDelayMs: 0,
+      cancelCompletesDeviceFlow: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
       streamDelaysMs: [],
       streamHoldsMs: [],
@@ -113,7 +156,11 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   const { port } = streamServer.address() as AddressInfo;
   page.once("close", () => streamServer.close());
   page.once("crash", () => streamServer.close());
-  await page.route("**/admin/api/v1/**", (route) => handle(route, fixture));
+  await page.route("**/admin/api/v1/**", (route) => handle(route, fixture, () => {
+    const heldPoll = heldDevicePoll;
+    heldDevicePoll = null;
+    return heldPoll;
+  }));
   await page.route("**/admin/api/v1/events/stream", async (route) => {
     fixture.requests.push(route.request());
     fixture.streamRequests.push(route.request());
@@ -125,7 +172,11 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   return fixture;
 }
 
-async function handle(route: Route, fixture: AdminFixture): Promise<void> {
+async function handle(
+  route: Route,
+  fixture: AdminFixture,
+  takeHeldDevicePoll: () => HeldDevicePoll | null,
+): Promise<void> {
   const request = route.request();
   fixture.requests.push(request);
   const url = new URL(request.url());
@@ -163,25 +214,79 @@ async function handle(route: Route, fixture: AdminFixture): Promise<void> {
       },
     });
   }
-  if (path === "/accounts") return json(route, 200, fixture.state.accounts);
+  if (path === "/accounts") {
+    const accounts = structuredClone(fixture.state.accounts);
+    if (fixture.state.accountsDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, fixture.state.accountsDelayMs));
+    }
+    return json(route, 200, accounts);
+  }
   if (path === "/device-flows" && request.method() === "POST") {
+    const now = fixture.state.deviceNowMs;
     return json(route, 201, {
       flowId: "flow-1",
       userCode: "ABCD-1234",
       verificationUri: "https://github.invalid/login/device",
-      expiresAt: "2026-09-03T12:10:00.000Z",
-      pollIntervalSeconds: 1,
+      expiresAt: new Date(now + 10 * 60_000).toISOString(),
+      pollIntervalSeconds: DEVICE_POLL_INTERVAL_MS / 1_000,
+      nextPollAt: new Date(now + DEVICE_POLL_INTERVAL_MS).toISOString(),
     });
   }
-  if (path === "/device-flows/flow-1") {
-    const ghes = account("ghes:2", "github.example.test", "enterprise");
-    if (!fixture.state.accounts.items.some((item) => item.accountId === ghes.accountId)) {
-      fixture.state.accounts = {
-        ...fixture.state.accounts,
-        items: [...fixture.state.accounts.items, ghes],
-      };
+  if (path === "/device-flows/flow-1" && request.method() === "DELETE") {
+    if (fixture.state.cancelCompletesDeviceFlow) {
+      const ghes = account("ghes:2", "github.example.test", "enterprise");
+      if (!fixture.state.accounts.items.some((item) => item.accountId === ghes.accountId)) {
+        fixture.state.accounts = {
+          ...fixture.state.accounts,
+          items: [...fixture.state.accounts.items, ghes],
+        };
+      }
+      return json(route, 200, { state: "complete", account: ghes });
     }
-    return json(route, 200, { state: "complete", account: ghes });
+    return json(route, 200, { state: "canceled" });
+  }
+  if (path === "/device-flows/flow-1" && request.method() === "GET") {
+    const heldPoll = takeHeldDevicePoll();
+    if (heldPoll !== null) {
+      heldPoll.markStarted();
+      await heldPoll.released;
+    }
+    try {
+      if (fixture.state.devicePollDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, fixture.state.devicePollDelayMs));
+      }
+      const state = fixture.state.devicePollStates.shift() ?? "pending";
+      if (state === "network") {
+        await route.abort("connectionfailed");
+        return;
+      }
+      if (state === "pending") {
+        await json(route, 200, {
+          state,
+          pollIntervalSeconds: 10,
+          nextPollAt: new Date(fixture.state.deviceNowMs + 10_000).toISOString(),
+        });
+        return;
+      }
+      if (state === "expired" || state === "denied" || state === "failed") {
+        await json(route, 200, { state });
+        return;
+      }
+      const ghes = account("ghes:2", "github.example.test", "enterprise");
+      if (!fixture.state.accounts.items.some((item) => item.accountId === ghes.accountId)) {
+        fixture.state.accounts = {
+          ...fixture.state.accounts,
+          items: [...fixture.state.accounts.items, ghes],
+        };
+      }
+      await json(route, 200, { state: "complete", account: ghes });
+      return;
+    } catch (error: unknown) {
+      if (heldPoll === null || !isHandledRoute(error)) throw error;
+    } finally {
+      heldPoll?.markResponseFinished();
+    }
+    return;
   }
   if (path === "/accounts/default") {
     if (fixture.state.conflictAccount) {
@@ -405,4 +510,8 @@ async function failure(route: Route, statusCode: number, code: string): Promise<
       error: { code, message: code.replaceAll("_", " "), requestId: "fixture-request" },
     }),
   });
+}
+
+function isHandledRoute(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Route is already handled");
 }

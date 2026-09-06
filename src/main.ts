@@ -244,6 +244,7 @@ export async function composeProductionDaemonGateway(
   const application = options.application
     ?? await createProductionApplicationContext(composition.startup, composition.env);
   let supplementalTelemetryRuntime: TelemetryRuntime | undefined;
+  let deviceFlows: DeviceFlowService | undefined;
   try {
     const runtime = application.runtime;
     const database = application.database;
@@ -281,7 +282,18 @@ export async function composeProductionDaemonGateway(
       application.history,
       telemetryRecorder,
     );
-    const deviceFlows = new DeviceFlowService(application.directory, new HttpDeviceOAuthClient());
+    deviceFlows = new DeviceFlowService(application.directory, new HttpDeviceOAuthClient());
+    const applicationWithDeviceFlows: ApplicationContext = {
+      ...applicationWithTelemetry,
+      async close() {
+        await deviceFlows?.close();
+        await applicationWithTelemetry.close?.();
+      },
+      forceClose() {
+        deviceFlows?.forceClose();
+        return applicationWithTelemetry.forceClose?.();
+      },
+    };
     const accountCaches = {
       invalidate(accountId: string): void {
         application.catalog.invalidate(accountId);
@@ -336,7 +348,7 @@ export async function composeProductionDaemonGateway(
     return await bootstrapGateway({
       startup: composition.startup,
       env: composition.env,
-      application: applicationWithTelemetry,
+      application: applicationWithDeviceFlows,
       dependencies: {
         admin,
         control,
@@ -352,6 +364,7 @@ export async function composeProductionDaemonGateway(
     });
   } catch (error: unknown) {
     try {
+      await deviceFlows?.close();
       await supplementalTelemetryRuntime?.close();
     } finally {
       await application.close?.();

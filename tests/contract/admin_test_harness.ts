@@ -105,13 +105,25 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       async start(host, signal) {
         signal?.throwIfAborted();
         calls.push(`device-start:${host}`);
-        return { flowId: "flow-1", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAtMs: now.value + 900_000, pollIntervalSeconds: 5 };
+        return {
+          flowId: "flow-1",
+          userCode: "ABCD-1234",
+          verificationUri: "https://github.com/login/device",
+          expiresAtMs: now.value + 900_000,
+          pollIntervalSeconds: 5,
+          nextPollAtMs: now.value + 5_000,
+        };
       },
       async poll(flowId, signal) {
         signal?.throwIfAborted();
         calls.push(`device-poll:${flowId}`);
-        return { status: "pending" };
+        return { status: "pending", pollIntervalSeconds: 5, nextPollAtMs: now.value + 5_000 };
       },
+      async cancel(flowId) {
+        calls.push(`device-cancel:${flowId}`);
+        return { status: "canceled" };
+      },
+      has: () => true,
     },
     catalog: {
       async get(accountId, signal) {

@@ -1,3 +1,4 @@
+import type { DeviceFlowCancelResult } from "../accounts/device_flow.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import { RUNTIME_CONFIG_RANGES } from "../config/schema.js";
 import type { GatewayActivity } from "../gateway/create_gateway.js";
@@ -151,12 +152,38 @@ export interface AdminDeviceFlows {
     readonly verificationUri: string;
     readonly expiresAtMs: number;
     readonly pollIntervalSeconds: number;
+    readonly nextPollAtMs: number;
   }>;
   poll(flowId: string, signal?: AbortSignal): Promise<
-    | { readonly status: "pending" | "expired" | "failed" }
+    | {
+        readonly status: "pending";
+        readonly pollIntervalSeconds: number;
+        readonly nextPollAtMs: number;
+      }
+    | { readonly status: "expired" | "denied" | "failed" }
     | { readonly status: "complete"; readonly accountId: string }
   >;
+  cancel(flowId: string): Promise<DeviceFlowCancelResult>;
+  has(flowId: string): boolean;
 }
+
+export interface AdminDeviceFlow {
+  readonly flowId: string;
+  readonly userCode: string;
+  readonly verificationUri: string;
+  readonly expiresAt: string;
+  readonly pollIntervalSeconds: number;
+  readonly nextPollAt: string;
+}
+
+export type AdminDeviceFlowPoll =
+  | {
+      readonly state: "pending";
+      readonly pollIntervalSeconds: number;
+      readonly nextPollAt: string;
+    }
+  | { readonly state: "expired" | "denied" | "failed" }
+  | { readonly state: "complete"; readonly account: AdminAccount };
 
 export interface AdminCatalog {
   get(accountId: string, signal: AbortSignal): Promise<{
@@ -281,34 +308,52 @@ export class AdminManagementApi {
     };
   }
 
-  async startDeviceFlow(host: string, signal: AbortSignal): Promise<{
-    readonly flowId: string;
-    readonly userCode: string;
-    readonly verificationUri: string;
-    readonly expiresAt: string;
-    readonly pollIntervalSeconds: number;
-  }> {
+  async startDeviceFlow(host: string, signal: AbortSignal): Promise<AdminDeviceFlow> {
     const flow = await this.dependencies.deviceFlows.start(host, signal);
-    signal.throwIfAborted();
+    try {
+      signal.throwIfAborted();
+    } catch (error: unknown) {
+      await this.dependencies.deviceFlows.cancel(flow.flowId);
+      throw error;
+    }
     return {
       flowId: flow.flowId,
       userCode: flow.userCode,
       verificationUri: flow.verificationUri,
       expiresAt: toIso(flow.expiresAtMs),
       pollIntervalSeconds: flow.pollIntervalSeconds,
+      nextPollAt: toIso(flow.nextPollAtMs),
     };
   }
 
-  async pollDeviceFlow(flowId: string, signal: AbortSignal): Promise<
-    | { readonly state: "pending" | "expired" | "failed" }
-    | { readonly state: "complete"; readonly account: AdminAccount }
-  > {
+  async pollDeviceFlow(flowId: string, signal: AbortSignal): Promise<AdminDeviceFlowPoll> {
     const result = await this.dependencies.deviceFlows.poll(flowId, signal);
     signal.throwIfAborted();
+    if (result.status === "pending") {
+      return {
+        state: "pending",
+        pollIntervalSeconds: result.pollIntervalSeconds,
+        nextPollAt: toIso(result.nextPollAtMs),
+      };
+    }
     if (result.status !== "complete") {
       return { state: result.status };
     }
     return { state: "complete", account: this.account(this.requireAccount(result.accountId)) };
+  }
+
+  async cancelDeviceFlow(flowId: string): Promise<
+    | { readonly state: "canceled" | "not_found" }
+    | { readonly state: "complete"; readonly account: AdminAccount }
+  > {
+    const result = await this.dependencies.deviceFlows.cancel(flowId);
+    return result.status === "complete"
+      ? { state: "complete", account: this.account(this.requireAccount(result.accountId)) }
+      : { state: result.status };
+  }
+
+  hasDeviceFlow(flowId: string): boolean {
+    return this.dependencies.deviceFlows.has(flowId);
   }
 
   async removeAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<AdminAccount> {

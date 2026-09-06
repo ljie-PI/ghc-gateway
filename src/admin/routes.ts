@@ -1,5 +1,6 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
+import { DEVICE_FLOW_TERMINAL_TTL_MS } from "../accounts/device_flow.js";
 import { RuntimeConfigSchema } from "../config/schema.js";
 import type {
   AdminBootstrapResult,
@@ -63,6 +64,13 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
     dependencies.setTimeout,
     dependencies.clearTimeout,
   );
+  const flowOwners = new AdminDeviceFlowOwners(
+    auth,
+    api,
+    dependencies.setTimeout,
+    dependencies.clearTimeout,
+    dependencies.nowMs,
+  );
   const eventHub = new AdminEventStreamHub(
     dependencies.telemetry,
     api,
@@ -78,7 +86,16 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
       }
       try {
         const bodyLimit = dependencies.runtimeConfig.read().config.limits.requestBodyBytes;
-        return await dispatch(request, context, bodyLimit, auth, api, eventHub, dependencies.nowMs ?? Date.now);
+        return await dispatch(
+          request,
+          context,
+          bodyLimit,
+          auth,
+          api,
+          flowOwners,
+          eventHub,
+          dependencies.nowMs ?? Date.now,
+        );
       } catch (error: unknown) {
         if (context.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
           return new Response(null);
@@ -95,6 +112,7 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
       }
       closed = true;
       eventHub.close();
+      flowOwners.close();
       auth.close();
     },
   };
@@ -106,6 +124,7 @@ async function dispatch(
   bodyLimit: number,
   auth: AdminAuth,
   api: AdminManagementApi,
+  flowOwners: AdminDeviceFlowOwners,
   events: AdminEventStreamHub,
   nowMs: () => number,
 ): Promise<Response> {
@@ -162,17 +181,33 @@ async function dispatch(
     break;
   case "deviceStart": {
     const value = checked(DeviceFlowStartSchema, body);
-    response = success(await api.startDeviceFlow(value.host, context.signal), context.requestId, 201);
+    const flow = await api.startDeviceFlow(value.host, context.signal);
+    flowOwners.own(session.sessionId, flow.flowId, Date.parse(flow.expiresAt));
+    if (context.signal.aborted) {
+      await flowOwners.cancel(session.sessionId, flow.flowId);
+      context.signal.throwIfAborted();
+    }
+    response = success(flow, context.requestId, 201);
     break;
   }
-  case "devicePoll":
-    response = success(await api.pollDeviceFlow(route.parameter, context.signal), context.requestId);
+  case "devicePoll": {
+    flowOwners.requireOwner(session.sessionId, route.parameter);
+    const result = await api.pollDeviceFlow(route.parameter, context.signal);
+    if (result.state !== "pending") {
+      flowOwners.retainTerminal(route.parameter);
+    }
+    response = success(result, context.requestId);
+    break;
+  }
+  case "deviceCancel":
+    response = success(await flowOwners.cancel(session.sessionId, route.parameter), context.requestId);
     break;
   case "accountDelete": {
     const value = checked(ExpectedRevisionSchema, body);
     response = success(await api.removeAccount(route.parameter, value.expectedRevision, context.signal), context.requestId);
     break;
   }
+
   case "accountDefault": {
     const value = checked(DefaultAccountSchema, body);
     response = success(await api.useDefaultAccount(value.accountId, value.expectedRevision, context.signal), context.requestId);
@@ -226,8 +261,95 @@ async function dispatch(
   return response;
 }
 
+class AdminDeviceFlowOwners {
+  private readonly flows = new Map<string, {
+    readonly sessionId: string;
+    readonly unsubscribe: () => void;
+    expiryTimer: ReturnType<typeof setTimeout>;
+  }>();
+
+  constructor(
+    private readonly auth: AdminAuth,
+    private readonly api: AdminManagementApi,
+    private readonly setTimer: typeof setTimeout = setTimeout,
+    private readonly clearTimer: typeof clearTimeout = clearTimeout,
+    private readonly nowMs: () => number = Date.now,
+  ) {}
+
+  own(sessionId: string, flowId: string, expiresAtMs: number): void {
+    for (const ownedFlowId of this.flows.keys()) {
+      if (!this.api.hasDeviceFlow(ownedFlowId)) this.release(ownedFlowId);
+    }
+    try {
+      const unsubscribe = this.auth.watchSession(sessionId, () => {
+        void this.api.cancelDeviceFlow(flowId).then(
+          () => this.release(flowId, false),
+          () => this.release(flowId, false),
+        );
+      });
+      const expiryTimer = this.setTimer(() => {
+        void this.api.cancelDeviceFlow(flowId).then(
+          () => this.release(flowId),
+          () => this.release(flowId),
+        );
+      }, Math.max(0, expiresAtMs + DEVICE_FLOW_TERMINAL_TTL_MS - this.nowMs()));
+      this.flows.set(flowId, { sessionId, unsubscribe, expiryTimer });
+    } catch (error: unknown) {
+      void this.api.cancelDeviceFlow(flowId);
+      throw error;
+    }
+  }
+
+  async cancel(sessionId: string, flowId: string): ReturnType<AdminManagementApi["cancelDeviceFlow"]> {
+    this.requireOwner(sessionId, flowId);
+    const result = await this.api.cancelDeviceFlow(flowId);
+    if (result.state === "complete") {
+      this.retainTerminal(flowId);
+    } else {
+      this.release(flowId);
+    }
+    return result;
+  }
+
+  requireOwner(sessionId: string, flowId: string): void {
+    const owner = this.flows.get(flowId);
+    if (owner === undefined) throw new AdminApiError("not_found");
+    if (owner.sessionId !== sessionId) throw new AdminApiError("forbidden");
+  }
+
+  retainTerminal(flowId: string): void {
+    const owner = this.flows.get(flowId);
+    if (owner === undefined) return;
+    this.clearTimer(owner.expiryTimer);
+    owner.expiryTimer = this.setTimer(() => {
+      void this.api.cancelDeviceFlow(flowId).then(
+        () => this.release(flowId),
+        () => this.release(flowId),
+      );
+    }, DEVICE_FLOW_TERMINAL_TTL_MS);
+  }
+
+  release(flowId: string, unsubscribe = true): void {
+    const owner = this.flows.get(flowId);
+    this.flows.delete(flowId);
+    if (owner !== undefined) {
+      this.clearTimer(owner.expiryTimer);
+      if (unsubscribe) owner.unsubscribe();
+    }
+  }
+
+  close(): void {
+    for (const [flowId, owner] of this.flows) {
+      this.clearTimer(owner.expiryTimer);
+      owner.unsubscribe();
+      void this.api.cancelDeviceFlow(flowId);
+    }
+    this.flows.clear();
+  }
+}
+
 type RouteId = "bootstrap" | "session" | "logout" | "status" | "usage" | "accounts" | "deviceStart"
-  | "devicePoll" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
+  | "devicePoll" | "deviceCancel" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
   | "configGet" | "configPut" | "historyGet" | "historyDelete" | "events" | "eventStream";
 
 interface MatchedRoute {
@@ -247,6 +369,9 @@ function matchRoute(method: string, pathname: string): MatchedRoute | null {
   if (method === "GET" && device?.[1] !== undefined) {
     return parameterRoute("devicePoll", device[1], false);
   }
+  if (method === "DELETE" && device?.[1] !== undefined) {
+    return parameterRoute("deviceCancel", device[1], false);
+  }
   const account = /^\/admin\/api\/v1\/accounts\/(.+)$/u.exec(pathname);
   if (method === "DELETE" && account?.[1] !== undefined) {
     return parameterRoute("accountDelete", account[1], true);
@@ -254,7 +379,7 @@ function matchRoute(method: string, pathname: string): MatchedRoute | null {
   return null;
 }
 
-function parameterRoute(id: "devicePoll" | "accountDelete", encoded: string, body: boolean): MatchedRoute {
+function parameterRoute(id: "devicePoll" | "deviceCancel" | "accountDelete", encoded: string, body: boolean): MatchedRoute {
   let parameter: string;
   try {
     parameter = decodeURIComponent(encoded);
@@ -264,7 +389,7 @@ function parameterRoute(id: "devicePoll" | "accountDelete", encoded: string, bod
   if (parameter.length === 0) {
     throw new AdminApiError("validation_failed");
   }
-  return { id, body, mutation: id === "accountDelete", query: new Set(), parameter };
+  return { id, body, mutation: id !== "devicePoll", query: new Set(), parameter };
 }
 
 const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([

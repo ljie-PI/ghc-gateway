@@ -21,9 +21,13 @@ describe("HTTP device OAuth client", () => {
     const client = new HttpDeviceOAuthClient(fetch);
 
     await expect(client.exchangeDeviceCode(environment, "test-device-code")).resolves.toEqual({
-      status: "complete",
+      status: "authorized",
       accessToken: "test-access-token",
-      user: { id: 42, login: "octocat", name: "Octo Cat" },
+    });
+    await expect(client.fetchUser(environment, "test-access-token")).resolves.toEqual({
+      id: 42,
+      login: "octocat",
+      name: "Octo Cat",
     });
     expect(requests).toEqual([
       { url: "https://ghe.example.com/login/oauth/access_token", authorization: null },
@@ -70,10 +74,17 @@ describe("HTTP device OAuth client", () => {
       requests += 1;
       return requests === 1
         ? jsonResponse({ access_token: "test-access-token" })
-        : jsonResponse([]);
+        : jsonResponse({ id: null, login: "" });
     });
 
-    await expect(client.exchangeDeviceCode(environment, "test-device-code")).rejects.toBeInstanceOf(DeviceOAuthError);
+    await expect(client.exchangeDeviceCode(environment, "test-device-code")).resolves.toEqual({
+      status: "authorized",
+      accessToken: "test-access-token",
+    });
+    await expect(client.fetchUser(environment, "test-access-token")).rejects.toMatchObject({
+      name: "DeviceOAuthError",
+      retryable: false,
+    });
     expect(requests).toBe(2);
   });
 
@@ -85,6 +96,67 @@ describe("HTTP device OAuth client", () => {
     });
 
     await expect(client.requestDeviceCode(environment, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("preserves pending, slow_down cadence, expiry, and denial results", async () => {
+    const responses = [
+      { error: "authorization_pending" },
+      { error: "slow_down", interval: 12 },
+      { error: "expired_token" },
+      { error: "access_denied" },
+    ];
+    const client = new HttpDeviceOAuthClient(async () => jsonResponse(responses.shift()));
+
+    await expect(client.exchangeDeviceCode(environment, "device")).resolves.toEqual({ status: "pending" });
+    await expect(client.exchangeDeviceCode(environment, "device")).resolves.toEqual({
+      status: "slow_down",
+      pollIntervalSeconds: 12,
+    });
+    await expect(client.exchangeDeviceCode(environment, "device")).resolves.toEqual({ status: "expired" });
+    await expect(client.exchangeDeviceCode(environment, "device")).resolves.toEqual({ status: "denied" });
+  });
+
+  it("finishes identity lookup after cancellation once a token is issued", async () => {
+    let userRequestStarted = (): void => undefined;
+    let releaseUser = (): void => undefined;
+    const started = new Promise<void>((resolve) => { userRequestStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseUser = resolve; });
+    let requests = 0;
+    const client = new HttpDeviceOAuthClient(async () => {
+      requests += 1;
+      if (requests === 1) return jsonResponse({ access_token: "test-access-token" });
+      userRequestStarted();
+      await release;
+      return jsonResponse({ id: 42, login: "octocat" });
+    });
+
+    const controller = new AbortController();
+    await expect(client.exchangeDeviceCode(environment, "device", controller.signal)).resolves.toEqual({
+      status: "authorized",
+      accessToken: "test-access-token",
+    });
+    const exchange = client.fetchUser(environment, "test-access-token");
+    await started;
+    controller.abort();
+    releaseUser();
+
+    await expect(exchange).resolves.toEqual({
+      id: 42,
+      login: "octocat",
+    });
+  });
+
+  it("classifies GitHub rate-limit 403 responses as retryable", async () => {
+    const client = new HttpDeviceOAuthClient(async () => new Response(null, {
+      status: 403,
+      headers: { "retry-after": "7" },
+    }));
+
+    await expect(client.fetchUser(environment, "test-access-token")).rejects.toMatchObject({
+      name: "DeviceOAuthError",
+      retryable: true,
+      retryAfterMs: 7_000,
+    });
   });
 });
 

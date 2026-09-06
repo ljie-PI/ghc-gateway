@@ -56,9 +56,17 @@ export class AdminClient {
   events(cursor?: string): Promise<AdminEventPage> {
     return this.request(`/events?limit=500${cursor === undefined ? "" : `&cursor=${encodeURIComponent(cursor)}`}`);
   }
-  startDeviceFlow(host: string): Promise<DeviceFlow> { return this.mutate("/device-flows", "POST", { host }); }
-  pollDeviceFlow(flowId: string): Promise<DeviceFlowPoll> {
-    return this.request(`/device-flows/${encodeURIComponent(flowId)}`);
+  startDeviceFlow(host: string, signal?: AbortSignal): Promise<DeviceFlow> {
+    return this.mutate("/device-flows", "POST", { host }, signal);
+  }
+  pollDeviceFlow(flowId: string, signal?: AbortSignal): Promise<DeviceFlowPoll> {
+    return this.request(`/device-flows/${encodeURIComponent(flowId)}`, signal === undefined ? undefined : { signal });
+  }
+  cancelDeviceFlow(flowId: string, signal?: AbortSignal): Promise<
+    | { readonly state: "canceled" | "not_found" }
+    | { readonly state: "complete"; readonly account: AdminAccount }
+  > {
+    return this.mutate(`/device-flows/${encodeURIComponent(flowId)}`, "DELETE", undefined, signal);
   }
   useAccount(accountId: string, expectedRevision: number): Promise<{ defaultAccountId: string; defaultRevision: number }> {
     return this.mutate("/accounts/default", "PUT", { accountId, expectedRevision });
@@ -80,13 +88,23 @@ export class AdminClient {
   }
   async logout(): Promise<void> { await this.mutate("/auth/logout", "POST"); }
 
-  private mutate<T>(path: string, method: "POST" | "PUT" | "DELETE", body?: object): Promise<T> {
+  private mutate<T>(
+    path: string,
+    method: "POST" | "PUT" | "DELETE",
+    body?: object,
+    signal?: AbortSignal,
+  ): Promise<T> {
     if (this.csrfToken === null) {
       return Promise.reject(new ApiError(401, "unauthenticated", null));
     }
     const headers: Record<string, string> = { "X-GHCG-CSRF": this.csrfToken };
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    return this.request(path, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return this.request(path, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal === undefined ? {} : { signal }),
+    });
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {

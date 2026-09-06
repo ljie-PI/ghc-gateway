@@ -5,7 +5,10 @@ const DEVICE_OAUTH_RESPONSE_BYTES = 1_048_576;
 export class DeviceOAuthError extends Error {
   readonly code = "remote_error";
 
-  constructor() {
+  constructor(
+    readonly retryable = true,
+    readonly retryAfterMs: number | null = null,
+  ) {
     super("remote error");
     this.name = "DeviceOAuthError";
   }
@@ -68,8 +71,20 @@ export class HttpDeviceOAuthClient implements DeviceOAuthClient {
       throw new DeviceOAuthError();
     }
     const value = await readJsonObject(response, signal);
-    if (value.error === "authorization_pending" || value.error === "slow_down") {
+    if (value.error === "authorization_pending") {
       return { status: "pending" } as const;
+    }
+    if (value.error === "slow_down") {
+      return {
+        status: "slow_down",
+        ...(positiveNumber(value.interval) ? { pollIntervalSeconds: value.interval } : {}),
+      } as const;
+    }
+    if (value.error === "expired_token") {
+      return { status: "expired" } as const;
+    }
+    if (value.error === "access_denied") {
+      return { status: "denied" } as const;
     }
     if (typeof value.error === "string") {
       return { status: "failed" } as const;
@@ -77,29 +92,37 @@ export class HttpDeviceOAuthClient implements DeviceOAuthClient {
     if (!nonemptyString(value.access_token)) {
       throw new DeviceOAuthError();
     }
+    return { status: "authorized" as const, accessToken: value.access_token };
+  }
+
+  async fetchUser(
+    environment: Parameters<NonNullable<DeviceOAuthClient["fetchUser"]>>[0],
+    accessToken: string,
+    signal?: AbortSignal,
+  ) {
     const userUrl = new URL(environment.apiBaseUrl);
     userUrl.pathname = `${userUrl.pathname.replace(/\/$/u, "")}/user`;
     const userResponse = await this.fetch(userUrl, {
-      headers: { accept: "application/vnd.github+json", authorization: `Bearer ${value.access_token}` },
+      headers: { accept: "application/vnd.github+json", authorization: `Bearer ${accessToken}` },
       ...(signal === undefined ? {} : { signal }),
     }, signal);
     if (!userResponse.ok) {
+      const retryAfterMs = rateLimitDelayMs(userResponse.headers);
+      const retryable = userResponse.status === 429
+        || userResponse.status >= 500
+        || (userResponse.status === 403 && retryAfterMs !== null);
       await cancelResponse(userResponse);
-      throw new DeviceOAuthError();
+      throw new DeviceOAuthError(retryable, retryAfterMs);
     }
     const user = await readJsonObject(userResponse, signal);
     if ((typeof user.id !== "string" && typeof user.id !== "number")
       || !nonemptyString(user.login)) {
-      throw new DeviceOAuthError();
+      throw new DeviceOAuthError(false);
     }
     return {
-      status: "complete" as const,
-      accessToken: value.access_token,
-      user: {
-        id: user.id,
-        login: user.login,
-        ...(typeof user.name === "string" ? { name: user.name } : {}),
-      },
+      id: user.id,
+      login: user.login,
+      ...(typeof user.name === "string" ? { name: user.name } : {}),
     };
   }
 
@@ -192,4 +215,19 @@ function positiveNumber(value: unknown): value is number {
 
 function nonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function rateLimitDelayMs(headers: Headers): number | null {
+  const retryAfter = headers.get("retry-after");
+  if (retryAfter !== null) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.max(0, date - Date.now());
+  }
+  if (headers.get("x-ratelimit-remaining") === "0") {
+    const resetSeconds = Number(headers.get("x-ratelimit-reset"));
+    if (Number.isFinite(resetSeconds)) return Math.max(0, resetSeconds * 1000 - Date.now());
+  }
+  return null;
 }
