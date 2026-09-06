@@ -1,15 +1,22 @@
-import { AccountDirectoryError, type AccountDirectory } from "../../accounts/account_directory.js";
+import type { AccountDirectory } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences, ModelPreference } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
-import { CapiFetchError } from "../../copilot/models_source.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
-import { TokenRefreshError } from "../../copilot/token_refresh.js";
 import {
-  classifyCopilotTransportError,
-  mapTokenRefreshError,
-} from "../../copilot/transport.js";
-import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
+  normalizeAccountBindingFailure,
+  normalizeCatalogFailure,
+  normalizeChatStreamFailure,
+  normalizeCopilotBindingFailure,
+  normalizeTransportFailure,
+  upstreamStreamEventFailure,
+} from "../../copilot/failures.js";
+import {
+  failureFromSignal,
+  failureOutcome,
+  GatewayFailureError,
+  safeRetryAfter,
+} from "../../gateway/failures.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import {
@@ -24,9 +31,10 @@ import {
 } from "../../serialization/wire_json.js";
 import { resolveModel, type ResolvedModel } from "../model_catalog/resolver.js";
 import type { ChatRequest, ChatStreamFrame } from "../chat_completions/types.js";
-import type { TelemetryOutcome, TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
-import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "./wire.js";
+import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk } from "./wire.js";
+import { presentOpenAiChatFailure } from "./failure_presenter.js";
 
 export interface OpenAiChatRouteDependencies {
   readonly directory: AccountDirectory;
@@ -52,24 +60,20 @@ interface PreparedOpenAiChatRequest {
   readonly resolvedModel: string;
 }
 
-const JSON_HEADERS = {
-  "Content-Type": "application/json; charset=utf-8",
-  "Cache-Control": "no-store",
-} as const;
-
 export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies): RouteRegistration {
   return {
     method: "POST",
     path: "/v1/chat/completions",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: (failure, requestId) => {
+    presentFailure: presentOpenAiChatFailure,
+    observeFailure: (failure) => {
       recordUsageSample(dependencies, {
         occurredAtMs: (dependencies.nowMs ?? Date.now)(),
         accountId: "unbound",
         protocol: "openai_chat",
         resolvedModel: "unresolved",
-        outcome: telemetryOutcome(failure),
+        outcome: failureOutcome(failure),
         requestCount: 1,
         errorCount: failure.kind === "aborted" ? 0 : 1,
         inputTokens: 0,
@@ -77,7 +81,6 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         cacheTokens: 0,
         latencyMs: 0,
       });
-      return presentOpenAiFailure(failure, requestId);
     },
     endpoint: async (request, scope) => {
       const startedAtMs = (dependencies.nowMs ?? Date.now)();
@@ -174,7 +177,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         upstreamController.abort();
         await upstream.cancel();
         void frames.return(undefined).catch(() => undefined);
-        throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+        throw upstreamStreamEventFailure();
       }
 
       return openAiChatStreamResponse({
@@ -193,37 +196,6 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       });
     },
   };
-}
-
-function telemetryOutcome(failure: Readonly<GatewayFailure>): TelemetryOutcome {
-  switch (failure.kind) {
-  case "invalid_request":
-  case "body_too_large":
-  case "unsupported_media_type":
-  case "unsupported_semantics":
-  case "model_not_found":
-    return "client_error";
-  case "authentication":
-  case "permission":
-    return "authentication_error";
-  case "queue_full":
-  case "queue_timeout":
-    return "overloaded";
-  case "upstream_timeout":
-    return "timeout";
-  case "aborted":
-    return "aborted";
-  case "upstream_http":
-  case "upstream_network":
-  case "upstream_stream_error":
-  case "upstream_stream_truncated":
-  case "invalid_upstream_response":
-  case "invalid_tool_arguments":
-  case "invalid_logprobs":
-    return "upstream_error";
-  case "internal":
-    return "internal_error";
-  }
 }
 
 export function decodeOpenAiChatRequest(body: WireJsonObject): DecodedOpenAiChatRequest {
@@ -312,10 +284,7 @@ async function bindAccount(directory: AccountDirectory, signal: AbortSignal) {
   try {
     return await directory.bindDefault(signal);
   } catch (error: unknown) {
-    if (error instanceof AccountDirectoryError && (error.code === "no_default" || error.code === "not_found")) {
-      throw new GatewayFailureError({ kind: "authentication" });
-    }
-    throw error;
+    throw normalizeAccountBindingFailure(error);
   }
 }
 
@@ -323,30 +292,7 @@ async function loadCatalog(catalog: CopilotModelCatalog, accountId: string, sign
   try {
     return await catalog.get(accountId, signal);
   } catch (error: unknown) {
-    if (error instanceof CapiFetchError) {
-      const retry = validRetryAfterValue(error.retryAfter);
-      if (error.failureKind === "upstream_timeout") {
-        throw new GatewayFailureError({ kind: "upstream_network", cause: error });
-      }
-      if (error.failureKind === "upstream_network") {
-        throw new GatewayFailureError({ kind: "upstream_network", cause: error });
-      }
-      if (error.failureKind === "invalid_upstream_response") {
-        throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
-      }
-      throw new GatewayFailureError({
-        kind: "upstream_http",
-        status: error.status,
-        ...(retry === undefined ? {} : { retryAfter: retry }),
-      });
-    }
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new GatewayFailureError({ kind: "aborted" });
-    }
-    if (error instanceof TypeError) {
-      throw new GatewayFailureError({ kind: "upstream_network", cause: error });
-    }
-    throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+    throw normalizeCatalogFailure(error, signal);
   }
 }
 
@@ -357,7 +303,7 @@ async function completeChat(
   try {
     return await copilot.completeChat(request);
   } catch (error: unknown) {
-    throw upstreamCallFailure(error);
+    throw upstreamCallFailure(error, request.signal);
   }
 }
 
@@ -369,16 +315,7 @@ async function bindCopilot(
   try {
     return await withOperationTimeout(scope, scope.config.timeouts.connectMs, (signal) => copilot.bind(account, signal));
   } catch (error: unknown) {
-    if (error instanceof GatewayFailureError) {
-      throw error;
-    }
-    if (error instanceof TokenRefreshError) {
-      throw new GatewayFailureError({ kind: mapTokenRefreshError(error), cause: error });
-    }
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new GatewayFailureError({ kind: "aborted" });
-    }
-    throw new GatewayFailureError({ kind: "upstream_network", cause: error });
+    throw normalizeCopilotBindingFailure(error, scope.signal);
   }
 }
 
@@ -400,7 +337,10 @@ async function withOperationTimeout<T>(
   }, ms);
   const onAbort = (): void => {
     timeoutController.abort();
-    rejectTimeout(new GatewayFailureError({ kind: "aborted" }));
+    rejectTimeout(new GatewayFailureError(failureFromSignal(scope.signal, {
+      source: "transport",
+      phase: "connect",
+    })));
   };
   scope.signal.addEventListener("abort", onAbort, { once: true });
   try {
@@ -427,19 +367,16 @@ async function openChatStream(
   try {
     return await copilot.openChatStream(request);
   } catch (error: unknown) {
-    throw upstreamCallFailure(error);
+    throw upstreamCallFailure(error, request.signal);
   }
 }
 
-function upstreamCallFailure(error: unknown): GatewayFailureError {
-  if (error instanceof GatewayFailureError) {
-    return error;
-  }
-  const kind = classifyCopilotTransportError(error);
-  if (kind === "aborted") {
-    return new GatewayFailureError({ kind });
-  }
-  return new GatewayFailureError({ kind, cause: error });
+function upstreamCallFailure(error: unknown, signal: AbortSignal): GatewayFailureError {
+  return normalizeTransportFailure(
+    error,
+    signal,
+    { source: "transport", phase: "headers" },
+  );
 }
 
 function parseUpstreamObject(body: Uint8Array, maxBytes: number): WireJsonObject {
@@ -524,34 +461,22 @@ function assertUpstreamSuccess(status: number, headers: Headers): void {
 }
 
 function retryAfter(headers: Headers): string | undefined {
-  return validRetryAfterValue(headers.get("retry-after") ?? undefined);
+  return safeRetryAfter(headers.get("retry-after") ?? undefined);
 }
 
-function validRetryAfterValue(value: string | undefined): string | undefined {
-  if (value === undefined || value.length === 0) {
-    return undefined;
-  }
-  if (/^\d+$/u.test(value)) {
-    return value;
-  }
-  if (/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/u.test(value) && !Number.isNaN(Date.parse(value))) {
-    return value;
-  }
-  return undefined;
-}
-
-async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>): Promise<ChatStreamFrame> {
+async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>, signal: AbortSignal): Promise<ChatStreamFrame> {
   try {
     const next = await frames.next();
     if (next.done === true) {
-      throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+      throw new GatewayFailureError({
+        kind: "upstream_stream_truncated",
+        source: "parser",
+        phase: "stream",
+      });
     }
     return next.value;
   } catch (error: unknown) {
-    if (error instanceof GatewayFailureError) {
-      throw error;
-    }
-    throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+    throw normalizeChatStreamFailure(error, signal);
   }
 }
 
@@ -568,7 +493,10 @@ async function firstFrameWithTimeout(
       timedOut = true;
       reject(new GatewayFailureError({ kind: "upstream_timeout" }));
     }, ms);
-    const onAbort = (): void => reject(new GatewayFailureError({ kind: "aborted" }));
+    const onAbort = (): void => reject(new GatewayFailureError(failureFromSignal(scope.signal, {
+      source: "parser",
+      phase: "stream",
+    })));
     scope.signal.addEventListener("abort", onAbort, { once: true });
     clear = () => {
       clearTimeout(timer);
@@ -576,7 +504,7 @@ async function firstFrameWithTimeout(
     };
   });
   try {
-    return await Promise.race([nextFrame(frames), timeout]);
+    return await Promise.race([nextFrame(frames, scope.signal), timeout]);
   } catch (error: unknown) {
     if (timedOut) {
       onTimeout();
@@ -633,13 +561,19 @@ function bodyTimeout(ms: number, signal: AbortSignal): {
   let clear = (): void => undefined;
   const promise = new Promise<IteratorResult<Uint8Array>>((_resolve, reject) => {
     if (signal.aborted) {
-      reject(new GatewayFailureError({ kind: "aborted" }));
+      reject(new GatewayFailureError(failureFromSignal(signal, {
+        source: "parser",
+        phase: "stream",
+      })));
       return;
     }
     const timer = setTimeout(() => reject(new GatewayFailureError({ kind: "upstream_timeout" })), ms);
     const onAbort = (): void => {
       clearTimeout(timer);
-      reject(new GatewayFailureError({ kind: "aborted" }));
+      reject(new GatewayFailureError(failureFromSignal(signal, {
+        source: "parser",
+        phase: "stream",
+      })));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     clear = () => {
@@ -683,7 +617,7 @@ function openAiChatStreamResponse(input: {
         return;
       }
       try {
-        const frame = pending ?? await nextFrame(input.frames);
+        const frame = pending ?? await nextFrame(input.frames, input.signal);
         pending = undefined;
         if (frame.kind === "chunk") {
           measure(input.dependencies.performanceObserver, "event", () => {
@@ -710,10 +644,12 @@ function openAiChatStreamResponse(input: {
           return;
         }
         closeFrames();
-        controller.error(new Error("upstream stream error"));
-      } catch (_error) {
+        controller.error(new Error("upstream stream error", { cause: upstreamStreamEventFailure() }));
+      } catch (error: unknown) {
         closeFrames();
-        controller.error(new Error("upstream stream error"));
+        controller.error(new Error("upstream stream error", {
+          cause: normalizeChatStreamFailure(error, input.signal),
+        }));
       }
     },
     cancel(): void {
@@ -808,107 +744,4 @@ function measure<T>(
   work: () => T,
 ): T {
   return observer === undefined ? work() : observer.measure(measurement, work);
-}
-
-function presentOpenAiFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
-  const status = statusForFailure(failure);
-  const headers = new Headers({ ...JSON_HEADERS, "x-request-id": requestId });
-  if (failure.kind === "upstream_http" && failure.status === 429 && failure.retryAfter !== undefined) {
-    headers.set("retry-after", failure.retryAfter);
-  }
-  return new Response(serializeOpenAiErrorBody(messageForFailure(failure), errorTypeForStatus(status)), {
-    status,
-    headers,
-  });
-}
-
-function statusForFailure(failure: Readonly<GatewayFailure>): number {
-  switch (failure.kind) {
-  case "invalid_request":
-    return 400;
-  case "body_too_large":
-    return 413;
-  case "unsupported_media_type":
-    return 415;
-  case "unsupported_semantics":
-    return 422;
-  case "authentication":
-    return 401;
-  case "permission":
-    return 403;
-  case "model_not_found":
-    return 404;
-  case "queue_full":
-  case "queue_timeout":
-    return 503;
-  case "upstream_network":
-  case "upstream_stream_error":
-  case "upstream_stream_truncated":
-  case "invalid_upstream_response":
-  case "invalid_tool_arguments":
-  case "invalid_logprobs":
-    return 502;
-  case "upstream_timeout":
-    return 504;
-  case "upstream_http":
-    return failure.status;
-  case "internal":
-  case "aborted":
-    return 500;
-  }
-}
-
-function messageForFailure(failure: Readonly<GatewayFailure>): string {
-  switch (failure.kind) {
-  case "invalid_request":
-    return "invalid request";
-  case "body_too_large":
-    return "request body too large";
-  case "unsupported_media_type":
-    return "unsupported media type";
-  case "unsupported_semantics":
-    return "unsupported semantics";
-  case "authentication":
-    return "authentication failed";
-  case "permission":
-    return "permission denied";
-  case "model_not_found":
-    return "model not found";
-  case "queue_full":
-  case "queue_timeout":
-    return "server overloaded";
-  case "upstream_timeout":
-    return "upstream timeout";
-  case "invalid_upstream_response":
-  case "upstream_stream_error":
-  case "upstream_stream_truncated":
-  case "invalid_tool_arguments":
-  case "invalid_logprobs":
-    return "invalid upstream response";
-  case "upstream_http":
-  case "upstream_network":
-    return "upstream request failed";
-  case "internal":
-  case "aborted":
-    return "internal error";
-  }
-}
-
-function errorTypeForStatus(status: number): string {
-  if (status === 401) {
-    return "authentication_error";
-  }
-  if (status === 403) {
-    return "permission_error";
-  }
-  if (status === 404) {
-    return "not_found_error";
-  }
-  if (status === 429) {
-    return "rate_limit_error";
-  }
-  if (status === 400 || status === 409 || status === 413 || status === 415 || status === 422) {
-    return "invalid_request_error";
-  }
-  return "api_error";
 }

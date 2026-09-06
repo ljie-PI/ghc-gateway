@@ -8,6 +8,7 @@ import type { BoundCopilot, CopilotBackend, CopilotTarget } from "../../src/copi
 import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { CopilotModelCatalog, type CapiModelsResponse } from "../../src/copilot/model_catalog.js";
 import { InvalidUpstreamResponseError, UpstreamTimeoutError } from "../../src/copilot/transport.js";
+import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
 import { defaultRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
@@ -33,6 +34,7 @@ class CapturingCopilotBackend implements CopilotBackend {
 
   constructor(
     private readonly options: {
+      readonly bindError?: unknown;
       readonly chat?: ChatResponse;
       readonly chatError?: unknown;
       readonly chatPromise?: Promise<ChatResponse>;
@@ -41,6 +43,9 @@ class CapturingCopilotBackend implements CopilotBackend {
   ) {}
 
   async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
+    if (this.options.bindError !== undefined) {
+      throw this.options.bindError;
+    }
     const target: CopilotTarget = { endpoint: "https://api.githubcopilot.com", token: "scripted-token" };
     return {
       accountId: account.accountId,
@@ -392,14 +397,15 @@ describe("OpenAI Chat endpoint", () => {
     const backend = new CapturingCopilotBackend({
       chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
     });
+
     const timeoutGateway = await openAiGateway(backend, {
       capiError: new CapiFetchError(502, undefined, "upstream_timeout"),
     });
     try {
       const response = await timeoutGateway.gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(504);
       expect(await response.text()).toBe(
-        "{\"error\":{\"message\":\"upstream request failed\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
       );
     } finally {
       await timeoutGateway.close();
@@ -416,6 +422,45 @@ describe("OpenAI Chat endpoint", () => {
       );
     } finally {
       await invalidGateway.close();
+    }
+  });
+
+  it.each([
+    ["missing", 401, "authentication_error", "authentication failed", "authentication_error"],
+    ["unauthorized", 401, "authentication_error", "authentication failed", "authentication_error"],
+    ["network", 502, "api_error", "upstream request failed", "upstream_error"],
+    ["timeout", 504, "api_error", "upstream timeout", "timeout"],
+  ] as const)("normalizes %s credential refresh failures at bind", async (code, status, type, message, outcome) => {
+    const usageUpdates: Array<{ outcome?: string }> = [];
+    const backend = new CapturingCopilotBackend({
+      bindError: new TokenRefreshError(code, "secret-token https://unsafe.example/private"),
+    });
+    const { gw, close } = await openAiGateway(backend, { usageUpdates });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(status);
+      expect(await response.text()).toBe(JSON.stringify({
+        error: { message, type, param: null, code: null },
+      }));
+      expect(usageUpdates).toMatchObject([{ outcome }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("does not mistake an unowned AbortError for a client disconnect", async () => {
+    const backend = new CapturingCopilotBackend({
+      chatError: new DOMException("upstream aborted", "AbortError"),
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(500);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"internal error\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
     }
   });
 

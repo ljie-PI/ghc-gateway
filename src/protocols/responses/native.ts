@@ -143,7 +143,11 @@ export async function* normalizeNativeResponsesStream(
     }
   }
   if (!terminal) {
-    throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+    throw new GatewayFailureError({
+      kind: "upstream_stream_truncated",
+      source: "parser",
+      phase: "stream",
+    });
   }
 }
 
@@ -213,13 +217,24 @@ async function* parseResponsesSse(
     if (error instanceof GatewayFailureError) {
       throw error;
     }
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new GatewayFailureError({
+        kind: "aborted",
+        source: "parser",
+        phase: "stream",
+      });
+    }
     if (error instanceof ChatSseError) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
   if (pending.length > 0) {
-    throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+    throw new GatewayFailureError({
+      kind: "upstream_stream_truncated",
+      source: "parser",
+      phase: "stream",
+    });
   }
 }
 

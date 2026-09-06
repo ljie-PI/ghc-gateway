@@ -31,6 +31,7 @@ export type ProtocolEndpoint = (
 export type FailurePresenter = (
   failure: Readonly<GatewayFailure>,
   requestId: string,
+  request: Request,
 ) => Response;
 
 export interface RouteRegistration {
@@ -39,6 +40,7 @@ export interface RouteRegistration {
   readonly admission: "none" | "inference";
   readonly body: "none" | "wire-json-object";
   readonly presentFailure: FailurePresenter;
+  readonly observeFailure?: (failure: Readonly<GatewayFailure>, requestId: string) => void;
   readonly endpoint: ProtocolEndpoint;
 }
 
@@ -173,7 +175,8 @@ async function handleRoute(
     if (controller.signal.aborted) {
       const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
       if (timeoutFailure !== undefined && !request.signal.aborted) {
-        return route.presentFailure(timeoutFailure, requestId);
+        observeRouteFailure(route, timeoutFailure, requestId);
+        return route.presentFailure(timeoutFailure, requestId, request);
       }
       return new Response(null);
     }
@@ -182,7 +185,8 @@ async function handleRoute(
     if (controller.signal.aborted) {
       const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
       if (timeoutFailure !== undefined && !request.signal.aborted) {
-        return route.presentFailure(timeoutFailure, requestId);
+        observeRouteFailure(route, timeoutFailure, requestId);
+        return route.presentFailure(timeoutFailure, requestId, request);
       }
       return new Response(null);
     }
@@ -194,19 +198,33 @@ async function handleRoute(
     return attachLifecycle(response, controller, cleanup, stream ? dependencies.streamFinished : undefined);
   } catch (error: unknown) {
     const failure = failureFromUnknown(error);
-    if (failure.kind === "aborted" || request.signal.aborted) {
-      const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
-      if (timeoutFailure !== undefined && !request.signal.aborted) {
-        return route.presentFailure(timeoutFailure, requestId);
-      }
+    const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
+    if (timeoutFailure !== undefined && !request.signal.aborted) {
+      observeRouteFailure(route, timeoutFailure, requestId);
+      return route.presentFailure(timeoutFailure, requestId, request);
+    }
+    if (request.signal.aborted || (failure.kind === "aborted" && controller.signal.aborted)) {
       return new Response(null);
     }
     holdUntilBody = true;
-    return attachLifecycle(route.presentFailure(failure, requestId), controller, cleanup);
+    observeRouteFailure(route, failure, requestId);
+    return attachLifecycle(route.presentFailure(failure, requestId, request), controller, cleanup);
   } finally {
     if (!holdUntilBody) {
       cleanup();
     }
+  }
+}
+
+function observeRouteFailure(
+  route: Readonly<RouteRegistration>,
+  failure: Readonly<GatewayFailure>,
+  requestId: string,
+): void {
+  try {
+    route.observeFailure?.(failure, requestId);
+  } catch (_error: unknown) {
+    // Observability cannot alter public failure bytes.
   }
 }
 

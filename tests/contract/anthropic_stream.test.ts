@@ -128,13 +128,14 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 
-  it("closes natural exhaustion with message_stop and propagates post-commit exceptions without synthetic success", async () => {
+  it("classifies post-commit parser failures without synthetic success terminals", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     async function* brokenStream(): AsyncIterable<Uint8Array> {
       yield sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] });
-      throw new Error("boom");
+      throw new TypeError("network failed");
     }
     const backend = new ScriptedCopilotBackend({ chatStream: brokenStream() });
-    const { gw, close } = await anthropicGateway({ backend });
+    const { gw, close } = await anthropicGateway({ backend, usageUpdates });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
       const reader = response.body?.getReader();
@@ -154,6 +155,10 @@ describe("Anthropic stream lifecycle", () => {
       expect(text).toContain("event: content_block_delta");
       expect(text).not.toContain("event: message_stop");
       expect(text).not.toContain("event: error");
+      expect(usageUpdates).toMatchObject([{
+        protocol: "anthropic",
+        outcome: "upstream_error",
+      }]);
     } finally {
       await close();
     }

@@ -1,9 +1,21 @@
-import { AccountDirectoryError, type AccountDirectory } from "../../accounts/account_directory.js";
+import type { AccountDirectory } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
 import { iterateChatFrames, type BoundCopilot, type CopilotBackend } from "../../copilot/backend.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
-import { CapiFetchError } from "../../copilot/models_source.js";
-import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
+import {
+  normalizeAccountBindingFailure,
+  normalizeCatalogFailure,
+  normalizeChatFrames,
+  normalizeCopilotBindingFailure,
+  normalizeTransportFailure,
+} from "../../copilot/failures.js";
+import {
+  failureFromSignal,
+  failureFromUnknown,
+  failureOutcome,
+  GatewayFailureError,
+  safeRetryAfter,
+} from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
@@ -22,10 +34,10 @@ import {
   encodeResponsesSseEvent,
   RESPONSES_JSON_HEADERS,
   RESPONSES_STREAM_HEADERS,
-  serializeResponsesErrorBody,
 } from "./wire.js";
 import type { TelemetryProtocol, TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
+import { presentResponsesFailure } from "./failure_presenter.js";
 
 export interface ResponsesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -47,11 +59,11 @@ export function createResponsesRoute(dependencies: ResponsesRouteDependencies): 
     path: "/v1/responses",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: (failure, requestId) => {
+    presentFailure: presentResponsesFailure,
+    observeFailure: (failure, requestId) => {
       const usage = attempts.get(requestId) ?? createUsageAttempt(dependencies, new AbortController().signal);
       usage.failure(new GatewayFailureError(failure));
       attempts.delete(requestId);
-      return presentResponsesFailure(failure, requestId);
     },
     endpoint: (request, scope) => executeResponses(dependencies, request, scope, attempts),
   };
@@ -82,7 +94,7 @@ async function executeResponses(
     throw new GatewayFailureError({ kind: resolved.kind });
   }
   usage.setModel(resolved.upstreamModel);
-  const bound = await dependencies.copilot.bind(account, scope.signal);
+  const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
   const plan = planResponsesExecution(decoded, resolved, bound.target);
   usage.setProtocol(plan.kind === "native_responses" ? "openai_responses_native" : "openai_responses_bridge");
   if (plan.kind === "native_responses") {
@@ -112,7 +124,10 @@ async function nativeNonstreamResponse(
   scope: Readonly<RequestScope>,
   usage: UsageAttempt,
 ): Promise<Response> {
-  const upstream = await completeNativeResponses(bound, plan, nativeOptions(scope));
+  const upstream = await transportCall(
+    () => completeNativeResponses(bound, plan, nativeOptions(scope)),
+    scope.signal,
+  );
   assertUpstreamSuccess(upstream);
   if (usage.enabled) {
     const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
@@ -131,7 +146,10 @@ async function nativeStreamResponse(
   usage: UsageAttempt,
   performanceObserver?: ProtocolPerformanceObserver,
 ): Promise<Response> {
-  const upstream = await openNativeResponsesStream(bound, plan, nativeOptions(scope));
+  const upstream = await transportCall(
+    () => openNativeResponsesStream(bound, plan, nativeOptions(scope)),
+    scope.signal,
+  );
   if (upstream.status < 200 || upstream.status >= 300) {
     await upstream.cancel();
   }
@@ -157,7 +175,8 @@ async function bridgeNonstreamResponse(
     reasoningConfig: null,
     ...promptCacheContext(bound.target.endpoint),
   }, scope.signal);
-  const upstream = await bound.completeChat(chatRequest(prepared.body, plan.resolvedModel.upstreamModel, false, scope));
+  const request = chatRequest(prepared.body, plan.resolvedModel.upstreamModel, false, scope);
+  const upstream = await transportCall(() => bound.completeChat(request), request.signal);
   assertUpstreamSuccess(upstream);
   const measured = measure(dependencies.performanceObserver, "buffered", () => {
     const chat = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
@@ -188,13 +207,14 @@ async function bridgeStreamResponse(
     reasoningConfig: null,
     ...promptCacheContext(bound.target.endpoint),
   }, scope.signal);
-  const upstream = await bound.openChatStream(chatRequest(prepared.body, plan.resolvedModel.upstreamModel, true, scope));
+  const request = chatRequest(prepared.body, plan.resolvedModel.upstreamModel, true, scope);
+  const upstream = await transportCall(() => bound.openChatStream(request), request.signal);
   if (upstream.status < 200 || upstream.status >= 300) {
     await upstream.cancel();
   }
   assertUpstreamSuccess(upstream);
   const timedUpstream = { ...upstream, bytes: withStreamTimeouts(upstream.bytes, upstream, scope) };
-  const emissions = convertChatStream(iterateChatFrames(timedUpstream), {
+  const emissions = convertChatStream(normalizeChatFrames(iterateChatFrames(timedUpstream), scope.signal), {
     originalRequest: plan.originalRequest,
     toolContext: prepared.toolContext,
     model: plan.resolvedModel.upstreamModel,
@@ -242,7 +262,10 @@ async function nextWithTimeout(
   upstream: UpstreamByteStream,
 ): Promise<IteratorResult<Uint8Array>> {
   if (signal.aborted) {
-    throw new DOMException("aborted", "AbortError");
+    throw new GatewayFailureError(failureFromSignal(signal, {
+      source: "parser",
+      phase: "stream",
+    }));
   }
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -254,7 +277,10 @@ async function nextWithTimeout(
     }, timeoutMs);
   });
   const abort = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(new DOMException("aborted", "AbortError"));
+    onAbort = () => reject(new GatewayFailureError(failureFromSignal(signal, {
+      source: "parser",
+      phase: "stream",
+    })));
     signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
@@ -344,9 +370,10 @@ async function streamBytesResponse(
     headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
   });
   scope.signal.addEventListener("abort", () => {
-    onFailure(scope.signal.reason instanceof GatewayFailureError
-      ? scope.signal.reason
-      : new GatewayFailureError({ kind: "aborted" }));
+    onFailure(new GatewayFailureError(failureFromSignal(scope.signal, {
+      source: "parser",
+      phase: "stream",
+    })));
   }, { once: true });
   void (async () => {
     try {
@@ -435,10 +462,30 @@ async function bindAccount(directory: AccountDirectory, signal: AbortSignal) {
   try {
     return await directory.bindDefault(signal);
   } catch (error: unknown) {
-    if (error instanceof AccountDirectoryError && (error.code === "no_default" || error.code === "not_found")) {
-      throw new GatewayFailureError({ kind: "authentication", cause: error });
-    }
-    throw error;
+    throw normalizeAccountBindingFailure(error);
+  }
+}
+
+async function bindCopilot(
+  copilot: CopilotBackend,
+  account: Awaited<ReturnType<AccountDirectory["bindDefault"]>>,
+  signal: AbortSignal,
+): Promise<BoundCopilot> {
+  try {
+    return await copilot.bind(account, signal);
+  } catch (error: unknown) {
+    throw normalizeCopilotBindingFailure(error, signal);
+  }
+}
+
+async function transportCall<T>(
+  work: () => Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  try {
+    return await work();
+  } catch (error: unknown) {
+    throw normalizeTransportFailure(error, signal, { source: "transport", phase: "headers" });
   }
 }
 
@@ -452,23 +499,7 @@ async function loadCatalog(
     dependencies.preferences.markInvalidIfMissing(accountId, new Set(catalog.models.map((model) => model.id)), catalog.generation);
     return catalog;
   } catch (error: unknown) {
-    if (error instanceof CapiFetchError) {
-      if (error.failureKind === "upstream_timeout") {
-        throw new GatewayFailureError({ kind: "upstream_timeout", cause: error });
-      }
-      if (error.failureKind === "upstream_network") {
-        throw new GatewayFailureError({ kind: "upstream_network", cause: error });
-      }
-      if (error.failureKind === "invalid_upstream_response") {
-        throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
-      }
-      throw new GatewayFailureError({
-        kind: "upstream_http",
-        status: error.status,
-        ...(error.retryAfter === undefined ? {} : { retryAfter: error.retryAfter }),
-      });
-    }
-    throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+    throw normalizeCatalogFailure(error, signal);
   }
 }
 
@@ -481,121 +512,11 @@ function promptCacheContext(endpoint: string): { readonly upstreamHost?: string;
   }
 }
 
-function presentResponsesFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
-  const status = statusForFailure(failure);
-  const headers = new Headers({ ...RESPONSES_JSON_HEADERS, "x-request-id": requestId });
-  if (failure.kind === "upstream_http" && failure.status === 429 && failure.retryAfter !== undefined) {
-    headers.set("retry-after", failure.retryAfter);
-  }
-  return new Response(serializeResponsesErrorBody(messageForFailure(failure), errorTypeForStatus(status)), { status, headers });
-}
-
-function statusForFailure(failure: Readonly<GatewayFailure>): number {
-  switch (failure.kind) {
-  case "invalid_request":
-    return 400;
-  case "body_too_large":
-    return 413;
-  case "unsupported_media_type":
-    return 415;
-  case "unsupported_semantics":
-    return 422;
-  case "authentication":
-    return 401;
-  case "permission":
-    return 403;
-  case "model_not_found":
-    return 404;
-  case "queue_full":
-  case "queue_timeout":
-    return 503;
-  case "upstream_timeout":
-    return 504;
-  case "upstream_http":
-    return failure.status;
-  case "upstream_network":
-  case "upstream_stream_error":
-  case "upstream_stream_truncated":
-  case "invalid_upstream_response":
-  case "invalid_tool_arguments":
-  case "invalid_logprobs":
-    return 502;
-  case "internal":
-  case "aborted":
-    return 500;
-  }
-}
-
-function messageForFailure(failure: Readonly<GatewayFailure>): string {
-  if (failure.kind === "upstream_http") {
-    return "upstream request failed";
-  }
-  if (failure.kind === "body_too_large") {
-    return "request body too large";
-  }
-  if (failure.kind === "unsupported_media_type") {
-    return "unsupported media type";
-  }
-  if (failure.kind === "unsupported_semantics") {
-    return "unsupported semantics";
-  }
-  if (failure.kind === "authentication") {
-    return "authentication failed";
-  }
-  if (failure.kind === "permission") {
-    return "permission denied";
-  }
-  if (failure.kind === "model_not_found") {
-    return "model not found";
-  }
-  if (failure.kind === "queue_full" || failure.kind === "queue_timeout") {
-    return "server overloaded";
-  }
-  if (failure.kind === "upstream_timeout") {
-    return "upstream timeout";
-  }
-  if (failure.kind === "invalid_upstream_response" || failure.kind === "invalid_tool_arguments" || failure.kind === "invalid_logprobs") {
-    return "invalid upstream response";
-  }
-  if (failure.kind === "upstream_network" || failure.kind === "upstream_stream_error" || failure.kind === "upstream_stream_truncated") {
-    return "upstream request failed";
-  }
-  return failure.kind === "invalid_request" ? "invalid request" : "internal error";
-}
-
-function errorTypeForStatus(status: number): string {
-  if (status === 401) {
-    return "authentication_error";
-  }
-  if (status === 403) {
-    return "permission_error";
-  }
-  if (status === 404) {
-    return "not_found_error";
-  }
-  if (status === 429) {
-    return "rate_limit_error";
-  }
-  return status === 400 || status === 409 || status === 413 || status === 415 || status === 422
-    ? "invalid_request_error"
-    : "api_error";
-}
-
 function retryAfterHeader(status: number, headers: Headers): string | undefined {
   if (status !== 429) {
     return undefined;
   }
-  const value = headers.get("retry-after");
-  if (value === null || value.length === 0) {
-    return undefined;
-  }
-  if (/^\d+$/u.test(value)) {
-    return value;
-  }
-  if (/^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/u.test(value) && !Number.isNaN(Date.parse(value))) {
-    return value;
-  }
-  return undefined;
+  return safeRetryAfter(headers.get("retry-after") ?? undefined);
 }
 
 interface UsageTokens {
@@ -784,46 +705,9 @@ function usageOutcome(error: unknown, signal: AbortSignal): UsageUpdate["outcome
   if (signal.aborted) {
     return abortOutcome(signal);
   }
-  if (error instanceof Error && error.name === "AbortError") {
-    return "aborted";
-  }
-  if (error instanceof AccountDirectoryError) {
-    return "authentication_error";
-  }
-  const failure = failureFromUnknown(error);
-  switch (failure.kind) {
-  case "invalid_request":
-  case "body_too_large":
-  case "unsupported_media_type":
-  case "unsupported_semantics":
-  case "model_not_found":
-    return "client_error";
-  case "authentication":
-  case "permission":
-    return "authentication_error";
-  case "queue_full":
-  case "queue_timeout":
-    return "overloaded";
-  case "upstream_timeout":
-    return "timeout";
-  case "upstream_http":
-  case "upstream_network":
-  case "upstream_stream_error":
-  case "upstream_stream_truncated":
-  case "invalid_upstream_response":
-  case "invalid_tool_arguments":
-  case "invalid_logprobs":
-    return "upstream_error";
-  case "aborted":
-    return "aborted";
-  case "internal":
-    return "internal_error";
-  }
+  return failureOutcome(failureFromUnknown(error, { source: "gateway", phase: "internal" }));
 }
 
 function abortOutcome(signal: AbortSignal): UsageUpdate["outcome"] {
-  const reason = signal.reason;
-  return reason instanceof GatewayFailureError && reason.failure.kind === "upstream_timeout"
-    ? "timeout"
-    : "aborted";
+  return failureOutcome(failureFromSignal(signal, { source: "gateway", phase: "deadline" }));
 }

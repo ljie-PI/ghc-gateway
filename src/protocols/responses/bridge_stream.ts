@@ -8,6 +8,7 @@ import {
   type WireJsonArray,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
+import { GatewayFailureError } from "../../gateway/failures.js";
 import type { ChatChunk, ChatStreamFrame } from "../chat_completions/types.js";
 import type { ResponsesRequest } from "./dto.js";
 import type { ResponsesHistoryRecord } from "./history.js";
@@ -959,8 +960,12 @@ function chatChunk(input: ResponsesBridgeStreamInput): ChatChunk {
   return isChunkFrame(input) ? input.chunk : input as ChatChunk;
 }
 
-function streamFrameError(value: WireJson | string): Error {
-  return value instanceof Error ? value : new Error(typeof value === "string" ? value : "Chat stream error");
+function streamFrameError(_value: WireJson | string): Error {
+  return new GatewayFailureError({
+    kind: "upstream_stream_error",
+    source: "parser",
+    phase: "stream",
+  });
 }
 
 function isManagedResponseId(id: string): boolean {
