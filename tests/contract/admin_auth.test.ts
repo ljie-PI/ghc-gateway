@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createAdminModule } from "../../src/admin/routes.js";
 import type { AdminModule } from "../../src/gateway/create_gateway.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
@@ -67,12 +67,19 @@ describe("Admin authentication", () => {
     const absolute = await createHarness({ value: 1_800_000_000_000 });
     try {
       const loggedIn = await login(absolute.gateway, absolute.admin);
+      expect((await mutate(
+        absolute.gateway,
+        "/admin/api/v1/device-flows",
+        loggedIn,
+        { host: "github.com" },
+      )).status).toBe(201);
       for (let interval = 1; interval < 36; interval += 1) {
         absolute.dependencies.now.value += 20 * 60_000;
         expect((await session(absolute.gateway, loggedIn.cookie)).status).toBe(200);
       }
       absolute.dependencies.now.value += 20 * 60_000;
       expect((await session(absolute.gateway, loggedIn.cookie)).status).toBe(401);
+      expect(absolute.dependencies.calls).toContain("device-cancel:flow-1");
       absolute.admin.close();
       absolute.admin.close();
       expect(absolute.admin.mintBootstrap()).toEqual({ kind: "closed" });
@@ -94,10 +101,25 @@ describe("Admin authentication", () => {
         origin: "http://127.0.0.1:9999",
       })).status).toBe(403);
       expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, { host: "github.com" })).status).toBe(201);
+      const otherSession = await login(harness.gateway, harness.admin);
+      expect((await get(
+        harness.gateway,
+        "/admin/api/v1/device-flows/flow-1",
+        otherSession.cookie,
+      )).status).toBe(403);
+      expect((await securedRequest(
+        harness.gateway,
+        "DELETE",
+        "/admin/api/v1/device-flows/flow-1",
+        otherSession,
+        undefined,
+        {},
+      )).status).toBe(403);
 
       const mutations = [
         ["POST", "/admin/api/v1/auth/logout", undefined],
         ["POST", "/admin/api/v1/device-flows", { host: "github.com" }],
+        ["DELETE", "/admin/api/v1/device-flows/flow-1", undefined],
         ["DELETE", "/admin/api/v1/accounts/github.com%2F42", { expectedRevision: 3 }],
         ["PUT", "/admin/api/v1/accounts/default", { accountId: "github.com/42", expectedRevision: 2 }],
         ["POST", "/admin/api/v1/models/refresh", { accountId: "github.com/42" }],
@@ -114,6 +136,9 @@ describe("Admin authentication", () => {
         expect(wrongOrigin.status, `${method} ${path} with wrong Origin`).toBe(403);
       }
 
+      expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, {
+        host: "github.com",
+      })).status).toBe(201);
       const logout = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/logout`, {
         method: "POST",
         headers: { cookie: loggedIn.cookie, origin: ORIGIN, "x-ghcg-csrf": loggedIn.csrf },
@@ -121,6 +146,7 @@ describe("Admin authentication", () => {
       expect(logout.status).toBe(204);
       expect(await logout.text()).toBe("");
       expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+      expect(harness.dependencies.calls).toContain("device-cancel:flow-1");
       expect((await session(harness.gateway, loggedIn.cookie)).status).toBe(401);
     } finally {
       await harness.close();
@@ -138,6 +164,28 @@ describe("Admin authentication", () => {
       expect((await exchange(harness.gateway, ninth.token)).status).toBe(503);
     } finally {
       await harness.close();
+    }
+  });
+
+  it("cancels and releases an owned flow at its deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_800_000_000_000);
+    const harness = await createHarness({ value: 1_800_000_000_000 });
+    try {
+      const loggedIn = await login(harness.gateway, harness.admin);
+      expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, {
+        host: "github.com",
+      })).status).toBe(201);
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+      expect(harness.dependencies.calls).toContain("device-cancel:flow-1");
+      expect((await get(
+        harness.gateway,
+        "/admin/api/v1/device-flows/flow-1",
+        loggedIn.cookie,
+      )).status).toBe(404);
+    } finally {
+      await harness.close();
+      vi.useRealTimers();
     }
   });
 });

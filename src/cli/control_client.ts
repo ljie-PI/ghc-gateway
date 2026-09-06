@@ -18,6 +18,9 @@ export type CliErrorCode =
   | "revision_conflict"
   | "permission_denied"
   | "security_error"
+  | "authorization_expired"
+  | "authorization_denied"
+  | "authorization_failed"
   | "remote_error"
   | "timeout"
   | "unavailable"
@@ -42,6 +45,9 @@ export const CLI_ERROR_EXIT: Readonly<Record<CliErrorCode, number>> = {
   revision_conflict: 3,
   permission_denied: 4,
   security_error: 4,
+  authorization_expired: 5,
+  authorization_denied: 5,
+  authorization_failed: 5,
   remote_error: 5,
   timeout: 5,
   unavailable: 5,
@@ -60,6 +66,9 @@ export const SAFE_ERROR_MESSAGES: Readonly<Record<CliErrorCode, string>> = {
   revision_conflict: "revision conflict",
   permission_denied: "permission denied",
   security_error: "security error",
+  authorization_expired: "authorization expired",
+  authorization_denied: "authorization denied",
+  authorization_failed: "authorization failed",
   remote_error: "remote error",
   timeout: "timeout",
   unavailable: "gateway unavailable",
@@ -148,13 +157,23 @@ export interface DeviceFlowStartResult {
   readonly verificationUri: string;
   readonly expiresAt: string;
   readonly pollIntervalSeconds: number;
+  readonly nextPollAt?: string;
 }
 
 export type DeviceFlowPollResult =
-  | { readonly state: "pending" }
+  | {
+      readonly state: "pending";
+      readonly pollIntervalSeconds?: number;
+      readonly nextPollAt?: string;
+    }
   | { readonly state: "complete"; readonly account: AdminAccount }
   | { readonly state: "expired" }
+  | { readonly state: "denied" }
   | { readonly state: "failed" };
+
+export type DeviceFlowCancelControlResult =
+  | { readonly state: "canceled" | "not_found" }
+  | { readonly state: "complete"; readonly accountId: string };
 
 export interface ControlOperationMap {
   readonly "auth.login.start": {
@@ -164,6 +183,10 @@ export interface ControlOperationMap {
   readonly "auth.login.poll": {
     readonly args: { readonly flowId: string };
     readonly result: DeviceFlowPollResult;
+  };
+  readonly "auth.login.cancel": {
+    readonly args: { readonly flowId: string };
+    readonly result: DeviceFlowCancelControlResult;
   };
   readonly "auth.logout": {
     readonly args: { readonly accountId?: string };
@@ -324,13 +347,18 @@ export class HttpControlClient implements ControlClient {
     args: ControlOperationMap[Operation]["args"],
     context: CliLifecycleContext,
   ): Promise<ControlOperationMap[Operation]["result"]> {
-    const endpoint = await this.requireEndpoint(context.dataDir);
-    await this.verifyEndpoint(endpoint);
-    const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/command", {
-      operation,
-      arguments: args,
-    }, context);
-    return data as ControlOperationMap[Operation]["result"];
+    const request = async (): Promise<ControlOperationMap[Operation]["result"]> => {
+      const endpoint = await this.requireEndpoint(context.dataDir);
+      await this.verifyEndpoint(endpoint);
+      const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/command", {
+        operation,
+        arguments: args,
+      }, context);
+      return data as ControlOperationMap[Operation]["result"];
+    };
+    return context.timeoutMs === undefined
+      ? await request()
+      : await withCliTimeout(request(), context.timeoutMs);
   }
 
   async adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult> {
@@ -383,6 +411,20 @@ export class HttpControlClient implements ControlClient {
       }
       throw error;
     }
+  }
+}
+
+async function withCliTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new CliError("timeout")), Math.max(0, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

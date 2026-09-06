@@ -22,6 +22,9 @@ const ControlCommandSchema = Type.Union([
   commandSchema("auth.login.poll", Type.Object({
     flowId: Type.String({ minLength: 1 }),
   }, { additionalProperties: false })),
+  commandSchema("auth.login.cancel", Type.Object({
+    flowId: Type.String({ minLength: 1 }),
+  }, { additionalProperties: false })),
   commandSchema("auth.logout", OptionalAccountSchema),
   commandSchema("auth.status", EmptyArgumentsSchema),
   commandSchema("accounts.list", EmptyArgumentsSchema),
@@ -382,6 +385,9 @@ function cliStatus(code: CliErrorCode): number {
   case "daemon_unreachable":
     return 503;
   case "remote_error":
+  case "authorization_expired":
+  case "authorization_denied":
+  case "authorization_failed":
     return 502;
   case "internal_error":
   case "interrupted":

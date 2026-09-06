@@ -2,9 +2,36 @@ import { describe, expect, it } from "vitest";
 import { anthropicGateway, anthropicRequest, decodeChatBody } from "./anthropic_harness.js";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
+import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
+import { UpstreamTimeoutError } from "../../src/copilot/transport.js";
 import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
+import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("Anthropic request route", () => {
+  it("observes pre-endpoint body failures once without coupling accounting to the presenter", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const { gw, close } = await anthropicGateway({ usageUpdates });
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+        },
+        body: "{\"messages\":",
+      }));
+      expect(response.status).toBe(400);
+      expect(usageUpdates).toMatchObject([{
+        protocol: "anthropic",
+        outcome: "client_error",
+        requestCount: 1,
+        errorCount: 1,
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
   it("requires the exact Messages version header and never forwards it to Chat", async () => {
     const { gw, capturedRequests, close } = await anthropicGateway();
     try {
@@ -75,6 +102,72 @@ describe("Anthropic request route", () => {
       } finally {
         await close();
       }
+    }
+  });
+
+  it.each([
+    [new TokenRefreshError("missing", "secret-token"), 401, "authentication_error"],
+    [new TokenRefreshError("unauthorized", "secret-token"), 401, "authentication_error"],
+    [new TokenRefreshError("network", "private upstream URL"), 502, "upstream_error"],
+    [new TokenRefreshError("timeout", "private upstream URL"), 504, "timeout"],
+  ])("normalizes bind failure %# for Messages", async (bindError, status, outcome) => {
+    const usageUpdates: UsageUpdate[] = [];
+    const backend = new ScriptedCopilotBackend({ bindError });
+    const { gw, close } = await anthropicGateway({ backend, usageUpdates });
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }));
+      expect(response.status).toBe(status);
+      expect(response.headers.get("request-id")).toBe("req_test_1");
+      expect(await response.text()).not.toContain("secret-token");
+      expect(usageUpdates).toMatchObject([{ outcome }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("normalizes transport timeout and malformed buffered output before commitment", async () => {
+    const timeoutGateway = await anthropicGateway({
+      backend: new ScriptedCopilotBackend({
+        chat() {
+          throw new UpstreamTimeoutError();
+        },
+      }),
+    });
+    try {
+      const response = await timeoutGateway.gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toContain("\"type\":\"timeout_error\"");
+    } finally {
+      await timeoutGateway.close();
+    }
+
+    const parserGateway = await anthropicGateway({
+      backend: new ScriptedCopilotBackend({
+        chat: {
+          status: 200,
+          headers: new Headers(),
+          body: new TextEncoder().encode("{\"choices\":"),
+        },
+      }),
+    });
+    try {
+      const response = await parserGateway.gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("\"message\":\"invalid upstream response\"");
+    } finally {
+      await parserGateway.close();
     }
   });
 

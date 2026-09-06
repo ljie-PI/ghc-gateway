@@ -1,14 +1,22 @@
-import { AccountDirectoryError, type AccountDirectory, type BoundAccount } from "../../accounts/account_directory.js";
+import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
-import type { CopilotBackend } from "../../copilot/backend.js";
+import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilities.js";
 import {
-  isModelCapabilityUnavailable,
-  ModelCapabilityUnavailableError,
-} from "../../copilot/model_capabilities.js";
-import { CapiFetchError } from "../../copilot/models_source.js";
-import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
+  normalizeAccountBindingFailure,
+  normalizeCatalogFailure,
+  normalizeCopilotBindingFailure,
+  normalizeTransportFailure,
+} from "../../copilot/failures.js";
+import {
+  failureFromSignal,
+  failureFromUnknown,
+  failureOutcome,
+  GatewayFailureError,
+  safeRetryAfter,
+} from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
@@ -18,9 +26,9 @@ import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js"
 import { convertChatResponse } from "./bridge.js";
 import { convertAnthropicRequest } from "./request.js";
 import { createAnthropicStreamResponse } from "./stream.js";
-import { anthropicErrorBody, type AnthropicErrorType } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
+import { presentAnthropicFailure } from "./failure_presenter.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -46,11 +54,11 @@ export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRout
     path: "/v1/messages",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: (failure, requestId) => {
+    presentFailure: presentAnthropicFailure,
+    observeFailure: (failure, requestId) => {
       const usage = attempts.get(requestId) ?? createUsageAttempt(dependencies, new AbortController().signal);
       usage.failure(new GatewayFailureError(failure));
       attempts.delete(requestId);
-      return presentAnthropicFailure(failure, requestId);
     },
     endpoint: (request, scope) => executeAnthropicMessages(dependencies, request, scope, attempts),
   };
@@ -95,7 +103,7 @@ async function executeAnthropicMessages(
     resolved.capability.profile.chatOutputTokenField.value,
   );
   const stream = chatBody.stream === true;
-  const copilot = await dependencies.copilot.bind(account, scope.signal);
+  const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
   const chatRequest: ChatRequest = {
     model: resolved.upstreamModel,
     body: new TextEncoder().encode(JSON.stringify(chatBody)),
@@ -108,13 +116,13 @@ async function executeAnthropicMessages(
   };
 
   if (!stream) {
-    const upstream = await copilot.completeChat(chatRequest);
+    const upstream = await completeChat(copilot, chatRequest);
     throwIfUpstreamHttp(upstream);
     if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response" });
     }
     return measureBuffered(dependencies, () => {
-      const body = convertChatResponse(upstream);
+      const body = convertBufferedChatResponse(upstream);
       usage.success(anthropicUsageTokens(body));
       return new Response(JSON.stringify(body), {
         headers: { ...JSON_HEADERS, "request-id": scope.requestId },
@@ -122,7 +130,23 @@ async function executeAnthropicMessages(
     });
   }
 
-  const upstream = await copilot.openChatStream(chatRequest);
+  function convertBufferedChatResponse(upstream: Parameters<typeof convertChatResponse>[0]) {
+    try {
+      return convertChatResponse(upstream);
+    } catch (error: unknown) {
+      if (error instanceof GatewayFailureError) {
+        throw error;
+      }
+      throw new GatewayFailureError({
+        kind: "invalid_upstream_response",
+        source: "converter",
+        phase: "convert",
+        cause: error,
+      });
+    }
+  }
+
+  const upstream = await openChatStream(copilot, chatRequest);
   throwIfUpstreamHttp(upstream);
   return createAnthropicStreamResponse({
     upstream,
@@ -142,103 +166,6 @@ function measureBuffered<T>(dependencies: AnthropicMessagesRouteDependencies, wo
   return dependencies.performanceObserver === undefined
     ? work()
     : dependencies.performanceObserver.measure("buffered", work);
-}
-
-function presentAnthropicFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
-  const mapped = mapAnthropicFailure(failure);
-  const headers = new Headers({ ...JSON_HEADERS, "request-id": requestId });
-  if (failure.kind === "upstream_http" && failure.retryAfter !== undefined) {
-    headers.set("retry-after", failure.retryAfter);
-  }
-  return new Response(anthropicErrorBody(mapped.type, mapped.message, requestId), {
-    status: mapped.status,
-    headers,
-  });
-}
-
-function mapAnthropicFailure(failure: Readonly<GatewayFailure>): {
-  readonly status: number;
-  readonly type: AnthropicErrorType;
-  readonly message: string;
-} {
-  if (failure.kind === "upstream_http") {
-    return {
-      status: failure.status,
-      type: upstreamAnthropicErrorType(failure.status),
-      message: "upstream request failed",
-    };
-  }
-  if (failure.kind === "body_too_large") {
-    return { status: 413, type: "request_too_large", message: "request body too large" };
-  }
-  if (failure.kind === "unsupported_media_type") {
-    return { status: 415, type: "invalid_request_error", message: "unsupported media type" };
-  }
-  if (failure.kind === "unsupported_semantics") {
-    return {
-      status: 400,
-      type: "invalid_request_error",
-      message: isModelCapabilityUnavailable(failure.cause)
-        ? "model native protocol capability is not configured"
-        : "unsupported semantics",
-    };
-  }
-  if (failure.kind === "authentication") {
-    return { status: 401, type: "authentication_error", message: "authentication failed" };
-  }
-  if (failure.kind === "permission") {
-    return { status: 403, type: "permission_error", message: "permission denied" };
-  }
-  if (failure.kind === "model_not_found") {
-    return { status: 404, type: "not_found_error", message: "model not found" };
-  }
-  if (failure.kind === "queue_full" || failure.kind === "queue_timeout") {
-    return { status: 529, type: "overloaded_error", message: "server overloaded" };
-  }
-  if (failure.kind === "upstream_timeout") {
-    return { status: 504, type: "timeout_error", message: "upstream timeout" };
-  }
-  if (failure.kind === "upstream_network") {
-    return { status: 502, type: "api_error", message: "upstream request failed" };
-  }
-  if (failure.kind === "invalid_upstream_response") {
-    return { status: 502, type: "api_error", message: "invalid upstream response" };
-  }
-  if (failure.kind === "internal") {
-    return { status: 500, type: "api_error", message: "internal error" };
-  }
-  return { status: 400, type: "invalid_request_error", message: "invalid request" };
-}
-
-function upstreamAnthropicErrorType(status: number): AnthropicErrorType {
-  if (status === 400 || status === 415 || status === 422) {
-    return "invalid_request_error";
-  }
-  if (status === 401) {
-    return "authentication_error";
-  }
-  if (status === 402) {
-    return "billing_error";
-  }
-  if (status === 403) {
-    return "permission_error";
-  }
-  if (status === 404) {
-    return "not_found_error";
-  }
-  if (status === 413) {
-    return "request_too_large";
-  }
-  if (status === 429) {
-    return "rate_limit_error";
-  }
-  if (status === 504) {
-    return "timeout_error";
-  }
-  if (status === 529) {
-    return "overloaded_error";
-  }
-  return "api_error";
 }
 
 function assertAnthropicVersion(headers: Headers): void {
@@ -267,10 +194,7 @@ async function bindAccount(
   try {
     return await dependencies.directory.bindDefault(signal);
   } catch (error: unknown) {
-    if (error instanceof AccountDirectoryError && (error.code === "no_default" || error.code === "not_found")) {
-      throw new GatewayFailureError({ kind: "authentication" });
-    }
-    throw error;
+    throw normalizeAccountBindingFailure(error);
   }
 }
 
@@ -293,24 +217,41 @@ async function loadCatalog(
     );
     return catalog;
   } catch (error: unknown) {
-    if (error instanceof CapiFetchError) {
-      if (error.failureKind === "upstream_timeout") {
-        throw new GatewayFailureError({ kind: "upstream_timeout", cause: error });
-      }
+    throw normalizeCatalogFailure(error, signal);
+  }
+}
 
-      if (error.failureKind === "upstream_network") {
-        throw new GatewayFailureError({ kind: "upstream_network", cause: error });
-      }
-      if (error.failureKind === "invalid_upstream_response") {
-        throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
-      }
-      throw new GatewayFailureError({
-        kind: "upstream_http",
-        status: error.status,
-        ...(error.retryAfter === undefined ? {} : { retryAfter: error.retryAfter }),
-      });
-    }
-    throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
+async function bindCopilot(
+  copilot: CopilotBackend,
+  account: Awaited<ReturnType<AccountDirectory["bindDefault"]>>,
+  signal: AbortSignal,
+): Promise<BoundCopilot> {
+  try {
+    return await copilot.bind(account, signal);
+  } catch (error: unknown) {
+    throw normalizeCopilotBindingFailure(error, signal);
+  }
+}
+
+async function completeChat(
+  copilot: BoundCopilot,
+  request: Readonly<ChatRequest>,
+) {
+  try {
+    return await copilot.completeChat(request);
+  } catch (error: unknown) {
+    throw normalizeTransportFailure(error, request.signal, { source: "transport", phase: "headers" });
+  }
+}
+
+async function openChatStream(
+  copilot: BoundCopilot,
+  request: Readonly<ChatRequest>,
+) {
+  try {
+    return await copilot.openChatStream(request);
+  } catch (error: unknown) {
+    throw normalizeTransportFailure(error, request.signal, { source: "transport", phase: "headers" });
   }
 }
 
@@ -330,17 +271,7 @@ function retryAfterHeader(status: number, headers: Headers): string | undefined 
   if (status !== 429) {
     return undefined;
   }
-  const value = headers.get("retry-after");
-  if (value === null || value.length === 0) {
-    return undefined;
-  }
-  if (/^\d+$/u.test(value)) {
-    return value;
-  }
-  if (value.includes(",") && !/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/u.test(value)) {
-    return undefined;
-  }
-  return Number.isNaN(Date.parse(value)) ? undefined : value;
+  return safeRetryAfter(headers.get("retry-after") ?? undefined);
 }
 
 function hasVisionInput(messages: unknown[]): boolean {
@@ -441,46 +372,9 @@ function usageOutcome(error: unknown, signal: AbortSignal): UsageUpdate["outcome
   if (signal.aborted) {
     return abortOutcome(signal);
   }
-  if (error instanceof Error && error.name === "AbortError") {
-    return "aborted";
-  }
-  if (error instanceof AccountDirectoryError) {
-    return "authentication_error";
-  }
-  const failure = failureFromUnknown(error);
-  switch (failure.kind) {
-  case "invalid_request":
-  case "body_too_large":
-  case "unsupported_media_type":
-  case "unsupported_semantics":
-  case "model_not_found":
-    return "client_error";
-  case "authentication":
-  case "permission":
-    return "authentication_error";
-  case "queue_full":
-  case "queue_timeout":
-    return "overloaded";
-  case "upstream_timeout":
-    return "timeout";
-  case "upstream_http":
-  case "upstream_network":
-  case "upstream_stream_error":
-  case "upstream_stream_truncated":
-  case "invalid_upstream_response":
-  case "invalid_tool_arguments":
-  case "invalid_logprobs":
-    return "upstream_error";
-  case "aborted":
-    return "aborted";
-  case "internal":
-    return "internal_error";
-  }
+  return failureOutcome(failureFromUnknown(error, { source: "gateway", phase: "internal" }));
 }
 
 function abortOutcome(signal: AbortSignal): UsageUpdate["outcome"] {
-  const reason = signal.reason;
-  return reason instanceof GatewayFailureError && reason.failure.kind === "upstream_timeout"
-    ? "timeout"
-    : "aborted";
+  return failureOutcome(failureFromSignal(signal, { source: "gateway", phase: "deadline" }));
 }

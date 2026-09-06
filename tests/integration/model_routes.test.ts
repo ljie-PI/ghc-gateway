@@ -10,6 +10,7 @@ import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_regi
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
 import { parseLiveModelCapabilities } from "../../src/copilot/model_capabilities.js";
+import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway } from "../../src/gateway/create_gateway.js";
@@ -312,6 +313,64 @@ describe("model routes errors and preferences", () => {
       releaseOld();
       expect((await staleListing).status).toBe(200);
       expect(accounts.preferences.get(account.accountId)?.validity).toBe("valid");
+    } finally {
+      await gateway.close();
+      closeDatabase(database);
+    }
+  });
+
+  it("normalizes model-list credential and timeout failures in both protocol shapes", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-cat-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    let error: unknown = new CapiFetchError(502, undefined, "upstream_timeout");
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        throw error;
+      },
+    });
+    const gateway = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: dir }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      catalog,
+      preferences: accounts.preferences,
+    }), { createRequestId: () => "req_models" });
+    try {
+      const openai = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      expect(openai.status).toBe(504);
+      expect(openai.headers.get("x-request-id")).toBe("req_models");
+      expect(JSON.parse(await openai.text())).toMatchObject({
+        error: { type: "api_error", code: "504" },
+      });
+
+      catalog.invalidate("github.com/1");
+      const anthropic = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models", {
+        headers: { "anthropic-version": "2023-06-01" },
+      }));
+      expect(anthropic.status).toBe(504);
+      expect(anthropic.headers.get("request-id")).toBe("req_models");
+      expect(JSON.parse(await anthropic.text())).toMatchObject({
+        type: "error",
+        error: { type: "timeout_error", message: "upstream timeout" },
+        request_id: "req_models",
+      });
+
+      error = new TokenRefreshError("missing", "secret-token https://unsafe.example/private");
+      catalog.invalidate("github.com/1");
+      const authentication = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      expect(authentication.status).toBe(401);
+      expect(await authentication.text()).not.toContain("secret-token");
     } finally {
       await gateway.close();
       closeDatabase(database);

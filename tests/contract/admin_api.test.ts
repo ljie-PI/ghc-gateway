@@ -24,6 +24,31 @@ describe("Admin API", () => {
       expect((await read(harness.gateway, "/admin/api/v1/accounts", session.cookie)).data).toMatchObject({
         defaultRevision: 2, defaultAccountId: "github.com/42", items: [{ numericUserId: "42", preferredModel: null }],
       });
+      const started = await mutate(harness.gateway, "POST", "/admin/api/v1/device-flows", session, {
+        host: "github.com",
+      });
+      expect(await started.json()).toEqual({
+        data: {
+          flowId: "flow-1",
+          userCode: "ABCD-1234",
+          verificationUri: "https://github.com/login/device",
+          expiresAt: "2027-01-15T08:15:00.000Z",
+          pollIntervalSeconds: 5,
+          nextPollAt: "2027-01-15T08:00:05.000Z",
+        },
+      });
+      expect((await read(harness.gateway, "/admin/api/v1/device-flows/flow-1", session.cookie)).data).toEqual({
+        state: "pending",
+        pollIntervalSeconds: 5,
+        nextPollAt: "2027-01-15T08:00:05.000Z",
+      });
+      const canceled = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/device-flows/flow-1`, {
+        method: "DELETE",
+        headers: { cookie: session.cookie, origin: ORIGIN, "x-ghcg-csrf": session.csrf },
+      }));
+      expect(canceled.status).toBe(200);
+      expect(await canceled.json()).toEqual({ data: { state: "canceled" } });
+      expect(harness.dependencies.calls).toContain("device-cancel:flow-1");
       expect((await read(harness.gateway, "/admin/api/v1/models", session.cookie)).data).toMatchObject({
         accountId: "github.com/42", catalogGeneration: 7, items: [{ id: "gpt-test", maxInputTokens: 200_000, maxOutputTokens: 8_192 }],
       });
@@ -427,6 +452,89 @@ describe("Admin API", () => {
       expect((await first).status).toBe(200);
       expect((await third).status).toBe(200);
       expect(calls).toBe(2);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("cancels a flow when its start request aborts before ownership", async () => {
+    const dependencies = adminDependencies();
+    let started = (): void => undefined;
+    let release = (): void => undefined;
+    const startCalled = new Promise<void>((resolve) => { started = resolve; });
+    const startRelease = new Promise<void>((resolve) => { release = resolve; });
+    dependencies.deviceFlows.start = async (...args) => {
+      started();
+      await startRelease;
+      dependencies.calls.push(`device-start:${args[0]}`);
+      return {
+        flowId: "flow-1",
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+        expiresAtMs: dependencies.now.value + 900_000,
+        pollIntervalSeconds: 5,
+        nextPollAtMs: dependencies.now.value + 5_000,
+      };
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const controller = new AbortController();
+      const request = harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/device-flows`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "content-type": "application/json",
+          cookie: session.cookie,
+          origin: ORIGIN,
+          "x-ghcg-csrf": session.csrf,
+        },
+        body: JSON.stringify({ host: "github.com" }),
+      }));
+      await startCalled;
+      controller.abort();
+      release();
+      expect(await (await request).text()).toBe("");
+      expect(dependencies.calls).toContain("device-cancel:flow-1");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("releases provisional ownership when a start aborts after registration", async () => {
+    const dependencies = adminDependencies();
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      expect((await mutate(harness.gateway, "POST", "/admin/api/v1/device-flows", session, {
+        host: "github.com",
+      })).status).toBe(201);
+      dependencies.deviceFlows.start = async () => ({
+        flowId: "flow-2",
+        userCode: "WXYZ-9999",
+        verificationUri: "https://github.com/login/device",
+        expiresAtMs: dependencies.now.value + 900_000,
+        pollIntervalSeconds: 5,
+        nextPollAtMs: dependencies.now.value + 5_000,
+      });
+      const controller = new AbortController();
+      dependencies.deviceFlows.has = () => {
+        controller.abort();
+        return true;
+      };
+      const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/device-flows`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "content-type": "application/json",
+          cookie: session.cookie,
+          origin: ORIGIN,
+          "x-ghcg-csrf": session.csrf,
+        },
+        body: JSON.stringify({ host: "github.com" }),
+      }));
+      expect(await response.text()).toBe("");
+      expect(dependencies.calls).toContain("device-cancel:flow-2");
     } finally {
       await harness.close();
     }

@@ -16,6 +16,12 @@ export function isModelCapabilityUnavailable(error: unknown): error is ModelCapa
   return error instanceof ModelCapabilityUnavailableError;
 }
 
+export function safeCapabilityFailureMessage(cause: unknown, fallback: string): string {
+  return isModelCapabilityUnavailable(cause)
+    ? "model native protocol capability is not configured"
+    : fallback;
+}
+
 export interface DeclaredField<T> {
   readonly state: CapabilityFieldState;
   readonly value?: T;

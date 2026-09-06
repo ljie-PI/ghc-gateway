@@ -26,7 +26,7 @@ import {
 
 export interface CommandDispatcherDependencies {
   readonly directory: AccountDirectory;
-  readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll">;
+  readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll" | "cancel">;
   readonly catalog: CopilotModelCatalog;
   readonly registry?: ModelCapabilityRegistry;
   readonly runtimeConfig: RuntimeConfigStore;
@@ -68,22 +68,37 @@ export class CommandDispatcher {
         verificationUri: started.verificationUri,
         expiresAt: new Date(started.expiresAtMs).toISOString(),
         pollIntervalSeconds: started.pollIntervalSeconds,
+        nextPollAt: new Date(started.nextPollAtMs).toISOString(),
       } as ControlOperationMap[Operation]["result"];
     }
     case "auth.login.poll": {
       const input = args as ControlOperationMap["auth.login.poll"]["args"];
       const result = await this.dependencies.deviceFlows.poll(input.flowId, signal);
       if (result.status === "pending") {
-        return { state: "pending" } as ControlOperationMap[Operation]["result"];
+        return {
+          state: "pending",
+          pollIntervalSeconds: result.pollIntervalSeconds,
+          nextPollAt: new Date(result.nextPollAtMs).toISOString(),
+        } as ControlOperationMap[Operation]["result"];
       }
       if (result.status === "expired") {
         return { state: "expired" } as ControlOperationMap[Operation]["result"];
+      }
+      if (result.status === "denied") {
+        return { state: "denied" } as ControlOperationMap[Operation]["result"];
       }
       if (result.status === "failed") {
         return { state: "failed" } as ControlOperationMap[Operation]["result"];
       }
       const account = this.requireAccount(result.accountId);
       return { state: "complete", account: this.adminAccount(account) } as ControlOperationMap[Operation]["result"];
+    }
+    case "auth.login.cancel": {
+      const input = args as ControlOperationMap["auth.login.cancel"]["args"];
+      const result = await this.dependencies.deviceFlows.cancel(input.flowId);
+      return (result.status === "complete"
+        ? { state: "complete", accountId: result.accountId }
+        : { state: result.status }) as ControlOperationMap[Operation]["result"];
     }
     case "auth.logout": {
       const input = args as ControlOperationMap["auth.logout"]["args"];

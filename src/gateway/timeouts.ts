@@ -34,6 +34,10 @@ export function armTimeout(
 
 export function abortWithTimeout(controller: AbortController): void {
   if (!controller.signal.aborted) {
-    controller.abort(new GatewayFailureError({ kind: "upstream_timeout" }));
+    controller.abort(new GatewayFailureError({
+      kind: "upstream_timeout",
+      source: "gateway",
+      phase: "deadline",
+    }));
   }
 }

@@ -40,6 +40,18 @@ export class AccountDirectoryError extends Error {
     this.name = "AccountDirectoryError";
     this.code = code;
   }
+
+}
+
+export class AccountDirectoryPostCommitError extends Error {
+  constructor(
+    readonly accountId: AccountId,
+    readonly retryCleanup: (signal?: AbortSignal) => Promise<void>,
+    options: ErrorOptions,
+  ) {
+    super("account committed but credential cleanup failed", options);
+    this.name = "AccountDirectoryPostCommitError";
+  }
 }
 
 let accountLifecycleLock: Promise<void> = Promise.resolve();
@@ -130,9 +142,9 @@ export class AccountDirectory {
       }
       const generation = (existing?.credential_generation ?? 0) + 1;
       const secret = { ...input.secret, generation };
-      await this.credentials.putGeneration(accountId, generation, secret);
+      await this.credentials.putGeneration(accountId, generation, secret, signal);
       if (signal?.aborted === true) {
-        await this.credentials.prune(this.activeCredentialReferences());
+        await this.credentials.prune(this.activeCredentialReferences(), signal);
         throw new DOMException("aborted", "AbortError");
       }
 
@@ -179,11 +191,22 @@ export class AccountDirectory {
           }
         })();
       } catch (error: unknown) {
-        await this.credentials.prune(this.activeCredentialReferences());
+        await this.credentials.prune(this.activeCredentialReferences(), signal);
         throw error;
       }
 
-      await this.credentials.prune(this.activeCredentialReferences());
+      try {
+        await this.credentials.prune(this.activeCredentialReferences(), signal);
+      } catch (error: unknown) {
+        throw new AccountDirectoryPostCommitError(
+          accountId,
+          async (cleanupSignal) => await withAccountLifecycleLock(
+            async () => await this.credentials.prune(this.activeCredentialReferences(), cleanupSignal),
+            cleanupSignal,
+          ),
+          { cause: error },
+        );
+      }
       return this.bind(accountId);
     }, signal), signal);
   }

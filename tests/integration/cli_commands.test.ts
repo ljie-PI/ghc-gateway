@@ -215,13 +215,13 @@ describe("CLI commands", () => {
 
   it("sends exact control operations to the selected data directory", async () => {
     const client = new ScriptedControlClient({
-      "auth.login.start": [{ flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5 }],
+      "auth.login.start": [{ flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5, nextPollAt: "2026-09-01T23:45:05.000Z" }],
       "admin.open": [{ opened: true }],
     });
     const stdout = new CaptureStream();
     const stderr = new CaptureStream();
     expect(await runCli({ argv: ["--json", "--data-dir", "selected", "auth", "login", "--host", "ghe.example.com"], homedir: "Q:/tmp/home", stdout, stderr, controlClient: client })).toBe(0);
-    expect(JSON.parse(stdout.chunks)).toEqual({ ok: true, data: { flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5 } });
+    expect(JSON.parse(stdout.chunks)).toEqual({ ok: true, data: { flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5, nextPollAt: "2026-09-01T23:45:05.000Z" } });
     expect(stderr.chunks).toBe("");
     expect(client.calls[0]).toEqual({ kind: "control", operation: "auth.login.start", args: { host: "ghe.example.com" }, dataDir: expect.stringContaining("selected") });
 
@@ -233,8 +233,8 @@ describe("CLI commands", () => {
 
   it("polls interactive login until terminal and handles interruption without leaking tokens", async () => {
     const client = new ScriptedControlClient({
-      "auth.login.start": [{ flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 1 }],
-      "auth.login.poll": [{ state: "pending" }, { state: "complete", account: accountDto("github.com/42") }],
+      "auth.login.start": [{ flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 1, nextPollAt: "2026-09-01T23:45:01.000Z" }],
+      "auth.login.poll": [{ state: "pending", pollIntervalSeconds: 6, nextPollAt: "2026-09-01T23:45:07.000Z" }, { state: "complete", account: accountDto("github.com/42") }],
     });
     const stdout = new CaptureStream();
     const stderr = new CaptureStream();
@@ -245,13 +245,138 @@ describe("CLI commands", () => {
 
     const abort = new AbortController();
     const interrupted = new ScriptedControlClient({
-      "auth.login.start": [{ flowId: "flow", userCode: "WXYZ-9999", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 30 }],
-      "auth.login.poll": [{ state: "pending" }],
+      "auth.login.start": [{ flowId: "flow", userCode: "WXYZ-9999", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 30, nextPollAt: "2026-09-01T23:45:30.000Z" }],
+      "auth.login.poll": [{ state: "pending", pollIntervalSeconds: 30, nextPollAt: "2026-09-01T23:46:00.000Z" }],
+      "auth.login.cancel": [{ state: "canceled" }],
     });
     const interruptedErr = new CaptureStream();
     abort.abort();
     expect(await runCli({ argv: ["auth", "login"], homedir: "Q:/tmp/home", stdout: new CaptureStream(), stderr: interruptedErr, controlClient: interrupted, shutdownSignal: abort.signal })).toBe(130);
     expect(interruptedErr.chunks).toBe("error: interrupted\n");
+    expect(interrupted.calls.some((call) => call.operation === "auth.login.cancel")).toBe(true);
+
+    const completedDuringCancel = new ScriptedControlClient({
+      "auth.login.start": [{ flowId: "flow", userCode: "DONE-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 30, nextPollAt: "2026-09-01T23:45:30.000Z" }],
+      "auth.login.cancel": [{ state: "complete", accountId: "github.com/42" }],
+    });
+    const completedOut = new CaptureStream();
+    const completedErr = new CaptureStream();
+    expect(await runCli({
+      argv: ["auth", "login"],
+      homedir: "Q:/tmp/home",
+      stdout: completedOut,
+      stderr: completedErr,
+      controlClient: completedDuringCancel,
+      shutdownSignal: abort.signal,
+    })).toBe(0);
+    expect(completedOut.chunks).toContain("Authenticated: github.com/42");
+    expect(completedErr.chunks).toBe("");
+  });
+
+  it("updates interactive login cadence from pending poll results", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T23:45:00.000Z"));
+    try {
+      const client = new ScriptedControlClient({
+        "auth.login.start": [{
+          flowId: "flow",
+          userCode: "ABCD-1234",
+          verificationUri: "https://github.com/login/device",
+          expiresAt: "2026-09-02T00:00:00.000Z",
+          pollIntervalSeconds: 1,
+          nextPollAt: "2026-09-01T23:45:01.000Z",
+        }],
+        "auth.login.poll": [
+          { state: "pending", pollIntervalSeconds: 6, nextPollAt: "2026-09-01T23:45:07.000Z" },
+          { state: "complete", account: accountDto("github.com/42") },
+        ],
+      });
+
+      const login = runCli({
+        argv: ["auth", "login"],
+        homedir: "Q:/tmp/home",
+        stdout: new CaptureStream(),
+        stderr: new CaptureStream(),
+        controlClient: client,
+      });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(client.calls.filter((call) => call.operation === "auth.login.poll")).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.calls.filter((call) => call.operation === "auth.login.poll")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(5_999);
+      expect(client.calls.filter((call) => call.operation === "auth.login.poll")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(login).resolves.toBe(0);
+      expect(client.calls.filter((call) => call.operation === "auth.login.poll")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["expired", "authorization expired"],
+    ["denied", "authorization denied"],
+    ["failed", "authorization failed"],
+  ] as const)("reports interactive login %s distinctly", async (state, message) => {
+    const client = new ScriptedControlClient({
+      "auth.login.start": [{
+        flowId: "flow",
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+        expiresAt: "2026-09-02T00:00:00.000Z",
+        pollIntervalSeconds: 1,
+        nextPollAt: "2026-09-01T23:45:01.000Z",
+      }],
+      "auth.login.poll": [{ state }],
+      "auth.login.cancel": [{ state: "canceled" }],
+    });
+    const stderr = new CaptureStream();
+    expect(await runCli({
+      argv: ["auth", "login"],
+      homedir: "Q:/tmp/home",
+      stdout: new CaptureStream(),
+      stderr,
+      controlClient: client,
+      pollDelayMs: 0,
+    })).toBe(5);
+    expect(stderr.chunks).toBe(`error: ${message}\n`);
+  });
+
+  it("falls back to the last interval for an older daemon without scheduling fields", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T23:45:00.000Z"));
+    try {
+      const client = new ScriptedControlClient({
+        "auth.login.start": [{
+          flowId: "flow",
+          userCode: "ABCD-1234",
+          verificationUri: "https://github.com/login/device",
+          expiresAt: "2026-09-02T00:00:00.000Z",
+          pollIntervalSeconds: 2,
+        }],
+        "auth.login.poll": [
+          { state: "pending" },
+          { state: "complete", account: accountDto("github.com/42") },
+        ],
+      });
+      const login = runCli({
+        argv: ["auth", "login"],
+        homedir: "Q:/tmp/home",
+        stdout: new CaptureStream(),
+        stderr: new CaptureStream(),
+        controlClient: client,
+      });
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(client.calls.filter((call) => call.operation === "auth.login.poll")).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.calls.filter((call) => call.operation === "auth.login.poll")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(login).resolves.toBe(0);
+      expect(client.calls.filter((call) => call.operation === "auth.login.poll")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("dispatches management commands through application modules with one CAS attempt", async () => {
@@ -260,6 +385,7 @@ describe("CLI commands", () => {
       const client = new DispatcherControlClient(harness.dispatcher);
       const login = await client.request("auth.login.start", { host: "github.com" }, { dataDir: "unused" });
       expect(login.pollIntervalSeconds).toBe(5);
+      harness.advanceTime(5_000);
       const poll = await client.request("auth.login.poll", { flowId: login.flowId }, { dataDir: "unused" });
       expect(poll).toMatchObject({ state: "complete", account: { accountId: "github.com/42" } });
       expect(await client.request("accounts.list", {}, { dataDir: "unused" })).toMatchObject({ defaultAccountId: "github.com/42", defaultRevision: 1 });
@@ -344,7 +470,7 @@ describe("CLI commands", () => {
       const started = await client.request("auth.login.start", {}, { dataDir: "unused" });
       nowValue += 2_000;
       expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "expired" });
-      await expect(client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
+      expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "expired" });
     } finally {
       expiredHarness.close();
     }
@@ -353,8 +479,9 @@ describe("CLI commands", () => {
     try {
       const client = new DispatcherControlClient(failedHarness.dispatcher);
       const started = await client.request("auth.login.start", {}, { dataDir: "unused" });
+      failedHarness.advanceTime(5_000);
       expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "failed" });
-      await expect(client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
+      expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "failed" });
     } finally {
       failedHarness.close();
     }
@@ -777,8 +904,10 @@ async function dispatcherHarness(options: {
   readonly runtimeConfig: RuntimeConfigStore;
   capiModels: Array<{ readonly id: string; readonly name: string; readonly vendor: string; readonly model_picker_enabled: boolean }>;
   readonly close: () => void;
+  readonly advanceTime: (milliseconds: number) => void;
 }> {
-  const now = options.now ?? (() => 1_800_000_000_000);
+  const clock = { value: 1_800_000_000_000 };
+  const now = options.now ?? (() => clock.value);
   const database = openDatabase({
     path: ":memory:",
     migrations: [
@@ -818,6 +947,7 @@ async function dispatcherHarness(options: {
     backend,
     history,
     runtimeConfig,
+    advanceTime: (milliseconds) => { clock.value += milliseconds; },
     get capiModels() {
       return harness.capiModels;
     },
