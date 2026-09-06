@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory, type AccountDirectoryError } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
@@ -9,6 +12,7 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import {
   composeProductionDaemonGateway,
+  createProductionApplicationContext,
   type ApplicationContext,
 } from "../../src/main.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
@@ -35,6 +39,41 @@ const IDENTITY = {
 };
 
 describe("production composition", () => {
+  it("closes inference responses and dispatchers before telemetry and SQLite", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-close-order-"));
+    const application = await createProductionApplicationContext(
+      parseStartupConfig(["--data-dir", dataDir, "--port", String(PORT)], {}),
+      {},
+    );
+    const order: string[] = [];
+    const closeCopilot = application.copilot.close.bind(application.copilot);
+    const closeCatalog = application.catalog.close.bind(application.catalog);
+    const telemetryRuntime = application.telemetryRuntime;
+    if (telemetryRuntime === undefined) {
+      throw new Error("expected production telemetry runtime");
+    }
+    const closeTelemetry = telemetryRuntime.close.bind(telemetryRuntime);
+    application.copilot.close = async () => {
+      order.push("copilot");
+      await closeCopilot();
+    };
+    application.catalog.close = async () => {
+      order.push("catalog");
+      await closeCatalog();
+    };
+    telemetryRuntime.close = async () => {
+      order.push("telemetry");
+      await closeTelemetry();
+    };
+    try {
+      await application.close?.();
+      expect(order).toEqual(["copilot", "catalog", "telemetry"]);
+    } finally {
+      application.forceClose?.();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("shares management state and applies runtime settings to every live owner", async () => {
     const harness = compositionHarness();
     const gateway = await composeProductionDaemonGateway({

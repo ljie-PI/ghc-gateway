@@ -53,8 +53,11 @@ export class CapiFetchError extends Error {
 export class HttpCopilotModelsSource implements CopilotModelsSource {
   private dispatcher: Dispatcher | undefined;
   private dispatcherPromise: Promise<Dispatcher> | undefined;
+  private closingDispatcherPromise: Promise<Dispatcher> | undefined;
   private closingDispatcher: Dispatcher | undefined;
   private closed = false;
+  private forceClosed = false;
+  private closePromise: Promise<void> | undefined;
   readonly modelMetadata = new Map<string, NormalizedModelInfo>();
 
   constructor(
@@ -98,7 +101,7 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
       signal,
       deadlineMs,
       this.limits,
-      this.fetchImpl === fetch ? await this.sharedDispatcher() : undefined,
+      this.fetchImpl === fetch ? await this.sharedDispatcher(signal, deadlineMs) : undefined,
     );
     if (response.status < 200 || response.status >= 300) {
       await response.cancel();
@@ -125,12 +128,19 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
   }
 
   async close(): Promise<void> {
+    this.closePromise ??= this.closeDispatcher();
+    return await this.closePromise;
+  }
+
+  private async closeDispatcher(): Promise<void> {
     this.closed = true;
     const pendingDispatcher = this.dispatcherPromise;
     this.dispatcherPromise = undefined;
+    this.closingDispatcherPromise = pendingDispatcher;
     const dispatcher = this.dispatcher ?? await pendingDispatcher?.catch(() => undefined);
+    this.closingDispatcherPromise = undefined;
     this.dispatcher = undefined;
-    if (dispatcher !== undefined) {
+    if (dispatcher !== undefined && !this.forceClosed) {
       this.closingDispatcher = dispatcher;
       try {
         await dispatcher.close();
@@ -143,9 +153,11 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
   }
 
   forceClose(): void {
+    this.forceClosed = true;
     this.closed = true;
-    const pendingDispatcher = this.dispatcherPromise;
+    const pendingDispatcher = this.dispatcherPromise ?? this.closingDispatcherPromise;
     this.dispatcherPromise = undefined;
+    this.closingDispatcherPromise = undefined;
     const dispatcher = this.dispatcher ?? this.closingDispatcher;
     this.dispatcher = undefined;
     this.closingDispatcher = undefined;
@@ -157,25 +169,24 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
     }
   }
 
-  private async sharedDispatcher(): Promise<Dispatcher> {
+  private async sharedDispatcher(signal: AbortSignal, deadlineMs: number): Promise<Dispatcher> {
     if (this.closed) {
       throw new DOMException("closed", "AbortError");
     }
     if (this.dispatcher !== undefined) {
       return this.dispatcher;
     }
-    const pending = this.dispatcherPromise
-      ?? Promise.resolve().then(async () => this.createDispatcher(this.limits));
-    this.dispatcherPromise = pending;
-    const dispatcher = await pending;
-    if (this.dispatcherPromise === pending) {
-      this.dispatcherPromise = undefined;
+    const pending = this.dispatcherPromise ?? this.startDispatcher();
+    const timeout = timeoutPromise<Dispatcher>(remainingMs(deadlineMs), signal);
+    try {
+      const dispatcher = await Promise.race([pending, timeout.promise]);
+      if (this.closed) {
+        throw new DOMException("closed", "AbortError");
+      }
+      return dispatcher;
+    } finally {
+      timeout.clear();
     }
-    if (this.closed) {
-      throw new DOMException("closed", "AbortError");
-    }
-    this.dispatcher ??= dispatcher;
-    return this.dispatcher;
   }
 
   private composeModelInfo(raw: unknown): CapiModelsResponse {
@@ -220,6 +231,25 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
         };
       }),
     };
+  }
+
+  private startDispatcher(): Promise<Dispatcher> {
+    const pending = Promise.resolve()
+      .then(async () => this.createDispatcher(this.limits))
+      .then((created) => {
+        if (!this.closed) {
+          this.dispatcher ??= created;
+          return this.dispatcher;
+        }
+        return created;
+      })
+      .finally(() => {
+        if (this.dispatcherPromise === pending) {
+          this.dispatcherPromise = undefined;
+        }
+      });
+    this.dispatcherPromise = pending;
+    return pending;
   }
 }
 

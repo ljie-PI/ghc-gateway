@@ -25,27 +25,3 @@ export type ChatStreamFrame =
   | { readonly kind: "chunk"; readonly chunk: ChatChunk }
   | { readonly kind: "error"; readonly value: WireJson | string }
   | { readonly kind: "done" };
-
-export interface NativeResponsesUpstreamRequest {
-  readonly body: Uint8Array;
-  readonly hasVisionInput: boolean;
-  readonly initiator: "user" | "agent";
-  readonly requestId: string;
-  readonly nonstreamBodyBytes: number;
-  readonly connectTimeoutMs: number;
-  readonly firstByteTimeoutMs: number;
-  readonly signal: AbortSignal;
-}
-
-export interface UpstreamByteResponse {
-  readonly status: number;
-  readonly headers: Headers;
-  readonly body: Uint8Array;
-}
-
-export interface UpstreamByteStream {
-  readonly status: number;
-  readonly headers: Headers;
-  readonly bytes: AsyncIterable<Uint8Array>;
-  cancel(): Promise<void>;
-}

@@ -211,13 +211,15 @@ export async function createProductionApplicationContext(
     modelMetadata: modelsSource.modelMetadata,
     runtime,
     async close() {
-      await telemetryRuntime.close();
+      await copilot.close();
       await catalog.close();
+      await telemetryRuntime.close();
       closeDatabaseOnce();
     },
     forceClose() {
-      telemetryRuntime.forceClose();
+      copilot.forceClose();
       modelsSource.forceClose();
+      telemetryRuntime.forceClose();
       closeDatabaseOnce();
     },
   };

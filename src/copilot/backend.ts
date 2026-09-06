@@ -6,10 +6,13 @@ import type {
   ChatRequest,
   ChatResponse,
   ChatStreamFrame,
+} from "../protocols/chat_completions/types.js";
+import type {
+  MessagesUpstreamRequest,
   NativeResponsesUpstreamRequest,
   UpstreamByteResponse,
   UpstreamByteStream,
-} from "../protocols/chat_completions/types.js";
+} from "./upstream_types.js";
 
 export interface CopilotTarget {
   readonly endpoint: string;
@@ -23,10 +26,14 @@ export interface BoundCopilot {
   openChatStream(request: Readonly<ChatRequest>): Promise<UpstreamByteStream>;
   completeResponses(request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteResponse>;
   openResponsesStream(request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteStream>;
+  completeMessages(request: Readonly<MessagesUpstreamRequest>): Promise<UpstreamByteResponse>;
+  openMessagesStream(request: Readonly<MessagesUpstreamRequest>): Promise<UpstreamByteStream>;
 }
 
 export interface CopilotBackend {
   bind(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<BoundCopilot>;
+  close(): Promise<void>;
+  forceClose(): void;
 }
 
 export interface ScriptedCopilotHandlers {
@@ -34,10 +41,13 @@ export interface ScriptedCopilotHandlers {
   chatStream?: Uint8Array[] | AsyncIterable<Uint8Array> | ((request: ChatRequest) => Uint8Array[] | AsyncIterable<Uint8Array>);
   responses?: UpstreamByteResponse | ((request: NativeResponsesUpstreamRequest) => UpstreamByteResponse | Promise<UpstreamByteResponse>);
   responsesStream?: Uint8Array[] | AsyncIterable<Uint8Array> | ((request: NativeResponsesUpstreamRequest) => Uint8Array[] | AsyncIterable<Uint8Array>);
+  messages?: UpstreamByteResponse | ((request: MessagesUpstreamRequest) => UpstreamByteResponse | Promise<UpstreamByteResponse>);
+  messagesStream?: Uint8Array[] | AsyncIterable<Uint8Array> | ((request: MessagesUpstreamRequest) => Uint8Array[] | AsyncIterable<Uint8Array>);
 }
 
 export class ScriptedCopilotBackend implements CopilotBackend {
   readonly captured: Array<{ readonly accountId: string; readonly kind: string }> = [];
+  private closed = false;
 
   constructor(
     private readonly handlers: ScriptedCopilotHandlers,
@@ -46,6 +56,9 @@ export class ScriptedCopilotBackend implements CopilotBackend {
   ) {}
 
   async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
+    if (this.closed) {
+      throw new DOMException("closed", "AbortError");
+    }
     const target = { endpoint: this.endpoint, token: this.token };
     const captured = this.captured;
     const handlers = this.handlers;
@@ -98,7 +111,38 @@ export class ScriptedCopilotBackend implements CopilotBackend {
           cancel: async () => undefined,
         };
       },
+      async completeMessages(request) {
+        captured.push({ accountId: account.accountId, kind: "messages" });
+        const handler = handlers.messages;
+        if (typeof handler === "function") {
+          return handler(request);
+        }
+        if (handler === undefined) {
+          throw new Error("scripted messages missing");
+        }
+        return handler;
+      },
+      async openMessagesStream(request) {
+        captured.push({ accountId: account.accountId, kind: "messages-stream" });
+        const stream = typeof handlers.messagesStream === "function"
+          ? handlers.messagesStream(request)
+          : handlers.messagesStream;
+        return {
+          status: 200,
+          headers: new Headers({ "content-type": "text/event-stream" }),
+          bytes: asAsync(stream ?? []),
+          cancel: async () => undefined,
+        };
+      },
     };
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+
+  forceClose(): void {
+    this.closed = true;
   }
 }
 
