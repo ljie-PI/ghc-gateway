@@ -471,6 +471,41 @@ describe("shared conversion response codecs", () => {
         void _emission;
       }
     }).rejects.toThrow();
+
+    const omittedItemDoneContent = [
+      responseEvent(0, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "msg_1",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "final", annotations: [] }],
+        },
+      }),
+      responseEvent(1, "response.completed", {
+        response: {
+          id: "resp_bad",
+          object: "response",
+          status: "completed",
+          output: [{
+            id: "msg_1",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [],
+          }],
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(omittedItemDoneContent)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
   });
 
   it("preserves text/tool/text item order in Messages-to-Responses streams", async () => {
@@ -681,6 +716,25 @@ describe("shared conversion response codecs", () => {
       for await (const _emission of convertProtocolStream(
         chunks(encoder.encode(reasoningEvents)),
         { ...streamContext("responses", "chat"), accumulatorBytes: 64 },
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+
+    const contentIndexes = Array.from({ length: 10 }, (_, index) => responseEvent(
+      index,
+      "response.output_text.done",
+      {
+        item_id: "msg_1",
+        output_index: 0,
+        content_index: index,
+        text: "",
+      },
+    )).join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(contentIndexes)),
+        { ...streamContext("responses", "chat"), accumulatorBytes: 256 },
       )) {
         void _emission;
       }

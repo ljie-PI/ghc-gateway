@@ -442,7 +442,7 @@ async function* decodeResponsesStream(
     if (type === "response.output_text.delta") {
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
-      observedContent.set(responseContentKey(payload, "text"), "output_text");
+      observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_delta",
         key: responseContentKey(payload, "text"),
@@ -453,7 +453,7 @@ async function* decodeResponsesStream(
     if (type === "response.output_text.done") {
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
-      observedContent.set(responseContentKey(payload, "text"), "output_text");
+      observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_done",
         key: responseContentKey(payload, "text"),
@@ -464,7 +464,7 @@ async function* decodeResponsesStream(
     if (type === "response.refusal.delta") {
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
-      observedContent.set(responseContentKey(payload, "refusal"), "refusal");
+      observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_delta",
         key: responseContentKey(payload, "refusal"),
@@ -475,7 +475,7 @@ async function* decodeResponsesStream(
     if (type === "response.refusal.done") {
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
-      observedContent.set(responseContentKey(payload, "refusal"), "refusal");
+      observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_done",
         key: responseContentKey(payload, "refusal"),
@@ -519,6 +519,7 @@ async function* decodeResponsesStream(
         invalid();
       }
       observedOutputTypes.set(outputIndex, itemType);
+      observeFinalItemContent(item, outputIndex, observedContent, budget);
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
       continue;
     }
@@ -636,6 +637,54 @@ function observeOutputIndex(
   if (!indexes.has(outputIndex)) {
     budget.reserveEntry();
     indexes.add(outputIndex);
+  }
+}
+
+function observeContent(
+  content: Map<string, "output_text" | "refusal">,
+  budget: DecoderBudget,
+  key: string,
+  type: "output_text" | "refusal",
+): void {
+  const existing = content.get(key);
+  if (existing !== undefined) {
+    if (existing !== type) {
+      invalid();
+    }
+    return;
+  }
+  budget.reserveEntry();
+  content.set(key, type);
+}
+
+function observeFinalItemContent(
+  item: WireJsonObject,
+  outputIndex: number,
+  observedContent: Map<string, "output_text" | "refusal">,
+  budget: DecoderBudget,
+): void {
+  if (stringMember(item, "type") !== "message") {
+    return;
+  }
+  const content = arrayMember(item, "content");
+  if (content === undefined) {
+    invalid();
+  }
+  for (let contentIndex = 0; contentIndex < content.items.length; contentIndex += 1) {
+    const part = content.items[contentIndex];
+    if (!isWireJsonObject(part)) {
+      invalid();
+    }
+    const type = stringMember(part, "type");
+    if (type !== "output_text" && type !== "refusal") {
+      invalid();
+    }
+    observeContent(
+      observedContent,
+      budget,
+      `responses:${outputIndex}:${contentIndex}:${type === "output_text" ? "text" : "refusal"}`,
+      type,
+    );
   }
 }
 
