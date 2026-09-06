@@ -261,7 +261,7 @@ class MessagesEmitter implements StreamEmitter {
   private activeText: { readonly key: string; readonly index: number } | undefined;
   private bufferedBytes = 0;
   private bufferAfterTool = false;
-  private readonly streamedMessageKeys = new Set<string>();
+  private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly tools = new Map<string, {
     readonly callId: string;
     readonly name: string;
@@ -298,27 +298,16 @@ class MessagesEmitter implements StreamEmitter {
     if (this.bufferAfterTool) {
       return;
     }
-    if (this.activeText?.key !== key) {
-      yield* this.closeActiveText();
-      const index = this.nextIndex++;
-      this.activeText = { key, index };
-      yield this.event({
-        type: "content_block_start",
-        index,
-        content_block: { type: "text", text: "" },
-      });
-    }
-    this.streamedMessageKeys.add(key);
-    const index = this.activeText.index;
-    yield this.event({
-      type: "content_block_delta",
-      index,
-      delta: { type: "text_delta", text: delta },
-    });
+    yield* this.emitLiveText(key, delta);
+    this.recordStreamed(key, "text", delta);
   }
 
   *refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    yield* this.textDelta(`refusal:${key}`, delta);
+    if (this.bufferAfterTool) {
+      return;
+    }
+    yield* this.emitLiveText(`refusal:${key}`, delta);
+    this.recordStreamed(key, "refusal", delta);
   }
 
   *toolStart(key: string, callId: string, name: string): Iterable<ConvertedStreamEmission> {
@@ -383,10 +372,17 @@ class MessagesEmitter implements StreamEmitter {
   private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
       if (item.type === "message") {
-        if (item.key !== undefined && this.streamedMessageKeys.has(item.key)) {
-          continue;
-        }
         for (const part of item.content) {
+          const streamed = item.key === undefined
+            ? ""
+            : this.streamedContent.get(item.key)?.[part.type] ?? "";
+          if (!part.text.startsWith(streamed)) {
+            invalid();
+          }
+          const remaining = part.text.slice(streamed.length);
+          if (remaining.length === 0) {
+            continue;
+          }
           const index = this.nextIndex++;
           yield this.event({
             type: "content_block_start",
@@ -396,7 +392,7 @@ class MessagesEmitter implements StreamEmitter {
           yield this.event({
             type: "content_block_delta",
             index,
-            delta: { type: "text_delta", text: part.text },
+            delta: { type: "text_delta", text: remaining },
           });
           yield this.event({ type: "content_block_stop", index });
         }
@@ -421,6 +417,30 @@ class MessagesEmitter implements StreamEmitter {
       }
       yield this.event({ type: "content_block_stop", index });
     }
+  }
+
+  private *emitLiveText(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    if (this.activeText?.key !== key) {
+      yield* this.closeActiveText();
+      const index = this.nextIndex++;
+      this.activeText = { key, index };
+      yield this.event({
+        type: "content_block_start",
+        index,
+        content_block: { type: "text", text: "" },
+      });
+    }
+    yield this.event({
+      type: "content_block_delta",
+      index: this.activeText.index,
+      delta: { type: "text_delta", text: delta },
+    });
+  }
+
+  private recordStreamed(key: string, kind: "text" | "refusal", delta: string): void {
+    const current = this.streamedContent.get(key) ?? { text: "", refusal: "" };
+    current[kind] += delta;
+    this.streamedContent.set(key, current);
   }
 
   private event(value: Record<string, unknown>): ConvertedStreamEmission {

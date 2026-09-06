@@ -474,6 +474,20 @@ describe("shared conversion response codecs", () => {
     expect(text.indexOf("\"id\": \"call_1\"")).toBeLessThan(text.indexOf("\"text\": \"after\""));
   });
 
+  it("preserves Chat text after a buffered tool and emits refusal text once", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"before\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"after\",\"refusal\":\"no\"},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const text = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(text).toContain("\"text\": \"before\"");
+    expect(text).toContain("\"text\": \"after\"");
+    expect(text.match(/"text": "no"/gu)).toHaveLength(1);
+    expect(text.match(/event: message_stop/gu)).toHaveLength(1);
+  });
+
   it("rejects conflicting Responses tool identity snapshots", async () => {
     const source = [
       responseEvent(0, "response.output_item.added", {
