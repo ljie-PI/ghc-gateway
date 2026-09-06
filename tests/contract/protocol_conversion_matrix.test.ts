@@ -506,10 +506,10 @@ describe("protocol conversion matrix", () => {
       expect(response.status).toBe(200);
       const payload = await response.json() as { output?: unknown[] };
       expect(payload.output).toEqual(expect.arrayContaining([expect.objectContaining({
-          type: "custom_tool_call",
-          call_id: "call_custom",
-          name: "render",
-          input: "hello",
+        type: "custom_tool_call",
+        call_id: "call_custom",
+        name: "render",
+        input: "hello",
       })]));
       expect(JSON.parse(decoder.decode(harness.chatBodies[0]))).toMatchObject({ max_tokens: 7 });
       expect(decoder.decode(harness.chatBodies[0])).not.toContain("max_completion_tokens");
