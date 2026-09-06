@@ -10,6 +10,7 @@ export function createStreamResponseWriter(init: {
   readonly status?: number;
   readonly headers?: HeadersInit;
   readonly signal: AbortSignal;
+  readonly onCancel?: () => Promise<void> | void;
 }): StreamResponseWriter {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   let committed = false;
@@ -44,10 +45,11 @@ export function createStreamResponseWriter(init: {
       outstandingPulls += 1;
       wakeProducer();
     },
-    cancel(): void {
+    async cancel(): Promise<void> {
       closed = true;
       lookahead = undefined;
       wakeProducer();
+      await init.onCancel?.();
     },
   });
 

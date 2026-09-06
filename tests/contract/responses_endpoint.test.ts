@@ -387,6 +387,49 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it.each([
+    { model: "native" as const, deadline: "idle" as const },
+    { model: "chat" as const, deadline: "idle" as const },
+    { model: "native" as const, deadline: "total" as const },
+    { model: "chat" as const, deadline: "total" as const },
+  ])("keeps postcommit $model $deadline timeout terminal semantics and one usage", async ({ model, deadline }) => {
+    const usageUpdates: UsageUpdate[] = [];
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.streamIdleMs = deadline === "idle" ? 1 : 60_000;
+    runtime.timeouts.totalMs = deadline === "total" ? 20 : 60_000;
+    const { gw, close } = await responsesGateway({
+      runtime,
+      usageUpdates,
+      backend: new ScriptedCopilotBackend({
+        responsesStream: (request) => responseEventThenStall(request.signal),
+        chatStream: (request) => chatEventThenStall(request.signal),
+      }),
+    });
+    try {
+      const response = await gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
+      expect(response.status).toBe(200);
+      const reader = response.body?.getReader();
+      let delivered = "";
+      await expect((async () => {
+        for (;;) {
+          const next = await reader?.read();
+          if (next?.done !== false) {
+            return;
+          }
+          delivered += new TextDecoder().decode(next.value, { stream: true });
+        }
+      })()).rejects.toThrow();
+      expect(delivered).not.toContain("response.completed");
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
+        outcome: "timeout",
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
   async function responsesGateway(options: {
     readonly backend?: ScriptedCopilotBackend;
     readonly usageUpdates?: UsageUpdate[];
@@ -476,6 +519,22 @@ describe("Responses endpoint", () => {
 
   async function* commentThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
     yield text(": keepalive\n\n");
+    await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
+  }
+
+  async function* responseEventThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
+    yield text("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_live\",\"output\":[]}}\n\n");
+    await waitForAbort(signal);
+  }
+
+  async function* chatEventThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
+    yield text("data: {\"id\":\"chatcmpl_live\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
+    await waitForAbort(signal);
+  }
+
+  async function waitForAbort(signal: AbortSignal): Promise<void> {
     await new Promise<void>((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
     });

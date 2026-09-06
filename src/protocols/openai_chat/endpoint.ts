@@ -19,7 +19,7 @@ import {
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt, type RequestAttempt } from "../../gateway/request_attempt.js";
-import { boundedCleanup, cleanupOwnedStream } from "../../gateway/stream_execution.js";
+import { boundedCleanup, createOwnedStreamCleanup } from "../../gateway/stream_execution.js";
 import {
   duplicateMemberNames,
   isWireJsonArray,
@@ -32,7 +32,6 @@ import {
 } from "../../serialization/wire_json.js";
 import { resolveModel, type ResolvedModel } from "../model_catalog/resolver.js";
 import type { ChatRequest, ChatStreamFrame } from "../chat_completions/types.js";
-import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk } from "./wire.js";
@@ -69,8 +68,9 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentOpenAiChatFailure,
-    createAttempt: (requestId) => createRequestAttempt({
+    createAttempt: (requestId, config) => createRequestAttempt({
       requestId,
+      config,
       protocol: "openai_chat",
       abortedErrorCount: 0,
       ...(dependencies.usageRecorder === undefined ? {} : { recorder: dependencies.usageRecorder }),
@@ -151,6 +151,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         scope.config.timeouts.streamIdleMs,
         () => upstreamController.abort(new GatewayFailureError({ kind: "upstream_timeout" })),
       ), scope.config.limits.sseEventBytes);
+      const cleanupUpstream = createOwnedStreamCleanup(upstream, frames);
       let first: ChatStreamFrame;
       try {
         first = await firstFrameWithTimeout(scope, frames, scope.config.timeouts.firstByteMs, () => {
@@ -158,12 +159,12 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         });
       } catch (error: unknown) {
         upstreamController.abort();
-        await cleanupOwnedStream(upstream, frames);
+        await cleanupUpstream();
         throw error;
       }
       if (first.kind === "error") {
         upstreamController.abort();
-        await cleanupOwnedStream(upstream, frames);
+        await cleanupUpstream();
         throw upstreamStreamEventFailure();
       }
 
@@ -173,7 +174,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         requestId: scope.requestId,
         first,
         frames,
-        upstream,
+        cleanupUpstream,
         scope,
         abortUpstream,
         releaseUpstreamAbort: () => scope.signal.removeEventListener("abort", abortUpstream),
@@ -532,15 +533,8 @@ async function* withBodyTimeouts(
   } catch (error: unknown) {
     if (error instanceof GatewayFailureError && error.failure.kind === "upstream_timeout") {
       onTimeout();
-      if (iterator.return !== undefined) {
-        void boundedCleanup(iterator.return());
-      }
     }
     throw error;
-  } finally {
-    if (iterator.return !== undefined) {
-      void boundedCleanup(iterator.return());
-    }
   }
 }
 
@@ -580,7 +574,7 @@ function openAiChatStreamResponse(input: {
   readonly requestId: string;
   readonly first: ChatStreamFrame;
   readonly frames: AsyncGenerator<ChatStreamFrame>;
-  readonly upstream: UpstreamByteStream;
+  readonly cleanupUpstream: () => Promise<void>;
   readonly scope: Readonly<RequestScope>;
   readonly abortUpstream: () => void;
   readonly releaseUpstreamAbort: () => void;
@@ -596,7 +590,7 @@ function openAiChatStreamResponse(input: {
     }
     closed = true;
     input.releaseUpstreamAbort();
-    void cleanupOwnedStream(input.upstream, input.frames);
+    void input.cleanupUpstream();
   };
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller): Promise<void> {
@@ -634,8 +628,9 @@ function openAiChatStreamResponse(input: {
         }));
       }
     },
-    cancel(): void {
+    async cancel(): Promise<void> {
       closeFrames();
+      await input.cleanupUpstream();
     },
   });
   input.signal.addEventListener("abort", () => {

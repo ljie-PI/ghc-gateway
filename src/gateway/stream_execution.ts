@@ -44,10 +44,24 @@ export async function cleanupOwnedStream(
   iterator?: AsyncIterator<unknown>,
   timeoutMs = 1_000,
 ): Promise<void> {
-  await boundedCleanup(upstream.cancel(), timeoutMs);
-  if (iterator?.return !== undefined) {
-    await boundedCleanup(iterator.return(), timeoutMs);
-  }
+  await createOwnedStreamCleanup(upstream, iterator, timeoutMs)();
+}
+
+export function createOwnedStreamCleanup(
+  upstream: UpstreamByteStream,
+  iterator?: AsyncIterator<unknown>,
+  timeoutMs = 1_000,
+): () => Promise<void> {
+  let cleanup: Promise<void> | undefined;
+  return async () => {
+    cleanup ??= (async () => {
+      await boundedCleanup(upstream.cancel(), timeoutMs);
+      if (iterator?.return !== undefined) {
+        await boundedCleanup(iterator.return(), timeoutMs);
+      }
+    })();
+    await cleanup;
+  };
 }
 
 export async function* withByteIdleDeadlines(
@@ -58,6 +72,7 @@ export async function* withByteIdleDeadlines(
   idleMs: number,
 ): AsyncIterable<Uint8Array> {
   const iterator = source[Symbol.asyncIterator]();
+  const cleanup = createOwnedStreamCleanup(upstream, iterator);
   let seenBytes = false;
   try {
     for (;;) {
@@ -75,13 +90,11 @@ export async function* withByteIdleDeadlines(
     }
   } catch (error: unknown) {
     if (error instanceof GatewayFailureError && error.failure.kind === "upstream_timeout") {
-      void cleanupOwnedStream(upstream, iterator);
+      void cleanup();
     }
     throw error;
   } finally {
-    if (iterator.return !== undefined) {
-      void boundedCleanup(iterator.return());
-    }
+    void cleanup();
   }
 }
 

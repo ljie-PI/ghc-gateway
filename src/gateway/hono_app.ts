@@ -6,6 +6,7 @@ import { readWireJsonObjectBody } from "./body_reader.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "./failures.js";
 import { createRequestScope, type RequestScope } from "./request_scope.js";
 import { createRequestAttempt, type RequestAttempt } from "./request_attempt.js";
+import { boundedCleanup } from "./stream_execution.js";
 import { abortWithTimeout, armTimeout, type TimeoutScheduler } from "./timeouts.js";
 import type { WireJsonObject } from "../serialization/wire_json.js";
 import type {
@@ -49,7 +50,7 @@ export interface RouteRegistration {
 }
 
 export interface InflightRequest {
-  abortForShutdown(): void;
+  abortForShutdown(): Promise<void>;
 }
 
 export interface HonoAppDependencies {
@@ -74,6 +75,7 @@ const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
 } as const;
+const RESPONSE_BODY_CLEANUP_MS = 2_500;
 
 export function createHonoApp(
   routes: readonly RouteRegistration[],
@@ -150,11 +152,16 @@ async function handleRoute(
   const snapshot = structuredClone(dependencies.readRuntimeConfig());
   const attempt = route.createAttempt?.(requestId, snapshot) ?? createRequestAttempt({
     requestId,
+    config: snapshot,
     protocol: "openai_chat",
     abortedErrorCount: 0,
   });
   const workController = new AbortController();
   const deliveryController = new AbortController();
+  let resolveSettled: () => void = () => undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
   const abort = (failure: GatewayFailure): void => {
     const error = new GatewayFailureError(failure);
     attempt.failure(error);
@@ -169,11 +176,14 @@ async function handleRoute(
     }
   };
   const inflight: InflightRequest = {
-    abortForShutdown: () => abortDelivery({
-      kind: "aborted",
-      source: "gateway",
-      phase: "internal",
-    }),
+    abortForShutdown: async () => {
+      abortDelivery({
+        kind: "aborted",
+        source: "gateway",
+        phase: "internal",
+      });
+      await settled;
+    },
   };
   dependencies.inflight.add(inflight);
   const onAbort = (): void => abortDelivery({
@@ -181,7 +191,11 @@ async function handleRoute(
     source: "request",
     phase: "body",
   });
-  request.signal.addEventListener("abort", onAbort, { once: true });
+  if (request.signal.aborted) {
+    onAbort();
+  } else {
+    request.signal.addEventListener("abort", onAbort, { once: true });
+  }
 
   const scope = createRequestScope(
     requestId,
@@ -194,11 +208,17 @@ async function handleRoute(
   let disarmTotal: (() => void) | undefined;
   let holdUntilBody = false;
 
+  let cleaned = false;
   const cleanup = (): void => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
     disarmTotal?.();
     release?.();
     dependencies.inflight.delete(inflight);
     request.signal.removeEventListener("abort", onAbort);
+    resolveSettled();
   };
 
   try {
@@ -329,7 +349,7 @@ function attachLifecycle(
   const stream = new ReadableStream<Uint8Array>({
     async pull(streamController): Promise<void> {
       if (deliverySignal.aborted) {
-        await reader.cancel().catch(() => undefined);
+        await boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS);
         once();
         streamController.close();
         return;
@@ -352,14 +372,13 @@ function attachLifecycle(
     },
     async cancel(): Promise<void> {
       abortDelivery();
-      await reader.cancel().catch(() => undefined);
+      await boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS);
       once();
     },
   });
 
   deliverySignal.addEventListener("abort", () => {
-    void reader.cancel().catch(() => undefined);
-    once();
+    void boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS).finally(once);
   }, { once: true });
 
   return new Response(stream, {

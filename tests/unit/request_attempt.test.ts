@@ -100,6 +100,31 @@ describe("RequestAttempt", () => {
     }]);
     expect(messages).toMatchObject([{ outcome: "aborted", errorCount: 0 }]);
   });
+
+  it.each([
+    {
+      first: new GatewayFailureError({ kind: "upstream_timeout" }),
+      second: new GatewayFailureError({ kind: "aborted" }),
+      outcome: "timeout",
+    },
+    {
+      first: new GatewayFailureError({ kind: "aborted" }),
+      second: new GatewayFailureError({ kind: "upstream_timeout" }),
+      outcome: "aborted",
+    },
+  ] as const)("linearizes timeout and client-cancel races at the first claim", ({ first, second, outcome }) => {
+    const updates: UsageUpdate[] = [];
+    const attempt = createRequestAttempt({
+      requestId: "req_race",
+      protocol: "openai_responses_native",
+      recorder: { recordUsage: (update) => updates.push(update) },
+      abortedErrorCount: 1,
+    });
+    attempt.failure(first);
+    attempt.failure(second);
+    expect(updates).toHaveLength(1);
+    expect(updates).toMatchObject([{ outcome }]);
+  });
 });
 
 describe("owned stream cleanup", () => {

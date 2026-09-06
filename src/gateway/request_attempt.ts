@@ -8,6 +8,7 @@ import type {
   TelemetryRecorder,
   UsageUpdate,
 } from "../telemetry/recorder.js";
+import type { RuntimeConfigSnapshot } from "../config/schema.js";
 
 export interface AttemptUsage {
   readonly inputTokens: number;
@@ -16,6 +17,8 @@ export interface AttemptUsage {
 }
 
 export interface RequestAttempt {
+  readonly requestId: string;
+  readonly config?: Readonly<RuntimeConfigSnapshot>;
   readonly enabled: boolean;
   readonly finalized: boolean;
   readonly prepared: boolean;
@@ -36,6 +39,7 @@ export interface RequestAttempt {
 
 export interface RequestAttemptOptions {
   readonly requestId: string;
+  readonly config?: Readonly<RuntimeConfigSnapshot>;
   readonly protocol: TelemetryProtocol;
   readonly recorder?: Pick<TelemetryRecorder, "recordUsage">;
   readonly nowMs?: () => number;
@@ -85,6 +89,8 @@ export function createRequestAttempt(options: Readonly<RequestAttemptOptions>): 
   };
 
   return {
+    requestId: options.requestId,
+    ...(options.config === undefined ? {} : { config: options.config }),
     get enabled(): boolean {
       return options.recorder !== undefined;
     },

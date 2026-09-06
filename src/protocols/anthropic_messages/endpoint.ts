@@ -49,8 +49,9 @@ export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRout
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentAnthropicFailure,
-    createAttempt: (requestId) => createRequestAttempt({
+    createAttempt: (requestId, config) => createRequestAttempt({
       requestId,
+      config,
       protocol: "anthropic",
       abortedErrorCount: 1,
       ...(dependencies.usageRecorder === undefined ? {} : { recorder: dependencies.usageRecorder }),

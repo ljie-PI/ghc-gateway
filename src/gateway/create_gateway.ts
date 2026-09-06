@@ -224,10 +224,7 @@ export async function createGateway(
     } catch (error: unknown) {
       closeError ??= error;
     }
-    for (const request of inflight) {
-      request.abortForShutdown();
-    }
-    inflight.clear();
+    const requestCleanup = [...inflight].map(async (request) => await request.abortForShutdown());
     const current = listener;
     listener = undefined;
     listenPromise = undefined;
@@ -249,6 +246,7 @@ export async function createGateway(
           closeError ??= error;
         }
       }
+      await Promise.allSettled(requestCleanup);
       try {
         await dependencies.onClose?.();
       } catch (error: unknown) {

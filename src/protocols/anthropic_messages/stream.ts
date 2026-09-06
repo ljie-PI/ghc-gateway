@@ -75,15 +75,19 @@ export async function createAnthropicStreamResponse(input: {
   const writer = createStreamResponseWriter({
     signal: input.scope.signal,
     headers: { ...STREAM_HEADERS, "request-id": input.scope.requestId },
+    onCancel: async () => await closeStream(),
   });
   let closed = false;
-  const closeStream = (): void => {
+  let cleanup: Promise<void> | undefined;
+  const closeStream = async (): Promise<void> => {
     if (closed) {
+      await cleanup;
       return;
     }
     closed = true;
     input.scope.signal.removeEventListener("abort", onAbort);
-    void cleanupOwnedStream(input.upstream, frames);
+    cleanup = cleanupOwnedStream(input.upstream, frames);
+    await cleanup;
   };
   const onAbort = (): void => {
     observeTerminal(input.onTerminal, {
@@ -93,7 +97,7 @@ export async function createAnthropicStreamResponse(input: {
         phase: "stream",
       })),
     });
-    closeStream();
+    void closeStream();
   };
   void (async () => {
     try {
@@ -157,7 +161,7 @@ export async function createAnthropicStreamResponse(input: {
       });
       writer.abort();
     } finally {
-      closeStream();
+      await closeStream();
     }
   })();
   input.scope.signal.addEventListener("abort", onAbort, { once: true });

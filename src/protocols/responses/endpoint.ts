@@ -20,7 +20,7 @@ import { createRequestAttempt, type AttemptUsage, type RequestAttempt } from "..
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
   boundedCleanup,
-  cleanupOwnedStream,
+  createOwnedStreamCleanup,
   nextWithDeadline,
 } from "../../gateway/stream_execution.js";
 import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
@@ -63,8 +63,9 @@ export function createResponsesRoute(dependencies: ResponsesRouteDependencies): 
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentResponsesFailure,
-    createAttempt: (requestId) => createRequestAttempt({
+    createAttempt: (requestId, config) => createRequestAttempt({
       requestId,
+      config,
       protocol: "openai_responses_unknown",
       abortedErrorCount: 1,
       ...(dependencies.usageRecorder === undefined ? {} : { recorder: dependencies.usageRecorder }),
@@ -240,11 +241,12 @@ async function* withStreamTimeouts(
   scope: Readonly<RequestScope>,
 ): AsyncIterable<Uint8Array> {
   const iterator = source[Symbol.asyncIterator]();
+  const cleanup = createOwnedStreamCleanup(upstream, iterator);
   let seenBytes = false;
   try {
     for (;;) {
       const timeoutMs = seenBytes ? scope.config.timeouts.streamIdleMs : scope.config.timeouts.firstByteMs;
-      const next = await nextWithTimeout(iterator, timeoutMs, scope.signal, upstream);
+      const next = await nextWithTimeout(iterator, timeoutMs, scope.signal);
       if (next.done === true) {
         return;
       }
@@ -252,9 +254,7 @@ async function* withStreamTimeouts(
       yield next.value;
     }
   } finally {
-    if (iterator.return !== undefined) {
-      void boundedCleanup(iterator.return());
-    }
+    void cleanup();
   }
 }
 
@@ -262,19 +262,11 @@ async function nextWithTimeout(
   iterator: AsyncIterator<Uint8Array>,
   timeoutMs: number,
   signal: AbortSignal,
-  upstream: UpstreamByteStream,
 ): Promise<IteratorResult<Uint8Array>> {
-  try {
-    return await nextWithDeadline(iterator, timeoutMs, signal, {
-      source: "parser",
-      phase: "stream",
-    });
-  } catch (error: unknown) {
-    if (error instanceof GatewayFailureError && error.failure.kind === "upstream_timeout") {
-      void cleanupOwnedStream(upstream, iterator);
-    }
-    throw error;
-  }
+  return await nextWithDeadline(iterator, timeoutMs, signal, {
+    source: "parser",
+    phase: "stream",
+  });
 }
 
 async function streamEmissionsResponse(
@@ -329,6 +321,7 @@ async function streamBytesResponse(
   onFailure: (error: unknown) => void,
 ): Promise<Response> {
   const iterator = bytes[Symbol.asyncIterator]();
+  const cleanup = createOwnedStreamCleanup(upstream, iterator);
   let first: IteratorResult<Uint8Array>;
   try {
     first = await nextWithDeadline(
@@ -339,12 +332,13 @@ async function streamBytesResponse(
     );
   } catch (error: unknown) {
     onFailure(error);
-    await cleanupOwnedStream(upstream, iterator);
+    await cleanup();
     throw error;
   }
   const writer = createStreamResponseWriter({
     signal: scope.signal,
     headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
+    onCancel: cleanup,
   });
   const onAbort = (): void => {
     onFailure(new GatewayFailureError(failureFromSignal(scope.signal, {
@@ -356,7 +350,7 @@ async function streamBytesResponse(
   void (async () => {
     try {
       if (first.done !== true && !await writer.enqueue(first.value)) {
-        await cleanupOwnedStream(upstream, iterator);
+        await cleanup();
         return;
       }
       for (;;) {
@@ -365,7 +359,7 @@ async function streamBytesResponse(
           break;
         }
         if (!await writer.enqueue(next.value)) {
-          await cleanupOwnedStream(upstream, iterator);
+          await cleanup();
           return;
         }
       }
@@ -375,7 +369,7 @@ async function streamBytesResponse(
       writer.abort();
     } finally {
       scope.signal.removeEventListener("abort", onAbort);
-      await cleanupOwnedStream(upstream, iterator);
+      await cleanup();
     }
   })();
   return writer.response;
