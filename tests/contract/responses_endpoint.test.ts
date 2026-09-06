@@ -414,6 +414,45 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it("rejects malformed non-object bridge choices before response.created", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const { gw, close } = await responsesGateway({
+      usageUpdates,
+      backend: new ScriptedCopilotBackend({
+        chatStream: [text("data: {\"id\":\"chatcmpl_bad\",\"choices\":[null]}\n\n")],
+      }),
+    });
+    try {
+      const response = await gw.fetch(responsesRequest({ model: "chat", input: "hi", stream: true }));
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain("response.created");
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{ outcome: "upstream_error" }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("awaits bridge iterator cleanup before gateway close hooks", async () => {
+    let iteratorReturned = false;
+    let closeSawReturn = false;
+    const { gw, close } = await responsesGateway({
+      onClose: () => {
+        closeSawReturn = iteratorReturned;
+      },
+      backend: new ScriptedCopilotBackend({
+        chatStream: (request) => delayedReturnStream(request.signal, () => {
+          iteratorReturned = true;
+        }),
+      }),
+    });
+    const response = await gw.fetch(responsesRequest({ model: "chat", input: "hi", stream: true }));
+    const reader = response.body?.getReader();
+    expect((await reader?.read())?.done).toBe(false);
+    await close();
+    expect(closeSawReturn).toBe(true);
+  });
+
   it.each([
     { model: "native" as const, deadline: "idle" as const },
     { model: "chat" as const, deadline: "idle" as const },
@@ -462,6 +501,7 @@ describe("Responses endpoint", () => {
     readonly usageUpdates?: UsageUpdate[];
     readonly catalogError?: unknown;
     readonly runtime?: ReturnType<typeof defaultRuntimeConfigSnapshot>;
+    readonly onClose?: () => void;
   } = {}): Promise<{
     readonly gw: Gateway;
     readonly backend: ScriptedCopilotBackend;
@@ -516,7 +556,10 @@ describe("Responses endpoint", () => {
       ...(options.usageUpdates === undefined
         ? {}
         : { usageRecorder: { recordUsage: (update: UsageUpdate) => options.usageUpdates?.push(update) } }),
-    })], { createRequestId: () => "req_responses" });
+    })], {
+      createRequestId: () => "req_responses",
+      ...(options.onClose === undefined ? {} : { onClose: options.onClose }),
+    });
     return {
       gw,
       backend,
@@ -563,6 +606,7 @@ describe("Responses endpoint", () => {
 
   async function* emptyChatThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
     yield text("data: {\"id\":\"chatcmpl_empty\",\"choices\":[]}\n\n");
+    yield text("data: {\"id\":\"chatcmpl_empty_object\",\"choices\":[{}]}\n\n");
     await waitForAbort(signal);
   }
 
@@ -570,6 +614,32 @@ describe("Responses endpoint", () => {
     await new Promise<void>((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
     });
+  }
+
+  function delayedReturnStream(signal: AbortSignal, onReturn: () => void): AsyncIterable<Uint8Array> {
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        let first = true;
+        return {
+          next: async () => {
+            if (first) {
+              first = false;
+              return {
+                done: false,
+                value: text("data: {\"id\":\"chatcmpl_live\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
+              };
+            }
+            await waitForAbort(signal);
+            return { done: true, value: undefined };
+          },
+          return: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            onReturn();
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
   }
 
   function text(value: string): Uint8Array {

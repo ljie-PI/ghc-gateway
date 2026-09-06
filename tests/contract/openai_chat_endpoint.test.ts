@@ -645,7 +645,7 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
-  it("does not let empty Chat chunks satisfy the first semantic deadline", async () => {
+  it.each(["[]", "[{}]"])("does not let empty Chat choices %s satisfy the first semantic deadline", async (choices) => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.firstByteMs = 1;
     runtime.timeouts.streamIdleMs = 60_000;
@@ -653,7 +653,7 @@ describe("OpenAI Chat endpoint", () => {
       chatStream: {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
-        bytes: hangingStreamAfter("data: {\"choices\":[]}\n\n"),
+        bytes: hangingStreamAfter(`data: {"choices":${choices}}\n\n`),
         cancel: async () => undefined,
       },
     });

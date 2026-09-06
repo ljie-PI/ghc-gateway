@@ -508,7 +508,7 @@ function openAiChatStreamResponse(input: {
   const stream = new ReadableStream<Uint8Array>({
     async pull(controller): Promise<void> {
       if (input.signal.aborted) {
-        closeFrames();
+        await closeFrames();
         controller.close();
         return;
       }

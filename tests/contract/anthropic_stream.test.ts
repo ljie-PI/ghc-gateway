@@ -274,6 +274,7 @@ async function* contentThenStall(): AsyncIterable<Uint8Array> {
 
 async function* emptyChunkThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
   yield sse({ id: "chunk_empty", choices: [] });
+  yield sse({ id: "chunk_empty_object", choices: [{}] });
   await new Promise<void>((_resolve, reject) => {
     signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
   });

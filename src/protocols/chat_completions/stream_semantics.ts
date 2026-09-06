@@ -17,7 +17,24 @@ export function isSemanticChatChunk(chunk: Readonly<ChatChunk>): boolean {
     return false;
   }
   const choices = memberValues(chunk.payload, "choices")[0];
-  return isWireJsonArray(choices) && choices.items.length > 0;
+  if (!isWireJsonArray(choices)) {
+    return false;
+  }
+  return choices.items.some((choice) => {
+    if (!isWireJsonObject(choice)) {
+      throw new GatewayFailureError({
+        kind: "invalid_upstream_response",
+        source: "parser",
+        phase: "stream",
+      });
+    }
+    const delta = memberValues(choice, "delta")[0];
+    const message = memberValues(choice, "message")[0];
+    const finishReason = memberValues(choice, "finish_reason")[0];
+    return (isWireJsonObject(delta) && delta.members.length > 0)
+      || (isWireJsonObject(message) && message.members.length > 0)
+      || (finishReason !== undefined && finishReason !== null);
+  });
 }
 
 export async function readThroughFirstSemanticChatFrame(

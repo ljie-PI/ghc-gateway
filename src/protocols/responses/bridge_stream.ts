@@ -149,7 +149,7 @@ export async function* convertChatStream(
     yield* finalizeStream(state);
   } finally {
     if (iterator.return !== undefined) {
-      void boundedCleanup(iterator.return());
+      await boundedCleanup(iterator.return());
     }
   }
 }
