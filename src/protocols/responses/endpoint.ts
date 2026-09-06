@@ -833,6 +833,7 @@ function validateExtendedResponsesRequest(
       phase: "convert",
     });
   }
+  expectedChatTools += countExtendedDiscoveredTools(memberValue(body, "input"));
   const toolContext = buildRequestToolContext(decodeResponsesRequest(body));
   if (toolContext.chatTools.length !== expectedChatTools) {
     throw new GatewayFailureError({
@@ -950,7 +951,8 @@ function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
       const callId = memberValue(item, "call_id");
       if (
         typeof callId !== "string"
-        || memberValue(item, "output") === undefined
+        || (type === "custom_tool_call_output" && memberValue(item, "output") === undefined)
+        || (type === "tool_search_output" && !isWireJsonArray(memberValue(item, "tools")))
         || !calls.delete(callId)
       ) {
         throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
@@ -963,6 +965,59 @@ function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
   return { kind: "array", items: ordinary };
+}
+
+function countExtendedDiscoveredTools(input: WireJson | undefined): number {
+  if (!isWireJsonArray(input)) {
+    return 0;
+  }
+  let count = 0;
+  for (const item of input.items) {
+    if (!isWireJsonObject(item) || memberValue(item, "type") !== "tool_search_output") {
+      continue;
+    }
+    const tools = memberValue(item, "tools");
+    if (!isWireJsonArray(tools)) {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    }
+    for (const tool of tools.items) {
+      if (!isWireJsonObject(tool)) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+      }
+      const type = memberValue(tool, "type");
+      if (type === "function") {
+        validateExtendedFunctionTool(tool);
+        count += 1;
+      } else if (type === "custom") {
+        assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
+        assertExtendedToolName(tool);
+        count += 1;
+      } else if (type === "namespace") {
+        const children = memberValue(tool, "tools") ?? memberValue(tool, "children");
+        if (!isWireJsonArray(children) || children.items.length === 0) {
+          throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+        }
+        for (const child of children.items) {
+          if (!isWireJsonObject(child) || memberValue(child, "type") !== "function") {
+            throw new GatewayFailureError({
+              kind: "unsupported_semantics",
+              source: "converter",
+              phase: "convert",
+            });
+          }
+          validateExtendedFunctionTool(child);
+          count += 1;
+        }
+      } else {
+        throw new GatewayFailureError({
+          kind: "unsupported_semantics",
+          source: "converter",
+          phase: "convert",
+        });
+      }
+    }
+  }
+  return count;
 }
 
 function assertExtendedToolKeys(tool: WireJsonObject, allowed: ReadonlySet<string>): void {
@@ -1009,12 +1064,13 @@ function validateExtendedFunctionTool(tool: WireJsonObject): WireJsonObject {
 }
 
 function rejectExtendedInstructionReordering(input: WireJson | undefined): void {
-  if (!isWireJsonArray(input)) {
-    return;
-  }
+  const items = isWireJsonArray(input) ? input.items : isWireJsonObject(input) ? [input] : [];
   let ordinarySeen = false;
-  for (const item of input.items) {
-    if (!isWireJsonObject(item) || memberValue(item, "type") !== "message") {
+  for (const item of items) {
+    if (
+      !isWireJsonObject(item)
+      || (memberValue(item, "type") !== undefined && memberValue(item, "type") !== "message")
+    ) {
       ordinarySeen = true;
       continue;
     }

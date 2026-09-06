@@ -209,6 +209,17 @@ describe("protocol conversion matrix", () => {
       input: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "unsafe" }] }],
       tools: [{ type: "custom", name: "render", format: { type: "text" } }],
     },
+    {
+      input: { role: "developer", content: [{ type: "input_text", text: "unsafe" }] },
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+    },
+    {
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "first" }] },
+        { role: "system", content: [{ type: "input_text", text: "late" }] },
+      ],
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+    },
   ])("rejects lossy extended tool variants before inference", async (request) => {
     const harness = await matrixGateway();
     try {
@@ -219,6 +230,47 @@ describe("protocol conversion matrix", () => {
       expect([400, 422]).toContain(response.status);
       await response.text();
       expect(harness.backend.captured).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("preserves tool-search discovery declarations in a buffered round trip", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: [
+          {
+            type: "tool_search_call",
+            call_id: "call_search",
+            arguments: { query: "lookup" },
+          },
+          {
+            type: "tool_search_output",
+            call_id: "call_search",
+            tools: [{
+              type: "function",
+              name: "lookup",
+              parameters: { type: "object" },
+            }],
+          },
+          {
+            type: "function_call",
+            call_id: "call_lookup",
+            name: "lookup",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_lookup",
+            output: "done",
+          },
+        ],
+        tools: [{ type: "tool_search" }],
+      }));
+      expect(response.status).toBe(200);
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
     } finally {
       await harness.close();
     }
