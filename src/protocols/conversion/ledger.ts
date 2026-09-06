@@ -26,6 +26,10 @@ export class SemanticItemLedger {
 
   constructor(private readonly maxBytes: number) {}
 
+  startMessage(key: string): void {
+    this.message(key);
+  }
+
   appendText(key: string, delta: string): void {
     this.reserve(delta);
     this.message(key).text += delta;

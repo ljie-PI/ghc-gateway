@@ -65,6 +65,10 @@ export async function* convertProtocolStream(
       yield { kind: "first_semantic" };
       yield* emitter.start();
     }
+    if (event.kind === "message_start") {
+      ledger.startMessage(event.key);
+      continue;
+    }
     if (event.kind === "text_delta") {
       ledger.appendText(event.key, event.delta);
       yield* emitter.textDelta(event.key, event.delta);

@@ -52,6 +52,10 @@ async function* decodeChatStream(
   let nextToolToStart = 0;
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
   let observedUsage = emptyUsage();
+  let chatText = "";
+  let chatRefusal = "";
+  let toolObserved = false;
+  const pendingPostTool: SemanticStreamEvent[] = [];
   const startReadyTools = function* (): Iterable<SemanticStreamEvent> {
     for (;;) {
       const tool = tools.get(nextToolToStart);
@@ -131,11 +135,25 @@ async function* decodeChatStream(
     if (delta !== undefined) {
       const content = stringMember(delta, "content");
       if (content !== undefined && content.length > 0) {
-        yield { kind: "text_delta", key: "chat:message", delta: content };
+        budget.reserve(content);
+        chatText += content;
+        const event = { kind: "text_delta", key: toolObserved ? "chat:message:1" : "chat:message:0", delta: content } as const;
+        if (toolObserved) {
+          pendingPostTool.push(event);
+        } else {
+          yield event;
+        }
       }
       const refusal = stringMember(delta, "refusal");
       if (refusal !== undefined && refusal.length > 0) {
-        yield { kind: "refusal_delta", key: "chat:message", delta: refusal };
+        budget.reserve(refusal);
+        chatRefusal += refusal;
+        const event = { kind: "refusal_delta", key: toolObserved ? "chat:message:1" : "chat:message:0", delta: refusal } as const;
+        if (toolObserved) {
+          pendingPostTool.push(event);
+        } else {
+          yield event;
+        }
       }
       const calls = arrayMember(delta, "tool_calls");
       if (calls !== undefined) {
@@ -191,6 +209,9 @@ async function* decodeChatStream(
           }
         }
         yield* startReadyTools();
+        if (calls.items.length > 0) {
+          toolObserved = true;
+        }
       }
     }
     const finalMessage = objectMember(choice, "message");
@@ -200,14 +221,38 @@ async function* decodeChatStream(
         invalid();
       }
       if (typeof contentValue === "string") {
-        yield { kind: "text_done", key: "chat:message", text: contentValue };
+        if (!contentValue.startsWith(chatText)) {
+          invalid();
+        }
+        const suffix = contentValue.slice(chatText.length);
+        if (suffix.length > 0) {
+          budget.reserve(suffix);
+          chatText = contentValue;
+          pendingPostTool.push({
+            kind: "text_delta",
+            key: toolObserved ? "chat:message:1" : "chat:message:0",
+            delta: suffix,
+          });
+        }
       }
       const refusalValue = singleMember(finalMessage, "refusal");
       if (refusalValue !== undefined && refusalValue !== null && typeof refusalValue !== "string") {
         invalid();
       }
       if (typeof refusalValue === "string") {
-        yield { kind: "refusal_done", key: "chat:message", refusal: refusalValue };
+        if (!refusalValue.startsWith(chatRefusal)) {
+          invalid();
+        }
+        const suffix = refusalValue.slice(chatRefusal.length);
+        if (suffix.length > 0) {
+          budget.reserve(suffix);
+          chatRefusal = refusalValue;
+          pendingPostTool.push({
+            kind: "refusal_delta",
+            key: toolObserved ? "chat:message:1" : "chat:message:0",
+            delta: suffix,
+          });
+        }
       }
       const calls = arrayMember(finalMessage, "tool_calls");
       if (calls !== undefined) {
@@ -270,6 +315,9 @@ async function* decodeChatStream(
     if (finish !== undefined && finish !== null) {
       pendingFinish = chatFinish(finish);
       yield* startReadyTools();
+      for (const event of pendingPostTool.splice(0)) {
+        yield event;
+      }
     }
   }
   invalidTruncated();
@@ -495,6 +543,9 @@ async function* decodeResponsesStream(
         invalid();
       }
       observedOutputTypes.set(outputIndex, itemType);
+      if (itemType === "message") {
+        yield { kind: "message_start", key: `responses:${outputIndex}:message` };
+      }
       if (itemType === "function_call") {
         const key = `responses:${outputIndex}`;
         const callId = stringMember(item, "call_id");
@@ -534,7 +585,7 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_delta",
-        key: responseContentKey(payload, "text"),
+        key: responseStreamMessageKey(payload),
         delta: stringMember(payload, "delta") ?? "",
       };
       continue;
@@ -545,7 +596,7 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_done",
-        key: responseContentKey(payload, "text"),
+        key: responseStreamMessageKey(payload),
         text: stringMember(payload, "text") ?? "",
       };
       continue;
@@ -556,7 +607,7 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_delta",
-        key: responseContentKey(payload, "refusal"),
+        key: responseStreamMessageKey(payload),
         delta: stringMember(payload, "delta") ?? "",
       };
       continue;
@@ -567,7 +618,7 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_done",
-        key: responseContentKey(payload, "refusal"),
+        key: responseStreamMessageKey(payload),
         refusal: stringMember(payload, "refusal") ?? "",
       };
       continue;
@@ -838,7 +889,7 @@ function* finalItemEvents(
         }
         yield {
           kind: "text_done",
-          key: `responses:${outputIndex}:${contentIndex}:text`,
+          key: `responses:${outputIndex}:message`,
           text,
         };
       } else if (partType === "refusal") {
@@ -848,7 +899,7 @@ function* finalItemEvents(
         }
         yield {
           kind: "refusal_done",
-          key: `responses:${outputIndex}:${contentIndex}:refusal`,
+          key: `responses:${outputIndex}:message`,
           refusal,
         };
       } else {
@@ -1007,6 +1058,10 @@ function responseContentKey(object: WireJsonObject, kind: "text" | "refusal"): s
     invalid();
   }
   return `responses:${outputIndex}:${contentIndex}:${kind}`;
+}
+
+function responseStreamMessageKey(object: WireJsonObject): string {
+  return `responses:${requiredOutputIndex(object)}:message`;
 }
 
 function singleMember(object: WireJsonObject, key: string): WireJson | undefined {
