@@ -255,6 +255,18 @@ describe("Responses bridge request conversion", () => {
     expect(json(converted)).not.toHaveProperty("prompt_cache_key");
   });
 
+  it("classifies a missing Chat token dialect as unavailable capability", () => {
+    const request = requestFromJson("{\"model\":\"chat\",\"input\":\"hi\",\"max_output_tokens\":9}");
+    expect(() => convertResponsesRequest(request, {
+      resolvedModel: "chat",
+      toolContext: buildRequestToolContext(request),
+      reasoningConfig: null,
+      chatOutputTokenField: null,
+    })).toThrow(expect.objectContaining({
+      failure: expect.objectContaining({ kind: "unsupported_semantics" }),
+    }));
+  });
+
   function requestFromJson(source: string) {
     const parsed = parseWireJson(new TextEncoder().encode(source), LIMITS);
     expect(isWireJsonObject(parsed)).toBe(true);

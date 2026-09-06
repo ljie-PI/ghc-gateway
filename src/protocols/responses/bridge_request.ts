@@ -1,5 +1,8 @@
 import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
-import type { ChatOutputTokenField } from "../../copilot/model_capabilities.js";
+import {
+  ModelCapabilityUnavailableError,
+  type ChatOutputTokenField,
+} from "../../copilot/model_capabilities.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import {
   isWireJsonArray,
@@ -155,7 +158,10 @@ function copyTopLevel(
   const maxOutputTokens = memberValues(source, "max_output_tokens")[0];
   if (maxOutputTokens !== undefined) {
     if (chatOutputTokenField === null) {
-      throw new GatewayFailureError({ kind: "invalid_request" });
+      throw new GatewayFailureError({
+        kind: "unsupported_semantics",
+        cause: new ModelCapabilityUnavailableError(),
+      });
     }
     members.push([chatOutputTokenField, maxOutputTokens]);
   }

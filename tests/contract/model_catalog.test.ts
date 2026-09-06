@@ -106,7 +106,7 @@ describe("CAPI parse and cache", () => {
     const catalog = new CopilotModelCatalog(source);
     const snapshot = await catalog.get("github.com/1", new AbortController().signal);
     expect(snapshot.models[0]?.capabilities).toMatchObject({
-      protocols: { state: "value", value: ["responses", "chat"] },
+      protocols: { state: "value", value: ["chat", "responses"] },
       maxInputTokens: { state: "value", value: 128_000 },
       maxOutputTokens: { state: "value", value: 64_000 },
       chatOutputTokenField: { state: "value", value: "max_completion_tokens" },
