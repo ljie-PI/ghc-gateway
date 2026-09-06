@@ -72,7 +72,7 @@ export function managedResponseId(
   customLlmProvider: string | undefined,
   modelId: string | undefined,
 ): string {
-  if (id.length === 0 || isManagedResponseId(id)) {
+  if (id.length === 0 || isGatewayManagedResponseId(id)) {
     return id;
   }
   const provider = customLlmProvider ?? "None";
@@ -396,7 +396,7 @@ function parseJsonString(value: string): WireJson | undefined {
   }
 }
 
-function isManagedResponseId(id: string): boolean {
+export function isGatewayManagedResponseId(id: string): boolean {
   if (!id.startsWith("resp_")) {
     return false;
   }

@@ -76,10 +76,10 @@ describe("legacy better-sqlite3 database compatibility", () => {
           checksum,
         }));
         expect(MIGRATION_MANIFEST
-          .filter(({ version }) => version !== 21 && version !== 40)
+          .filter(({ version }) => version !== 21 && version !== 40 && version !== 41)
           .map(({ version, name, checksum }) => ({ version, name, checksum })))
           .toEqual(legacyMigrations);
-        expect(MIGRATION_MANIFEST.map(({ version }) => version)).toEqual([1, 10, 20, 21, 30, 40]);
+        expect(MIGRATION_MANIFEST.map(({ version }) => version)).toEqual([1, 10, 20, 21, 30, 40, 41]);
         for (const [table, rows] of Object.entries(expected)) {
           expect(table).toMatch(/^[a-z_]+$/u);
           if (table === "schema_migrations") {
@@ -180,30 +180,21 @@ describe("legacy better-sqlite3 database compatibility", () => {
     });
   });
 
-  it("restores legacy Responses calls and preserves atomic history changes across restart", async () => {
+  it("preserves legacy Responses calls as unowned and persists new scoped history", async () => {
     await withFixtureCopy("history", async (filename) => {
       let database = openFixture(filename);
       const signal = new AbortController().signal;
       try {
         const history = new SqliteResponsesHistory(database, { nowMs });
         const initialInspection = {
-          revision: 2, count: 2, oldestAt: 1_700_000_000_000, newestAt: 1_700_000_000_000,
-          ttlDays: 7, maxResponses: 512,
+          revision: 2, count: 2, receiptCount: 0, legacyCount: 2,
+          untrackedContinuationBlocked: false,
+          oldestAt: 1_700_000_000_000, newestAt: 1_700_000_000_000,
+          ttlDays: 7, maxResponses: 512, maxReceipts: 2048,
         };
         expect(history.inspect()).toEqual(initialInspection);
-        const outputs = [
-          { type: "function_call_output", call_id: "call_synthetic_function", output: "synthetic" },
-          { type: "custom_tool_call_output", call_id: "call_synthetic_custom", output: "synthetic" },
-          { type: "tool_search_output", call_id: "call_synthetic_search", output: [] },
-        ];
-        const request = historyRequest(outputs, "resp_synthetic_first");
-        const expectedInput = wire([
-          { type: "function_call", call_id: "call_synthetic_function", name: "synthetic_echo", arguments: "{}" },
-          { type: "custom_tool_call", call_id: "call_synthetic_custom", name: "synthetic_tool", input: "synthetic-only" },
-          { type: "tool_search_call", call_id: "call_synthetic_search", arguments: {}, status: "completed" },
-          ...outputs,
-        ]);
-        expect((await history.enrich(request, signal)).input).toEqual(expectedInput);
+        await expect(history.resolve("resp_synthetic_first", "github.com/1", signal))
+          .resolves.toEqual({ kind: "legacy_unowned" });
         expect(history.inspect()).toEqual(initialInspection);
 
         const rollback = new Error("synthetic history rollback");
@@ -212,31 +203,59 @@ describe("legacy better-sqlite3 database compatibility", () => {
           throw rollback;
         })()).toThrow(rollback);
         expect(history.inspect()).toEqual(initialInspection);
-        expect((await history.enrich(request, signal)).input).toEqual(expectedInput);
+        await expect(history.resolve("resp_synthetic_first", "github.com/1", signal))
+          .resolves.toEqual({ kind: "legacy_unowned" });
 
         const newCall = { type: "function_call", call_id: "call_added", name: "synthetic_added", arguments: "{}" };
-        await history.record({ responseId: "resp_added", output: wire([newCall]) }, signal);
-        expect(history.inspect()).toEqual({ ...initialInspection, revision: 3, count: 3 });
+        const ownership = {
+          accountId: "github.com/1",
+          modelId: "gpt",
+          upstreamOrigin: "https://api.githubcopilot.com",
+          owner: "converted",
+          upstreamProtocol: "chat",
+          conversionVersion: "responses-chat-v1",
+        } as const;
+        await history.recordCheckpoint(
+          { responseId: "resp_added", output: wire([newCall]) },
+          ownership,
+          "complete",
+          signal,
+        );
+        expect(history.inspect()).toEqual({
+          ...initialInspection, revision: 3, count: 3, receiptCount: 1,
+        });
         expect(() => history.clear(2)).toThrow(ResponsesHistoryAdminError);
         closeDatabase(database);
         database = openFixture(filename);
         const reopened = new SqliteResponsesHistory(database, { nowMs });
-        expect(reopened.inspect()).toEqual({ ...initialInspection, revision: 3, count: 3 });
-        expect((await reopened.enrich(request, signal)).input).toEqual(expectedInput);
+        expect(reopened.inspect()).toEqual({
+          ...initialInspection, revision: 3, count: 3, receiptCount: 1,
+        });
+        await expect(reopened.resolve("resp_synthetic_first", "github.com/1", signal))
+          .resolves.toEqual({ kind: "legacy_unowned" });
         const newOutput = { type: "function_call_output", call_id: "call_added", output: "synthetic" };
-        expect((await reopened.enrich(historyRequest([newOutput], "resp_added"), signal)).input)
+        const resolution = await reopened.resolve("resp_added", "github.com/1", signal);
+        if (resolution.kind !== "owned") {
+          throw new Error("expected owned scoped response");
+        }
+        expect((await reopened.enrich(historyRequest([newOutput], "resp_added"), resolution.receipt, signal)).input)
           .toEqual(wire([newCall, newOutput]));
 
         expect(reopened.clear(3)).toEqual({
-          ...initialInspection, revision: 4, count: 0, oldestAt: null, newestAt: null,
+          ...initialInspection, revision: 4, count: 0, receiptCount: 0, legacyCount: 0,
+          untrackedContinuationBlocked: false,
+          oldestAt: null, newestAt: null,
         });
         closeDatabase(database);
         database = openFixture(filename);
         const cleared = new SqliteResponsesHistory(database, { nowMs });
         expect(cleared.inspect()).toEqual({
-          ...initialInspection, revision: 4, count: 0, oldestAt: null, newestAt: null,
+          ...initialInspection, revision: 4, count: 0, receiptCount: 0, legacyCount: 0,
+          untrackedContinuationBlocked: false,
+          oldestAt: null, newestAt: null,
         });
-        expect((await cleared.enrich(request, signal)).input).toEqual(wire(outputs));
+        await expect(cleared.resolve("resp_synthetic_first", "github.com/1", signal))
+          .resolves.toEqual({ kind: "none" });
       } finally {
         closeDatabase(database);
       }

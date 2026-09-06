@@ -16,7 +16,7 @@ import {
 import type { ResponsesHistory } from "./history.js";
 import type { ChatBridgePlan } from "./planner.js";
 import { buildRequestToolContext, chatNameForSource, type RequestToolContext } from "./tool_context.js";
-import type { ResponsesRequest } from "./dto.js";
+import { consumeResponsesPreviousResponseId, type ResponsesRequest } from "./dto.js";
 
 export interface ReasoningConfig {
   readonly supportsThinking?: boolean;
@@ -59,8 +59,13 @@ export async function prepareChatBridgeRequest(
   signal: AbortSignal,
 ): Promise<PreparedChatBridgeRequest> {
   const explicitPromptCacheKey = stringMember(plan.originalRequest.body, "prompt_cache_key");
-  const enriched = await history.enrich(plan.originalRequest, signal);
-  const modeled = applyResolvedModel(enriched, plan.resolvedModel.upstreamModel);
+  const enriched = plan.continuation === undefined
+    ? plan.originalRequest
+    : await history.enrich(plan.originalRequest, plan.continuation, signal);
+  const modeled = applyResolvedModel(
+    consumeResponsesPreviousResponseId(enriched),
+    plan.resolvedModel.upstreamModel,
+  );
   const toolContext = buildRequestToolContext(modeled);
   return {
     toolContext,

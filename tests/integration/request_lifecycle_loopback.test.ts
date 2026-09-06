@@ -159,10 +159,14 @@ async function responsesGateway(options: {
 }
 
 const EMPTY_HISTORY: ResponsesHistory = {
+  async resolve() {
+    return { kind: "none" };
+  },
   async enrich(request) {
     return request;
   },
-  async record() {},
+  async recordReceipt() {},
+  async recordCheckpoint() {},
 };
 
 function responsesRequest(): Request {

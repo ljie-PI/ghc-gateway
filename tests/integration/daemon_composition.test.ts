@@ -24,6 +24,7 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
+import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 
@@ -296,6 +297,7 @@ function compositionHarness(): CompositionHarness {
       embedMigration(telemetryMigration),
       embedMigration(historyMigration),
       embedMigration(modelCapabilitiesMigration),
+      embedMigration(continuationMigration),
     ],
     nowMs: () => NOW,
   });

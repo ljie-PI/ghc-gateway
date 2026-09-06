@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import { applyMigrations, embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
 import {
+  ResponsesContinuationError,
   SqliteResponsesHistory,
+  type ResponsesContinuationOwnership,
   type ResponsesHistoryRecord,
+  type ResponsesRouteReceipt,
 } from "../../src/protocols/responses/history.js";
 import {
   isWireJsonArray,
@@ -18,15 +22,12 @@ import {
 } from "../../src/serialization/wire_json.js";
 
 const LIMITS = { maxBytes: 8192, maxDepth: 64 } as const;
+const SIGNAL = new AbortController().signal;
 
 function objectFromJson(json: string): WireJsonObject {
   const value = parseWireJson(new TextEncoder().encode(json), LIMITS);
   expect(isWireJsonObject(value)).toBe(true);
   return value as WireJsonObject;
-}
-
-function callRecord(responseId: string, outputJson: string): ResponsesHistoryRecord {
-  return { responseId, output: outputFromJson(outputJson) };
 }
 
 function outputFromJson(json: string): readonly WireJson[] {
@@ -35,240 +36,229 @@ function outputFromJson(json: string): readonly WireJson[] {
   return (value as { items: readonly WireJson[] }).items;
 }
 
-function history(nowMs = 1_700_000_000_000): {
-  readonly database: Database;
-  readonly store: SqliteResponsesHistory;
-} {
+function callRecord(responseId: string, callId: string, name: string): ResponsesHistoryRecord {
+  return {
+    responseId,
+    output: outputFromJson(
+      `[{"type":"function_call","call_id":"${callId}","name":"${name}","arguments":"{}"}]`,
+    ),
+  };
+}
+
+function ownership(
+  accountId: string,
+  modelId = "gpt",
+  protocol: "chat" | "messages" = "chat",
+): ResponsesContinuationOwnership {
+  return {
+    accountId,
+    modelId,
+    upstreamOrigin: "https://api.githubcopilot.com",
+    owner: "converted",
+    upstreamProtocol: protocol,
+    conversionVersion: protocol === "chat" ? "responses-chat-v1" : "responses-messages-v1",
+  };
+}
+
+function nativeOwnership(accountId: string, modelId = "gpt"): ResponsesContinuationOwnership {
+  return {
+    accountId,
+    modelId,
+    upstreamOrigin: "https://api.githubcopilot.com",
+    owner: "native",
+    upstreamProtocol: "responses",
+    conversionVersion: null,
+  };
+}
+
+function history(): { readonly database: Database; readonly store: SqliteResponsesHistory } {
   const database = new Database(":memory:");
   applyMigrations(database, [
     embedMigration(runtimeConfigMigration),
     embedMigration(responsesHistoryMigration),
-  ], () => nowMs);
-  return {
-    database,
-    store: new SqliteResponsesHistory(database, { nowMs: () => nowMs }),
-  };
+    embedMigration(responsesContinuationMigration),
+  ], () => 1_700_000_000_000);
+  return { database, store: new SqliteResponsesHistory(database, { nowMs: () => 1_700_000_000_000 }) };
 }
 
-function typesFromInput(input: WireJson | undefined): readonly string[] {
-  expect(input).toBeDefined();
-  if (isWireJsonObject(input)) {
-    return [String(memberValues(input, "type")[0])];
+async function owned(
+  store: SqliteResponsesHistory,
+  responseId: string,
+  accountId: string,
+): Promise<ResponsesRouteReceipt> {
+  const resolution = await store.resolve(responseId, accountId, SIGNAL);
+  expect(resolution.kind).toBe("owned");
+  if (resolution.kind !== "owned") {
+    throw new Error("expected owned receipt");
   }
-  expect(isWireJsonArray(input)).toBe(true);
-  return (input as { items: readonly WireJson[] }).items.map((item) => {
-    expect(isWireJsonObject(item)).toBe(true);
-    return String(memberValues(item as WireJsonObject, "type")[0]);
-  });
+  return resolution.receipt;
 }
 
-function firstCall(input: WireJson | undefined): WireJsonObject {
-  expect(isWireJsonArray(input)).toBe(true);
-  const item = (input as { items: readonly WireJson[] }).items.find((candidate) => {
-    return isWireJsonObject(candidate) && memberValues(candidate, "type")[0] === "function_call";
-  });
-  expect(isWireJsonObject(item)).toBe(true);
-  return item as WireJsonObject;
+function restoredName(input: WireJson | undefined): string | undefined {
+  if (!isWireJsonArray(input)) {
+    return undefined;
+  }
+  const item = input.items.find((candidate) => isWireJsonObject(candidate)
+    && memberValues(candidate, "type")[0] === "function_call");
+  return isWireJsonObject(item) ? memberValues(item, "name")[0] as string | undefined : undefined;
 }
 
-describe("Responses history enrichment", () => {
-  it("uses previous_response_id first and restores ordered calls before outputs", async () => {
+describe("Responses continuation history", () => {
+  it("isolates identical response and call IDs by bound account", async () => {
     const { database, store } = history();
     try {
-      await store.record(callRecord("resp_previous", [
-        "[",
-        "{\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"first\",\"arguments\":\"{}\"},",
-        "{\"type\":\"custom_tool_call\",\"call_id\":\"call_b\",\"name\":\"second\",\"input\":\"payload\"}",
-        "]",
-      ].join("")), new AbortController().signal);
-      await store.record(callRecord("resp_other", [
-        "[{\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"wrong\",\"arguments\":\"{}\"}]",
-      ].join("")), new AbortController().signal);
+      await store.recordCheckpoint(callRecord("resp_same", "call_same", "account_one"), ownership("github.com/1"), "complete", SIGNAL);
+      await store.recordCheckpoint(callRecord("resp_same", "call_same", "account_two"), ownership("github.com/2"), "complete", SIGNAL);
 
-      const request = decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",",
-        "\"previous_response_id\":\"resp_previous\",",
-        "\"input\":[",
-        "{\"type\":\"function_call_output\",\"call_id\":\"call_a\",\"output\":\"one\"},",
-        "{\"type\":\"custom_tool_call_output\",\"call_id\":\"call_b\",\"output\":\"two\"}",
-        "]}",
-      ].join("")));
-      const enriched = await store.enrich(request, new AbortController().signal);
+      const request = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"previous_response_id\":\"resp_same\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call_same\",\"output\":\"ok\"}}",
+      ));
+      const one = await store.enrich(request, await owned(store, "resp_same", "github.com/1"), SIGNAL);
+      const two = await store.enrich(request, await owned(store, "resp_same", "github.com/2"), SIGNAL);
 
-      expect(typesFromInput(enriched.input)).toEqual([
+      expect(restoredName(one.input)).toBe("account_one");
+      expect(restoredName(two.input)).toBe("account_two");
+      expect(store.inspect()).toMatchObject({ count: 2, receiptCount: 2, legacyCount: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("never falls back to a global call ID after scoped lookup", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint(callRecord("resp_one", "call_shared", "one"), ownership("github.com/1"), "complete", SIGNAL);
+      await store.recordCheckpoint(callRecord("resp_two", "call_other", "two"), ownership("github.com/1"), "complete", SIGNAL);
+      const request = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"previous_response_id\":\"resp_two\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call_shared\",\"output\":\"ok\"}}",
+      ));
+
+      await expect(store.enrich(request, await owned(store, "resp_two", "github.com/1"), SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects model, protocol, and owner reuse of an existing scoped response ID", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordReceipt({
+        ...ownership("github.com/1", "model-a"),
+        responseId: "resp_claimed",
+        checkpointState: "route_only",
+      }, SIGNAL);
+      await expect(store.recordReceipt({
+        ...ownership("github.com/1", "model-b"),
+        responseId: "resp_claimed",
+        checkpointState: "route_only",
+      }, SIGNAL)).rejects.toBeInstanceOf(ResponsesContinuationError);
+      await expect(store.recordReceipt({
+        ...ownership("github.com/1", "model-a", "messages"),
+        responseId: "resp_claimed",
+        checkpointState: "route_only",
+      }, SIGNAL)).rejects.toMatchObject({ code: "ownership_conflict" });
+      await expect(store.recordReceipt({
+        ...nativeOwnership("github.com/1", "model-a"),
+        responseId: "resp_claimed",
+        checkpointState: "complete",
+      }, SIGNAL)).rejects.toMatchObject({ code: "ownership_conflict" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("uses a first-writer claim under concurrent same-ID records", async () => {
+    const { database, store } = history();
+    try {
+      const results = await Promise.allSettled([
+        store.recordReceipt({
+          ...ownership("github.com/1", "model-a"),
+          responseId: "resp_race",
+          checkpointState: "route_only",
+        }, SIGNAL),
+        store.recordReceipt({
+          ...ownership("github.com/1", "model-b"),
+          responseId: "resp_race",
+          checkpointState: "route_only",
+        }, SIGNAL),
+      ]);
+      expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+      expect((await owned(store, "resp_race", "github.com/1")).modelId).toBe("model-a");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps native receipts content-free and refuses local enrichment", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordReceipt({
+        ...nativeOwnership("github.com/1"),
+        responseId: "resp_native",
+        checkpointState: "complete",
+      }, SIGNAL);
+      const receipt = await owned(store, "resp_native", "github.com/1");
+      const request = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"previous_response_id\":\"resp_native\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call\",\"output\":\"ok\"}}",
+      ));
+      await expect(store.enrich(request, receipt, SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
+      expect(store.inspect()).toMatchObject({ count: 0, receiptCount: 1 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("supports a future Messages-owned minimal tool checkpoint without replay claims", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint(
+        callRecord("resp_messages", "call_m", "lookup"),
+        ownership("github.com/1", "claude", "messages"),
+        "partial",
+        SIGNAL,
+      );
+      const request = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"claude\",\"previous_response_id\":\"resp_messages\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call_m\",\"output\":\"ok\"}}",
+      ));
+      const enriched = await store.enrich(
+        request,
+        await owned(store, "resp_messages", "github.com/1"),
+        SIGNAL,
+      );
+      expect(restoredName(enriched.input)).toBe("lookup");
+      expect((await owned(store, "resp_messages", "github.com/1")).checkpointState).toBe("partial");
+
+      const textOnly = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"claude\",\"previous_response_id\":\"resp_messages\",\"input\":\"continue\"}",
+      ));
+      await expect(store.enrich(textOnly, await owned(store, "resp_messages", "github.com/1"), SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("preserves legacy rows as unowned and unusable", async () => {
+    const { database, store } = history();
+    try {
+      database.prepare(
+        "INSERT INTO responses (response_id, insertion_seq, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?)",
+      ).run("resp_legacy", 1, 1_700_000_000_000, 1_700_604_800_000);
+      database.prepare(
+        "INSERT INTO response_calls (response_id, ordinal, call_id, kind, item_json) VALUES (?, ?, ?, ?, ?)",
+      ).run(
+        "resp_legacy",
+        0,
+        "call_legacy",
         "function_call",
-        "custom_tool_call",
-        "function_call_output",
-        "custom_tool_call_output",
-      ]);
-      const restored = firstCall(enriched.input);
-      expect(memberValues(restored, "name")[0]).toBe("first");
-    } finally {
-      database.close();
-    }
-  });
+        "{\"type\":\"function_call\",\"call_id\":\"call_legacy\",\"name\":\"legacy\",\"arguments\":\"{}\"}",
+      );
 
-  it("falls back only to a globally unique call id and misses ambiguous calls", async () => {
-    const { database, store } = history();
-    try {
-      await store.record(callRecord("resp_one", [
-        "[{\"type\":\"function_call\",\"call_id\":\"unique_call\",\"name\":\"only\",\"arguments\":\"{}\"}]",
-      ].join("")), new AbortController().signal);
-      await store.record(callRecord("resp_two", [
-        "[{\"type\":\"function_call\",\"call_id\":\"ambiguous\",\"name\":\"first\",\"arguments\":\"{}\"}]",
-      ].join("")), new AbortController().signal);
-      await store.record(callRecord("resp_three", [
-        "[{\"type\":\"custom_tool_call\",\"call_id\":\"ambiguous\",\"name\":\"second\",\"input\":\"x\"}]",
-      ].join("")), new AbortController().signal);
-
-      const unique = await store.enrich(decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",",
-        "\"call_id\":\"unique_call\",\"output\":\"ok\"}}",
-      ].join(""))), new AbortController().signal);
-      expect(typesFromInput(unique.input)).toEqual(["function_call", "function_call_output"]);
-
-      const ambiguous = await store.enrich(decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",",
-        "\"call_id\":\"ambiguous\",\"output\":\"skip\"}}",
-      ].join(""))), new AbortController().signal);
-      expect(typesFromInput(ambiguous.input)).toEqual(["function_call_output"]);
-    } finally {
-      database.close();
-    }
-  });
-
-  it("fills only empty call fields and leaves non-empty request fields authoritative", async () => {
-    const { database, store } = history();
-    try {
-      await store.record(callRecord("resp_previous", [
-        "[{\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"cached\",",
-        "\"arguments\":\"{\\\"cached\\\":true}\",\"status\":\"completed\"}]",
-      ].join("")), new AbortController().signal);
-      const request = decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"previous_response_id\":\"resp_previous\",",
-        "\"input\":{\"type\":\"function_call\",\"call_id\":\"call_a\",",
-        "\"name\":\"\",\"arguments\":\"\",\"status\":\"in_progress\"}}",
-      ].join("")));
-
-      const enriched = await store.enrich(request, new AbortController().signal);
-      const call = firstCall(enriched.input);
-
-      expect(typesFromInput(enriched.input)).toEqual(["function_call"]);
-      expect(memberValues(call, "name")[0]).toBe("cached");
-      expect(memberValues(call, "arguments")[0]).toBe("{\"cached\":true}");
-      expect(memberValues(call, "status")[0]).toBe("in_progress");
-    } finally {
-      database.close();
-    }
-  });
-
-  it("recovers Unicode call payloads using UTF-8 byte limits", async () => {
-    const { database, store } = history();
-    try {
-      await store.record(callRecord("resp_unicode", [
-        "[{\"type\":\"custom_tool_call\",\"call_id\":\"unicode\",\"name\":\"render\",\"input\":\"汉\"}]",
-      ].join("")), new AbortController().signal);
-      const request = decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"input\":{\"type\":\"custom_tool_call_output\",",
-        "\"call_id\":\"unicode\",\"output\":\"ok\"}}",
-      ].join("")));
-      const enriched = await store.enrich(request, new AbortController().signal);
-      const items = isWireJsonArray(enriched.input) ? enriched.input.items : [];
-      const restored = items[0];
-      expect(isWireJsonObject(restored)).toBe(true);
-      if (isWireJsonObject(restored)) {
-        expect(memberValues(restored, "input")[0]).toBe("汉");
-      }
-    } finally {
-      database.close();
-    }
-  });
-
-  it("stores only recordable call kinds and minimal fields used for enrichment", async () => {
-    const { database, store } = history();
-    try {
-      await store.record(callRecord("resp_previous", [
-        "[",
-        "{\"type\":\"message\",\"content\":\"ignored\"},",
-        "{\"type\":\"tool_search_call\",\"call_id\":\"search\",\"arguments\":{\"q\":\"docs\"},\"extra\":\"drop\"},",
-        "{\"type\":\"custom_tool_call\",\"call_id\":\"custom\",\"name\":\"render\",\"input\":\"card\",\"extra\":\"drop\"}",
-        "]",
-      ].join("")), new AbortController().signal);
-      expect(store.inspect().count).toBe(1);
-
-      const request = decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"previous_response_id\":\"resp_previous\",",
-        "\"input\":{\"type\":\"tool_search_output\",\"call_id\":\"search\",\"output\":[]}}",
-      ].join("")));
-      const enriched = await store.enrich(request, new AbortController().signal);
-      const items = isWireJsonArray(enriched.input) ? enriched.input.items : [];
-      const restored = items[0];
-
-      expect(typesFromInput(enriched.input)).toEqual([
-        "tool_search_call",
-        "custom_tool_call",
-        "tool_search_output",
-      ]);
-      expect(isWireJsonObject(restored)).toBe(true);
-      if (isWireJsonObject(restored)) {
-        expect(memberValues(restored, "extra")).toEqual([]);
-      }
-    } finally {
-      database.close();
-    }
-  });
-
-  it("keeps a single object input unchanged when no history applies", async () => {
-    const { database, store } = history();
-    try {
-      const request = decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"previous_response_id\":\"missing\",",
-        "\"input\":{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}}",
-      ].join("")));
-      const enriched = await store.enrich(request, new AbortController().signal);
-
-      expect(enriched).toBe(request);
-      expect(isWireJsonObject(enriched.input)).toBe(true);
-    } finally {
-      database.close();
-    }
-  });
-
-  it("does not trim previous response IDs before scoped lookup", async () => {
-    const { database, store } = history();
-    try {
-      await store.record(callRecord("resp_previous", [
-        "[{\"type\":\"function_call\",\"call_id\":\"ambiguous\",\"name\":\"scoped\",\"arguments\":\"{}\"}]",
-      ].join("")), new AbortController().signal);
-      await store.record(callRecord("resp_other", [
-        "[{\"type\":\"function_call\",\"call_id\":\"ambiguous\",\"name\":\"other\",\"arguments\":\"{}\"}]",
-      ].join("")), new AbortController().signal);
-
-      const enriched = await store.enrich(decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"previous_response_id\":\" resp_previous \",",
-        "\"input\":{\"type\":\"function_call_output\",\"call_id\":\"ambiguous\",\"output\":\"ok\"}}",
-      ].join(""))), new AbortController().signal);
-
-      expect(typesFromInput(enriched.input)).toEqual(["function_call_output"]);
-    } finally {
-      database.close();
-    }
-  });
-
-  it("recovers history stored at the accepted WireJson depth", async () => {
-    const { database, store } = history();
-    try {
-      const nested = "{\"x\":".repeat(40) + "\"leaf\"" + "}".repeat(40);
-      await store.record(callRecord("resp_deep", [
-        "[{\"type\":\"function_call\",\"call_id\":\"deep\",\"name\":\"fn\",\"arguments\":",
-        nested,
-        "}]",
-      ].join("")), new AbortController().signal);
-      const enriched = await store.enrich(decodeResponsesRequest(objectFromJson([
-        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",",
-        "\"call_id\":\"deep\",\"output\":\"ok\"}}",
-      ].join(""))), new AbortController().signal);
-      expect(typesFromInput(enriched.input)).toEqual(["function_call", "function_call_output"]);
+      await expect(store.resolve("resp_legacy", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "legacy_unowned" });
+      expect(store.inspect()).toMatchObject({ count: 1, receiptCount: 0, legacyCount: 1 });
     } finally {
       database.close();
     }

@@ -17,6 +17,7 @@ import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import type { NativeResponsesUpstreamRequest } from "../../src/copilot/upstream_types.js";
 import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
@@ -55,18 +56,34 @@ describe("Responses endpoint", () => {
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/openai/v1/responses", { method: "POST" }))).status).toBe(404);
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/responses/compact", { method: "POST" }))).status).toBe(404);
 
+      const malformedContinuation = await gw.fetch(responsesRequest({
+        model: "native",
+        previous_response_id: 8,
+        input: "hi",
+      }));
+      expect(malformedContinuation.status).toBe(400);
+      await malformedContinuation.text();
+
       const unknown = await gw.fetch(responsesRequest({ model: "missing", input: "hi" }));
       expect(unknown.status).toBe(404);
       expect(await unknown.text()).toBe("{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}");
       expect(backend.captured).toEqual([]);
-      expect(usageUpdates).toMatchObject([{
-        protocol: "openai_responses_unknown",
-        outcome: "client_error",
-        accountId: "github.com/1",
-        resolvedModel: "missing",
-        requestCount: 1,
-        errorCount: 1,
-      }]);
+      expect(usageUpdates).toMatchObject([
+        {
+          protocol: "openai_responses_unknown",
+          outcome: "client_error",
+          accountId: "unbound",
+          resolvedModel: "unresolved",
+        },
+        {
+          protocol: "openai_responses_unknown",
+          outcome: "client_error",
+          accountId: "github.com/1",
+          resolvedModel: "missing",
+          requestCount: 1,
+          errorCount: 1,
+        },
+      ]);
     } finally {
       await close();
     }
@@ -100,6 +117,7 @@ describe("Responses endpoint", () => {
       expect(backend.captured.map((entry) => entry.kind)).toEqual(["responses"]);
       expect(new TextDecoder().decode(captured?.body)).toBe("{\"model\":\"native\",\"previous_response_id\":\"upstream-owned\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}],\"reasoning\":{\"encrypted_content\":\"secret-state\"},\"stream\":false}");
       expect(history.inspect().count).toBe(0);
+      expect(history.inspect().receiptCount).toBe(1);
       expect(usageUpdates).toMatchObject([{
         protocol: "openai_responses_native",
         outcome: "success",
@@ -149,6 +167,7 @@ describe("Responses endpoint", () => {
       expect(body.output.map((item) => item.type)).toEqual(["message", "function_call"]);
       expect(body.output[1]?.call_id).toBe("call_1");
       expect(history.inspect().count).toBe(1);
+      expect(history.inspect().receiptCount).toBe(1);
       expect(backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
       expect(new TextDecoder().decode(captured?.body)).toContain("\"model\":\"chat\"");
       expect(usageUpdates).toMatchObject([{
@@ -158,6 +177,114 @@ describe("Responses endpoint", () => {
         outputTokens: 4,
         cacheTokens: 3,
       }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("pins a known converted continuation to Chat before native-first selection", async () => {
+    let captured: ChatRequest | undefined;
+    const backend = new ScriptedCopilotBackend({
+      chat(request) {
+        captured = request;
+        return {
+          status: 200,
+          headers: new Headers(),
+          body: text("{\"id\":\"chatcmpl_next\",\"model\":\"dual\",\"choices\":[]}"),
+        };
+      },
+    });
+    const { gw, history, close } = await responsesGateway({ backend });
+    try {
+      const ownership = {
+        accountId: "github.com/1",
+        modelId: "dual",
+        upstreamOrigin: "https://api.githubcopilot.com",
+        owner: "converted",
+        upstreamProtocol: "chat",
+        conversionVersion: "responses-chat-v1",
+      } as const;
+      await history.recordCheckpoint({
+        responseId: "resp_converted",
+        output: [{
+          kind: "object",
+          members: [
+            { key: "type", value: "function_call" },
+            { key: "call_id", value: "call_owned" },
+            { key: "name", value: "lookup" },
+            { key: "arguments", value: "{}" },
+          ],
+        }],
+      }, ownership, "complete", new AbortController().signal);
+
+      const response = await gw.fetch(responsesRequest({
+        model: "dual",
+        previous_response_id: "resp_converted",
+        input: { type: "function_call_output", call_id: "call_owned", output: "ok" },
+      }));
+      expect(response.status).toBe(200);
+      expect(backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
+      const forwarded = new TextDecoder().decode(captured?.body);
+      expect(forwarded).not.toContain("previous_response_id");
+      expect(forwarded).toContain("\"tool_call_id\":\"call_owned\"");
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects cross-account, model, protocol, origin, and unknown converted continuations", async () => {
+    const { gw, backend, history, close } = await responsesGateway();
+    try {
+      const signal = new AbortController().signal;
+      await history.recordReceipt({
+        accountId: "github.com/2",
+        responseId: "resp_foreign",
+        modelId: "native",
+        upstreamOrigin: "https://api.githubcopilot.com",
+        owner: "native",
+        upstreamProtocol: "responses",
+        conversionVersion: null,
+        checkpointState: "complete",
+      }, signal);
+      await history.recordReceipt({
+        accountId: "github.com/1",
+        responseId: "resp_chat_route",
+        modelId: "native",
+        upstreamOrigin: "https://api.githubcopilot.com",
+        owner: "converted",
+        upstreamProtocol: "chat",
+        conversionVersion: "responses-chat-v1",
+        checkpointState: "complete",
+      }, signal);
+      await history.recordReceipt({
+        accountId: "github.com/1",
+        responseId: "resp_other_origin",
+        modelId: "native",
+        upstreamOrigin: "https://other.example",
+        owner: "native",
+        upstreamProtocol: "responses",
+        conversionVersion: null,
+        checkpointState: "complete",
+      }, signal);
+
+      const requests = [
+        { model: "native", previous_response_id: "resp_foreign", input: "hi" },
+        { model: "chat", previous_response_id: "resp_chat_route", input: "hi" },
+        { model: "native", previous_response_id: "resp_chat_route", input: "hi" },
+        { model: "native", previous_response_id: "resp_other_origin", input: "hi" },
+        { model: "chat", previous_response_id: "external_unknown", input: "hi" },
+        {
+          model: "native",
+          previous_response_id: "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmNoYXQ7cmVzcG9uc2VfaWQ6b2xk",
+          input: "hi",
+        },
+      ];
+      for (const body of requests) {
+        const response = await gw.fetch(responsesRequest(body));
+        expect(response.status).toBe(409);
+        await response.text();
+      }
+      expect(backend.captured).toEqual([]);
     } finally {
       await close();
     }
@@ -515,6 +642,7 @@ describe("Responses endpoint", () => {
         embedMigration(runtimeConfigMigration),
         embedMigration(accountsMigration),
         embedMigration(responsesHistoryMigration),
+        embedMigration(responsesContinuationMigration),
       ],
       nowMs,
     });
@@ -533,6 +661,7 @@ describe("Responses endpoint", () => {
           data: [
             { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] } },
             { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+            { id: "dual", name: "Dual", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses", "/chat/completions"], chat_output_token_field: "max_tokens" } },
           ],
         };
       },

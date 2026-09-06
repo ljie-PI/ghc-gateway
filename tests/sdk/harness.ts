@@ -13,6 +13,7 @@ import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import type { NativeResponsesUpstreamRequest } from "../../src/copilot/upstream_types.js";
 import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
@@ -64,6 +65,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       embedMigration(runtimeConfigMigration),
       embedMigration(accountsMigration),
       embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
       embedMigration(modelCapabilitiesMigration),
     ],
     nowMs,

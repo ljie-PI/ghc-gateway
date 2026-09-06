@@ -235,7 +235,18 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       },
     },
     history: {
-      inspect: () => ({ revision: historyRevision, count: 0, oldestAt: null, newestAt: null, ttlDays: 7, maxResponses: 512 }),
+      inspect: () => ({
+        revision: historyRevision,
+        count: 0,
+        receiptCount: 0,
+        legacyCount: 0,
+        untrackedContinuationBlocked: false,
+        oldestAt: null,
+        newestAt: null,
+        ttlDays: 7,
+        maxResponses: 512,
+        maxReceipts: 2048,
+      }),
       clear: (expectedRevision) => {
         if (expectedRevision !== historyRevision) throw coded("revision_conflict");
       },
