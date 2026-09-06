@@ -756,16 +756,24 @@ function* finalItemEvents(
       }
       const partType = stringMember(part, "type");
       if (partType === "output_text") {
+        const text = stringMember(part, "text");
+        if (text === undefined) {
+          invalid();
+        }
         yield {
           kind: "text_done",
           key: `responses:${outputIndex}:${contentIndex}:text`,
-          text: stringMember(part, "text") ?? "",
+          text,
         };
       } else if (partType === "refusal") {
+        const refusal = stringMember(part, "refusal");
+        if (refusal === undefined) {
+          invalid();
+        }
         yield {
           kind: "refusal_done",
           key: `responses:${outputIndex}:${contentIndex}:refusal`,
-          refusal: stringMember(part, "refusal") ?? "",
+          refusal,
         };
       } else {
         invalid();

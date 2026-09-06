@@ -1,12 +1,11 @@
 import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
-import { iterateChatFrames, type BoundCopilot, type CopilotBackend } from "../../copilot/backend.js";
+import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import {
   normalizeAccountBindingFailure,
   normalizeCatalogFailure,
-  normalizeChatFrames,
   normalizeCopilotBindingFailure,
   normalizeTransportFailure,
 } from "../../copilot/failures.js";
@@ -47,22 +46,17 @@ import { decodeResponsesRequest, ResponsesRequestDecodeError } from "./decoder.j
 import { consumeResponsesPreviousResponseId } from "./dto.js";
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
 import { prepareChatBridgeRequest } from "./bridge_request.js";
-import { convertChatStream, type ResponsesStreamEmission } from "./bridge_stream.js";
 import {
   type ResponsesContinuationOwnership,
   type ResponsesHistory,
 } from "./history.js";
 import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
 import type { ChatBridgePlan } from "./planner.js";
-import {
-  encodeResponsesSseEvent,
-  RESPONSES_JSON_HEADERS,
-  RESPONSES_STREAM_HEADERS,
-} from "./wire.js";
+import { RESPONSES_JSON_HEADERS, RESPONSES_STREAM_HEADERS } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentResponsesFailure } from "./failure_presenter.js";
-import { planProtocolExecution } from "../conversion/planner.js";
+import { planProtocolExecution, prepareConvertedRequest } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
 import type {
@@ -169,12 +163,24 @@ async function executeResponses(
   const forcedTarget = continuationReceipt?.upstreamProtocol;
   const protocols = resolved.capability.protocols.value;
   const extendedChat = hasExtendedResponsesTools(planningRequest.body)
+    && protocols?.includes("chat") === true
     && (forcedTarget === "chat"
       || (forcedTarget === undefined
         && protocols?.includes("responses") !== true
         && protocols?.includes("chat") === true));
   if (extendedChat) {
-    validateExtendedResponsesRequest(planningRequest.body);
+    validateExtendedResponsesRequest(
+      planningRequest.body,
+      resolved.upstreamModel,
+      resolved.capability,
+    );
+    if (decoded.stream) {
+      throw new GatewayFailureError({
+        kind: "unsupported_semantics",
+        source: "converter",
+        phase: "convert",
+      });
+    }
     validateExternalContinuation(decoded.previousResponseId, continuation, "chat_bridge");
     usage.setProtocol("openai_responses_bridge");
     const ownership = continuationOwnership(
@@ -188,9 +194,7 @@ async function executeResponses(
       originalRequest: planningRequest,
       resolvedModel: resolved,
     };
-    return decoded.stream
-      ? await extendedBridgeStreamResponse(dependencies, ownership, bound, extendedPlan, scope, usage)
-      : await extendedBridgeNonstreamResponse(dependencies, ownership, bound, extendedPlan, scope, usage);
+    return await extendedBridgeNonstreamResponse(dependencies, ownership, bound, extendedPlan, scope, usage);
   }
   const plan = planProtocolExecution({
     source: "responses",
@@ -375,112 +379,6 @@ async function extendedBridgeNonstreamResponse(
   return new Response(measured.bytes, {
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
-}
-
-async function extendedBridgeStreamResponse(
-  dependencies: ResponsesRouteDependencies,
-  ownership: Readonly<ResponsesContinuationOwnership>,
-  bound: BoundCopilot,
-  plan: ChatBridgePlan,
-  scope: Readonly<RequestScope>,
-  usage: RequestAttempt,
-): Promise<Response> {
-  const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
-    reasoningConfig: null,
-    chatOutputTokenField: plan.resolvedModel.capability.profile.chatOutputTokenField.value,
-  }, scope.signal);
-  const request = extendedChatRequest(prepared.body, plan.resolvedModel.upstreamModel, true, scope);
-  const upstream = await transportCall(() => bound.openChatStream(request), request.signal);
-  if (upstream.status < 200 || upstream.status >= 300) {
-    await boundedCleanup(upstream.cancel());
-  }
-  assertUpstreamSuccess(upstream);
-  const cancelExchange = createExchangeCancellation(upstream);
-  const timedUpstream = {
-    ...upstream,
-    bytes: withByteIdleDeadlines(
-      upstream.bytes,
-      scope.signal,
-      scope.config.timeouts.firstByteMs,
-      scope.config.timeouts.streamIdleMs,
-      cancelExchange,
-    ),
-  };
-  const emissions = convertChatStream(normalizeChatFrames(iterateChatFrames(timedUpstream), scope.signal), {
-    originalRequest: plan.originalRequest,
-    toolContext: prepared.toolContext,
-    model: plan.resolvedModel.upstreamModel,
-    nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
-    uuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
-    customLlmProvider: "github_copilot",
-    modelId: plan.resolvedModel.upstreamModel,
-  });
-  return await extendedStreamEmissionsResponse(
-    emissions,
-    dependencies.history,
-    ownership,
-    upstream,
-    scope,
-    usage,
-    dependencies.performanceObserver,
-    cancelExchange,
-  );
-}
-
-async function extendedStreamEmissionsResponse(
-  emissions: AsyncIterable<ResponsesStreamEmission>,
-  history: ResponsesHistory,
-  ownership: Readonly<ResponsesContinuationOwnership>,
-  upstream: UpstreamByteStream,
-  scope: Readonly<RequestScope>,
-  usage: RequestAttempt,
-  performanceObserver?: ProtocolPerformanceObserver,
-  cancelExchange?: () => Promise<void>,
-): Promise<Response> {
-  const bytes = (async function* (): AsyncIterable<Uint8Array> {
-    for await (const emission of emissions) {
-      if (scope.signal.aborted) {
-        return;
-      }
-      if (memberValue(emission.event, "type") === "response.created") {
-        const responseId = responseIdFromPayload(emission.event);
-        if (responseId !== undefined) {
-          await measureAsync(
-            performanceObserver,
-            "checkpoint",
-            async () => await persistContinuation(
-              async () => await history.recordReceipt({
-                ...ownership,
-                responseId,
-                checkpointState: "route_only",
-              }, scope.signal),
-              scope.signal,
-            ),
-          );
-        }
-      }
-      if (emission.kind === "checkpoint") {
-        await measureAsync(
-          performanceObserver,
-          "checkpoint",
-          async () => await persistContinuation(
-            async () => await history.recordCheckpoint(
-              emission.historyRecord,
-              ownership,
-              memberValue(emission.event, "type") === "response.completed" ? "complete" : "partial",
-              scope.signal,
-            ),
-            scope.signal,
-          ),
-        );
-      }
-      if (usage.enabled) {
-        observeExtendedBridgeEvent(usage, emission.event);
-      }
-      yield measure(performanceObserver, "event", () => encodeResponsesSseEvent(emission.event));
-    }
-  })();
-  return await streamBytesResponse(bytes, upstream, scope, usage.failure, cancelExchange);
 }
 
 async function convertedNonstreamResponse(
@@ -724,7 +622,11 @@ function hasExtendedResponsesTools(body: WireJsonObject): boolean {
   ));
 }
 
-function validateExtendedResponsesRequest(body: WireJsonObject): void {
+function validateExtendedResponsesRequest(
+  body: WireJsonObject,
+  model: string,
+  capability: Parameters<typeof prepareConvertedRequest>[4],
+): void {
   if (
     duplicateMemberNames(body).length > 0
     || body.members.some((member) => !EXTENDED_RESPONSES_KEYS.has(member.key))
@@ -755,6 +657,7 @@ function validateExtendedResponsesRequest(body: WireJsonObject): void {
   if (!isWireJsonArray(tools)) {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
+  const toolNames = new Set<string>();
   for (const tool of tools.items) {
     if (!isWireJsonObject(tool) || duplicateMemberNames(tool).length > 0) {
       throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
@@ -766,6 +669,7 @@ function validateExtendedResponsesRequest(body: WireJsonObject): void {
     if (type === "custom") {
       assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
       assertExtendedToolName(tool);
+      toolNames.add(memberValue(tool, "name") as string);
       continue;
     }
     if (type === "namespace") {
@@ -779,7 +683,13 @@ function validateExtendedResponsesRequest(body: WireJsonObject): void {
     }
     if (type === "tool_search") {
       assertExtendedToolKeys(tool, new Set(["type"]));
+      toolNames.add("tool_search");
       continue;
+    }
+    validateExtendedToolChoice(memberValue(body, "tool_choice"), toolNames);
+    const parallel = memberValue(body, "parallel_tool_calls");
+    if (parallel !== undefined && typeof parallel !== "boolean") {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
     }
     throw new GatewayFailureError({
       kind: "unsupported_semantics",
@@ -787,6 +697,44 @@ function validateExtendedResponsesRequest(body: WireJsonObject): void {
       phase: "convert",
     });
   }
+
+  function validateExtendedToolChoice(value: WireJson | undefined, names: ReadonlySet<string>): void {
+    if (value === undefined) {
+      return;
+    }
+    if (value === "auto" || value === "none" || value === "required") {
+      return;
+    }
+    if (!isWireJsonObject(value) || duplicateMemberNames(value).length > 0) {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    }
+    assertExtendedToolKeys(value, new Set(["type", "name", "namespace"]));
+    const type = memberValue(value, "type");
+    const name = memberValue(value, "name");
+    if (
+      (type !== "custom" && type !== "function" && type !== "tool_search")
+      || typeof name !== "string"
+      || !names.has(name)
+    ) {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    }
+  }
+  if (memberValue(body, "text") !== undefined || memberValue(body, "response_format") !== undefined) {
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      source: "converter",
+      phase: "convert",
+    });
+  }
+  const sanitized: WireJsonObject = {
+    kind: "object",
+    members: body.members.filter((member) => (
+      member.key !== "tools"
+      && member.key !== "tool_choice"
+      && member.key !== "parallel_tool_calls"
+    )),
+  };
+  prepareConvertedRequest("responses", "chat", sanitized, model, capability);
 }
 
 function assertExtendedToolKeys(tool: WireJsonObject, allowed: ReadonlySet<string>): void {
@@ -966,22 +914,6 @@ function createNativeStreamObservation(usage: RequestAttempt): { readonly observ
         });
       }
     },
-  };
-}
-
-function observeExtendedBridgeEvent(usage: RequestAttempt, event: WireJsonObject): void {
-  if (memberValue(event, "type") === "response.completed") {
-    usage.finish("success", extendedChatUsage(objectMember(event, "response")));
-  }
-}
-
-function extendedChatUsage(response: WireJsonObject | undefined): UsageTokens {
-  const usage = objectMember(response, "usage");
-  const details = objectMember(usage, "prompt_tokens_details");
-  return {
-    inputTokens: observedInteger(memberValue(usage, "prompt_tokens")) ?? 0,
-    outputTokens: observedInteger(memberValue(usage, "completion_tokens")) ?? 0,
-    cacheTokens: observedInteger(memberValue(details, "cached_tokens")) ?? 0,
   };
 }
 

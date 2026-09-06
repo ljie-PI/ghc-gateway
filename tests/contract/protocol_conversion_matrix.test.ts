@@ -210,6 +210,27 @@ describe("protocol conversion matrix", () => {
       await harness.close();
     }
   });
+
+  it.each([
+    [{ max_output_tokens: -1 }, 400],
+    [{ text: { format: { type: "json_schema", name: "x", schema: { type: "object" } } } }, 422],
+    [{ stream: true }, 422],
+  ] as const)("rejects unsafe extended-tool semantics before inference", async (extra, status) => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+        ...extra,
+      }));
+      expect(response.status).toBe(status);
+      await response.text();
+      expect(harness.backend.captured).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
 });
 
 interface MatrixHarness {
