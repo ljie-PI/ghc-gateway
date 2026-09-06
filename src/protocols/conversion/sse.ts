@@ -16,24 +16,22 @@ export async function* decodeSseRecords(
     for await (const chunk of bytes) {
       pending += decoder.decode(chunk, { stream: true });
       for (;;) {
-        const normalized = pending.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
-        const boundary = normalized.indexOf("\n\n");
-        if (boundary === -1) {
-          if (new TextEncoder().encode(normalized).byteLength > eventLimitBytes) {
+        const extracted = takeSseRecord(pending);
+        if (extracted === undefined) {
+          if (new TextEncoder().encode(pending).byteLength > eventLimitBytes) {
             throw new ChatSseError("event_too_large", "SSE event exceeds limit");
           }
-          pending = normalized;
           break;
         }
-        const raw = normalized.slice(0, boundary);
-        if (new TextEncoder().encode(`${raw}\n\n`).byteLength > eventLimitBytes) {
+        if (new TextEncoder().encode(extracted.consumed).byteLength > eventLimitBytes) {
           throw new ChatSseError("event_too_large", "SSE event exceeds limit");
         }
-        pending = normalized.slice(boundary + 2);
-        const parsed = parseRecord(raw);
+        pending = extracted.rest;
+        const parsed = parseRecord(normalizeSseNewlines(extracted.raw));
         if (parsed !== undefined) {
           yield parsed;
         }
+
       }
     }
     pending += decoder.decode();
@@ -53,6 +51,44 @@ export async function* decodeSseRecords(
       phase: "stream",
     });
   }
+}
+
+export function takeSseRecord(value: string): {
+  readonly raw: string;
+  readonly consumed: string;
+  readonly rest: string;
+} | undefined {
+  for (let index = 0; index < value.length; index += 1) {
+    const first = lineBreakLength(value, index);
+    if (first === 0) {
+      continue;
+    }
+    const second = lineBreakLength(value, index + first);
+    if (second === 0) {
+      continue;
+    }
+    const end = index + first + second;
+    return {
+      raw: value.slice(0, index),
+      consumed: value.slice(0, end),
+      rest: value.slice(end),
+    };
+  }
+  return undefined;
+}
+
+function lineBreakLength(value: string, index: number): number {
+  if (value[index] === "\n") {
+    return 1;
+  }
+  if (value[index] !== "\r") {
+    return 0;
+  }
+  return value[index + 1] === "\n" ? 2 : 1;
+}
+
+function normalizeSseNewlines(value: string): string {
+  return value.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
 }
 
 function parseRecord(raw: string): SseRecord | undefined {

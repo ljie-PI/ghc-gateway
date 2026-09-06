@@ -158,10 +158,64 @@ describe("shared conversion request codecs", () => {
         },
       },
     });
+
     expect(converted.degradations).toEqual([
       "cache.control_omitted",
       "reasoning.budget_coarsened",
     ]);
+  });
+
+  it("accepts Messages structured output without a source name using the fixed response name", () => {
+    const converted = prepareConvertedRequest("messages", "responses", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      output_config: {
+        format: {
+          type: "json_schema",
+          schema: { type: "object", properties: { value: { type: "string" } } },
+        },
+      },
+    }), "target", capability(["responses"]));
+    expect(decoded(converted.bytes)).toMatchObject({
+      text: {
+        format: {
+          type: "json_schema",
+          name: "response",
+          schema: { type: "object" },
+        },
+      },
+    });
+  });
+
+  it("accepts Chat assistant tool history with omitted optional content", () => {
+    const converted = prepareConvertedRequest("chat", "responses", body({
+      model: "source",
+      messages: [{
+        role: "assistant",
+        tool_calls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "lookup", arguments: "{}" },
+        }],
+      }],
+    }), "target", capability(["responses"]));
+    expect(decoded(converted.bytes)).toMatchObject({
+      input: [{
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      }],
+    });
+  });
+
+  it("rejects a Chat sampling value outside the Messages target range", () => {
+    expect(() => prepareConvertedRequest("chat", "messages", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 1.5,
+    }), "target", capability(["messages"]))).toThrow();
   });
 
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {
@@ -219,10 +273,37 @@ describe("shared conversion request codecs", () => {
         { role: "tool", tool_call_id: "call_1", content: "ok" },
       ],
     });
+
     expect(converted.degradations).toEqual([
       "reasoning.presentation_omitted",
       "reasoning.state_omitted",
     ]);
+  });
+
+  it("replays converter-emitted Responses message IDs and annotations through Messages", () => {
+    const converted = prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      input: [
+        { type: "message", id: "msg_user", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        {
+          type: "message",
+          id: "msg_assistant",
+          status: "completed",
+          role: "assistant",
+          content: [{
+            type: "output_text",
+            text: "answer",
+            annotations: [{ type: "url_citation", url: "https://example.test" }],
+          }],
+        },
+      ],
+    }), "target", capability(["messages"]));
+    expect(decoded(converted.bytes)).toMatchObject({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "assistant", content: [{ type: "text", text: "answer" }] },
+      ],
+    });
   });
 
   it("uses the configured/default/ceiling/unknown Messages token hierarchy without raising explicit budgets", () => {
@@ -274,6 +355,33 @@ describe("shared conversion request codecs", () => {
       rawBody(json),
       "target",
       capability(["responses"]),
+    )).toThrow();
+  });
+
+  it.each([
+    ["malformed cache control", {
+      model: "source",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: 17 }] }],
+      max_tokens: 8,
+    }],
+    ["malformed Messages metadata", {
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      metadata: { user_id: 17 },
+    }],
+    ["unknown Responses reasoning item key", {
+      model: "source",
+      input: [{ type: "reasoning", summary: [], unknown: null }],
+    }],
+  ])("rejects strict nested protocol shape: %s", (_name, request) => {
+    const source = "input" in request ? "responses" : "messages";
+    expect(() => prepareConvertedRequest(
+      source,
+      source === "messages" ? "chat" : "messages",
+      body(request),
+      "target",
+      capability([source === "messages" ? "chat" : "messages"]),
     )).toThrow();
   });
 

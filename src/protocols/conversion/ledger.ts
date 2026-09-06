@@ -11,33 +11,29 @@ interface ToolState {
   done: boolean;
 }
 
+interface MessageState {
+  readonly key: string;
+  text: string;
+  refusal: string;
+}
+
 export class SemanticItemLedger {
   private readonly encoder = new TextEncoder();
   private usedBytes = 0;
   private readonly tools = new Map<string, ToolState>();
-  private readonly order: Array<{ readonly kind: "message" } | { readonly kind: "tool"; readonly key: string }> = [];
-  private messageSeen = false;
-  private text = "";
-  private refusal = "";
+  private readonly messages = new Map<string, MessageState>();
+  private readonly order: Array<{ readonly kind: "message" | "tool"; readonly key: string }> = [];
 
   constructor(private readonly maxBytes: number) {}
 
-  appendText(delta: string): void {
+  appendText(key: string, delta: string): void {
     this.reserve(delta);
-    if (!this.messageSeen) {
-      this.messageSeen = true;
-      this.order.push({ kind: "message" });
-    }
-    this.text += delta;
+    this.message(key).text += delta;
   }
 
-  appendRefusal(delta: string): void {
+  appendRefusal(key: string, delta: string): void {
     this.reserve(delta);
-    if (!this.messageSeen) {
-      this.messageSeen = true;
-      this.order.push({ kind: "message" });
-    }
-    this.refusal += delta;
+    this.message(key).refusal += delta;
   }
 
   startTool(input: {
@@ -85,17 +81,19 @@ export class SemanticItemLedger {
       this.reserve(suffix);
       tool.argumentsJson = snapshot;
     }
-    validateArguments(tool.argumentsJson);
     tool.done = true;
     return suffix;
   }
 
   finishOpenTools(): void {
     for (const tool of this.tools.values()) {
-      if (!tool.done) {
-        this.finishTool(tool.key);
-      }
+      validateArguments(tool.argumentsJson);
+      tool.done = true;
     }
+  }
+
+  toolKeys(): readonly string[] {
+    return this.order.filter((entry) => entry.kind === "tool").map((entry) => entry.key);
   }
 
   tool(key: string): Readonly<ToolState> {
@@ -110,9 +108,13 @@ export class SemanticItemLedger {
     const items: SemanticResponseItem[] = [];
     for (const entry of this.order) {
       if (entry.kind === "message") {
+        const message = this.messages.get(entry.key);
+        if (message === undefined) {
+          invalid();
+        }
         const content = [
-          ...(this.text.length === 0 ? [] : [{ type: "text", text: this.text } as const]),
-          ...(this.refusal.length === 0 ? [] : [{ type: "refusal", text: this.refusal } as const]),
+          ...(message.text.length === 0 ? [] : [{ type: "text", text: message.text } as const]),
+          ...(message.refusal.length === 0 ? [] : [{ type: "refusal", text: message.refusal } as const]),
         ];
         if (content.length > 0) {
           items.push({ type: "message", content });
@@ -135,12 +137,12 @@ export class SemanticItemLedger {
     return items;
   }
 
-  textValue(): string {
-    return this.text;
+  textValue(key: string): string {
+    return this.messages.get(key)?.text ?? "";
   }
 
-  refusalValue(): string {
-    return this.refusal;
+  refusalValue(key: string): string {
+    return this.messages.get(key)?.refusal ?? "";
   }
 
   private reserve(value: string): void {
@@ -152,6 +154,17 @@ export class SemanticItemLedger {
         phase: "stream",
       });
     }
+  }
+
+  private message(key: string): MessageState {
+    let message = this.messages.get(key);
+    if (message === undefined) {
+      this.reserve(key);
+      message = { key, text: "", refusal: "" };
+      this.messages.set(key, message);
+      this.order.push({ kind: "message", key });
+    }
+    return message;
   }
 }
 

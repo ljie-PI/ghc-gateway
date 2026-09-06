@@ -49,7 +49,12 @@ export async function* convertProtocolStream(
     yield { kind: "degradation", ruleId };
   }
 
-  for await (const event of decodeProtocolStream(context.source, bytes, context.eventLimitBytes)) {
+  for await (const event of decodeProtocolStream(
+    context.source,
+    bytes,
+    context.eventLimitBytes,
+    context.accumulatorBytes,
+  )) {
     if (event.kind === "usage") {
       usage = event.usage;
       yield { kind: "usage", usage };
@@ -61,27 +66,27 @@ export async function* convertProtocolStream(
       yield* emitter.start();
     }
     if (event.kind === "text_delta") {
-      ledger.appendText(event.delta);
+      ledger.appendText(event.key, event.delta);
       yield* emitter.textDelta(event.delta);
       continue;
     }
     if (event.kind === "text_done") {
-      const suffix = reconcileSnapshot(ledger.textValue(), event.text);
+      const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
       if (suffix.length > 0) {
-        ledger.appendText(suffix);
+        ledger.appendText(event.key, suffix);
         yield* emitter.textDelta(suffix);
       }
       continue;
     }
     if (event.kind === "refusal_delta") {
-      ledger.appendRefusal(event.delta);
+      ledger.appendRefusal(event.key, event.delta);
       yield* emitter.refusalDelta(event.delta);
       continue;
     }
     if (event.kind === "refusal_done") {
-      const suffix = reconcileSnapshot(ledger.refusalValue(), event.refusal);
+      const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
       if (suffix.length > 0) {
-        ledger.appendRefusal(suffix);
+        ledger.appendRefusal(event.key, suffix);
         yield* emitter.refusalDelta(suffix);
       }
       continue;
@@ -101,7 +106,6 @@ export async function* convertProtocolStream(
       if (suffix.length > 0) {
         yield* emitter.toolArgumentsDelta(event.key, suffix);
       }
-      yield* emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson);
       continue;
     }
     if (event.kind === "terminal") {
@@ -111,6 +115,9 @@ export async function* convertProtocolStream(
       terminal = true;
       if (event.status === "completed") {
         ledger.finishOpenTools();
+        for (const key of ledger.toolKeys()) {
+          yield* emitter.toolDone(key, ledger.tool(key).argumentsJson);
+        }
       }
       const items = ledger.items(event.status);
       yield* emitter.finish(event, usage, items);
@@ -371,7 +378,14 @@ class ResponsesEmitter implements StreamEmitter {
   private readonly createdAt: number;
   private sequence = 0;
   private nextOutputIndex = 0;
-  private message: { readonly id: string; readonly outputIndex: number; added: boolean } | undefined;
+  private message: {
+    readonly id: string;
+    readonly outputIndex: number;
+    itemAdded: boolean;
+    nextContentIndex: number;
+    textIndex?: number;
+    refusalIndex?: number;
+  } | undefined;
   private readonly tools = new Map<string, {
     readonly itemId: string;
     readonly callId: string;
@@ -397,34 +411,40 @@ class ResponsesEmitter implements StreamEmitter {
 
   *textDelta(delta: string): Iterable<ConvertedStreamEmission> {
     const message = this.ensureMessage();
-    if (!message.added) {
-      message.added = true;
-      yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message.id, "in_progress", ""));
-      yield this.contentEvent("response.content_part.added", message, outputText(""));
+    if (!message.itemAdded) {
+      message.itemAdded = true;
+      yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));
+    }
+    if (message.textIndex === undefined) {
+      message.textIndex = message.nextContentIndex++;
+      yield this.contentEvent("response.content_part.added", message, message.textIndex, outputText(""));
     }
     yield this.event(wireObject([
       ["type", "response.output_text.delta"],
       ["sequence_number", wireNumber(this.sequence++)],
       ["item_id", message.id],
       ["output_index", wireNumber(message.outputIndex)],
-      ["content_index", wireNumber(0)],
+      ["content_index", wireNumber(message.textIndex)],
       ["delta", delta],
     ]));
   }
 
   *refusalDelta(delta: string): Iterable<ConvertedStreamEmission> {
     const message = this.ensureMessage();
-    if (!message.added) {
-      message.added = true;
-      yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message.id, "in_progress", ""));
-      yield this.contentEvent("response.content_part.added", message, refusal(""));
+    if (!message.itemAdded) {
+      message.itemAdded = true;
+      yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));
+    }
+    if (message.refusalIndex === undefined) {
+      message.refusalIndex = message.nextContentIndex++;
+      yield this.contentEvent("response.content_part.added", message, message.refusalIndex, refusal(""));
     }
     yield this.event(wireObject([
       ["type", "response.refusal.delta"],
       ["sequence_number", wireNumber(this.sequence++)],
       ["item_id", message.id],
       ["output_index", wireNumber(message.outputIndex)],
-      ["content_index", wireNumber(0)],
+      ["content_index", wireNumber(message.refusalIndex)],
       ["delta", delta],
     ]));
   }
@@ -500,7 +520,7 @@ class ResponsesEmitter implements StreamEmitter {
       kind: "checkpoint",
       intent: { responseId: this.responseId, output, state: terminal.status === "completed" ? "complete" : "partial" },
     };
-    if (this.message?.added === true) {
+    if (this.message?.itemAdded === true) {
       const text = items
         .filter((item) => item.type === "message")
         .flatMap((item) => item.content)
@@ -513,34 +533,37 @@ class ResponsesEmitter implements StreamEmitter {
         .filter((part) => part.type === "refusal")
         .map((part) => part.text)
         .join("");
-      const part = refused.length > 0 ? refusal(refused) : outputText(text);
       this.completed.set(
         this.message.outputIndex,
-        responseMessage(this.message.id, terminal.status, refused.length > 0 ? refused : text, refused.length > 0),
+        responseMessage(this.message, terminal.status, text, refused),
       );
-      yield this.event(wireObject([
-        ["type", refused.length > 0 ? "response.refusal.done" : "response.output_text.done"],
-        ["sequence_number", wireNumber(this.sequence++)],
-        ["item_id", this.message.id],
-        ["output_index", wireNumber(this.message.outputIndex)],
-        ["content_index", wireNumber(0)],
-        [refused.length > 0 ? "refusal" : "text", refused.length > 0 ? refused : text],
-      ]));
-      yield this.contentEvent("response.content_part.done", this.message, part);
+      if (this.message.textIndex !== undefined) {
+        yield this.event(wireObject([
+          ["type", "response.output_text.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", this.message.id],
+          ["output_index", wireNumber(this.message.outputIndex)],
+          ["content_index", wireNumber(this.message.textIndex)],
+          ["text", text],
+        ]));
+        yield this.contentEvent("response.content_part.done", this.message, this.message.textIndex, outputText(text));
+      }
+      if (this.message.refusalIndex !== undefined) {
+        yield this.event(wireObject([
+          ["type", "response.refusal.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", this.message.id],
+          ["output_index", wireNumber(this.message.outputIndex)],
+          ["content_index", wireNumber(this.message.refusalIndex)],
+          ["refusal", refused],
+        ]));
+        yield this.contentEvent("response.content_part.done", this.message, this.message.refusalIndex, refusal(refused));
+      }
       yield this.itemEvent(
         "response.output_item.done",
         this.message.outputIndex,
-        responseMessage(this.message.id, terminal.status, refused.length > 0 ? refused : text, refused.length > 0),
+        responseMessage(this.message, terminal.status, text, refused),
       );
-    }
-    for (const item of items) {
-      if (item.type !== "tool_call") {
-        continue;
-      }
-      const entry = [...this.tools.entries()].find(([, tool]) => tool.callId === item.callId);
-      if (entry !== undefined && !entry[1].done) {
-        yield* this.toolDone(entry[0], item.argumentsJson);
-      }
     }
     const finalType = terminal.status === "completed" ? "response.completed" : "response.incomplete";
     yield this.responseEvent(finalType, terminal.status, output, usage, terminal.finishReason);
@@ -550,7 +573,8 @@ class ResponsesEmitter implements StreamEmitter {
     this.message ??= {
       id: `msg_${this.context.createUuid()}`,
       outputIndex: this.nextOutputIndex++,
-      added: false,
+      itemAdded: false,
+      nextContentIndex: 0,
     };
     return this.message;
   }
@@ -599,6 +623,7 @@ class ResponsesEmitter implements StreamEmitter {
   private contentEvent(
     type: string,
     message: { readonly id: string; readonly outputIndex: number },
+    contentIndex: number,
     part: ReturnType<typeof wireObject>,
   ): ConvertedStreamEmission {
     return this.event(wireObject([
@@ -606,7 +631,7 @@ class ResponsesEmitter implements StreamEmitter {
       ["sequence_number", wireNumber(this.sequence++)],
       ["item_id", message.id],
       ["output_index", wireNumber(message.outputIndex)],
-      ["content_index", wireNumber(0)],
+      ["content_index", wireNumber(contentIndex)],
       ["part", part],
     ]));
   }
@@ -619,7 +644,12 @@ class ResponsesEmitter implements StreamEmitter {
 function responseOutput(
   items: readonly SemanticResponseItem[],
   status: "completed" | "incomplete",
-  message: { readonly id: string; readonly outputIndex: number } | undefined,
+  message: {
+    readonly id: string;
+    readonly outputIndex: number;
+    readonly textIndex?: number;
+    readonly refusalIndex?: number;
+  } | undefined,
   tools: ReadonlyMap<string, {
     readonly itemId: string;
     readonly callId: string;
@@ -636,7 +666,7 @@ function responseOutput(
     const refused = content.filter((part) => part.type === "refusal").map((part) => part.text).join("");
     indexed.push({
       index: message.outputIndex,
-      item: responseMessage(message.id, status, refused.length > 0 ? refused : text, refused.length > 0),
+      item: responseMessage(message, status, text, refused),
     });
   }
   for (const item of items) {
@@ -688,17 +718,28 @@ function responseSnapshot(
 }
 
 function responseMessage(
-  id: string,
+  message: {
+    readonly id: string;
+    readonly textIndex?: number;
+    readonly refusalIndex?: number;
+  },
   status: "in_progress" | "completed" | "incomplete",
-  value: string,
-  refused = false,
+  text: string,
+  refused: string,
 ) {
+  const content: Array<{ readonly index: number; readonly part: ReturnType<typeof wireObject> }> = [];
+  if (message.textIndex !== undefined) {
+    content.push({ index: message.textIndex, part: outputText(text) });
+  }
+  if (message.refusalIndex !== undefined) {
+    content.push({ index: message.refusalIndex, part: refusal(refused) });
+  }
   return wireObject([
     ["type", "message"],
-    ["id", id],
+    ["id", message.id],
     ["status", status],
     ["role", "assistant"],
-    ["content", wireArray([refused ? refusal(value) : outputText(value)])],
+    ["content", wireArray(content.sort((left, right) => left.index - right.index).map((entry) => entry.part))],
   ]);
 }
 

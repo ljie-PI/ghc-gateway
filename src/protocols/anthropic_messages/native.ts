@@ -18,6 +18,7 @@ import {
 } from "../../serialization/wire_json.js";
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { SemanticUsage } from "../conversion/types.js";
+import { takeSseRecord } from "../conversion/sse.js";
 
 export function serializeNativeMessagesRequest(body: WireJsonObject, model: string): Uint8Array {
   let replaced = false;
@@ -159,6 +160,12 @@ export async function createNativeMessagesStreamResponse(input: {
           return;
         }
       }
+      if (observer.isTerminal) {
+        observe(input.onTerminal, { kind: "success", usage: observer.observedUsage });
+        await closeStream();
+        writer.close();
+        return;
+      }
       for (;;) {
         const next = await iterator.next();
         if (next.done === true) {
@@ -170,6 +177,12 @@ export async function createNativeMessagesStreamResponse(input: {
         }
         observer.consume(next.value);
         if (!await writer.enqueue(next.value)) {
+          return;
+        }
+        if (observer.isTerminal) {
+          observe(input.onTerminal, { kind: "success", usage: observer.observedUsage });
+          await closeStream();
+          writer.close();
           return;
         }
       }
@@ -204,6 +217,14 @@ class NativeMessagesObserver {
     return this.semantic;
   }
 
+  get isTerminal(): boolean {
+    return this.terminal;
+  }
+
+  get observedUsage(): SemanticUsage {
+    return this.usage;
+  }
+
   consume(bytes: Uint8Array): void {
     this.pending += this.decoder.decode(bytes, { stream: true });
     this.drain();
@@ -220,21 +241,18 @@ class NativeMessagesObserver {
 
   private drain(): void {
     for (;;) {
-      const normalized = this.pending.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
-      const boundary = normalized.indexOf("\n\n");
-      if (boundary === -1) {
-        if (new TextEncoder().encode(normalized).byteLength > this.eventLimitBytes) {
+      const extracted = takeSseRecord(this.pending);
+      if (extracted === undefined) {
+        if (new TextEncoder().encode(this.pending).byteLength > this.eventLimitBytes) {
           invalid();
         }
-        this.pending = normalized;
         return;
       }
-      const raw = normalized.slice(0, boundary);
-      this.pending = normalized.slice(boundary + 2);
-      if (new TextEncoder().encode(`${raw}\n\n`).byteLength > this.eventLimitBytes) {
+      this.pending = extracted.rest;
+      if (new TextEncoder().encode(extracted.consumed).byteLength > this.eventLimitBytes) {
         invalid();
       }
-      this.observeRecord(raw);
+      this.observeRecord(extracted.raw.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n"));
     }
   }
 

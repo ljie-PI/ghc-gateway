@@ -179,7 +179,7 @@ function decodeChatRequest(body: WireJsonObject): SemanticRequest {
     stop: parseStringList(oneMember(body, "stop", "REQ-C-STOP"), "REQ-C-STOP"),
     outputFormat: decodeChatOutputFormat(oneMember(body, "response_format", "REQ-C-FORMAT")),
     reasoning,
-    metadata: oneMember(body, "metadata", "REQ-C-METADATA"),
+    metadata: validatedMetadata(oneMember(body, "metadata", "REQ-C-METADATA"), "chat"),
     degradations: [...degradations],
   });
 }
@@ -246,7 +246,7 @@ function decodeChatContent(
   textOnly: boolean,
   allowNull = false,
 ): readonly SemanticContent[] {
-  if (value === null && allowNull) {
+  if ((value === null || value === undefined) && allowNull) {
     return [];
   }
   if (typeof value === "string") {
@@ -351,7 +351,7 @@ function decodeMessagesRequest(body: WireJsonObject): SemanticRequest {
       outputConfig === undefined ? undefined : oneMember(outputConfig, "format", "REQ-M-FORMAT"),
     ),
     reasoning,
-    metadata: oneMember(body, "metadata", "REQ-M-METADATA"),
+    metadata: validatedMetadata(oneMember(body, "metadata", "REQ-M-METADATA"), "messages"),
     degradations: [...degradations],
   });
 }
@@ -373,6 +373,7 @@ function decodeMessagesSystem(
       unsupported("REQ-M-SYSTEM-TYPE");
     }
     if (oneMember(block, "cache_control", "REQ-M-SYSTEM-CACHE") !== undefined) {
+      validateCacheControl(oneMember(block, "cache_control", "REQ-M-SYSTEM-CACHE"));
       degradations.add("cache.control_omitted");
     }
     return {
@@ -411,6 +412,7 @@ function decodeMessagesMessage(
     if (type === "text") {
       assertAllowedKeys(block, new Set(["type", "text", "cache_control"]), "REQ-M-TEXT");
       if (oneMember(block, "cache_control", "REQ-M-TEXT-CACHE") !== undefined) {
+        validateCacheControl(oneMember(block, "cache_control", "REQ-M-TEXT-CACHE"));
         degradations.add("cache.control_omitted");
       }
       ordinary.push({
@@ -425,6 +427,7 @@ function decodeMessagesMessage(
       }
       assertAllowedKeys(block, new Set(["type", "source", "cache_control"]), "REQ-M-IMAGE");
       if (oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE") !== undefined) {
+        validateCacheControl(oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE"));
         degradations.add("cache.control_omitted");
       }
       ordinary.push(decodeMessagesImage(oneMember(block, "source", "REQ-M-IMAGE-SOURCE")));
@@ -435,7 +438,7 @@ function decodeMessagesMessage(
       if (role !== "assistant") {
         invalid("REQ-M-TOOL-USE-ROLE");
       }
-      output.push(decodeMessagesToolUse(block));
+      output.push(decodeMessagesToolUse(block, degradations));
       continue;
     }
     if (type === "tool_result") {
@@ -446,6 +449,14 @@ function decodeMessagesMessage(
       continue;
     }
     if (type === "thinking" || type === "redacted_thinking") {
+      if (type === "thinking") {
+        assertAllowedKeys(block, new Set(["type", "thinking", "signature"]), "REQ-M-THINKING-BLOCK");
+        requiredString(oneMember(block, "thinking", "REQ-M-THINKING-TEXT"), "REQ-M-THINKING-TEXT", true);
+        optionalString(oneMember(block, "signature", "REQ-M-THINKING-SIGNATURE"), "REQ-M-THINKING-SIGNATURE");
+      } else {
+        assertAllowedKeys(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING");
+        requiredString(oneMember(block, "data", "REQ-M-REDACTED-DATA"), "REQ-M-REDACTED-DATA", true);
+      }
       degradations.add(type === "thinking" ? "reasoning.presentation_omitted" : "reasoning.state_omitted");
       continue;
     }
@@ -477,8 +488,15 @@ function decodeMessagesImage(value: WireJson | undefined): SemanticImage {
   unsupported("REQ-M-IMAGE-SOURCE-TYPE");
 }
 
-function decodeMessagesToolUse(value: WireJsonObject) {
+function decodeMessagesToolUse(
+  value: WireJsonObject,
+  degradations: Set<ConversionDegradationRule>,
+) {
   assertAllowedKeys(value, new Set(["type", "id", "name", "input", "cache_control"]), "REQ-M-TOOL-USE");
+  if (oneMember(value, "cache_control", "REQ-M-TOOL-USE-CACHE") !== undefined) {
+    validateCacheControl(oneMember(value, "cache_control", "REQ-M-TOOL-USE-CACHE"));
+    degradations.add("cache.control_omitted");
+  }
   const input = requiredObject(oneMember(value, "input", "REQ-M-TOOL-USE-INPUT"), "REQ-M-TOOL-USE-INPUT");
   return {
     type: "tool_call",
@@ -498,6 +516,7 @@ function decodeMessagesToolResult(
     "REQ-M-TOOL-RESULT",
   );
   if (oneMember(value, "cache_control", "REQ-M-TOOL-RESULT-CACHE") !== undefined) {
+    validateCacheControl(oneMember(value, "cache_control", "REQ-M-TOOL-RESULT-CACHE"));
     degradations.add("cache.control_omitted");
   }
   const rawContent = oneMember(value, "content", "REQ-M-TOOL-RESULT-CONTENT");
@@ -581,7 +600,7 @@ function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
       ),
       "REQ-R-EFFORT",
     ),
-    metadata: oneMember(body, "metadata", "REQ-R-METADATA"),
+    metadata: validatedMetadata(oneMember(body, "metadata", "REQ-R-METADATA"), "responses"),
     degradations: [...degradations],
   });
 }
@@ -609,7 +628,7 @@ function decodeResponsesInput(
     const object = requiredObject(item, "REQ-R-INPUT-ITEM");
     const type = optionalString(oneMember(object, "type", "REQ-R-INPUT-TYPE"), "REQ-R-INPUT-TYPE");
     if (type === undefined || type === "message") {
-      assertAllowedKeys(object, new Set(["type", "role", "content", "status"]), "REQ-R-MESSAGE");
+      assertAllowedKeys(object, new Set(["type", "id", "role", "content", "status"]), "REQ-R-MESSAGE");
       const role = requiredString(oneMember(object, "role", "REQ-R-MESSAGE-ROLE"), "REQ-R-MESSAGE-ROLE");
       if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
         invalid("REQ-R-MESSAGE-ROLE");
@@ -669,6 +688,23 @@ function decodeResponsesInput(
       continue;
     }
     if (type === "reasoning") {
+      assertAllowedKeys(
+        object,
+        new Set(["type", "id", "status", "summary", "content", "encrypted_content"]),
+        "REQ-R-REASONING-ITEM",
+      );
+      if (oneMember(object, "summary", "REQ-R-REASONING-SUMMARY") !== undefined) {
+        requiredArray(oneMember(object, "summary", "REQ-R-REASONING-SUMMARY"), "REQ-R-REASONING-SUMMARY");
+      }
+      if (oneMember(object, "content", "REQ-R-REASONING-CONTENT") !== undefined) {
+        requiredArray(oneMember(object, "content", "REQ-R-REASONING-CONTENT"), "REQ-R-REASONING-CONTENT");
+      }
+      if (oneMember(object, "encrypted_content", "REQ-R-REASONING-STATE") !== undefined) {
+        requiredString(
+          oneMember(object, "encrypted_content", "REQ-R-REASONING-STATE"),
+          "REQ-R-REASONING-STATE",
+        );
+      }
       degradations.add("reasoning.presentation_omitted");
       continue;
     }
@@ -685,7 +721,11 @@ function decodeResponsesContent(value: WireJson | undefined, allowImage: boolean
     const block = requiredObject(item, "REQ-R-CONTENT-BLOCK");
     const type = requiredString(oneMember(block, "type", "REQ-R-CONTENT-TYPE"), "REQ-R-CONTENT-TYPE");
     if (type === "input_text" || type === "output_text" || type === "text") {
-      assertAllowedKeys(block, new Set(["type", "text"]), "REQ-R-TEXT");
+      assertAllowedKeys(block, new Set(["type", "text", "annotations"]), "REQ-R-TEXT");
+      const annotations = oneMember(block, "annotations", "REQ-R-TEXT-ANNOTATIONS");
+      if (annotations !== undefined) {
+        requiredArray(annotations, "REQ-R-TEXT-ANNOTATIONS");
+      }
       return {
         type: "text",
         text: requiredString(oneMember(block, "text", "REQ-R-TEXT"), "REQ-R-TEXT", true),
@@ -964,7 +1004,18 @@ function decodeMessagesOutputFormat(value: WireJson | undefined): SemanticOutput
   if (type !== "json_schema") {
     unsupported("REQ-M-FORMAT-TYPE");
   }
-  return decodeNamedSchema(object, "REQ-M-FORMAT");
+  const description = optionalString(
+    oneMember(object, "description", "REQ-M-FORMAT-DESCRIPTION"),
+    "REQ-M-FORMAT-DESCRIPTION",
+  );
+  const strict = optionalBoolean(oneMember(object, "strict", "REQ-M-FORMAT-STRICT"), "REQ-M-FORMAT-STRICT");
+  return {
+    kind: "json_schema",
+    name: optionalString(oneMember(object, "name", "REQ-M-FORMAT-NAME"), "REQ-M-FORMAT-NAME") ?? "response",
+    ...(description === undefined ? {} : { description }),
+    schema: requiredObject(oneMember(object, "schema", "REQ-M-FORMAT-SCHEMA"), "REQ-M-FORMAT-SCHEMA"),
+    ...(strict === undefined ? {} : { strict }),
+  };
 }
 
 function decodeResponsesOutputFormat(body: WireJsonObject): SemanticOutputFormat | undefined {
@@ -1095,6 +1146,16 @@ function encodeMessagesRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
+  if (request.temperature !== undefined && request.temperature > 1) {
+    unsupported("REQ-TARGET-M-TEMPERATURE");
+  }
+  if (
+    request.metadata !== undefined
+    && (!isWireJsonObject(request.metadata)
+      || request.metadata.members.some((member) => member.key !== "user_id"))
+  ) {
+    unsupported("REQ-TARGET-M-METADATA");
+  }
   const budget = outputBudget(request.maxOutputTokens, context.capability);
   const split = splitMessagesInstructions(request);
   const body = wireObject([
@@ -1613,6 +1674,37 @@ function parseDataUrl(url: string): { readonly mediaType: string; readonly data:
 
 function validateArgumentsJson(value: string, ruleId: string): void {
   parseArgumentsObject(value, ruleId);
+}
+
+function validateCacheControl(value: WireJson | undefined): void {
+  const object = requiredObject(value, "REQ-M-CACHE-CONTROL");
+  assertAllowedKeys(object, new Set(["type", "ttl"]), "REQ-M-CACHE-CONTROL");
+  if (oneMember(object, "type", "REQ-M-CACHE-CONTROL-TYPE") !== "ephemeral") {
+    invalid("REQ-M-CACHE-CONTROL-TYPE");
+  }
+  const ttl = optionalString(oneMember(object, "ttl", "REQ-M-CACHE-CONTROL-TTL"), "REQ-M-CACHE-CONTROL-TTL");
+  if (ttl !== undefined && ttl !== "5m" && ttl !== "1h") {
+    invalid("REQ-M-CACHE-CONTROL-TTL");
+  }
+}
+
+function validatedMetadata(
+  value: WireJson | undefined,
+  source: InferenceProtocol,
+): WireJson | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const object = requiredObject(value, `REQ-${source.toUpperCase()}-METADATA`);
+  if (source === "messages") {
+    assertAllowedKeys(object, new Set(["user_id"]), "REQ-M-METADATA");
+  }
+  for (const member of object.members) {
+    if (typeof member.value !== "string") {
+      invalid(`REQ-${source.toUpperCase()}-METADATA`);
+    }
+  }
+  return object;
 }
 
 function parseArgumentsObject(value: string, ruleId: string): WireJsonObject {

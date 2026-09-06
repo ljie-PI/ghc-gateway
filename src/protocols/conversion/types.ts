@@ -193,10 +193,10 @@ export interface ConvertedBufferedResponse {
 }
 
 export type SemanticStreamEvent =
-  | { readonly kind: "text_delta"; readonly delta: string }
-  | { readonly kind: "text_done"; readonly text: string }
-  | { readonly kind: "refusal_delta"; readonly delta: string }
-  | { readonly kind: "refusal_done"; readonly refusal: string }
+  | { readonly kind: "text_delta"; readonly key: string; readonly delta: string }
+  | { readonly kind: "text_done"; readonly key: string; readonly text: string }
+  | { readonly kind: "refusal_delta"; readonly key: string; readonly delta: string }
+  | { readonly kind: "refusal_done"; readonly key: string; readonly refusal: string }
   | {
     readonly kind: "tool_start";
     readonly key: string;

@@ -5,6 +5,9 @@ import type {
   ConvertedStreamEmission,
   InferenceProtocol,
 } from "../../src/protocols/conversion/types.js";
+import { createNativeMessagesStreamResponse } from "../../src/protocols/anthropic_messages/native.js";
+import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
+import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -225,7 +228,7 @@ describe("shared conversion response codecs", () => {
     expect(text.match(/\\"q\\":\\"a\\"/gu)?.length).toBeGreaterThan(0);
     expect(emissions.filter((item) => item.kind === "terminal")).toHaveLength(1);
     expect(emissions.filter((item) => item.kind === "usage").at(-1)).toMatchObject({
-      usage: { inputTokens: 2, outputTokens: 3, cacheReadTokens: 2 },
+      usage: { inputTokens: 6, outputTokens: 3, cacheReadTokens: 2 },
     });
   });
 
@@ -250,6 +253,76 @@ describe("shared conversion response codecs", () => {
     expect(text).toContain("final only");
     expect(text.match(/final only/gu)).toHaveLength(1);
     expect(text.match(/data: \[DONE\]/gu)).toHaveLength(1);
+  });
+
+  it("preserves multiple final-only Responses message items and mixed text/refusal content", async () => {
+    const response = {
+      id: "resp_source",
+      object: "response",
+      status: "completed",
+      model: "source",
+      output: [
+        {
+          id: "msg_one",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "one", annotations: [] }],
+        },
+        {
+          id: "msg_two",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "two", annotations: [] },
+            { type: "refusal", refusal: "refused" },
+          ],
+        },
+      ],
+      usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 },
+    };
+    const emissions = await collectStream(
+      "responses",
+      "messages",
+      chunks(encoder.encode(responseEvent(0, "response.completed", { response }))),
+    );
+    const text = wireText(emissions);
+    expect(text).toContain("\"text\": \"one\"");
+    expect(text).toContain("\"text\": \"two\"");
+    expect(text).toContain("\"refusal\": \"refused\"");
+    expect(text.match(/event: message_stop/gu)).toHaveLength(1);
+  });
+
+  it("keeps token-limited partial tool arguments incomplete instead of validating fabricated JSON", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":\"length\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const emissions = await collectStream("chat", "responses", chunks(encoder.encode(source)));
+    const text = wireText(emissions);
+    expect(text).toContain("response.incomplete");
+    expect(text).toContain("\"arguments\":\"{\\\"q\\\":\"");
+    expect(text).not.toContain("response.function_call_arguments.done");
+  });
+
+  it("rejects unsupported substantive final output rather than returning empty success", async () => {
+    const response = {
+      id: "resp_source",
+      object: "response",
+      status: "completed",
+      output: [{ id: "ig_1", type: "image_generation_call", status: "completed", result: "abc" }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    const generator = convertProtocolStream(
+      chunks(encoder.encode(responseEvent(0, "response.completed", { response }))),
+      streamContext("responses", "chat"),
+    );
+    await expect(async () => {
+      for await (const _emission of generator) {
+        void _emission;
+      }
+    }).rejects.toThrow();
   });
 
   it("rejects conflicting final snapshots and never emits a success terminal", async () => {
@@ -306,6 +379,78 @@ describe("shared conversion response codecs", () => {
         void _emission;
       }
     }).rejects.toThrow();
+
+    const prestartOverflow = convertProtocolStream(
+      chunks(encoder.encode([
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"12345\"}}]},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join(""))),
+      { ...streamContext("chat", "messages"), accumulatorBytes: 4 },
+    );
+    await expect(async () => {
+      for await (const _emission of prestartOverflow) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("finishes a native Messages stream at message_stop without waiting for upstream EOF", async () => {
+    let cancelled = false;
+    async function* openAfterTerminal(): AsyncIterable<Uint8Array> {
+      const payload = [
+        messageEvent("message_start", {
+          type: "message_start",
+          message: {
+            id: "msg_native",
+            type: "message",
+            role: "assistant",
+            content: [],
+            model: "native",
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 0 },
+          },
+        }),
+        messageEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { output_tokens: 1 },
+        }),
+        messageEvent("message_stop", { type: "message_stop" }),
+      ].join("").replace(/\n/gu, "\r\n");
+      for await (const part of splitEveryByte(encoder.encode(payload))) {
+        yield part;
+      }
+      await new Promise<never>(() => undefined);
+    }
+    const result: Array<{ readonly kind: string }> = [];
+    const controller = new AbortController();
+    const response = await createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: openAfterTerminal(),
+        async cancel() {
+          cancelled = true;
+        },
+      },
+      scope: {
+        requestId: "req_native",
+        signal: controller.signal,
+        deliverySignal: controller.signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: (value) => result.push(value),
+    });
+    const text = await response.text();
+    expect(text).toContain("event: message_stop");
+    expect(cancelled).toBe(true);
+    expect(result).toMatchObject([{ kind: "success" }]);
   });
 });
 

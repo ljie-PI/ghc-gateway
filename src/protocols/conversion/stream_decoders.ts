@@ -23,20 +23,23 @@ export function decodeProtocolStream(
   source: InferenceProtocol,
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
+  accumulatorBytes: number,
 ): AsyncIterable<SemanticStreamEvent> {
   if (source === "chat") {
-    return decodeChatStream(bytes, eventLimitBytes);
+    return decodeChatStream(bytes, eventLimitBytes, accumulatorBytes);
   }
   if (source === "messages") {
-    return decodeMessagesStream(bytes, eventLimitBytes);
+    return decodeMessagesStream(bytes, eventLimitBytes, accumulatorBytes);
   }
-  return decodeResponsesStream(bytes, eventLimitBytes);
+  return decodeResponsesStream(bytes, eventLimitBytes, accumulatorBytes);
 }
 
 async function* decodeChatStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
+  accumulatorBytes: number,
 ): AsyncIterable<SemanticStreamEvent> {
+  const budget = new DecoderBudget(accumulatorBytes);
   const tools = new Map<number, {
     id: string;
     name: string;
@@ -45,6 +48,7 @@ async function* decodeChatStream(
     done: boolean;
   }>();
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
+  let observedUsage = emptyUsage();
   for await (const frame of parseChatSse(bytes, eventLimitBytes)) {
     if (frame.kind === "error") {
       throw upstreamStreamEventFailure();
@@ -54,6 +58,9 @@ async function* decodeChatStream(
         invalid();
       }
       for (const [index, tool] of tools) {
+        if (pendingFinish === "length" || pendingFinish === "content_filter") {
+          continue;
+        }
         if (!tool.started || tool.done) {
           continue;
         }
@@ -73,7 +80,8 @@ async function* decodeChatStream(
     }
     const usage = objectMember(payload, "usage");
     if (usage !== undefined) {
-      yield { kind: "usage", usage: chatUsage(usage) };
+      observedUsage = chatUsage(usage, observedUsage);
+      yield { kind: "usage", usage: observedUsage };
     }
     const choices = arrayMember(payload, "choices");
     if (choices === undefined || choices.items.length === 0) {
@@ -87,11 +95,11 @@ async function* decodeChatStream(
     if (delta !== undefined) {
       const content = stringMember(delta, "content");
       if (content !== undefined && content.length > 0) {
-        yield { kind: "text_delta", delta: content };
+        yield { kind: "text_delta", key: "chat:message", delta: content };
       }
       const refusal = stringMember(delta, "refusal");
       if (refusal !== undefined && refusal.length > 0) {
-        yield { kind: "refusal_delta", delta: refusal };
+        yield { kind: "refusal_delta", key: "chat:message", delta: refusal };
       }
       const calls = arrayMember(delta, "tool_calls");
       if (calls !== undefined) {
@@ -104,7 +112,11 @@ async function* decodeChatStream(
           if (index === undefined || index < 0) {
             invalid();
           }
-          const tool = tools.get(index) ?? {
+          const existing = tools.get(index);
+          if (existing === undefined) {
+            budget.reserveEntry();
+          }
+          const tool = existing ?? {
             id: "",
             name: "",
             pendingArguments: "",
@@ -116,15 +128,18 @@ async function* decodeChatStream(
             if (tool.id.length > 0 && tool.id !== id) {
               invalid();
             }
+            budget.reserve(id);
             tool.id = id;
           }
           const fn = objectMember(value, "function");
           const nameDelta = stringMember(fn, "name");
           if (nameDelta !== undefined) {
+            budget.reserve(nameDelta);
             tool.name += nameDelta;
           }
           const argumentsDelta = stringMember(fn, "arguments");
           if (argumentsDelta !== undefined) {
+            budget.reserve(argumentsDelta);
             tool.pendingArguments += argumentsDelta;
           }
           tools.set(index, tool);
@@ -156,9 +171,12 @@ async function* decodeChatStream(
 async function* decodeMessagesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
+  accumulatorBytes: number,
 ): AsyncIterable<SemanticStreamEvent> {
+  const budget = new DecoderBudget(accumulatorBytes);
   const blocks = new Map<number, { readonly kind: "text" | "refusal" | "tool" | "ignored"; readonly key?: string }>();
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
+  let observedUsage = emptyUsage();
   for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
     if (record.data === "[DONE]") {
       invalid();
@@ -179,7 +197,8 @@ async function* decodeMessagesStream(
       const message = objectMember(payload, "message");
       const usage = objectMember(message, "usage");
       if (usage !== undefined) {
-        yield { kind: "usage", usage: messagesUsage(usage) };
+        observedUsage = messagesUsage(usage, observedUsage);
+        yield { kind: "usage", usage: observedUsage };
       }
       continue;
     }
@@ -189,18 +208,19 @@ async function* decodeMessagesStream(
       if (index === undefined || block === undefined || blocks.has(index)) {
         invalid();
       }
+      budget.reserveEntry();
       const blockType = stringMember(block, "type");
       if (blockType === "text") {
         blocks.set(index, { kind: "text" });
         const text = stringMember(block, "text");
         if (text !== undefined && text.length > 0) {
-          yield { kind: "text_delta", delta: text };
+          yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
         }
       } else if (blockType === "refusal") {
         blocks.set(index, { kind: "refusal" });
         const refusal = stringMember(block, "refusal") ?? stringMember(block, "text");
         if (refusal !== undefined && refusal.length > 0) {
-          yield { kind: "refusal_delta", delta: refusal };
+          yield { kind: "refusal_delta", key: `messages:${index}:refusal`, delta: refusal };
         }
       } else if (blockType === "tool_use") {
         const callId = stringMember(block, "id");
@@ -210,6 +230,8 @@ async function* decodeMessagesStream(
         }
         const key = `messages:${index}`;
         blocks.set(index, { kind: "tool", key });
+        budget.reserve(callId);
+        budget.reserve(name);
         yield { kind: "tool_start", key, callId, name };
         const input = objectMember(block, "input");
         if (input !== undefined && input.members.length > 0) {
@@ -235,9 +257,13 @@ async function* decodeMessagesStream(
       }
       const deltaType = stringMember(delta, "type");
       if (block.kind === "text" && deltaType === "text_delta") {
-        yield { kind: "text_delta", delta: stringMember(delta, "text") ?? "" };
+        yield { kind: "text_delta", key: `messages:${index}:text`, delta: stringMember(delta, "text") ?? "" };
       } else if (block.kind === "refusal" && (deltaType === "refusal_delta" || deltaType === "text_delta")) {
-        yield { kind: "refusal_delta", delta: stringMember(delta, "refusal") ?? stringMember(delta, "text") ?? "" };
+        yield {
+          kind: "refusal_delta",
+          key: `messages:${index}:refusal`,
+          delta: stringMember(delta, "refusal") ?? stringMember(delta, "text") ?? "",
+        };
       } else if (block.kind === "tool" && deltaType === "input_json_delta" && block.key !== undefined) {
         yield {
           kind: "tool_arguments_delta",
@@ -268,7 +294,8 @@ async function* decodeMessagesStream(
       }
       const usage = objectMember(payload, "usage");
       if (usage !== undefined) {
-        yield { kind: "usage", usage: messagesUsage(usage) };
+        observedUsage = messagesUsage(usage, observedUsage);
+        yield { kind: "usage", usage: observedUsage };
       }
       continue;
     }
@@ -294,7 +321,9 @@ async function* decodeMessagesStream(
 async function* decodeResponsesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
+  accumulatorBytes: number,
 ): AsyncIterable<SemanticStreamEvent> {
+  const budget = new DecoderBudget(accumulatorBytes);
   const toolsByIndex = new Map<number, string>();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
@@ -327,6 +356,9 @@ async function* decodeResponsesStream(
           invalid();
         }
         toolsByIndex.set(outputIndex, key);
+        budget.reserveEntry();
+        budget.reserve(callId);
+        budget.reserve(name);
         yield {
           kind: "tool_start",
           key,
@@ -342,19 +374,35 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.output_text.delta") {
-      yield { kind: "text_delta", delta: stringMember(payload, "delta") ?? "" };
+      yield {
+        kind: "text_delta",
+        key: responseContentKey(payload, "text"),
+        delta: stringMember(payload, "delta") ?? "",
+      };
       continue;
     }
     if (type === "response.output_text.done") {
-      yield { kind: "text_done", text: stringMember(payload, "text") ?? "" };
+      yield {
+        kind: "text_done",
+        key: responseContentKey(payload, "text"),
+        text: stringMember(payload, "text") ?? "",
+      };
       continue;
     }
     if (type === "response.refusal.delta") {
-      yield { kind: "refusal_delta", delta: stringMember(payload, "delta") ?? "" };
+      yield {
+        kind: "refusal_delta",
+        key: responseContentKey(payload, "refusal"),
+        delta: stringMember(payload, "delta") ?? "",
+      };
       continue;
     }
     if (type === "response.refusal.done") {
-      yield { kind: "refusal_done", refusal: stringMember(payload, "refusal") ?? "" };
+      yield {
+        kind: "refusal_done",
+        key: responseContentKey(payload, "refusal"),
+        refusal: stringMember(payload, "refusal") ?? "",
+      };
       continue;
     }
     if (type === "response.function_call_arguments.delta") {
@@ -466,10 +514,21 @@ function* finalItemEvents(
         continue;
       }
       const partType = stringMember(part, "type");
+      const contentIndex = content.items.indexOf(part);
       if (partType === "output_text") {
-        yield { kind: "text_done", text: stringMember(part, "text") ?? "" };
+        yield {
+          kind: "text_done",
+          key: `responses:${outputIndex}:${contentIndex}:text`,
+          text: stringMember(part, "text") ?? "",
+        };
       } else if (partType === "refusal") {
-        yield { kind: "refusal_done", refusal: stringMember(part, "refusal") ?? "" };
+        yield {
+          kind: "refusal_done",
+          key: `responses:${outputIndex}:${contentIndex}:refusal`,
+          refusal: stringMember(part, "refusal") ?? "",
+        };
+      } else {
+        invalid();
       }
     }
     return;
@@ -493,7 +552,12 @@ function* finalItemEvents(
       };
     }
     yield { kind: "tool_done", key, argumentsJson: stringMember(item, "arguments") };
+    return;
   }
+  if (type === "reasoning") {
+    return;
+  }
+  invalid();
 }
 
 function parseEventObject(data: string, eventLimitBytes: number): WireJsonObject {
@@ -540,26 +604,31 @@ function messagesFinish(value: string): SemanticResponse["finishReason"] {
   invalid();
 }
 
-function chatUsage(value: WireJsonObject): SemanticUsage {
+function chatUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
   const promptDetails = objectMember(value, "prompt_tokens_details");
   const completionDetails = objectMember(value, "completion_tokens_details");
   return {
-    inputTokens: nonnegativeIntegerMember(value, "prompt_tokens"),
-    outputTokens: nonnegativeIntegerMember(value, "completion_tokens"),
-    cacheReadTokens: nonnegativeIntegerMember(promptDetails, "cached_tokens")
-      || nonnegativeIntegerMember(value, "cache_read_input_tokens"),
-    cacheWriteTokens: nonnegativeIntegerMember(promptDetails, "cache_write_tokens")
-      || nonnegativeIntegerMember(value, "cache_creation_input_tokens"),
-    reasoningTokens: nonnegativeIntegerMember(completionDetails, "reasoning_tokens"),
+    inputTokens: optionalNonnegativeIntegerMember(value, "prompt_tokens") ?? current.inputTokens,
+    outputTokens: optionalNonnegativeIntegerMember(value, "completion_tokens") ?? current.outputTokens,
+    cacheReadTokens: optionalNonnegativeIntegerMember(promptDetails, "cached_tokens")
+      ?? optionalNonnegativeIntegerMember(value, "cache_read_input_tokens")
+      ?? current.cacheReadTokens,
+    cacheWriteTokens: optionalNonnegativeIntegerMember(promptDetails, "cache_write_tokens")
+      ?? optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens")
+      ?? current.cacheWriteTokens,
+    reasoningTokens: optionalNonnegativeIntegerMember(completionDetails, "reasoning_tokens")
+      ?? current.reasoningTokens,
   };
 }
 
-function messagesUsage(value: WireJsonObject): SemanticUsage {
-  const read = nonnegativeIntegerMember(value, "cache_read_input_tokens");
-  const write = nonnegativeIntegerMember(value, "cache_creation_input_tokens");
+function messagesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
+  const read = optionalNonnegativeIntegerMember(value, "cache_read_input_tokens") ?? current.cacheReadTokens;
+  const write = optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens") ?? current.cacheWriteTokens;
+  const currentNoncache = Math.max(0, current.inputTokens - current.cacheReadTokens - current.cacheWriteTokens);
+  const noncache = optionalNonnegativeIntegerMember(value, "input_tokens") ?? currentNoncache;
   return {
-    inputTokens: nonnegativeIntegerMember(value, "input_tokens") + read + write,
-    outputTokens: nonnegativeIntegerMember(value, "output_tokens"),
+    inputTokens: noncache + read + write,
+    outputTokens: optionalNonnegativeIntegerMember(value, "output_tokens") ?? current.outputTokens,
     cacheReadTokens: read,
     cacheWriteTokens: write,
     reasoningTokens: 0,
@@ -576,6 +645,15 @@ function responsesUsage(value: WireJsonObject): SemanticUsage {
     cacheWriteTokens: nonnegativeIntegerMember(inputDetails, "cache_write_tokens"),
     reasoningTokens: nonnegativeIntegerMember(outputDetails, "reasoning_tokens"),
   };
+}
+
+function responseContentKey(object: WireJsonObject, kind: "text" | "refusal"): string {
+  const outputIndex = integerMember(object, "output_index");
+  const contentIndex = integerMember(object, "content_index");
+  if (outputIndex === undefined || contentIndex === undefined) {
+    invalid();
+  }
+  return `responses:${outputIndex}:${contentIndex}:${kind}`;
 }
 
 function singleMember(object: WireJsonObject, key: string): WireJson | undefined {
@@ -635,12 +713,19 @@ function integerMember(object: WireJsonObject, key: string): number | undefined 
 }
 
 function nonnegativeIntegerMember(object: WireJsonObject | undefined, key: string): number {
+  return optionalNonnegativeIntegerMember(object, key) ?? 0;
+}
+
+function optionalNonnegativeIntegerMember(
+  object: WireJsonObject | undefined,
+  key: string,
+): number | undefined {
   if (object === undefined) {
-    return 0;
+    return undefined;
   }
   const value = singleMember(object, key);
   if (value === undefined) {
-    return 0;
+    return undefined;
   }
   if (!isWireJsonNumber(value)) {
     invalid();
@@ -650,6 +735,39 @@ function nonnegativeIntegerMember(object: WireJsonObject | undefined, key: strin
     invalid();
   }
   return parsed;
+}
+
+function emptyUsage(): SemanticUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+  };
+}
+
+class DecoderBudget {
+  private readonly encoder = new TextEncoder();
+  private used = 0;
+
+  constructor(private readonly maxBytes: number) {}
+
+  reserve(value: string): void {
+    this.used += this.encoder.encode(value).byteLength;
+    this.assertBounded();
+  }
+
+  reserveEntry(): void {
+    this.used += 64;
+    this.assertBounded();
+  }
+
+  private assertBounded(): void {
+    if (this.used > this.maxBytes) {
+      invalid();
+    }
+  }
 }
 
 function invalid(): never {

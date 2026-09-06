@@ -84,6 +84,8 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
     upstreamInvalid();
   }
   const items: SemanticResponseItem[] = [];
+  const finishReason = chatFinishReason(singleMember(choice, "finish_reason"));
+  const completeTools = finishReason !== "length" && finishReason !== "content_filter";
   const content: Array<Extract<SemanticContent, { readonly type: "text" | "refusal" }>> = [];
   const text = stringOrNullMember(message, "content");
   if (text !== undefined && text !== null) {
@@ -99,10 +101,9 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   const toolCalls = arrayMember(message, "tool_calls");
   if (toolCalls !== undefined) {
     for (const value of toolCalls.items) {
-      items.push(decodeChatToolCall(value));
+      items.push(decodeChatToolCall(value, completeTools));
     }
   }
-  const finishReason = chatFinishReason(singleMember(choice, "finish_reason"));
   if (finishReason === "tool_calls" && !items.some((item) => item.type === "tool_call")) {
     upstreamInvalid();
   }
@@ -115,7 +116,7 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   };
 }
 
-function decodeChatToolCall(value: WireJson): SemanticToolCallItem {
+function decodeChatToolCall(value: WireJson, complete: boolean): SemanticToolCallItem {
   if (!isWireJsonObject(value)) {
     upstreamInvalid();
   }
@@ -129,7 +130,9 @@ function decodeChatToolCall(value: WireJson): SemanticToolCallItem {
   if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0 || argumentsJson === undefined) {
     upstreamInvalid();
   }
-  validateCompleteArguments(argumentsJson);
+  if (complete) {
+    validateCompleteArguments(argumentsJson);
+  }
   return { type: "tool_call", callId, name, argumentsJson };
 }
 
@@ -292,7 +295,9 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
       if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0 || argumentsJson === undefined) {
         upstreamInvalid();
       }
-      validateCompleteArguments(argumentsJson);
+      if (status === "completed") {
+        validateCompleteArguments(argumentsJson);
+      }
       const itemId = stringMember(value, "id");
       items.push({
         type: "tool_call",
