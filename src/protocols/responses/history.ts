@@ -1,4 +1,4 @@
-import type { SqliteDatabase } from "../../persistence/sqlite.js";
+import type { SqliteDatabase, SqliteStatement } from "../../persistence/sqlite.js";
 import {
   isWireJsonArray,
   isWireJsonObject,
@@ -196,6 +196,7 @@ interface StateRow {
 }
 
 export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistoryAdmin {
+  private readonly statements = new Map<string, SqliteStatement>();
   private readonly nowMs: () => number;
   private ttlMs: number;
   private readonly maxResponses: number;
@@ -370,6 +371,48 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     ) {
       return;
     }
+    if (
+      existing !== undefined
+      && existing.checkpoint_state !== "expired"
+      && existing.created_at_ms + this.ttlMs > this.nowMs()
+      && sameOwnership(existing, ownership)
+    ) {
+      const nowMs = this.nowMs();
+      const transaction = this.database.transaction(() => {
+        const receiptsExpired = this.expireReceipts(nowMs);
+        const legacyExpired = this.expireLegacy(nowMs);
+        const receiptChanged = checkpointRank(checkpointState) > checkpointRank(existing.checkpoint_state);
+        if (receiptChanged) {
+          this.statement(
+            `UPDATE response_route_receipts
+             SET checkpoint_state = ?
+             WHERE account_id = ? AND response_id = ?`,
+          ).run(checkpointState, ownership.accountId, responseId);
+        }
+        const checkpointChanged = calls.length > 0
+          ? this.upsertCheckpoint(ownership.accountId, responseId, calls)
+          : false;
+        const checkpointEvicted = receiptsExpired || legacyExpired || receiptChanged || checkpointChanged
+          ? this.evictCheckpointOverflow()
+          : false;
+        const receiptEvicted = receiptsExpired || legacyExpired
+          ? this.evictReceiptOverflow()
+          : false;
+        if (
+          receiptsExpired
+          || legacyExpired
+          || receiptChanged
+          || checkpointChanged
+          || checkpointEvicted
+          || receiptEvicted
+        ) {
+          this.bumpRevision(nowMs);
+        }
+      });
+      transaction();
+      throwIfAborted(signal);
+      return;
+    }
     this.mutateIfChanged(() => {
       const receiptChanged = this.upsertReceipt({ ...ownership, responseId, checkpointState });
       const checkpointChanged = calls.length > 0
@@ -476,7 +519,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private expireReceipts(nowMs: number): boolean {
-    const expired = this.database.prepare(
+    const expired = this.statement(
       `SELECT account_id, response_id
        FROM response_route_receipts
        WHERE checkpoint_state <> 'expired' AND created_at_ms + ? <= ?`,
@@ -500,7 +543,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private expireLegacy(nowMs: number): boolean {
-    const expired = this.database.prepare(
+    const expired = this.statement(
       "SELECT response_id FROM responses WHERE created_at_ms + ? <= ?",
     ).all(this.ttlMs, nowMs) as Array<{ response_id: string }>;
     if (expired.length === 0) {
@@ -643,27 +686,27 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     if (existingCalls.length > 0 && callsEqual(existingCalls, calls)) {
       return false;
     }
-    const existing = this.database.prepare(
+    const existing = this.statement(
       `SELECT 1 FROM response_scoped_checkpoints
        WHERE account_id = ? AND response_id = ?`,
     ).get(accountId, responseId);
     if (existing === undefined) {
       const state = this.readState();
       const nowMs = this.nowMs();
-      this.database.prepare(
+      this.statement(
         `INSERT INTO response_scoped_checkpoints
          (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
          VALUES (?, ?, ?, ?, ?)`,
       ).run(accountId, responseId, state.next_checkpoint_seq, nowMs, nowMs + this.ttlMs);
-      this.database.prepare(
+      this.statement(
         "UPDATE responses_continuation_state SET next_checkpoint_seq = ? WHERE singleton_id = 1",
       ).run(state.next_checkpoint_seq + 1);
     } else {
-      this.database.prepare(
+      this.statement(
         "DELETE FROM response_scoped_calls WHERE account_id = ? AND response_id = ?",
       ).run(accountId, responseId);
     }
-    const insertCall = this.database.prepare(
+    const insertCall = this.statement(
       `INSERT INTO response_scoped_calls
        (account_id, response_id, ordinal, call_id, kind, item_json)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -675,7 +718,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private readReceipt(accountId: string, responseId: string): ReceiptRow | undefined {
-    return this.database.prepare(
+    return this.statement(
       `SELECT account_id, response_id, model_id, upstream_origin, owner, upstream_protocol,
               conversion_version, checkpoint_state, created_at_ms, expires_at_ms
        FROM response_route_receipts
@@ -696,7 +739,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private readCalls(accountId: string, responseId: string): readonly StoredCall[] {
-    const rows = this.database.prepare(
+    const rows = this.statement(
       `SELECT response_id, ordinal, call_id, kind, item_json
        FROM response_scoped_calls
        WHERE account_id = ? AND response_id = ?
@@ -723,19 +766,19 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private responseCount(): number {
-    return (this.database.prepare(
+    return (this.statement(
       "SELECT COUNT(*) AS count FROM response_scoped_checkpoints",
     ).get() as { count: number }).count;
   }
 
   private receiptCount(): number {
-    return (this.database.prepare(
+    return (this.statement(
       "SELECT COUNT(*) AS count FROM response_route_receipts",
     ).get() as { count: number }).count;
   }
 
   private legacyCount(): number {
-    return (this.database.prepare(
+    return (this.statement(
       "SELECT COUNT(*) AS count FROM responses",
     ).get() as { count: number }).count;
   }
@@ -747,25 +790,34 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private markUncertain(nowMs: number): void {
-    this.database.prepare(
+    this.statement(
       `INSERT OR IGNORE INTO response_receipt_uncertainty
        (singleton_id, uncertain_since_ms) VALUES (1, ?)`,
     ).run(nowMs);
   }
 
   private readState(): StateRow {
-    return this.database.prepare(
+    return this.statement(
       `SELECT revision, next_receipt_seq, next_checkpoint_seq
        FROM responses_continuation_state WHERE singleton_id = 1`,
     ).get() as StateRow;
   }
 
   private bumpRevision(nowMs: number): void {
-    this.database.prepare(
+    this.statement(
       `UPDATE responses_continuation_state
        SET revision = revision + 1, updated_at_ms = ?
        WHERE singleton_id = 1`,
     ).run(nowMs);
+  }
+
+  private statement(sql: string): SqliteStatement {
+    let statement = this.statements.get(sql);
+    if (statement === undefined) {
+      statement = this.database.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
   }
 }
 
