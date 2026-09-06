@@ -234,7 +234,7 @@ describe("Admin API", () => {
       const capacity = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
         accountId: "github.com/42",
         modelId: "overflow",
-        expectedRevision: 0,
+        expectedRevision: 2,
         capabilities: { enabled: true },
       });
       expect(capacity.status).toBe(503);
@@ -249,8 +249,10 @@ describe("Admin API", () => {
   it("does not recreate overrides after removal and completes reconciliation after commit", async () => {
     const dependencies = adminDependencies();
     let releaseValidation = (): void => undefined;
-    dependencies.registry.validateOverride = async () => {
+    const originalPreview = dependencies.registry.previewOverride;
+    dependencies.registry.previewOverride = async (...args) => {
       await new Promise<void>((resolve) => { releaseValidation = resolve; });
+      return await originalPreview(...args);
     };
     let writes = 0;
     const originalSet = dependencies.capabilityOverrides.set;
@@ -308,6 +310,34 @@ describe("Admin API", () => {
       expect(committedDependencies.calls).toContain("preference-invalidated");
     } finally {
       await committedHarness.close();
+    }
+
+    const preferenceRace = adminDependencies();
+    let capabilityWrites = 0;
+    const raceSet = preferenceRace.capabilityOverrides.set;
+    preferenceRace.capabilityOverrides.set = (...args) => {
+      capabilityWrites += 1;
+      return raceSet(...args);
+    };
+    const racePreview = preferenceRace.registry.previewOverride;
+    preferenceRace.registry.previewOverride = async (...args) => {
+      const preview = await racePreview(...args);
+      preferenceRace.preferredModels.setPreferred("github.com/42", "gpt-test", 0, preview);
+      return preview;
+    };
+    const raceHarness = await createHarness(preferenceRace);
+    try {
+      const session = await login(raceHarness.gateway, raceHarness.admin);
+      const response = await mutate(raceHarness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual",
+        expectedRevision: 0,
+        capabilities: { enabled: true, protocols: ["messages"] },
+      });
+      expect(response.status).toBe(409);
+      expect(capabilityWrites).toBe(0);
+    } finally {
+      await raceHarness.close();
     }
   });
 

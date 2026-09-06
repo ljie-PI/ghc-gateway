@@ -248,6 +248,25 @@ describe("model capability registry", () => {
     expect(overrides.revision("github.com/1")).toBe(600);
   });
 
+  it("rolls back override and revision when preference reconciliation fails", async () => {
+    const database = databaseWithCapabilities();
+    await createAccount(database, "1");
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    expect(() => overrides.set(
+      "github.com/1",
+      "manual",
+      { enabled: true, protocols: ["messages"] },
+      0,
+      () => { throw new Error("preference conflict"); },
+    )).toThrow("preference conflict");
+    expect(overrides.get("github.com/1", "manual")).toEqual({
+      accountId: "github.com/1",
+      modelId: "manual",
+      revision: 0,
+      value: null,
+    });
+  });
+
   it("uses explicit valid output budgets, configured defaults, known ceilings, and unknown fallback", () => {
     const unknownConfiguration = {
       value: null, source: "unknown" as const, conflict: false, liveState: "missing" as const,

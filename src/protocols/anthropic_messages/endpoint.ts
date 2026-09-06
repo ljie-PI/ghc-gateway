@@ -3,6 +3,10 @@ import type { AccountModelPreferences } from "../../accounts/model_preferences.j
 import type { CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import {
+  isModelCapabilityUnavailable,
+  ModelCapabilityUnavailableError,
+} from "../../copilot/model_capabilities.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
@@ -77,7 +81,10 @@ async function executeAnthropicMessages(
     throw new GatewayFailureError({ kind: resolved.kind });
   }
   if (resolved.capability.protocols.value?.includes("chat") !== true) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      cause: new ModelCapabilityUnavailableError(),
+    });
   }
   usage.setModel(resolved.upstreamModel);
   const chatBody = convertAnthropicRequest(
@@ -166,7 +173,13 @@ function mapAnthropicFailure(failure: Readonly<GatewayFailure>): {
     return { status: 415, type: "invalid_request_error", message: "unsupported media type" };
   }
   if (failure.kind === "unsupported_semantics") {
-    return { status: 400, type: "invalid_request_error", message: "unsupported semantics" };
+    return {
+      status: 400,
+      type: "invalid_request_error",
+      message: isModelCapabilityUnavailable(failure.cause)
+        ? "model native protocol capability is not configured"
+        : "unsupported semantics",
+    };
   }
   if (failure.kind === "authentication") {
     return { status: 401, type: "authentication_error", message: "authentication failed" };

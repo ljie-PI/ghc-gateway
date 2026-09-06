@@ -5,6 +5,17 @@ export type ChatOutputTokenField = "max_tokens" | "max_completion_tokens";
 export type CapabilityFieldState = "missing" | "value" | "malformed";
 export type CapabilitySource = "admin_override" | "live" | "builtin" | "unknown";
 
+export class ModelCapabilityUnavailableError extends Error {
+  constructor() {
+    super("model native protocol capability is not configured");
+    this.name = "ModelCapabilityUnavailableError";
+  }
+}
+
+export function isModelCapabilityUnavailable(error: unknown): error is ModelCapabilityUnavailableError {
+  return error instanceof ModelCapabilityUnavailableError;
+}
+
 export interface DeclaredField<T> {
   readonly state: CapabilityFieldState;
   readonly value?: T;

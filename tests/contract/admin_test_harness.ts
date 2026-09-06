@@ -43,6 +43,23 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     readonly validity: "valid" | "invalid";
     readonly catalogGeneration: number;
   } | null = null;
+  const capabilitySnapshot = (
+    bound: Awaited<ReturnType<NonNullable<AdminModuleDependencies["accounts"]["bindAccount"]>>>,
+    entries: ReadonlyMap<string, { revision: number; value: ModelCapabilityOverrideValue | null }>,
+    revision: number,
+  ) => ({
+    accountId: bound.accountId,
+    credentialGeneration: bound.credentialGeneration,
+    catalogGeneration: 7,
+    fetchedAt: "2027-01-15T08:00:00.000Z",
+    capabilityRevision: revision,
+    models: [
+      capabilityModel("gpt-test", entries.get("gpt-test"), revision),
+      ...[...entries.entries()]
+        .filter(([modelId, stored]) => modelId !== "gpt-test" && stored.value !== null)
+        .map(([modelId, stored]) => capabilityModel(modelId, stored, revision)),
+    ],
+  });
   const telemetry: AdminTelemetry = {
     async queryUsage(query, signal) {
       calls.push(`usage:${query.limit}`);
@@ -136,27 +153,24 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       async get(bound, signal) {
         signal.throwIfAborted();
         calls.push(`catalog:${bound.accountId}`);
-        return {
-          accountId: bound.accountId,
-          credentialGeneration: bound.credentialGeneration,
-          catalogGeneration: 7,
-          fetchedAt: "2027-01-15T08:00:00.000Z",
-          capabilityRevision,
-          models: [
-            capabilityModel("gpt-test", capabilityOverrides.get("gpt-test"), capabilityRevision),
-            ...[...capabilityOverrides.entries()]
-              .filter(([modelId, stored]) => modelId !== "gpt-test" && stored.value !== null)
-              .map(([modelId, stored]) => capabilityModel(modelId, stored, capabilityRevision)),
-          ],
-        };
+        return capabilitySnapshot(bound, capabilityOverrides, capabilityRevision);
       },
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
-      validateOverride: async (_account, _modelId, candidate) => {
-        if (candidate.defaultOutputTokens !== undefined
+      previewOverride: async (account, modelId, candidate, expectedRevision, signal) => {
+        signal.throwIfAborted();
+        if (expectedRevision !== capabilityRevision) throw coded("revision_conflict");
+        if (candidate?.defaultOutputTokens !== undefined
           && candidate.maxOutputTokens !== undefined
           && candidate.defaultOutputTokens > candidate.maxOutputTokens) {
           throw coded("validation_failed");
         }
+        const preview = new Map(capabilityOverrides);
+        if (candidate === null) {
+          preview.delete(modelId);
+        } else {
+          preview.set(modelId, { revision: capabilityRevision + 1, value: structuredClone(candidate) });
+        }
+        return capabilitySnapshot(account, preview, capabilityRevision + 1);
       },
     },
     preferences: {
@@ -179,18 +193,20 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       },
     },
     capabilityOverrides: {
-      set: (_accountId, modelId, candidate, expectedRevision) => {
+      set: (_accountId, modelId, candidate, expectedRevision, afterWrite) => {
         if (capabilityRevision !== expectedRevision) throw coded("revision_conflict");
         capabilityRevision += 1;
         capabilityOverrides.set(modelId, {
           revision: capabilityRevision,
           value: structuredClone(candidate),
         });
+        afterWrite?.();
       },
-      reset: (_accountId, modelId, expectedRevision) => {
+      reset: (_accountId, modelId, expectedRevision, afterWrite) => {
         if (capabilityRevision !== expectedRevision) throw coded("revision_conflict");
         capabilityRevision += 1;
         capabilityOverrides.set(modelId, { revision: capabilityRevision, value: null });
+        afterWrite?.();
       },
     },
     runtimeConfig: {

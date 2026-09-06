@@ -3,6 +3,7 @@ import type { AccountModelPreferences } from "../../accounts/model_preferences.j
 import { iterateChatFrames, type BoundCopilot, type CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import { isModelCapabilityUnavailable } from "../../copilot/model_capabilities.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
@@ -544,7 +545,9 @@ function messageForFailure(failure: Readonly<GatewayFailure>): string {
     return "unsupported media type";
   }
   if (failure.kind === "unsupported_semantics") {
-    return "unsupported semantics";
+    return isModelCapabilityUnavailable(failure.cause)
+      ? "model native protocol capability is not configured"
+      : "unsupported semantics";
   }
   if (failure.kind === "authentication") {
     return "authentication failed";

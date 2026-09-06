@@ -4,6 +4,10 @@ import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import {
+  isModelCapabilityUnavailable,
+  ModelCapabilityUnavailableError,
+} from "../../copilot/model_capabilities.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
 import { TokenRefreshError } from "../../copilot/token_refresh.js";
 import {
@@ -95,7 +99,10 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       const catalog = await loadCatalog(dependencies, account, scope.signal);
       const resolved = resolveOpenAiChatModel(decoded, catalog, preference);
       if (resolved.capability.protocols.value?.includes("chat") !== true) {
-        throw new GatewayFailureError({ kind: "invalid_request" });
+        throw new GatewayFailureError({
+          kind: "unsupported_semantics",
+          cause: new ModelCapabilityUnavailableError(),
+        });
       }
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
@@ -876,7 +883,9 @@ function messageForFailure(failure: Readonly<GatewayFailure>): string {
   case "unsupported_media_type":
     return "unsupported media type";
   case "unsupported_semantics":
-    return "unsupported semantics";
+    return isModelCapabilityUnavailable(failure.cause)
+      ? "model native protocol capability is not configured"
+      : "unsupported semantics";
   case "authentication":
     return "authentication failed";
   case "permission":

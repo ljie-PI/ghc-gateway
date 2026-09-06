@@ -261,12 +261,13 @@ export interface AdminCapabilityRegistry {
     }[];
   }>;
   invalidate(accountId: string): void;
-  validateOverride(
+  previewOverride(
     account: Readonly<BoundAccount>,
     modelId: string,
-    candidate: Readonly<ModelCapabilityOverrideValue>,
+    candidate: Readonly<ModelCapabilityOverrideValue> | null,
+    expectedRevision: number,
     signal: AbortSignal,
-  ): Promise<void>;
+  ): ReturnType<AdminCapabilityRegistry["get"]>;
 }
 
 export interface AdminAccountCaches {
@@ -297,8 +298,9 @@ export interface AdminCapabilityOverrides {
     modelId: string,
     candidate: Readonly<ModelCapabilityOverrideValue>,
     expectedRevision: number,
+    afterWrite?: () => void,
   ): unknown;
-  reset(accountId: string, modelId: string, expectedRevision: number): unknown;
+  reset(accountId: string, modelId: string, expectedRevision: number, afterWrite?: () => void): unknown;
 }
 
 export interface AdminStoredPreference extends AdminPreference {
@@ -507,7 +509,13 @@ export class AdminManagementApi {
       this.requireActiveAccount(accountId);
       const before = this.dependencies.preferences.get(accountId);
       const validatedAccount = await this.dependencies.accounts.bindAccount(accountId, signal);
-      await this.dependencies.registry.validateOverride(validatedAccount, modelId, candidate, signal);
+      const preview = await this.dependencies.registry.previewOverride(
+        validatedAccount,
+        modelId,
+        candidate,
+        expectedRevision,
+        signal,
+      );
       signal.throwIfAborted();
       const account = await this.dependencies.accounts.bindAccount(accountId, signal);
       signal.throwIfAborted();
@@ -515,10 +523,21 @@ export class AdminManagementApi {
       if (account.credentialGeneration !== validatedAccount.credentialGeneration) {
         throw new AdminApiError("revision_conflict");
       }
-      this.dependencies.capabilityOverrides.set(accountId, modelId, candidate, expectedRevision);
-      const catalog = await this.dependencies.registry.get(account, new AbortController().signal);
-      this.dependencies.preferredModels.markInvalidIfMissing(accountId, catalog, before?.revision ?? null);
-      return this.modelsDto(catalog);
+      if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {
+        throw new AdminApiError("revision_conflict");
+      }
+      this.dependencies.capabilityOverrides.set(
+        accountId,
+        modelId,
+        candidate,
+        expectedRevision,
+        () => this.dependencies.preferredModels.markInvalidIfMissing(
+          accountId,
+          preview,
+          before?.revision ?? null,
+        ),
+      );
+      return this.modelsDto(preview);
     });
   }
 
@@ -532,12 +551,29 @@ export class AdminManagementApi {
       this.requireActiveAccount(accountId);
       const before = this.dependencies.preferences.get(accountId);
       const account = await this.dependencies.accounts.bindAccount(accountId, signal);
+      const preview = await this.dependencies.registry.previewOverride(
+        account,
+        modelId,
+        null,
+        expectedRevision,
+        signal,
+      );
       signal.throwIfAborted();
       this.requireActiveAccount(accountId);
-      this.dependencies.capabilityOverrides.reset(accountId, modelId, expectedRevision);
-      const catalog = await this.dependencies.registry.get(account, new AbortController().signal);
-      this.dependencies.preferredModels.markInvalidIfMissing(accountId, catalog, before?.revision ?? null);
-      return this.modelsDto(catalog);
+      if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {
+        throw new AdminApiError("revision_conflict");
+      }
+      this.dependencies.capabilityOverrides.reset(
+        accountId,
+        modelId,
+        expectedRevision,
+        () => this.dependencies.preferredModels.markInvalidIfMissing(
+          accountId,
+          preview,
+          before?.revision ?? null,
+        ),
+      );
+      return this.modelsDto(preview);
     });
   }
 

@@ -79,30 +79,53 @@ export class ModelCapabilityRegistry {
 
   async get(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<CapabilityCatalogSnapshot> {
     const catalog = await this.catalog.get(account.accountId, signal, account.credentialGeneration);
-    return this.compose(account, catalog);
+    return this.compose(
+      account,
+      catalog,
+      this.overrides.list(account.accountId),
+      this.overrides.revision(account.accountId),
+    );
   }
 
-  async validateOverride(
+  async previewOverride(
     account: Readonly<BoundAccount>,
     modelId: string,
-    candidate: Readonly<ModelCapabilityOverrideValue>,
+    candidate: Readonly<ModelCapabilityOverrideValue> | null,
+    expectedRevision: number,
     signal: AbortSignal,
-  ): Promise<void> {
-    if (candidate.defaultOutputTokens === undefined) {
-      return;
+  ): Promise<CapabilityCatalogSnapshot> {
+    const currentRevision = this.overrides.revision(account.accountId);
+    if (currentRevision !== expectedRevision) {
+      throw new ModelCapabilityOverrideError("revision_conflict");
     }
     const catalog = await this.catalog.get(account.accountId, signal, account.credentialGeneration);
-    const model = catalog.models.find((item) => item.id === modelId);
-    const live = model?.capabilities ?? UNKNOWN_DECLARATIONS;
-    const fallback = this.builtins.get(modelId)?.capabilities ?? UNKNOWN_DECLARATIONS;
-    const ceiling = effectiveField(
-      candidate.maxOutputTokens,
-      live.maxOutputTokens,
-      fallback.maxOutputTokens,
-    ).value;
-    if (ceiling !== null && candidate.defaultOutputTokens > ceiling) {
-      throw new ModelCapabilityOverrideError("validation_failed");
+    if (candidate?.defaultOutputTokens !== undefined) {
+      const model = catalog.models.find((item) => item.id === modelId);
+      const live = model?.capabilities ?? UNKNOWN_DECLARATIONS;
+      const fallback = this.builtins.get(modelId)?.capabilities ?? UNKNOWN_DECLARATIONS;
+      const ceiling = effectiveField(
+        candidate.maxOutputTokens,
+        live.maxOutputTokens,
+        fallback.maxOutputTokens,
+      ).value;
+      if (ceiling !== null && candidate.defaultOutputTokens > ceiling) {
+        throw new ModelCapabilityOverrideError("validation_failed");
+      }
     }
+    const configured = this.overrides.list(account.accountId)
+      .filter((stored) => stored.modelId !== modelId);
+    const current = this.overrides.get(account.accountId, modelId);
+    const changesState = candidate !== null || current.value !== null;
+    const nextRevision = changesState ? currentRevision + 1 : currentRevision;
+    if (candidate !== null) {
+      configured.push({
+        accountId: account.accountId,
+        modelId,
+        revision: nextRevision,
+        value: candidate,
+      });
+    }
+    return this.compose(account, catalog, configured, nextRevision);
   }
 
   invalidate(accountId: string): void {
@@ -116,8 +139,9 @@ export class ModelCapabilityRegistry {
   private compose(
     account: Readonly<BoundAccount>,
     catalog: Readonly<CatalogSnapshot>,
+    configured: readonly StoredModelCapabilityOverride[],
+    capabilityRevision: number,
   ): CapabilityCatalogSnapshot {
-    const configured = this.overrides.list(account.accountId);
     const overrides = new Map(configured.map((item) => [item.modelId, item]));
     const discoveredIds = new Set(catalog.models.map((model) => model.id));
     const models = catalog.models.map((model) => this.effective(account, catalog, model, overrides.get(model.id)));
@@ -132,7 +156,7 @@ export class ModelCapabilityRegistry {
       catalogGeneration: catalog.generation,
       fetchedAt: catalog.fetchedAt,
       models,
-      capabilityRevision: this.overrides.revision(account.accountId),
+      capabilityRevision,
     });
   }
 

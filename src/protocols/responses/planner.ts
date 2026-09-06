@@ -1,5 +1,6 @@
 import type { CopilotTarget } from "../../copilot/backend.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilities.js";
 import type { ResolvedModel } from "../model_catalog/resolver.js";
 import type { ResponsesRequest } from "./dto.js";
 
@@ -37,7 +38,10 @@ export function planResponsesExecution(
   if (protocols?.includes("chat") === true) {
     return { kind: "chat_bridge", originalRequest: request, resolvedModel };
   }
-  throw new GatewayFailureError({ kind: "invalid_request" });
+  throw new GatewayFailureError({
+    kind: "unsupported_semantics",
+    cause: new ModelCapabilityUnavailableError(),
+  });
 }
 
 export function responsesUpstreamUrl(endpoint: string): string {

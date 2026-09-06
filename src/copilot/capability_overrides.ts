@@ -57,6 +57,7 @@ export class SqliteModelCapabilityOverrides {
     modelId: string,
     candidate: Readonly<ModelCapabilityOverrideValue>,
     expectedRevision: number,
+    afterWrite: () => void = () => undefined,
   ): StoredModelCapabilityOverride {
     validateModelId(modelId);
     validateOverride(candidate);
@@ -90,11 +91,17 @@ export class SqliteModelCapabilityOverrides {
            updated_at_ms = excluded.updated_at_ms`,
       ).run(accountId, modelId, nextRevision, JSON.stringify(next), updatedAt);
       this.writeRevision(accountId, nextRevision, updatedAt);
+      afterWrite();
     })();
     return this.get(accountId, modelId);
   }
 
-  reset(accountId: string, modelId: string, expectedRevision: number): StoredModelCapabilityOverride {
+  reset(
+    accountId: string,
+    modelId: string,
+    expectedRevision: number,
+    afterWrite: () => void = () => undefined,
+  ): StoredModelCapabilityOverride {
     validateModelId(modelId);
     const currentRevision = this.revision(accountId);
     if (currentRevision !== expectedRevision) {
@@ -111,6 +118,7 @@ export class SqliteModelCapabilityOverrides {
         "DELETE FROM model_capability_overrides WHERE account_id = ? AND model_id = ?",
       ).run(accountId, modelId);
       this.writeRevision(accountId, nextRevision, updatedAt);
+      afterWrite();
     })();
     return this.get(accountId, modelId);
   }
