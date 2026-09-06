@@ -230,6 +230,12 @@ describe("model capability registry", () => {
     if (revision === undefined) throw new Error("missing account revision");
     await directory.remove(account.accountId, revision);
     expect(overrides.list(account.accountId)).toEqual([]);
+    const reauthenticated = await directory.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "new-token" },
+    });
+    expect(reauthenticated.credentialGeneration).toBe(2);
   });
 
   it("keeps reset revision state bounded without retaining per-model tombstones", async () => {

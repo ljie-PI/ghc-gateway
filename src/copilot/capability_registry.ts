@@ -61,6 +61,7 @@ export async function loadCapabilitySnapshot(
   if (dependencies.registry !== undefined) {
     return await dependencies.registry.get(account, signal);
   }
+
   if (dependencies.catalog !== undefined) {
     return capabilitySnapshotFromCatalog(
       account,
@@ -68,6 +69,20 @@ export async function loadCapabilitySnapshot(
     );
   }
   throw new Error("model capability registry is unavailable");
+}
+
+export function isCapabilitySnapshotCurrent(
+  dependencies: Readonly<CapabilitySnapshotDependencies>,
+  snapshot: Readonly<CapabilityCatalogSnapshot>,
+): boolean {
+  if (dependencies.registry !== undefined) {
+    return dependencies.registry.isCurrent(snapshot);
+  }
+  return dependencies.catalog?.isCurrent(
+    snapshot.accountId,
+    snapshot.catalogGeneration,
+    snapshot.credentialGeneration,
+  ) === true;
 }
 
 export class ModelCapabilityRegistry {
@@ -130,6 +145,14 @@ export class ModelCapabilityRegistry {
 
   invalidate(accountId: string): void {
     this.catalog.invalidate(accountId);
+  }
+
+  isCurrent(snapshot: Readonly<CapabilityCatalogSnapshot>): boolean {
+    return this.catalog.isCurrent(
+      snapshot.accountId,
+      snapshot.catalogGeneration,
+      snapshot.credentialGeneration,
+    );
   }
 
   async close(): Promise<void> {

@@ -14,7 +14,7 @@ import type { RequestScope } from "../../gateway/request_scope.js";
 import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
-import { reconcilePreferredModel } from "../model_catalog/preferred.js";
+import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import { convertChatResponse } from "./bridge.js";
 import { convertAnthropicRequest } from "./request.js";
 import { createAnthropicStreamResponse } from "./stream.js";
@@ -282,7 +282,15 @@ async function loadCatalog(
 ) {
   try {
     const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
-    reconcilePreferredModel(dependencies.preferences, account.accountId, catalog, observedPreference);
+    await reconcilePreferredModelIfCurrent(
+      dependencies.preferences,
+      dependencies.directory,
+      dependencies,
+      account,
+      catalog,
+      observedPreference,
+      signal,
+    );
     return catalog;
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {

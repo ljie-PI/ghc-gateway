@@ -13,7 +13,7 @@ import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serial
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
-import { reconcilePreferredModel } from "../model_catalog/preferred.js";
+import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
 import { prepareChatBridgeRequest } from "./bridge_request.js";
 import { convertChatStream, type ResponsesStreamEmission } from "./bridge_stream.js";
@@ -455,7 +455,15 @@ async function loadCatalog(
 ) {
   try {
     const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
-    reconcilePreferredModel(dependencies.preferences, account.accountId, catalog, observedPreference);
+    await reconcilePreferredModelIfCurrent(
+      dependencies.preferences,
+      dependencies.directory,
+      dependencies,
+      account,
+      catalog,
+      observedPreference,
+      signal,
+    );
     return catalog;
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {

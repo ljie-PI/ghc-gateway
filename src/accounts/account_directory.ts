@@ -241,7 +241,7 @@ export class AccountDirectory {
     await this.credentials.removeAccount(accountId);
     throwIfAborted(signal);
     this.database.prepare(
-      "UPDATE accounts SET credential_state = 'removed', credential_generation = NULL, revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
+      "UPDATE accounts SET credential_state = 'removed', revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
     ).run(this.nowMs(), accountId);
     const removed = this.readAccount(accountId);
     if (removed === undefined) {

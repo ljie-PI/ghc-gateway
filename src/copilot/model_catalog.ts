@@ -130,6 +130,11 @@ export class CopilotModelCatalog {
     this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1);
   }
 
+  isCurrent(accountId: string, generation: number, credentialGeneration: number): boolean {
+    return (this.generations.get(accountId) ?? 0) === generation
+      && this.credentialGenerations.get(accountId) === credentialGeneration;
+  }
+
   clear(): void {
     for (const accountId of new Set([...this.cache.keys(), ...this.generations.keys()])) {
       this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1);

@@ -252,4 +252,69 @@ describe("model routes errors and preferences", () => {
       closeDatabase(database);
     }
   });
+
+  it("does not reconcile preference validity from a superseded catalog generation", async () => {
+    const database = openDatabase({
+      path: ":memory:",
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        embedMigration(modelCapabilitiesMigration),
+      ],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const account = await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    accounts.preferences.set(account.accountId, { modelId: "keep", catalogGeneration: 0 }, 0);
+    let fetches = 0;
+    let releaseOld = (): void => undefined;
+    let oldStarted = (): void => undefined;
+    const oldStartedPromise = new Promise<void>((resolve) => { oldStarted = resolve; });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        fetches += 1;
+        if (fetches === 1) {
+          oldStarted();
+          await new Promise<void>((resolve) => { releaseOld = resolve; });
+          return { data: [] };
+        }
+        return { data: [{
+          id: "keep",
+          name: "Keep",
+          vendor: "test",
+          model_picker_enabled: true,
+          model_info: { supported_endpoints: ["/chat/completions"] },
+        }] };
+      },
+    });
+    const registry = new ModelCapabilityRegistry(
+      catalog,
+      new SqliteModelCapabilityOverrides(database, nowMs),
+      { get: () => null },
+    );
+    const gateway = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:/superseded-models" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      registry,
+      preferences: accounts.preferences,
+    }));
+    try {
+      const staleListing = gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      await oldStartedPromise;
+      registry.invalidate(account.accountId);
+      await registry.get(account, new AbortController().signal);
+      releaseOld();
+      expect((await staleListing).status).toBe(200);
+      expect(accounts.preferences.get(account.accountId)?.validity).toBe("valid");
+    } finally {
+      await gateway.close();
+      closeDatabase(database);
+    }
+  });
 });
