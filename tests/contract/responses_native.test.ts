@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import type { BoundAccount } from "../../src/accounts/account_directory.js";
 import type { BoundCopilot } from "../../src/copilot/backend.js";
-import type { NativeResponsesUpstreamRequest, UpstreamByteStream } from "../../src/protocols/chat_completions/types.js";
+import type { NativeResponsesUpstreamRequest, UpstreamByteStream } from "../../src/copilot/upstream_types.js";
 import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
 import {
   completeNativeResponses,
@@ -130,6 +130,8 @@ describe("native Responses execution", () => {
         }
         return options.stream;
       },
+      completeMessages: async () => { throw new Error("messages must not be called"); },
+      openMessagesStream: async () => { throw new Error("messages stream must not be called"); },
     };
   }
 

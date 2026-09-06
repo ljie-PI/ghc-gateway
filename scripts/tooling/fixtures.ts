@@ -39,7 +39,7 @@ import { buildRequestToolContext } from "../../src/protocols/responses/tool_cont
 import { encodeResponsesSseEvent } from "../../src/protocols/responses/wire.js";
 import { canonicalizeWireJson } from "../../src/serialization/canonical_json.js";
 import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, WireJsonError, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
-import type { UpstreamByteStream } from "../../src/protocols/chat_completions/types.js";
+import type { UpstreamByteStream } from "../../src/copilot/upstream_types.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 export interface FixtureManifestEntry {

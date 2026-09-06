@@ -25,7 +25,7 @@ import type {
   NativeResponsesUpstreamRequest,
   UpstreamByteResponse,
   UpstreamByteStream,
-} from "../../src/protocols/chat_completions/types.js";
+} from "../../src/copilot/upstream_types.js";
 import {
   SqliteResponsesHistory,
   type ResponsesHistoryRecord,
@@ -179,8 +179,14 @@ class BenchmarkCopilotBackend implements CopilotBackend {
         bytes: byteStream([encoder.encode(NATIVE_STREAM_EVENT)]),
         cancel: async () => undefined,
       }),
+      completeMessages: async () => { throw new Error("messages must not be called"); },
+      openMessagesStream: async () => { throw new Error("messages stream must not be called"); },
     };
   }
+
+  async close(): Promise<void> {}
+
+  forceClose(): void {}
 
   private chatStream(): UpstreamByteStream {
     const parts = this.mode === "event"

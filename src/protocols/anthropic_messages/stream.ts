@@ -2,7 +2,7 @@ import { iterateChatFrames } from "../../copilot/backend.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
-import type { UpstreamByteStream } from "../chat_completions/types.js";
+import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import { anthropicStopReason, anthropicUsage } from "./bridge.js";
 import { asRecord, normalizeToolId, wireToJson } from "./common.js";
 import { encodeAnthropicSse, type AnthropicEvent } from "./wire.js";

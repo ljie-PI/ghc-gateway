@@ -5,7 +5,10 @@ import { CapiFetchError } from "../../copilot/models_source.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
 import { TokenRefreshError } from "../../copilot/token_refresh.js";
-import { mapTokenRefreshError, UpstreamBodyLimitError, UpstreamTimeoutError } from "../../copilot/transport.js";
+import {
+  classifyCopilotTransportError,
+  mapTokenRefreshError,
+} from "../../copilot/transport.js";
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
@@ -432,16 +435,11 @@ function upstreamCallFailure(error: unknown): GatewayFailureError {
   if (error instanceof GatewayFailureError) {
     return error;
   }
-  if (error instanceof Error && error.name === "AbortError") {
-    return new GatewayFailureError({ kind: "aborted" });
+  const kind = classifyCopilotTransportError(error);
+  if (kind === "aborted") {
+    return new GatewayFailureError({ kind });
   }
-  if (error instanceof UpstreamBodyLimitError) {
-    return new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
-  }
-  if (error instanceof UpstreamTimeoutError) {
-    return new GatewayFailureError({ kind: "upstream_timeout", cause: error });
-  }
-  return new GatewayFailureError({ kind: "upstream_network", cause: error });
+  return new GatewayFailureError({ kind, cause: error });
 }
 
 function parseUpstreamObject(body: Uint8Array, maxBytes: number): WireJsonObject {

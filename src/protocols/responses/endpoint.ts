@@ -8,7 +8,8 @@ import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_a
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
-import type { ChatRequest, UpstreamByteResponse, UpstreamByteStream } from "../chat_completions/types.js";
+import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
+import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
 import { prepareChatBridgeRequest } from "./bridge_request.js";

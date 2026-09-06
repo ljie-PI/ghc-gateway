@@ -7,7 +7,7 @@ import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import type { BoundCopilot, CopilotBackend, CopilotTarget } from "../../src/copilot/backend.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { CopilotModelCatalog, type CapiModelsResponse } from "../../src/copilot/model_catalog.js";
-import { UpstreamTimeoutError } from "../../src/copilot/transport.js";
+import { InvalidUpstreamResponseError, UpstreamTimeoutError } from "../../src/copilot/transport.js";
 import { defaultRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
@@ -16,7 +16,12 @@ import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { createOpenAiChatRoute } from "../../src/protocols/openai_chat/endpoint.js";
-import type { ChatRequest, ChatResponse, NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../../src/protocols/chat_completions/types.js";
+import type {
+  NativeResponsesUpstreamRequest,
+  UpstreamByteResponse,
+  UpstreamByteStream,
+} from "../../src/copilot/upstream_types.js";
+import type { ChatRequest, ChatResponse } from "../../src/protocols/chat_completions/types.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -29,6 +34,7 @@ class CapturingCopilotBackend implements CopilotBackend {
   constructor(
     private readonly options: {
       readonly chat?: ChatResponse;
+      readonly chatError?: unknown;
       readonly chatPromise?: Promise<ChatResponse>;
       readonly chatStream?: UpstreamByteStream;
     },
@@ -41,6 +47,9 @@ class CapturingCopilotBackend implements CopilotBackend {
       target,
       completeChat: async (request) => {
         this.chatRequests.push(request);
+        if (this.options.chatError !== undefined) {
+          throw this.options.chatError;
+        }
         if (this.options.chatPromise !== undefined) {
           return await withScriptedFirstByteTimeout(this.options.chatPromise, request.firstByteTimeoutMs);
         }
@@ -62,8 +71,14 @@ class CapturingCopilotBackend implements CopilotBackend {
       openResponsesStream: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteStream> => {
         throw new Error("responses stream must not be called");
       },
+      completeMessages: async () => { throw new Error("messages must not be called"); },
+      openMessagesStream: async () => { throw new Error("messages stream must not be called"); },
     };
   }
+
+  async close(): Promise<void> {}
+
+  forceClose(): void {}
 }
 
 async function openAiGateway(backend: CapturingCopilotBackend, options: {
@@ -401,6 +416,22 @@ describe("OpenAI Chat endpoint", () => {
       );
     } finally {
       await invalidGateway.close();
+    }
+  });
+
+  it("classifies malformed upstream redirects as a safe invalid response", async () => {
+    const backend = new CapturingCopilotBackend({
+      chatError: new InvalidUpstreamResponseError(),
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\"}"));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
     }
   });
 

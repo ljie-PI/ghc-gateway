@@ -193,8 +193,8 @@ export async function createProductionApplicationContext(
   let databaseClosed = false;
   const closeDatabaseOnce = (): void => {
     if (!databaseClosed) {
-      databaseClosed = true;
       closeDatabase(database);
+      databaseClosed = true;
     }
   };
   return {
@@ -211,13 +211,27 @@ export async function createProductionApplicationContext(
     modelMetadata: modelsSource.modelMetadata,
     runtime,
     async close() {
-      await telemetryRuntime.close();
-      await catalog.close();
-      closeDatabaseOnce();
+      const errors: unknown[] = [];
+      for (const close of [
+        async () => copilot.close(),
+        async () => catalog.close(),
+        async () => telemetryRuntime.close(),
+        async () => closeDatabaseOnce(),
+      ]) {
+        try {
+          await close();
+        } catch (error: unknown) {
+          errors.push(error);
+        }
+      }
+      if (errors.length > 0) {
+        throw new AggregateError(errors, "failed to close application resources");
+      }
     },
     forceClose() {
-      telemetryRuntime.forceClose();
+      copilot.forceClose();
       modelsSource.forceClose();
+      telemetryRuntime.forceClose();
       closeDatabaseOnce();
     },
   };

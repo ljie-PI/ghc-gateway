@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory, type AccountDirectoryError } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
@@ -9,6 +12,7 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import {
   composeProductionDaemonGateway,
+  createProductionApplicationContext,
   type ApplicationContext,
 } from "../../src/main.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
@@ -35,6 +39,95 @@ const IDENTITY = {
 };
 
 describe("production composition", () => {
+  it("closes inference responses and dispatchers before telemetry and SQLite", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-close-order-"));
+    const application = await createProductionApplicationContext(
+      parseStartupConfig(["--data-dir", dataDir, "--port", String(PORT)], {}),
+      {},
+    );
+    const order: string[] = [];
+    const closeCopilot = application.copilot.close.bind(application.copilot);
+    const closeCatalog = application.catalog.close.bind(application.catalog);
+    const telemetryRuntime = application.telemetryRuntime;
+    const database = application.database;
+    if (telemetryRuntime === undefined || database === undefined) {
+      throw new Error("expected production close owners");
+    }
+    const closeTelemetry = telemetryRuntime.close.bind(telemetryRuntime);
+    const closeSqlite = database.close.bind(database);
+    application.copilot.close = async () => {
+      order.push("copilot");
+      await closeCopilot();
+    };
+    application.catalog.close = async () => {
+      order.push("catalog");
+      await closeCatalog();
+    };
+    telemetryRuntime.close = async () => {
+      order.push("telemetry");
+      await closeTelemetry();
+    };
+    database.close = () => {
+      order.push("sqlite");
+      return closeSqlite();
+    };
+    try {
+      await application.close?.();
+      expect(order).toEqual(["copilot", "catalog", "telemetry", "sqlite"]);
+    } finally {
+      application.forceClose?.();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues the ordered close chain and aggregates owner failures", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-close-errors-"));
+    const application = await createProductionApplicationContext(
+      parseStartupConfig(["--data-dir", dataDir, "--port", String(PORT)], {}),
+      {},
+    );
+    const order: string[] = [];
+    application.copilot.close = async () => {
+      order.push("copilot");
+      throw new Error("copilot close failed");
+    };
+    application.catalog.close = async () => {
+      order.push("catalog");
+      throw new Error("catalog close failed");
+    };
+    const telemetryRuntime = application.telemetryRuntime;
+    if (telemetryRuntime === undefined || application.database === undefined) {
+      throw new Error("expected production close owners");
+    }
+    const closeSqlite = application.database.close.bind(application.database);
+    telemetryRuntime.close = async () => {
+      order.push("telemetry");
+      throw new Error("telemetry close failed");
+    };
+    application.database.close = () => {
+      order.push("sqlite");
+      throw new Error("sqlite close failed");
+    };
+    try {
+      await expect(application.close?.()).rejects.toMatchObject({
+        name: "AggregateError",
+        errors: [
+          expect.objectContaining({ message: "copilot close failed" }),
+          expect.objectContaining({ message: "catalog close failed" }),
+          expect.objectContaining({ message: "telemetry close failed" }),
+          expect.objectContaining({ message: "sqlite close failed" }),
+        ],
+      });
+      expect(order).toEqual(["copilot", "catalog", "telemetry", "sqlite"]);
+      expect(application.database.prepare("SELECT 1").get()).toEqual({ "1": 1 });
+    } finally {
+      application.database.close = closeSqlite;
+      application.forceClose?.();
+      expect(() => application.database?.prepare("SELECT 1").get()).toThrow();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("shares management state and applies runtime settings to every live owner", async () => {
     const harness = compositionHarness();
     const gateway = await composeProductionDaemonGateway({

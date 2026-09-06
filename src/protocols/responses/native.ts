@@ -11,7 +11,11 @@ import {
   type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
-import type { NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../chat_completions/types.js";
+import type {
+  NativeResponsesUpstreamRequest,
+  UpstreamByteResponse,
+  UpstreamByteStream,
+} from "../../copilot/upstream_types.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import type { NativeResponsesPlan } from "./planner.js";
 import { encodeResponsesSseEvent } from "./wire.js";

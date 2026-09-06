@@ -5,7 +5,7 @@ import type { Socket } from "node:net";
 import { gzipSync } from "node:zlib";
 import path from "node:path";
 import { Agent } from "undici";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import {
@@ -398,6 +398,248 @@ describe("CAPI parse and cache", () => {
       );
       await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 502 });
     } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("recovers after one shared dispatcher factory rejection without poisoning later fetches", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"data\":[]}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    let factoryCalls = 0;
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      fetch,
+      { connectTimeoutMs: 100, totalTimeoutMs: 1_000, bodyLimitBytes: 32 },
+      () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) {
+          throw new Error("factory failed");
+        }
+        return new Agent({ connections: 1, pipelining: 1 });
+      },
+    );
+    try {
+      const first = source.fetch("github.com/1", new AbortController().signal);
+      const concurrent = source.fetch("github.com/2", new AbortController().signal);
+      await expect(first).rejects.toThrow("factory failed");
+      await expect(concurrent).rejects.toThrow("factory failed");
+      expect(factoryCalls).toBe(1);
+      await expect(source.fetch("github.com/1", new AbortController().signal)).resolves.toEqual({ data: [] });
+      expect(factoryCalls).toBe(2);
+    } finally {
+      await source.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("keeps a newer dispatcher generation when an older shared waiter settles later", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"data\":[]}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    let rejectFirst: (error: Error) => void = () => undefined;
+    const firstFactory = new Promise<Agent>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    let resolveSecond: (dispatcher: Agent) => void = () => undefined;
+    const secondFactory = new Promise<Agent>((resolve) => {
+      resolveSecond = resolve;
+    });
+    let factoryCalls = 0;
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      fetch,
+      { connectTimeoutMs: 100, totalTimeoutMs: 1_000, bodyLimitBytes: 32 },
+      async () => {
+        factoryCalls += 1;
+        return await (factoryCalls === 1 ? firstFactory : secondFactory);
+      },
+    );
+    try {
+      const olderFirst = source.fetch("github.com/1", new AbortController().signal);
+      const olderSecond = source.fetch("github.com/2", new AbortController().signal);
+      const newer = olderFirst.catch(async () => await source.fetch("github.com/3", new AbortController().signal));
+      rejectFirst(new Error("first generation failed"));
+      await expect(olderSecond).rejects.toThrow("first generation failed");
+      await vi.waitFor(() => expect(factoryCalls).toBe(2));
+      const newerCompanion = source.fetch("github.com/4", new AbortController().signal);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(factoryCalls).toBe(2);
+      resolveSecond(new Agent({ connections: 1, pipelining: 1 }));
+      await expect(Promise.all([newer, newerCompanion])).resolves.toEqual([{ data: [] }, { data: [] }]);
+      expect(factoryCalls).toBe(2);
+    } finally {
+      await source.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("bounds and cancels waits for a pending model dispatcher factory", async () => {
+    let resolveFactory: (dispatcher: Agent) => void = () => undefined;
+    const factory = new Promise<Agent>((resolve) => {
+      resolveFactory = resolve;
+    });
+    const dispatcher = new Agent();
+    const destroy = vi.spyOn(dispatcher, "destroy");
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "http://127.0.0.1:1" }),
+      fetch,
+      { connectTimeoutMs: 20, totalTimeoutMs: 10, bodyLimitBytes: 32 },
+      async () => await factory,
+    );
+    await expect(source.fetch("github.com/1", new AbortController().signal))
+      .rejects.toMatchObject({ failureKind: "upstream_timeout" });
+    const controller = new AbortController();
+    const aborted = source.fetch("github.com/2", controller.signal);
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
+    source.forceClose();
+    resolveFactory(dispatcher);
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+  });
+
+  it("keeps an established model dispatcher across ordinary HTTP failures", async () => {
+    let requests = 0;
+    const server = createServer((_request, response) => {
+      requests += 1;
+      if (requests === 1) {
+        response.writeHead(503).end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"data\":[]}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    let factoryCalls = 0;
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      fetch,
+      { connectTimeoutMs: 100, totalTimeoutMs: 1_000, bodyLimitBytes: 32 },
+      () => {
+        factoryCalls += 1;
+        return new Agent({ connections: 1, pipelining: 1 });
+      },
+    );
+    try {
+      await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ status: 503 });
+      await expect(source.fetch("github.com/1", new AbortController().signal)).resolves.toEqual({ data: [] });
+      expect(factoryCalls).toBe(1);
+    } finally {
+      await source.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("closes a dispatcher that is created after graceful shutdown starts", async () => {
+    let resolveFactory: (dispatcher: Agent) => void = () => undefined;
+    const factory = new Promise<Agent>((resolve) => {
+      resolveFactory = resolve;
+    });
+    const dispatcher = new Agent();
+    const close = vi.spyOn(dispatcher, "close");
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "http://127.0.0.1:1" }),
+      fetch,
+      { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 32 },
+      async () => await factory,
+    );
+    const fetchPending = source.fetch("github.com/1", new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const closing = source.close();
+    resolveFactory(dispatcher);
+    await closing;
+    await expect(fetchPending).rejects.toMatchObject({ name: "AbortError" });
+    expect(close).toHaveBeenCalled();
+    await expect(source.fetch("github.com/1", new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("destroys a dispatcher that is created after force-close wins initialization", async () => {
+    let resolveFactory: (dispatcher: Agent) => void = () => undefined;
+    const factory = new Promise<Agent>((resolve) => {
+      resolveFactory = resolve;
+    });
+    const dispatcher = new Agent();
+    const destroy = vi.spyOn(dispatcher, "destroy");
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "http://127.0.0.1:1" }),
+      fetch,
+      { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 32 },
+      async () => await factory,
+    );
+    const fetchPending = source.fetch("github.com/1", new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    source.forceClose();
+    resolveFactory(dispatcher);
+    await expect(fetchPending).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+  });
+
+  it("force-closes a pending model dispatcher already claimed by graceful shutdown", async () => {
+    let resolveFactory: (dispatcher: Agent) => void = () => undefined;
+    const factory = new Promise<Agent>((resolve) => {
+      resolveFactory = resolve;
+    });
+    const dispatcher = new Agent();
+    const destroy = vi.spyOn(dispatcher, "destroy");
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: "http://127.0.0.1:1" }),
+      fetch,
+      { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 32 },
+      async () => await factory,
+    );
+    const fetchPending = source.fetch("github.com/1", new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const closing = source.close();
+    source.forceClose();
+    resolveFactory(dispatcher);
+    await closing;
+    await expect(fetchPending).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+  });
+
+  it("retains a model dispatcher rejected by graceful close until force-close destroys it", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"data\":[]}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    const dispatcher = new Agent({ connections: 1, pipelining: 1 });
+    vi.spyOn(dispatcher, "close").mockRejectedValue(new Error("dispatcher close failed"));
+    const destroy = vi.spyOn(dispatcher, "destroy");
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      fetch,
+      { connectTimeoutMs: 100, totalTimeoutMs: 1_000, bodyLimitBytes: 32 },
+      () => dispatcher,
+    );
+    try {
+      await source.fetch("github.com/1", new AbortController().signal);
+      await expect(source.close()).rejects.toThrow("dispatcher close failed");
+      expect(destroy).not.toHaveBeenCalled();
+      source.forceClose();
+      await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+    } finally {
+      source.forceClose();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
