@@ -765,7 +765,7 @@ function validateExtendedResponsesRequest(
   if (!isWireJsonArray(tools)) {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
-  const toolNames = new Set<string>();
+  const toolChoiceKeys = new Set<string>();
   let expectedChatTools = 0;
   for (const tool of tools.items) {
     if (!isWireJsonObject(tool) || duplicateMemberNames(tool).length > 0) {
@@ -774,35 +774,21 @@ function validateExtendedResponsesRequest(
     const type = memberValue(tool, "type");
     if (type === "function") {
       const functionObject = validateExtendedFunctionTool(tool);
-      toolNames.add(memberValue(functionObject, "name") as string);
+      const name = memberValue(functionObject, "name") as string;
+      toolChoiceKeys.add(`\u0000${name}`);
       expectedChatTools += 1;
       continue;
     }
     if (type === "custom") {
-      assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
-      assertExtendedToolName(tool);
-      const description = memberValue(tool, "description");
-      const format = memberValue(tool, "format");
-      if (description !== undefined && typeof description !== "string") {
-        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-      }
-      if (format !== undefined) {
-        if (
-          !isWireJsonObject(format)
-          || duplicateMemberNames(format).length > 0
-          || format.members.some((member) => member.key !== "type")
-          || memberValue(format, "type") !== "text"
-        ) {
-          throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-        }
-      }
-      toolNames.add(memberValue(tool, "name") as string);
+      const name = validateExtendedCustomTool(tool);
+      toolChoiceKeys.add(`\u0000${name}`);
       expectedChatTools += 1;
       continue;
     }
     if (type === "namespace") {
       assertExtendedToolKeys(tool, new Set(["type", "name", "description", "tools", "children"]));
       assertExtendedToolName(tool);
+      const namespace = memberValue(tool, "name") as string;
       const children = memberValue(tool, "tools") ?? memberValue(tool, "children");
       if (!isWireJsonArray(children) || children.items.length === 0) {
         throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
@@ -816,14 +802,15 @@ function validateExtendedResponsesRequest(
           });
         }
         const functionObject = validateExtendedFunctionTool(child);
-        toolNames.add(memberValue(functionObject, "name") as string);
+        const name = memberValue(functionObject, "name") as string;
+        toolChoiceKeys.add(`${namespace}\u0000${name}`);
         expectedChatTools += 1;
       }
       continue;
     }
     if (type === "tool_search") {
       assertExtendedToolKeys(tool, new Set(["type"]));
-      toolNames.add("tool_search");
+      toolChoiceKeys.add("\u0000tool_search");
       expectedChatTools += 1;
       continue;
     }
@@ -842,7 +829,7 @@ function validateExtendedResponsesRequest(
       phase: "convert",
     });
   }
-  validateExtendedToolChoice(memberValue(body, "tool_choice"), toolNames);
+  validateExtendedToolChoice(memberValue(body, "tool_choice"), toolChoiceKeys);
   const parallel = memberValue(body, "parallel_tool_calls");
   if (parallel !== undefined && typeof parallel !== "boolean") {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
@@ -869,7 +856,7 @@ function validateExtendedResponsesRequest(
   rejectExtendedInstructionReordering(memberValue(body, "input"));
 }
 
-function validateExtendedToolChoice(value: WireJson | undefined, names: ReadonlySet<string>): void {
+function validateExtendedToolChoice(value: WireJson | undefined, keys: ReadonlySet<string>): void {
   if (value === undefined) {
     return;
   }
@@ -882,10 +869,15 @@ function validateExtendedToolChoice(value: WireJson | undefined, names: Readonly
   assertExtendedToolKeys(value, new Set(["type", "name", "namespace"]));
   const type = memberValue(value, "type");
   const name = memberValue(value, "name");
+  const namespace = memberValue(value, "namespace");
+  const key = typeof name === "string" && typeof namespace !== "object"
+    ? `${typeof namespace === "string" ? namespace : ""}\u0000${name}`
+    : "";
   if (
     (type !== "custom" && type !== "function" && type !== "tool_search")
     || typeof name !== "string"
-    || !names.has(name)
+    || (namespace !== undefined && typeof namespace !== "string")
+    || !keys.has(key)
   ) {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
@@ -896,7 +888,6 @@ function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
     return value ?? { kind: "array", items: [] };
   }
   const ordinary: WireJson[] = [];
-  const calls = new Set<string>();
   for (const item of value.items) {
     if (!isWireJsonObject(item)) {
       ordinary.push(item);
@@ -930,20 +921,45 @@ function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
           : new Set(["type", "id", "call_id", "arguments", "status", "execution"]),
       );
       const callId = memberValue(item, "call_id");
-      if (typeof callId !== "string" || callId.length === 0 || calls.has(callId)) {
+      if (typeof callId !== "string" || callId.length === 0) {
         throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
       }
       if (type === "custom_tool_call") {
-        if (
-          typeof memberValue(item, "name") !== "string"
-          || typeof memberValue(item, "input") !== "string"
-        ) {
+        const name = memberValue(item, "name");
+        const input = memberValue(item, "input");
+        if (typeof name !== "string" || name.length === 0 || typeof input !== "string") {
           throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
         }
-      } else if (!isWireJsonObject(memberValue(item, "arguments"))) {
+        ordinary.push({
+          kind: "object",
+          members: [
+            { key: "type", value: "function_call" },
+            { key: "call_id", value: callId },
+            { key: "name", value: name },
+            {
+              key: "arguments",
+              value: new TextDecoder().decode(serializeWireJson({
+                kind: "object",
+                members: [{ key: "input", value: input }],
+              })),
+            },
+          ],
+        });
+        continue;
+      }
+      const argumentsValue = memberValue(item, "arguments");
+      if (!isWireJsonObject(argumentsValue)) {
         throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
       }
-      calls.add(callId);
+      ordinary.push({
+        kind: "object",
+        members: [
+          { key: "type", value: "function_call" },
+          { key: "call_id", value: callId },
+          { key: "name", value: "tool_search" },
+          { key: "arguments", value: new TextDecoder().decode(serializeWireJson(argumentsValue)) },
+        ],
+      });
       continue;
     }
     if (type === "custom_tool_call_output" || type === "tool_search_output") {
@@ -953,16 +969,23 @@ function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
         typeof callId !== "string"
         || (type === "custom_tool_call_output" && memberValue(item, "output") === undefined)
         || (type === "tool_search_output" && !isWireJsonArray(memberValue(item, "tools")))
-        || !calls.delete(callId)
       ) {
         throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
       }
+      const output = type === "custom_tool_call_output"
+        ? memberValue(item, "output") as WireJson
+        : new TextDecoder().decode(serializeWireJson(memberValue(item, "tools") as WireJson));
+      ordinary.push({
+        kind: "object",
+        members: [
+          { key: "type", value: "function_call_output" },
+          { key: "call_id", value: callId },
+          { key: "output", value: output },
+        ],
+      });
       continue;
     }
     ordinary.push(item);
-  }
-  if (calls.size > 0) {
-    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
   return { kind: "array", items: ordinary };
 }
@@ -989,8 +1012,7 @@ function countExtendedDiscoveredTools(input: WireJson | undefined): number {
         validateExtendedFunctionTool(tool);
         count += 1;
       } else if (type === "custom") {
-        assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
-        assertExtendedToolName(tool);
+        validateExtendedCustomTool(tool);
         count += 1;
       } else if (type === "namespace") {
         const children = memberValue(tool, "tools") ?? memberValue(tool, "children");
@@ -1035,6 +1057,28 @@ function assertExtendedToolName(tool: WireJsonObject): void {
   if (typeof name !== "string" || name.length === 0) {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
+}
+
+function validateExtendedCustomTool(tool: WireJsonObject): string {
+  assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
+  assertExtendedToolName(tool);
+  const name = memberValue(tool, "name") as string;
+  const description = memberValue(tool, "description");
+  const format = memberValue(tool, "format");
+  if (description !== undefined && typeof description !== "string") {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  if (format !== undefined) {
+    if (
+      !isWireJsonObject(format)
+      || duplicateMemberNames(format).length > 0
+      || format.members.some((member) => member.key !== "type")
+      || memberValue(format, "type") !== "text"
+    ) {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    }
+  }
+  return name;
 }
 
 function validateExtendedFunctionTool(tool: WireJsonObject): WireJsonObject {

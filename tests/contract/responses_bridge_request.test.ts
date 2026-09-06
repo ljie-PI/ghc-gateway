@@ -256,7 +256,14 @@ describe("Responses bridge request conversion", () => {
         {
           role: "tool",
           tool_call_id: "call_json_media",
-          content: "{\"call_id\":\"call_json_media\",\"output\":\"{\\\"media\\\":\\\"[cc-switch: tool result media moved to the following user message]\\\",\\\"residual\\\":\\\"[cc-switch: omitted 8192 bytes]\\\"}\",\"type\":\"tool_search_output\"}",
+          content: JSON.stringify({
+            call_id: "call_json_media",
+            output: JSON.stringify({
+              media: "[cc-switch: tool result media moved to the following user message]",
+              residual,
+            }),
+            type: "tool_search_output",
+          }),
         },
         {
           role: "user",

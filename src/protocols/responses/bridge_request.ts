@@ -618,7 +618,7 @@ function extractMediaFromToolOutput(value: WireJson, depth = 0): ExtractedMedia 
     if (parsed !== undefined) {
       const extracted = extractMediaFromToolOutput(parsed, depth + 1);
       if (extracted.media.length > 0) {
-        return { value: canonicalString(omitLongResidualStrings(extracted.value)), media: extracted.media };
+        return { value: canonicalString(extracted.value), media: extracted.media };
       }
     }
   }
@@ -668,26 +668,6 @@ function mediaPart(value: WireJson): WireJsonObject | undefined {
     return convertContentPart(value);
   }
   return undefined;
-}
-
-function omitLongResidualStrings(value: WireJson): WireJson {
-  if (typeof value === "string") {
-    const bytes = new TextEncoder().encode(value).byteLength;
-    if (bytes >= 8192 && value !== "[cc-switch: tool result media moved to the following user message]") {
-      return `[cc-switch: omitted ${bytes} bytes]`;
-    }
-    return value;
-  }
-  if (isWireJsonArray(value)) {
-    return { kind: "array", items: value.items.map(omitLongResidualStrings) };
-  }
-  if (isWireJsonObject(value)) {
-    return {
-      kind: "object",
-      members: value.members.map((member) => ({ key: member.key, value: omitLongResidualStrings(member.value) })),
-    };
-  }
-  return value;
 }
 
 function mediaMessage(callIdValue: string, media: readonly WireJsonObject[]): WireJsonObject {

@@ -220,6 +220,44 @@ describe("protocol conversion matrix", () => {
       ],
       tools: [{ type: "custom", name: "render", format: { type: "text" } }],
     },
+    {
+      input: [
+        { type: "tool_search_call", call_id: "call_search", arguments: { query: "x" } },
+        {
+          type: "tool_search_output",
+          call_id: "call_search",
+          tools: [{ type: "custom", name: "grammar", format: { type: "grammar", syntax: "regex" } }],
+        },
+      ],
+      tools: [{ type: "tool_search" }],
+    },
+    {
+      input: "namespace choice",
+      tools: [{
+        type: "namespace",
+        name: "ns",
+        tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+      }],
+      tool_choice: { type: "function", namespace: "missing", name: "lookup" },
+    },
+    {
+      input: [
+        { type: "custom_tool_call", call_id: "call_dup", name: "render", input: "x" },
+        { type: "function_call", call_id: "call_dup", name: "lookup", arguments: "{}" },
+      ],
+      tools: [
+        { type: "custom", name: "render", format: { type: "text" } },
+        { type: "function", name: "lookup", parameters: { type: "object" } },
+      ],
+    },
+    {
+      input: [
+        { type: "custom_tool_call", call_id: "call_1", name: "render", input: "x" },
+        { role: "user", content: [{ type: "input_text", text: "interrupt" }] },
+        { type: "custom_tool_call_output", call_id: "call_1", output: "done" },
+      ],
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+    },
   ])("rejects lossy extended tool variants before inference", async (request) => {
     const harness = await matrixGateway();
     try {
@@ -271,6 +309,35 @@ describe("protocol conversion matrix", () => {
       }));
       expect(response.status).toBe(200);
       expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("preserves long custom tool-result text when moving adjacent media", async () => {
+    const harness = await matrixGateway();
+    try {
+      const longText = "x".repeat(9000);
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: [
+          { type: "custom_tool_call", call_id: "call_1", name: "render", input: "x" },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_1",
+            output: [
+              { type: "input_text", text: longText },
+              { type: "input_image", image_url: "data:image/png;base64,QUJD" },
+            ],
+          },
+        ],
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      expect(response.status).toBe(200);
+      const forwarded = decoder.decode(harness.chatBodies[0]);
+      expect(forwarded).toContain(longText);
+      expect(forwarded).toContain("image_url");
+      expect(forwarded).not.toContain("[cc-switch: omitted");
     } finally {
       await harness.close();
     }
