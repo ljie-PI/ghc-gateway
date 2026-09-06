@@ -67,6 +67,50 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it.each([
+    [{
+      tools: [
+        { type: "custom", name: "render", format: { type: "text" } },
+        { type: "function", name: "bad", parameters: [], unknown: true },
+      ],
+    }, 422],
+    [{
+      tools: [{
+        type: "namespace",
+        name: "ns",
+        tools: [{
+          type: "function",
+          name: "bad",
+          parameters: "invalid",
+          strict: "invalid",
+          unknown_constraint: true,
+        }],
+      }],
+    }, 422],
+    [{
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      parallel_tool_calls: "bad",
+    }, 400],
+    [{
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      tool_choice: { type: "custom", name: "missing" },
+    }, 400],
+  ] as const)("strictly rejects malformed extended tool declarations and controls", async (extra, status) => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        ...extra,
+      }));
+      expect(response.status).toBe(status);
+      await response.text();
+      expect(harness.backend.captured).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("round-trips a buffered custom tool through scoped Responses history", async () => {
     const harness = await matrixGateway();
     try {

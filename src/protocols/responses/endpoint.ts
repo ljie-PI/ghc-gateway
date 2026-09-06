@@ -356,7 +356,7 @@ async function extendedBridgeNonstreamResponse(
   const upstream = await transportCall(() => bound.completeChat(request), request.signal);
   assertUpstreamSuccess(upstream);
   const measured = measure(dependencies.performanceObserver, "buffered", () => {
-    convertBufferedResponse(upstream.body, {
+    const shared = convertBufferedResponse(upstream.body, {
       source: "chat",
       target: "responses",
       model: plan.resolvedModel.upstreamModel,
@@ -372,21 +372,87 @@ async function extendedBridgeNonstreamResponse(
       modelId: plan.resolvedModel.upstreamModel,
       createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     });
-    return { converted, bytes: Buffer.from(serializeWireJson(converted.response)) };
+    const merged = mergeExtendedResponseOutput(shared.body, converted.response);
+    const responseId = memberValue(merged, "id");
+    const output = memberValue(merged, "output");
+    if (typeof responseId !== "string" || !isWireJsonArray(output)) {
+      throw new GatewayFailureError({
+        kind: "invalid_upstream_response",
+        source: "converter",
+        phase: "convert",
+      });
+    }
+    return {
+      historyRecord: { responseId, output: output.items },
+      observations: shared.observations,
+      bytes: Buffer.from(serializeWireJson(merged)),
+    };
   });
   await persistContinuation(
-    async () => await dependencies.history.recordCheckpoint(
-      measured.converted.historyRecord,
-      ownership,
-      memberValue(measured.converted.response, "status") === "completed" ? "complete" : "partial",
-      scope.signal,
-    ),
+    async () => measured.observations.terminal === "completed"
+      ? await dependencies.history.recordCheckpoint(
+        measured.historyRecord,
+        ownership,
+        "complete",
+        scope.signal,
+      )
+      : await dependencies.history.recordReceipt({
+        ...ownership,
+        responseId: measured.historyRecord.responseId,
+        checkpointState: "route_only",
+      }, scope.signal),
     scope.signal,
   );
-  usage.success(responsesUsage(measured.converted.response));
+  usage.success(attemptUsage(measured.observations.usage));
   return new Response(measured.bytes, {
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
+}
+
+function mergeExtendedResponseOutput(
+  shared: WireJsonObject,
+  legacy: WireJsonObject,
+): WireJsonObject {
+  const sharedOutput = memberValue(shared, "output");
+  const legacyOutput = memberValue(legacy, "output");
+  if (!isWireJsonArray(sharedOutput) || !isWireJsonArray(legacyOutput)) {
+    throw new GatewayFailureError({
+      kind: "invalid_upstream_response",
+      source: "converter",
+      phase: "convert",
+    });
+  }
+  const extendedByCallId = new Map<string, WireJson>();
+  for (const item of legacyOutput.items) {
+    if (!isWireJsonObject(item)) {
+      continue;
+    }
+    const type = memberValue(item, "type");
+    const callId = memberValue(item, "call_id");
+    if (
+      typeof callId === "string"
+      && (type === "custom_tool_call"
+        || type === "tool_search_call"
+        || (type === "function_call" && memberValue(item, "namespace") !== undefined))
+    ) {
+      extendedByCallId.set(callId, item);
+    }
+  }
+  const output = sharedOutput.items.map((item) => {
+    if (!isWireJsonObject(item) || memberValue(item, "type") !== "function_call") {
+      return item;
+    }
+    const callId = memberValue(item, "call_id");
+    return typeof callId === "string" ? extendedByCallId.get(callId) ?? item : item;
+  });
+  return replaceWireMember(shared, "output", { kind: "array", items: output });
+}
+
+function replaceWireMember(object: WireJsonObject, key: string, value: WireJson): WireJsonObject {
+  return {
+    kind: "object",
+    members: object.members.map((member) => member.key === key ? { key, value } : member),
+  };
 }
 
 async function convertedNonstreamResponse(
@@ -672,15 +738,28 @@ function validateExtendedResponsesRequest(
     }
     const type = memberValue(tool, "type");
     if (type === "function") {
-      const shape = memberValue(tool, "function");
-      const functionObject = isWireJsonObject(shape) ? shape : tool;
-      assertExtendedToolName(functionObject);
+      const functionObject = validateExtendedFunctionTool(tool);
       toolNames.add(memberValue(functionObject, "name") as string);
       continue;
     }
     if (type === "custom") {
       assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
       assertExtendedToolName(tool);
+      const description = memberValue(tool, "description");
+      const format = memberValue(tool, "format");
+      if (description !== undefined && typeof description !== "string") {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+      }
+      if (format !== undefined) {
+        if (
+          !isWireJsonObject(format)
+          || duplicateMemberNames(format).length > 0
+          || format.members.some((member) => member.key !== "type")
+          || memberValue(format, "type") !== "text"
+        ) {
+          throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+        }
+      }
       toolNames.add(memberValue(tool, "name") as string);
       continue;
     }
@@ -699,9 +778,7 @@ function validateExtendedResponsesRequest(
             phase: "convert",
           });
         }
-        const shape = memberValue(child, "function");
-        const functionObject = isWireJsonObject(shape) ? shape : child;
-        assertExtendedToolName(functionObject);
+        const functionObject = validateExtendedFunctionTool(child);
         toolNames.add(memberValue(functionObject, "name") as string);
       }
       continue;
@@ -741,6 +818,7 @@ function validateExtendedResponsesRequest(
       .concat({ key: "input", value: sanitizedExtendedInput(memberValue(body, "input")) }),
   };
   prepareConvertedRequest("responses", "chat", sanitized, model, capability);
+  rejectExtendedInstructionReordering(memberValue(body, "input"));
 }
 
 function validateExtendedToolChoice(value: WireJson | undefined, names: ReadonlySet<string>): void {
@@ -833,6 +911,56 @@ function assertExtendedToolName(tool: WireJsonObject): void {
   const name = memberValue(tool, "name");
   if (typeof name !== "string" || name.length === 0) {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+}
+
+function validateExtendedFunctionTool(tool: WireJsonObject): WireJsonObject {
+  assertExtendedToolKeys(tool, new Set(["type", "function", "name", "description", "parameters", "strict"]));
+  const nested = memberValue(tool, "function");
+  const shape = isWireJsonObject(nested) ? nested : tool;
+  if (isWireJsonObject(nested)) {
+    if (duplicateMemberNames(nested).length > 0) {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    }
+    assertExtendedToolKeys(nested, new Set(["name", "description", "parameters", "strict"]));
+  }
+  assertExtendedToolName(shape);
+  const description = memberValue(shape, "description");
+  const parameters = memberValue(shape, "parameters");
+  const strict = memberValue(shape, "strict");
+  if (
+    (description !== undefined && typeof description !== "string")
+    || !isWireJsonObject(parameters)
+    || duplicateMemberNames(parameters).length > 0
+    || (strict !== undefined && typeof strict !== "boolean")
+  ) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  return shape;
+}
+
+function rejectExtendedInstructionReordering(input: WireJson | undefined): void {
+  if (!isWireJsonArray(input)) {
+    return;
+  }
+  let ordinarySeen = false;
+  for (const item of input.items) {
+    if (!isWireJsonObject(item) || memberValue(item, "type") !== "message") {
+      ordinarySeen = true;
+      continue;
+    }
+    const role = memberValue(item, "role");
+    if (role === "system" || role === "developer") {
+      if (ordinarySeen) {
+        throw new GatewayFailureError({
+          kind: "unsupported_semantics",
+          source: "converter",
+          phase: "convert",
+        });
+      }
+    } else {
+      ordinarySeen = true;
+    }
   }
 }
 
