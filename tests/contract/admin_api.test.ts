@@ -269,6 +269,7 @@ describe("Admin API", () => {
         expectedRevision: 0,
         capabilities: { enabled: true, protocols: ["messages"] },
       });
+
       await new Promise((resolve) => setTimeout(resolve, 0));
       const active = dependencies.accounts.list()[0];
       if (active === undefined) throw new Error("missing test account");
@@ -338,6 +339,55 @@ describe("Admin API", () => {
       expect(capabilityWrites).toBe(0);
     } finally {
       await raceHarness.close();
+    }
+  });
+
+  it("rejects catalog-backed mutations when reauthentication changes credential generation", async () => {
+    for (const operation of ["refresh", "preferred", "reset"] as const) {
+      const dependencies = adminDependencies();
+      const originalBind = dependencies.accounts.bindAccount;
+      const originalGet = dependencies.registry.get;
+      const originalPreview = dependencies.registry.previewOverride;
+      let release = (): void => undefined;
+      let started = (): void => undefined;
+      const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+      if (operation === "reset") {
+        dependencies.registry.previewOverride = async (...args) => {
+          started();
+          await new Promise<void>((resolve) => { release = resolve; });
+          return await originalPreview(...args);
+        };
+      } else {
+        dependencies.registry.get = async (...args) => {
+          started();
+          await new Promise<void>((resolve) => { release = resolve; });
+          return await originalGet(...args);
+        };
+      }
+      const harness = await createHarness(dependencies);
+      try {
+        const session = await login(harness.gateway, harness.admin);
+        const responsePromise = operation === "refresh"
+          ? mutate(harness.gateway, "POST", "/admin/api/v1/models/refresh", session, {
+            accountId: "github.com/42",
+          })
+          : operation === "preferred"
+            ? mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
+              accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+            })
+            : mutate(harness.gateway, "DELETE", "/admin/api/v1/models/capabilities", session, {
+              accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+            });
+        await startedPromise;
+        dependencies.accounts.bindAccount = async (accountId, signal) => ({
+          ...(await originalBind(accountId, signal)),
+          credentialGeneration: 5,
+        });
+        release();
+        expect((await responsePromise).status, operation).toBe(409);
+      } finally {
+        await harness.close();
+      }
     }
   });
 

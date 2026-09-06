@@ -13,6 +13,7 @@ import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serial
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
+import { reconcilePreferredModel } from "../model_catalog/preferred.js";
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
 import { prepareChatBridgeRequest } from "./bridge_request.js";
 import { convertChatStream, type ResponsesStreamEmission } from "./bridge_stream.js";
@@ -79,8 +80,9 @@ async function executeResponses(
   }
   const account = await bindAccount(dependencies.directory, scope.signal);
   usage.setAccount(account.accountId);
-  const catalog = await loadCatalog(dependencies, account, scope.signal);
-  const resolved = resolveModel(catalog, decoded.model, dependencies.preferences.get(account.accountId));
+  const preference = dependencies.preferences.get(account.accountId);
+  const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
+  const resolved = resolveModel(catalog, decoded.model, preference);
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
@@ -448,15 +450,12 @@ async function bindAccount(directory: AccountDirectory, signal: AbortSignal) {
 async function loadCatalog(
   dependencies: ResponsesRouteDependencies,
   account: Readonly<BoundAccount>,
+  observedPreference: ReturnType<AccountModelPreferences["get"]>,
   signal: AbortSignal,
 ) {
   try {
     const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
-    dependencies.preferences.markInvalidIfMissing(
-      account.accountId,
-      new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
-      catalog.catalogGeneration,
-    );
+    reconcilePreferredModel(dependencies.preferences, account.accountId, catalog, observedPreference);
     return catalog;
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {

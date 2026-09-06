@@ -193,4 +193,63 @@ describe("model routes errors and preferences", () => {
       closeDatabase(database);
     }
   });
+
+  it("does not let a stale public listing invalidate a newer preferred model", async () => {
+    const database = openDatabase({
+      path: ":memory:",
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        embedMigration(modelCapabilitiesMigration),
+      ],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const account = await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    let release = (): void => undefined;
+    let started = (): void => undefined;
+    const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        started();
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { data: [{
+          id: "old",
+          name: "Old",
+          vendor: "test",
+          model_picker_enabled: true,
+          model_info: { supported_endpoints: ["/chat/completions"] },
+        }] };
+      },
+    });
+    const overrides = new SqliteModelCapabilityOverrides(database, nowMs);
+    const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+    const gateway = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:/stale-models" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      registry,
+      preferences: accounts.preferences,
+    }));
+    try {
+      const listing = gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      await startedPromise;
+      overrides.set(account.accountId, "new", { enabled: true, protocols: ["responses"] }, 0);
+      accounts.preferences.set(account.accountId, { modelId: "new", catalogGeneration: 1 }, 0);
+      release();
+      expect((await listing).status).toBe(200);
+      expect(accounts.preferences.get(account.accountId)).toMatchObject({
+        modelId: "new",
+        validity: "valid",
+      });
+    } finally {
+      await gateway.close();
+      closeDatabase(database);
+    }
+  });
 });

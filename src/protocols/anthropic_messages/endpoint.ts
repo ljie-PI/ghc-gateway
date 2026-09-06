@@ -14,6 +14,7 @@ import type { RequestScope } from "../../gateway/request_scope.js";
 import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
+import { reconcilePreferredModel } from "../model_catalog/preferred.js";
 import { convertChatResponse } from "./bridge.js";
 import { convertAnthropicRequest } from "./request.js";
 import { createAnthropicStreamResponse } from "./stream.js";
@@ -75,8 +76,9 @@ async function executeAnthropicMessages(
   }
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
-  const catalog = await loadCatalog(dependencies, account, scope.signal);
-  const resolved = resolveModel(catalog, requestedModel.value, dependencies.preferences.get(account.accountId));
+  const preference = dependencies.preferences.get(account.accountId);
+  const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
+  const resolved = resolveModel(catalog, requestedModel.value, preference);
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
@@ -275,15 +277,12 @@ async function bindAccount(
 async function loadCatalog(
   dependencies: AnthropicMessagesRouteDependencies,
   account: Readonly<BoundAccount>,
+  observedPreference: ReturnType<AccountModelPreferences["get"]>,
   signal: AbortSignal,
 ) {
   try {
     const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
-    dependencies.preferences.markInvalidIfMissing(
-      account.accountId,
-      new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
-      catalog.catalogGeneration,
-    );
+    reconcilePreferredModel(dependencies.preferences, account.accountId, catalog, observedPreference);
     return catalog;
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {

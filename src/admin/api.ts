@@ -458,7 +458,7 @@ export class AdminManagementApi {
       const account = await this.dependencies.accounts.bindAccount(accountId, signal);
       const catalog = await this.dependencies.registry.get(account, signal);
       signal.throwIfAborted();
-      this.requireActiveAccount(accountId);
+      await this.requireSameCredentialGeneration(accountId, account, signal);
       this.dependencies.preferredModels.markInvalidIfMissing(
         accountId,
         catalog,
@@ -479,7 +479,7 @@ export class AdminManagementApi {
       const account = await this.dependencies.accounts.bindAccount(accountId, signal);
       const catalog = await this.dependencies.registry.get(account, signal);
       signal.throwIfAborted();
-      this.requireActiveAccount(accountId);
+      await this.requireSameCredentialGeneration(accountId, account, signal);
       let preference: AdminStoredPreference;
       try {
         preference = this.dependencies.preferredModels.setPreferred(
@@ -517,12 +517,7 @@ export class AdminManagementApi {
         signal,
       );
       signal.throwIfAborted();
-      const account = await this.dependencies.accounts.bindAccount(accountId, signal);
-      signal.throwIfAborted();
-      this.requireActiveAccount(accountId);
-      if (account.credentialGeneration !== validatedAccount.credentialGeneration) {
-        throw new AdminApiError("revision_conflict");
-      }
+      await this.requireSameCredentialGeneration(accountId, validatedAccount, signal);
       if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {
         throw new AdminApiError("revision_conflict");
       }
@@ -559,7 +554,7 @@ export class AdminManagementApi {
         signal,
       );
       signal.throwIfAborted();
-      this.requireActiveAccount(accountId);
+      await this.requireSameCredentialGeneration(accountId, account, signal);
       if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {
         throw new AdminApiError("revision_conflict");
       }
@@ -692,6 +687,21 @@ export class AdminManagementApi {
       throw new AdminApiError("not_found");
     }
     return account;
+  }
+
+  private async requireSameCredentialGeneration(
+    accountId: string,
+    expected: Readonly<BoundAccount>,
+    signal: AbortSignal,
+  ): Promise<BoundAccount> {
+    signal.throwIfAborted();
+    const current = await this.dependencies.accounts.bindAccount(accountId, signal);
+    signal.throwIfAborted();
+    this.requireActiveAccount(accountId);
+    if (current.credentialGeneration !== expected.credentialGeneration) {
+      throw new AdminApiError("revision_conflict");
+    }
+    return current;
   }
 
   private runtimeConfigDto(

@@ -10,6 +10,7 @@ import {
   serializeOpenAiModels,
   serializeOpenAiModelsError,
 } from "./wire.js";
+import { reconcilePreferredModel } from "./preferred.js";
 
 export interface ModelCatalogRouteDependencies {
   readonly directory: AccountDirectory;
@@ -67,9 +68,9 @@ async function loadCatalog(
     throw error;
   }
   try {
+    const observedPreference = dependencies.preferences.get(account.accountId);
     const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
-    const visible = new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId));
-    dependencies.preferences.markInvalidIfMissing(account.accountId, visible, catalog.catalogGeneration);
+    reconcilePreferredModel(dependencies.preferences, account.accountId, catalog, observedPreference);
     return catalog;
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {
