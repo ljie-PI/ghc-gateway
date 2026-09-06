@@ -406,6 +406,17 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("accepts Chat usage:null and preserves source tool indexes across delayed arguments", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"usage\":null,\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const text = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    expect(text.indexOf("\"call_id\":\"call_a\"")).toBeLessThan(text.indexOf("\"call_id\":\"call_b\""));
+    expect(text).toContain("response.completed");
+  });
+
   it("rejects conflicting Responses tool identity snapshots", async () => {
     const source = [
       responseEvent(0, "response.output_item.added", {

@@ -45,11 +45,41 @@ async function* decodeChatStream(
     id: string;
     name: string;
     pendingArguments: string;
+    argumentsSeen: boolean;
     started: boolean;
     done: boolean;
   }>();
+  let nextToolToStart = 0;
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
   let observedUsage = emptyUsage();
+  const startReadyTools = function* (): Iterable<SemanticStreamEvent> {
+    for (;;) {
+      const tool = tools.get(nextToolToStart);
+      if (
+        tool === undefined
+        || tool.started
+        || !tool.argumentsSeen
+        || tool.id.length === 0
+        || tool.name.length === 0
+      ) {
+        return;
+      }
+      const index = nextToolToStart;
+      nextToolToStart += 1;
+      tool.started = true;
+      yield {
+        kind: "tool_start",
+        key: `chat:${index}`,
+        callId: tool.id,
+        name: tool.name,
+      };
+      if (tool.pendingArguments.length > 0) {
+        const pending = tool.pendingArguments;
+        tool.pendingArguments = "";
+        yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
+      }
+    }
+  };
   for await (const frame of parseChatSse(bytes, eventLimitBytes)) {
     if (frame.kind === "error") {
       throw upstreamStreamEventFailure();
@@ -84,7 +114,7 @@ async function* decodeChatStream(
     if (!isWireJsonObject(payload)) {
       continue;
     }
-    const usage = objectMember(payload, "usage");
+    const usage = nullableObjectMember(payload, "usage");
     if (usage !== undefined) {
       observedUsage = chatUsage(usage, observedUsage);
       yield { kind: "usage", usage: observedUsage };
@@ -126,6 +156,7 @@ async function* decodeChatStream(
             id: "",
             name: "",
             pendingArguments: "",
+            argumentsSeen: false,
             started: false,
             done: false,
           };
@@ -150,28 +181,16 @@ async function* decodeChatStream(
           if (argumentsDelta !== undefined) {
             budget.reserve(argumentsDelta);
             tool.pendingArguments += argumentsDelta;
+            tool.argumentsSeen = true;
           }
           tools.set(index, tool);
-          if (
-            !tool.started
-            && argumentsDelta !== undefined
-            && tool.id.length > 0
-            && tool.name.length > 0
-          ) {
-            tool.started = true;
-            yield {
-              kind: "tool_start",
-              key: `chat:${index}`,
-              callId: tool.id,
-              name: tool.name,
-            };
-          }
-          if (tool.started && tool.pendingArguments.length > 0) {
+          if (tool.started && argumentsDelta !== undefined && tool.pendingArguments.length > 0) {
             const pending = tool.pendingArguments;
             tool.pendingArguments = "";
             yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
           }
         }
+        yield* startReadyTools();
       }
     }
     const finalMessage = objectMember(choice, "message");
@@ -192,6 +211,7 @@ async function* decodeChatStream(
       }
       const calls = arrayMember(finalMessage, "tool_calls");
       if (calls !== undefined) {
+        const finalToolArguments = new Map<number, string>();
         for (let position = 0; position < calls.items.length; position += 1) {
           const value = calls.items[position];
           if (!isWireJsonObject(value)) {
@@ -221,31 +241,26 @@ async function* decodeChatStream(
               id,
               name,
               pendingArguments: "",
-              started: true,
+              argumentsSeen: true,
+              started: false,
               done: false,
             };
             tools.set(index, tool);
-            yield {
-              kind: "tool_start",
-              key: `chat:${index}`,
-              callId: id,
-              name,
-            };
           } else if (tool.id !== id || tool.name !== name) {
             invalid();
           } else if (!tool.started) {
-            tool.started = true;
-            yield {
-              kind: "tool_start",
-              key: `chat:${index}`,
-              callId: id,
-              name,
-            };
-            if (tool.pendingArguments.length > 0) {
-              const pending = tool.pendingArguments;
-              tool.pendingArguments = "";
-              yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
-            }
+            tool.argumentsSeen = true;
+          }
+          tool.argumentsSeen = true;
+          tool.pendingArguments = "";
+          tools.set(index, tool);
+          finalToolArguments.set(index, argumentsJson);
+        }
+        yield* startReadyTools();
+        for (const [index, argumentsJson] of [...finalToolArguments.entries()].sort(([left], [right]) => left - right)) {
+          const tool = tools.get(index);
+          if (tool === undefined || !tool.started) {
+            invalid();
           }
           tool.done = true;
           yield { kind: "tool_done", key: `chat:${index}`, argumentsJson };
@@ -255,23 +270,7 @@ async function* decodeChatStream(
     const finish = singleMember(choice, "finish_reason");
     if (finish !== undefined && finish !== null) {
       pendingFinish = chatFinish(finish);
-      for (const [index, tool] of tools) {
-        if (tool.started || tool.id.length === 0 || tool.name.length === 0) {
-          continue;
-        }
-        tool.started = true;
-        yield {
-          kind: "tool_start",
-          key: `chat:${index}`,
-          callId: tool.id,
-          name: tool.name,
-        };
-        if (tool.pendingArguments.length > 0) {
-          const pending = tool.pendingArguments;
-          tool.pendingArguments = "";
-          yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
-        }
-      }
+      yield* startReadyTools();
     }
   }
   invalidTruncated();
@@ -1033,6 +1032,17 @@ function objectMember(object: WireJsonObject | undefined, key: string): WireJson
   }
   const value = singleMember(object, key);
   if (value === undefined) {
+    return undefined;
+  }
+  if (!isWireJsonObject(value)) {
+    invalid();
+  }
+  return value;
+}
+
+function nullableObjectMember(object: WireJsonObject, key: string): WireJsonObject | undefined {
+  const value = singleMember(object, key);
+  if (value === undefined || value === null) {
     return undefined;
   }
   if (!isWireJsonObject(value)) {
