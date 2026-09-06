@@ -124,12 +124,11 @@ export async function createNativeMessagesStreamResponse(input: {
       if (next.done === true) {
         throw truncated();
       }
-      prefetched.push(next.value);
       prefetchedBytes += next.value.byteLength;
       if (prefetchedBytes > input.scope.config.limits.accumulatorBytes) {
         invalid();
       }
-      observer.consume(next.value);
+      prefetched.push(...observer.consume(next.value));
     }
   } catch (error: unknown) {
     await cleanupUpstream();
@@ -183,15 +182,21 @@ export async function createNativeMessagesStreamResponse(input: {
       for (;;) {
         const next = await iterator.next();
         if (next.done === true) {
-          const usage = observer.finish();
-          observe(input.onTerminal, { kind: "success", usage });
+          const finished = observer.finish();
+          for (const value of finished.records) {
+            if (!await writer.enqueue(value)) {
+              return;
+            }
+          }
+          observe(input.onTerminal, { kind: "success", usage: finished.usage });
           await closeStream();
           writer.close();
           return;
         }
-        observer.consume(next.value);
-        if (!await writer.enqueue(next.value)) {
-          return;
+        for (const value of observer.consume(next.value)) {
+          if (!await writer.enqueue(value)) {
+            return;
+          }
         }
         if (observer.isTerminal) {
           observe(input.onTerminal, { kind: "success", usage: observer.observedUsage });
@@ -214,6 +219,7 @@ export async function createNativeMessagesStreamResponse(input: {
 
 class NativeMessagesObserver {
   private readonly decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  private readonly encoder = new TextEncoder();
   private pending = "";
   private terminal = false;
   private semantic = false;
@@ -239,34 +245,40 @@ class NativeMessagesObserver {
     return this.usage;
   }
 
-  consume(bytes: Uint8Array): void {
+  consume(bytes: Uint8Array): readonly Uint8Array[] {
     this.pending += this.decoder.decode(bytes, { stream: true });
-    this.drain();
+    return this.drain();
   }
 
-  finish(): SemanticUsage {
+  finish(): { readonly usage: SemanticUsage; readonly records: readonly Uint8Array[] } {
     this.pending += this.decoder.decode();
-    this.drain(true);
+    const records = this.drain(true);
     if (this.pending.trim().length > 0 || !this.terminal) {
       throw truncated();
     }
-    return this.usage;
+    return { usage: this.usage, records };
   }
 
-  private drain(final = false): void {
+  private drain(final = false): readonly Uint8Array[] {
+    const records: Uint8Array[] = [];
     for (;;) {
       const extracted = takeSseRecord(this.pending, final);
       if (extracted === undefined) {
-        if (new TextEncoder().encode(this.pending).byteLength > this.eventLimitBytes) {
+        if (this.encoder.encode(this.pending).byteLength > this.eventLimitBytes) {
           invalid();
         }
-        return;
+        return records;
       }
       this.pending = extracted.rest;
-      if (new TextEncoder().encode(extracted.consumed).byteLength > this.eventLimitBytes) {
+      if (this.encoder.encode(extracted.consumed).byteLength > this.eventLimitBytes) {
         invalid();
       }
       this.observeRecord(extracted.raw.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n"));
+      records.push(this.encoder.encode(extracted.consumed));
+      if (this.terminal) {
+        this.pending = "";
+        return records;
+      }
     }
   }
 

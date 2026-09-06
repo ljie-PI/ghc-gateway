@@ -97,7 +97,7 @@ async function* decodeChatStream(
       invalid();
     }
     const choice = choices.items[0];
-    const delta = objectMember(choice, "delta") ?? objectMember(choice, "message");
+    const delta = objectMember(choice, "delta");
     if (delta !== undefined) {
       const content = stringMember(delta, "content");
       if (content !== undefined && content.length > 0) {
@@ -171,6 +171,84 @@ async function* decodeChatStream(
             tool.pendingArguments = "";
             yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
           }
+        }
+      }
+    }
+    const finalMessage = objectMember(choice, "message");
+    if (finalMessage !== undefined) {
+      const contentValue = singleMember(finalMessage, "content");
+      if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
+        invalid();
+      }
+      if (typeof contentValue === "string") {
+        yield { kind: "text_done", key: "chat:message", text: contentValue };
+      }
+      const refusalValue = singleMember(finalMessage, "refusal");
+      if (refusalValue !== undefined && refusalValue !== null && typeof refusalValue !== "string") {
+        invalid();
+      }
+      if (typeof refusalValue === "string") {
+        yield { kind: "refusal_done", key: "chat:message", refusal: refusalValue };
+      }
+      const calls = arrayMember(finalMessage, "tool_calls");
+      if (calls !== undefined) {
+        for (let position = 0; position < calls.items.length; position += 1) {
+          const value = calls.items[position];
+          if (!isWireJsonObject(value)) {
+            invalid();
+          }
+          const index = integerMember(value, "index") ?? position;
+          const fn = objectMember(value, "function");
+          const id = stringMember(value, "id");
+          const name = stringMember(fn, "name");
+          const argumentsJson = stringMember(fn, "arguments");
+          if (
+            index < 0
+            || id === undefined
+            || id.length === 0
+            || name === undefined
+            || name.length === 0
+            || argumentsJson === undefined
+          ) {
+            invalid();
+          }
+          let tool = tools.get(index);
+          if (tool === undefined) {
+            budget.reserveEntry();
+            budget.reserve(id);
+            budget.reserve(name);
+            tool = {
+              id,
+              name,
+              pendingArguments: "",
+              started: true,
+              done: false,
+            };
+            tools.set(index, tool);
+            yield {
+              kind: "tool_start",
+              key: `chat:${index}`,
+              callId: id,
+              name,
+            };
+          } else if (tool.id !== id || tool.name !== name) {
+            invalid();
+          } else if (!tool.started) {
+            tool.started = true;
+            yield {
+              kind: "tool_start",
+              key: `chat:${index}`,
+              callId: id,
+              name,
+            };
+            if (tool.pendingArguments.length > 0) {
+              const pending = tool.pendingArguments;
+              tool.pendingArguments = "";
+              yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
+            }
+          }
+          tool.done = true;
+          yield { kind: "tool_done", key: `chat:${index}`, argumentsJson };
         }
       }
     }

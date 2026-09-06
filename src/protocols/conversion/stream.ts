@@ -260,10 +260,13 @@ class MessagesEmitter implements StreamEmitter {
   private nextIndex = 0;
   private activeText: { readonly key: string; readonly index: number } | undefined;
   private bufferedBytes = 0;
+  private readonly toolOrder: string[] = [];
+  private nextToolToEmit = 0;
   private readonly tools = new Map<string, {
     readonly callId: string;
     readonly name: string;
     argumentsJson: string;
+    done: boolean;
     emitted: boolean;
   }>();
 
@@ -320,7 +323,8 @@ class MessagesEmitter implements StreamEmitter {
     if (this.tools.has(key)) {
       invalid();
     }
-    this.tools.set(key, { callId, name, argumentsJson: "", emitted: false });
+    this.tools.set(key, { callId, name, argumentsJson: "", done: false, emitted: false });
+    this.toolOrder.push(key);
   }
 
   toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
@@ -345,21 +349,8 @@ class MessagesEmitter implements StreamEmitter {
     if (argumentsJson !== tool.argumentsJson) {
       invalid();
     }
-    tool.emitted = true;
-    const index = this.nextIndex++;
-    yield this.event({
-      type: "content_block_start",
-      index,
-      content_block: { type: "tool_use", id: tool.callId, name: tool.name, input: {} },
-    });
-    if (tool.argumentsJson.length > 0) {
-      yield this.event({
-        type: "content_block_delta",
-        index,
-        delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
-      });
-    }
-    yield this.event({ type: "content_block_stop", index });
+    tool.done = true;
+    yield* this.flushReadyTools();
   }
 
   *finish(
@@ -367,11 +358,10 @@ class MessagesEmitter implements StreamEmitter {
     usage: Readonly<SemanticUsage>,
   ): Iterable<ConvertedStreamEmission> {
     yield* this.closeActiveText();
-    for (const [key, tool] of this.tools) {
-      if (!tool.emitted) {
-        yield* this.toolDone(key, tool.argumentsJson);
-      }
+    for (const tool of this.tools.values()) {
+      tool.done = true;
     }
+    yield* this.flushReadyTools();
     yield this.event({
       type: "message_delta",
       delta: {
@@ -388,6 +378,35 @@ class MessagesEmitter implements StreamEmitter {
     }
     yield this.event({ type: "content_block_stop", index: this.activeText.index });
     this.activeText = undefined;
+  }
+
+  private *flushReadyTools(): Iterable<ConvertedStreamEmission> {
+    while (this.nextToolToEmit < this.toolOrder.length) {
+      const key = this.toolOrder[this.nextToolToEmit];
+      const tool = key === undefined ? undefined : this.tools.get(key);
+      if (tool === undefined || !tool.done) {
+        return;
+      }
+      this.nextToolToEmit += 1;
+      if (tool.emitted) {
+        continue;
+      }
+      tool.emitted = true;
+      const index = this.nextIndex++;
+      yield this.event({
+        type: "content_block_start",
+        index,
+        content_block: { type: "tool_use", id: tool.callId, name: tool.name, input: {} },
+      });
+      if (tool.argumentsJson.length > 0) {
+        yield this.event({
+          type: "content_block_delta",
+          index,
+          delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
+        });
+      }
+      yield this.event({ type: "content_block_stop", index });
+    }
   }
 
   private event(value: Record<string, unknown>): ConvertedStreamEmission {

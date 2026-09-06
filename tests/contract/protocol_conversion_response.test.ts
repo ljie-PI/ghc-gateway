@@ -279,6 +279,55 @@ describe("shared conversion response codecs", () => {
     expect(text.match(/data: \[DONE\]/gu)).toHaveLength(1);
   });
 
+  it("reconciles Chat partial text with a final message snapshot", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const text = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    expect(text).toContain("\"text\":\"hello\"");
+    expect(text).not.toContain("helhello");
+  });
+
+  it("keeps Messages tool blocks in source order when completion arrives out of order", async () => {
+    const response = {
+      id: "resp_tools",
+      object: "response",
+      status: "completed",
+      output: [
+        { id: "fc_a", type: "function_call", call_id: "call_a", name: "lookup", arguments: "{}", status: "completed" },
+        { id: "fc_b", type: "function_call", call_id: "call_b", name: "lookup", arguments: "{}", status: "completed" },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { ...response.output[0], arguments: "", status: "in_progress" },
+      }),
+      responseEvent(1, "response.output_item.added", {
+        output_index: 1,
+        item: { ...response.output[1], arguments: "", status: "in_progress" },
+      }),
+      responseEvent(2, "response.function_call_arguments.delta", {
+        item_id: "fc_a", output_index: 0, delta: "{}",
+      }),
+      responseEvent(3, "response.function_call_arguments.delta", {
+        item_id: "fc_b", output_index: 1, delta: "{}",
+      }),
+      responseEvent(4, "response.function_call_arguments.done", {
+        item_id: "fc_b", output_index: 1, name: "lookup", arguments: "{}",
+      }),
+      responseEvent(5, "response.function_call_arguments.done", {
+        item_id: "fc_a", output_index: 0, name: "lookup", arguments: "{}",
+      }),
+      responseEvent(6, "response.completed", { response }),
+    ].join("");
+    const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
+    expect(text.indexOf("\"id\": \"call_a\"")).toBeLessThan(text.indexOf("\"id\": \"call_b\""));
+  });
+
   it("preserves multiple final-only Responses message items and mixed text/refusal content", async () => {
     const response = {
       id: "resp_source",
@@ -1038,6 +1087,54 @@ describe("shared conversion response codecs", () => {
       onTerminal: () => undefined,
     })).rejects.toThrow();
     expect(cancelled).toBe(true);
+  });
+
+  it("withholds fragmented native Messages error diagnostics", async () => {
+    async function* upstream(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_error",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "native",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }));
+      yield encoder.encode("event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"secret");
+      yield encoder.encode("\"}}\n\n");
+    }
+    const signal = new AbortController().signal;
+    const response = await createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: upstream(),
+        async cancel() {},
+      },
+      scope: {
+        requestId: "req_native_error",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native_error",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    });
+    const reader = response.body?.getReader();
+    if (reader === undefined) {
+      throw new Error("missing response body");
+    }
+    const first = await reader.read();
+    expect(decoder.decode(first.value)).not.toContain("secret");
+    await expect(reader.read()).rejects.toThrow();
   });
 });
 
