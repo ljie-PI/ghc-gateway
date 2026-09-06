@@ -162,6 +162,28 @@ describe("CAPI parse and cache", () => {
     expect(fetches).toBe(2);
   });
 
+  it("aborts every displaced in-flight generation during close", async () => {
+    let aborts = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch(_accountId, signal) {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        });
+        return { data: [] };
+      },
+    });
+    const older = catalog.get("github.com/1", new AbortController().signal, 1);
+    const newer = catalog.get("github.com/1", new AbortController().signal, 2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await catalog.close();
+    await expect(older).rejects.toMatchObject({ name: "AbortError" });
+    await expect(newer).rejects.toMatchObject({ name: "AbortError" });
+    expect(aborts).toBe(2);
+  });
+
   it("caches empty catalogs per account and does not share them", async () => {
     const seen: string[] = [];
     const catalog = new CopilotModelCatalog({

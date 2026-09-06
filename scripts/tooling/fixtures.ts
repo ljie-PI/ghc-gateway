@@ -803,6 +803,7 @@ function fixtureCapability(
       configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
       effective: 4096,
       source: "unknown_fallback",
+      valid: true,
     },
     profile: {
       chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },

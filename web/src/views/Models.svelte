@@ -271,10 +271,10 @@
           <div><dt>Native HTTP protocols</dt><dd>{model.protocols?.join(", ") || (model.protocols === null ? "Unknown" : "None")}</dd></div>
           <div><dt>Protocol source</dt><dd>{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""}</dd></div>
           <div><dt>Live declaration</dt><dd>{model.protocolsLiveState}</dd></div>
-          <div><dt>Input window</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {model.maxInputTokensSource}</dd></div>
-          <div><dt>Output window</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} · {model.maxOutputTokensSource}</dd></div>
-          <div><dt>Default output</dt><dd>{model.defaultOutputTokens.effective.toLocaleString()} · {model.defaultOutputTokens.source}</dd></div>
-          <div><dt>Chat budget field</dt><dd>{model.chatOutputTokenField ?? "Unknown"} · {model.chatOutputTokenFieldSource}</dd></div>
+          <div><dt>Input window</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {model.maxInputTokensSource}{model.maxInputTokensConflict ? " · conflict" : ""} · live {model.maxInputTokensLiveState}</dd></div>
+          <div><dt>Output window</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} · {model.maxOutputTokensSource}{model.maxOutputTokensConflict ? " · conflict" : ""} · live {model.maxOutputTokensLiveState}</dd></div>
+          <div><dt>Default output</dt><dd>{model.defaultOutputTokens.effective.toLocaleString()} · {model.defaultOutputTokens.source}{model.defaultOutputTokens.conflict ? " · conflict" : ""}{model.defaultOutputTokens.valid ? "" : " · invalid for current ceiling"} · live {model.defaultOutputTokens.liveState}</dd></div>
+          <div><dt>Chat budget field</dt><dd>{model.chatOutputTokenField ?? "Unknown"} · {model.chatOutputTokenFieldSource}{model.chatOutputTokenFieldConflict ? " · conflict" : ""} · live {model.chatOutputTokenFieldLiveState}</dd></div>
           <div><dt>Built-in revision</dt><dd>{model.builtinRevision ?? "None"}</dd></div>
         </dl>
 

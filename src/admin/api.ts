@@ -122,15 +122,25 @@ export interface AdminModels {
     readonly protocolsLiveState: CapabilityFieldState;
     readonly maxInputTokens: number | null;
     readonly maxInputTokensSource: CapabilitySource;
+    readonly maxInputTokensConflict: boolean;
+    readonly maxInputTokensLiveState: CapabilityFieldState;
     readonly maxOutputTokens: number | null;
     readonly maxOutputTokensSource: CapabilitySource;
+    readonly maxOutputTokensConflict: boolean;
+    readonly maxOutputTokensLiveState: CapabilityFieldState;
     readonly defaultOutputTokens: {
       readonly configured: number | null;
+      readonly configuredSource: CapabilitySource;
+      readonly conflict: boolean;
+      readonly liveState: CapabilityFieldState;
       readonly effective: number;
       readonly source: CapabilitySource | "known_ceiling" | "unknown_fallback";
+      readonly valid: boolean;
     };
     readonly chatOutputTokenField: ChatOutputTokenField | null;
     readonly chatOutputTokenFieldSource: CapabilitySource;
+    readonly chatOutputTokenFieldConflict: boolean;
+    readonly chatOutputTokenFieldLiveState: CapabilityFieldState;
     readonly overrideRevision: number;
     readonly builtinRevision: string | null;
     readonly override: ModelCapabilityOverrideValue | null;
@@ -212,17 +222,35 @@ export interface AdminCapabilityRegistry {
         readonly conflict: boolean;
         readonly liveState: CapabilityFieldState;
       };
-      readonly maxInputTokens: { readonly value: number | null; readonly source: CapabilitySource };
-      readonly maxOutputTokens: { readonly value: number | null; readonly source: CapabilitySource };
+      readonly maxInputTokens: {
+        readonly value: number | null;
+        readonly source: CapabilitySource;
+        readonly conflict: boolean;
+        readonly liveState: CapabilityFieldState;
+      };
+      readonly maxOutputTokens: {
+        readonly value: number | null;
+        readonly source: CapabilitySource;
+        readonly conflict: boolean;
+        readonly liveState: CapabilityFieldState;
+      };
       readonly defaultOutputTokens: {
-        readonly configuration: { readonly value: number | null };
+        readonly configuration: {
+          readonly value: number | null;
+          readonly source: CapabilitySource;
+          readonly conflict: boolean;
+          readonly liveState: CapabilityFieldState;
+        };
         readonly effective: number;
         readonly source: CapabilitySource | "known_ceiling" | "unknown_fallback";
+        readonly valid: boolean;
       };
       readonly profile: {
         readonly chatOutputTokenField: {
           readonly value: ChatOutputTokenField | null;
           readonly source: CapabilitySource;
+          readonly conflict: boolean;
+          readonly liveState: CapabilityFieldState;
         };
       };
       readonly revision: {
@@ -478,10 +506,17 @@ export class AdminManagementApi {
     return await this.withModelMutation(accountId, signal, async () => {
       this.requireActiveAccount(accountId);
       const before = this.dependencies.preferences.get(accountId);
+      const validatedAccount = await this.dependencies.accounts.bindAccount(accountId, signal);
+      await this.dependencies.registry.validateOverride(validatedAccount, modelId, candidate, signal);
+      signal.throwIfAborted();
       const account = await this.dependencies.accounts.bindAccount(accountId, signal);
-      await this.dependencies.registry.validateOverride(account, modelId, candidate, signal);
+      signal.throwIfAborted();
+      this.requireActiveAccount(accountId);
+      if (account.credentialGeneration !== validatedAccount.credentialGeneration) {
+        throw new AdminApiError("revision_conflict");
+      }
       this.dependencies.capabilityOverrides.set(accountId, modelId, candidate, expectedRevision);
-      const catalog = await this.dependencies.registry.get(account, signal);
+      const catalog = await this.dependencies.registry.get(account, new AbortController().signal);
       this.dependencies.preferredModels.markInvalidIfMissing(accountId, catalog, before?.revision ?? null);
       return this.modelsDto(catalog);
     });
@@ -496,9 +531,11 @@ export class AdminManagementApi {
     return await this.withModelMutation(accountId, signal, async () => {
       this.requireActiveAccount(accountId);
       const before = this.dependencies.preferences.get(accountId);
-      this.dependencies.capabilityOverrides.reset(accountId, modelId, expectedRevision);
       const account = await this.dependencies.accounts.bindAccount(accountId, signal);
-      const catalog = await this.dependencies.registry.get(account, signal);
+      signal.throwIfAborted();
+      this.requireActiveAccount(accountId);
+      this.dependencies.capabilityOverrides.reset(accountId, modelId, expectedRevision);
+      const catalog = await this.dependencies.registry.get(account, new AbortController().signal);
       this.dependencies.preferredModels.markInvalidIfMissing(accountId, catalog, before?.revision ?? null);
       return this.modelsDto(catalog);
     });
@@ -579,15 +616,25 @@ export class AdminManagementApi {
         protocolsLiveState: model.protocols.liveState,
         maxInputTokens: model.maxInputTokens.value,
         maxInputTokensSource: model.maxInputTokens.source,
+        maxInputTokensConflict: model.maxInputTokens.conflict,
+        maxInputTokensLiveState: model.maxInputTokens.liveState,
         maxOutputTokens: model.maxOutputTokens.value,
         maxOutputTokensSource: model.maxOutputTokens.source,
+        maxOutputTokensConflict: model.maxOutputTokens.conflict,
+        maxOutputTokensLiveState: model.maxOutputTokens.liveState,
         defaultOutputTokens: {
           configured: model.defaultOutputTokens.configuration.value,
+          configuredSource: model.defaultOutputTokens.configuration.source,
+          conflict: model.defaultOutputTokens.configuration.conflict,
+          liveState: model.defaultOutputTokens.configuration.liveState,
           effective: model.defaultOutputTokens.effective,
           source: model.defaultOutputTokens.source,
+          valid: model.defaultOutputTokens.valid,
         },
         chatOutputTokenField: model.profile.chatOutputTokenField.value,
         chatOutputTokenFieldSource: model.profile.chatOutputTokenField.source,
+        chatOutputTokenFieldConflict: model.profile.chatOutputTokenField.conflict,
+        chatOutputTokenFieldLiveState: model.profile.chatOutputTokenField.liveState,
         overrideRevision: model.revision.overrideRevision,
         builtinRevision: model.revision.builtinRevision,
         override: model.override,

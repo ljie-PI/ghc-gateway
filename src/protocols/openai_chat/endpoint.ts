@@ -2,7 +2,7 @@ import { AccountDirectoryError, type AccountDirectory, type BoundAccount } from 
 import type { AccountModelPreferences, ModelPreference } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
-import { capabilitySnapshotFromCatalog, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
+import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
 import { TokenRefreshError } from "../../copilot/token_refresh.js";
@@ -330,16 +330,7 @@ async function loadCatalog(
   signal: AbortSignal,
 ) {
   try {
-    if (dependencies.registry !== undefined) {
-      return await dependencies.registry.get(account, signal);
-    }
-    if (dependencies.catalog !== undefined) {
-      return capabilitySnapshotFromCatalog(
-        account,
-        await dependencies.catalog.get(account.accountId, signal, account.credentialGeneration),
-      );
-    }
-    throw new Error("model capability registry is unavailable");
+    return await loadCapabilitySnapshot(dependencies, account, signal);
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {
       const retry = validRetryAfterValue(error.retryAfter);

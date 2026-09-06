@@ -240,14 +240,22 @@ function capabilityModel(
     enabled: override?.enabled ?? discovered,
     visible: override?.enabled ?? discovered,
     protocols: { value: protocols, source: override?.protocols === undefined ? "live" as const : "admin_override" as const, conflict: false, liveState: discovered ? "value" as const : "missing" as const },
-    maxInputTokens: { value: 200_000, source: "builtin" as const },
-    maxOutputTokens: { value: 8_192, source: "builtin" as const },
+    maxInputTokens: { value: 200_000, source: "builtin" as const, conflict: false, liveState: "missing" as const },
+    maxOutputTokens: { value: 8_192, source: "builtin" as const, conflict: false, liveState: "missing" as const },
     defaultOutputTokens: {
-      configuration: { value: null },
+      configuration: { value: null, source: "unknown" as const, conflict: false, liveState: "missing" as const },
       effective: 8_192,
       source: "known_ceiling" as const,
+      valid: true,
     },
-    profile: { chatOutputTokenField: { value: "max_tokens" as const, source: "builtin" as const } },
+    profile: {
+      chatOutputTokenField: {
+        value: "max_tokens" as const,
+        source: "builtin" as const,
+        conflict: false,
+        liveState: "missing" as const,
+      },
+    },
     revision: { overrideRevision: stored?.revision ?? 0, builtinRevision: discovered ? "test" : null },
     override,
   };

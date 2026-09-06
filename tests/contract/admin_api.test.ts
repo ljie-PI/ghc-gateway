@@ -246,6 +246,71 @@ describe("Admin API", () => {
     }
   });
 
+  it("does not recreate overrides after removal and completes reconciliation after commit", async () => {
+    const dependencies = adminDependencies();
+    let releaseValidation = (): void => undefined;
+    dependencies.registry.validateOverride = async () => {
+      await new Promise<void>((resolve) => { releaseValidation = resolve; });
+    };
+    let writes = 0;
+    const originalSet = dependencies.capabilityOverrides.set;
+    dependencies.capabilityOverrides.set = (...args) => {
+      writes += 1;
+      return originalSet(...args);
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const pending = mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual",
+        expectedRevision: 0,
+        capabilities: { enabled: true, protocols: ["messages"] },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const active = dependencies.accounts.list()[0];
+      if (active === undefined) throw new Error("missing test account");
+      dependencies.accounts.list = () => [{ ...active, state: "removed" }];
+      releaseValidation();
+      expect((await pending).status).toBe(404);
+      expect(writes).toBe(0);
+    } finally {
+      await harness.close();
+    }
+
+    const committedDependencies = adminDependencies();
+    const committedHarness = await createHarness(committedDependencies);
+    try {
+      const session = await login(committedHarness.gateway, committedHarness.admin);
+      const abort = new AbortController();
+      const committedSet = committedDependencies.capabilityOverrides.set;
+      committedDependencies.capabilityOverrides.set = (...args) => {
+        const result = committedSet(...args);
+        abort.abort();
+        return result;
+      };
+      await committedHarness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/models/capabilities`, {
+        method: "PUT",
+        signal: abort.signal,
+        headers: {
+          "content-type": "application/json",
+          cookie: session.cookie,
+          origin: ORIGIN,
+          "x-ghcg-csrf": session.csrf,
+        },
+        body: JSON.stringify({
+          accountId: "github.com/42",
+          modelId: "manual",
+          expectedRevision: 0,
+          capabilities: { enabled: true, protocols: ["messages"] },
+        }),
+      }));
+      expect(committedDependencies.calls).toContain("preference-invalidated");
+    } finally {
+      await committedHarness.close();
+    }
+  });
+
   it("keeps model mutations serialized when a queued request aborts", async () => {
     const dependencies = adminDependencies();
     let releaseCatalog = (): void => undefined;

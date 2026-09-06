@@ -170,8 +170,15 @@ describe("model routes errors and preferences", () => {
     }));
     try {
       const response = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
-      const body = await response.json() as { data: Array<{ id: string }> };
+      const body = await response.json() as {
+        data: Array<{ id: string; x_ghcg_configured?: boolean; x_ghcg_verified?: boolean }>;
+      };
       expect(body.data.map((item) => item.id)).toEqual(["discovered", "manual"]);
+      expect(body.data[1]).toMatchObject({
+        id: "manual",
+        x_ghcg_configured: true,
+        x_ghcg_verified: false,
+      });
 
       const snapshot = await registry.get(account, new AbortController().signal);
       new PreferredModelManager(accounts.preferences).setPreferred(account.accountId, "manual", 0, snapshot);

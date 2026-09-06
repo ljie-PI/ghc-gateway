@@ -48,7 +48,6 @@ interface InflightEntry {
   readonly generation: number;
   readonly credentialGeneration: number;
   readonly promise: Promise<CatalogSnapshot>;
-  readonly controller: AbortController;
 }
 
 export class CopilotModelCatalog {
@@ -56,6 +55,7 @@ export class CopilotModelCatalog {
   private readonly generations = new Map<string, number>();
   private readonly credentialGenerations = new Map<string, number>();
   private readonly inflight = new Map<string, InflightEntry>();
+  private readonly activeControllers = new Set<AbortController>();
   private closed = false;
 
   constructor(
@@ -88,14 +88,15 @@ export class CopilotModelCatalog {
     }
     const controller = new AbortController();
     const promise = this.fetchCatalog(accountId, generation, credentialGeneration, controller.signal);
-    this.inflight.set(accountId, { generation, credentialGeneration, promise, controller });
-    try {
-      return await waitForCatalog(promise, signal);
-    } finally {
+    this.inflight.set(accountId, { generation, credentialGeneration, promise });
+    this.activeControllers.add(controller);
+    void promise.finally(() => {
+      this.activeControllers.delete(controller);
       if (this.inflight.get(accountId)?.promise === promise) {
         this.inflight.delete(accountId);
       }
-    }
+    }).catch(() => undefined);
+    return await waitForCatalog(promise, signal);
   }
 
   private async fetchCatalog(
@@ -139,10 +140,11 @@ export class CopilotModelCatalog {
   async close(): Promise<void> {
     this.closed = true;
     this.clear();
-    for (const pending of this.inflight.values()) {
-      pending.controller.abort();
+    for (const controller of this.activeControllers) {
+      controller.abort();
     }
     this.inflight.clear();
+    this.activeControllers.clear();
     await this.source.close?.();
   }
 }

@@ -48,6 +48,28 @@ export interface CapabilityCatalogSnapshot {
   readonly overrideRevisions: Readonly<Record<string, number>>;
 }
 
+export interface CapabilitySnapshotDependencies {
+  readonly registry?: ModelCapabilityRegistry;
+  readonly catalog?: CopilotModelCatalog;
+}
+
+export async function loadCapabilitySnapshot(
+  dependencies: Readonly<CapabilitySnapshotDependencies>,
+  account: Readonly<BoundAccount>,
+  signal: AbortSignal,
+): Promise<CapabilityCatalogSnapshot> {
+  if (dependencies.registry !== undefined) {
+    return await dependencies.registry.get(account, signal);
+  }
+  if (dependencies.catalog !== undefined) {
+    return capabilitySnapshotFromCatalog(
+      account,
+      await dependencies.catalog.get(account.accountId, signal, account.credentialGeneration),
+    );
+  }
+  throw new Error("model capability registry is unavailable");
+}
+
 export class ModelCapabilityRegistry {
   constructor(
     private readonly catalog: CopilotModelCatalog,

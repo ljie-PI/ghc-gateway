@@ -151,7 +151,7 @@ describe("native Responses execution", () => {
         maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
         defaultOutputTokens: {
           configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
-          effective: 4096, source: "unknown_fallback",
+          effective: 4096, source: "unknown_fallback", valid: true,
         },
         profile: {
           chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },

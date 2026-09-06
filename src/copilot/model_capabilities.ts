@@ -29,6 +29,7 @@ export interface EffectiveOutputDefault {
   readonly configuration: EffectiveCapabilityField<number>;
   readonly effective: number;
   readonly source: CapabilitySource | "known_ceiling" | "unknown_fallback";
+  readonly valid: boolean;
 }
 
 export interface ModelCapabilityProfile {
@@ -169,6 +170,7 @@ export function resolveDefaultOutputTokens(
       configuration,
       effective: configuration.value,
       source: configuration.source,
+      valid: maxOutputTokens === null || configuration.value <= maxOutputTokens,
     });
   }
   if (maxOutputTokens !== null) {
@@ -176,9 +178,10 @@ export function resolveDefaultOutputTokens(
       configuration,
       effective: Math.min(8192, maxOutputTokens),
       source: "known_ceiling",
+      valid: true,
     });
   }
-  return Object.freeze({ configuration, effective: 4096, source: "unknown_fallback" });
+  return Object.freeze({ configuration, effective: 4096, source: "unknown_fallback", valid: true });
 }
 
 export function chooseOutputTokenBudget(
@@ -190,6 +193,9 @@ export function chooseOutputTokenBudget(
       throw new TypeError("invalid explicit output token budget");
     }
     return explicit;
+  }
+  if (!fallback.valid) {
+    throw new TypeError("configured output token default exceeds model ceiling");
   }
   return fallback.effective;
 }

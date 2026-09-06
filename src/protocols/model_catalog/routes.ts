@@ -2,8 +2,7 @@ import { AccountDirectoryError, type AccountDirectory } from "../../accounts/acc
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
-import type { ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
-import { capabilitySnapshotFromCatalog } from "../../copilot/capability_registry.js";
+import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import type { FailurePresenter, RouteRegistration } from "../../gateway/hono_app.js";
 import {
@@ -68,12 +67,7 @@ async function loadCatalog(
     throw error;
   }
   try {
-    const catalog = dependencies.registry !== undefined
-      ? await dependencies.registry.get(account, signal)
-      : capabilitySnapshotFromCatalog(
-        account,
-        await requireCatalog(dependencies).get(account.accountId, signal, account.credentialGeneration),
-      );
+    const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
     const visible = new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId));
     dependencies.preferences.markInvalidIfMissing(account.accountId, visible, catalog.catalogGeneration);
     return catalog;
@@ -97,13 +91,6 @@ async function loadCatalog(
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
-}
-
-function requireCatalog(dependencies: ModelCatalogRouteDependencies): CopilotModelCatalog {
-  if (dependencies.catalog === undefined) {
-    throw new Error("model capability registry is unavailable");
-  }
-  return dependencies.catalog;
 }
 
 function statusFor(kind: GatewayFailure["kind"], failure?: GatewayFailure): number {

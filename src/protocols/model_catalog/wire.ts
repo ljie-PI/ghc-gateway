@@ -32,6 +32,10 @@ export function serializeOpenAiModels(
     if (model.maxOutputTokens.value !== null) {
       item.max_output_tokens = model.maxOutputTokens.value;
     }
+    if (model.configured && !model.verified) {
+      item.x_ghcg_configured = true;
+      item.x_ghcg_verified = false;
+    }
     return item;
   });
   return JSON.stringify({ data, object: "list" });
@@ -51,6 +55,9 @@ export function serializeAnthropicModels(
       created_at: createdAt,
       max_input_tokens: model.maxInputTokens.value,
       max_tokens: model.maxOutputTokens.value,
+      ...(model.configured && !model.verified
+        ? { x_ghcg_configured: true, x_ghcg_verified: false }
+        : {}),
     };
   });
   const first = visible[0]?.modelId ?? null;

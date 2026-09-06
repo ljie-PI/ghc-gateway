@@ -145,8 +145,13 @@ describe("model capability registry", () => {
     const companion = registry.get(account, signal);
     firstAbort.abort();
     await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    const laterWaiter = registry.get(account, signal);
+    expect(fetches).toBe(1);
     releaseFirst();
-    await expect(companion).resolves.toMatchObject({ models: [{ modelId: "generation-1" }] });
+    await expect(Promise.all([companion, laterWaiter])).resolves.toEqual([
+      expect.objectContaining({ models: [expect.objectContaining({ modelId: "generation-1" })] }),
+      expect.objectContaining({ models: [expect.objectContaining({ modelId: "generation-1" })] }),
+    ]);
     expect(fetches).toBe(1);
 
     let releaseStale = (): void => undefined;
@@ -226,17 +231,45 @@ describe("model capability registry", () => {
       value: null, source: "unknown" as const, conflict: false, liveState: "missing" as const,
     };
     expect(chooseOutputTokenBudget(1234, {
-      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback",
+      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback", valid: true,
     })).toBe(1234);
     expect(chooseOutputTokenBudget(undefined, {
-      configuration: unknownConfiguration, effective: 8192, source: "known_ceiling",
+      configuration: unknownConfiguration, effective: 8192, source: "known_ceiling", valid: true,
     })).toBe(8192);
     expect(chooseOutputTokenBudget(undefined, {
-      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback",
+      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback", valid: true,
     })).toBe(4096);
     expect(() => chooseOutputTokenBudget(0, {
-      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback",
+      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback", valid: true,
     })).toThrow(TypeError);
+  });
+
+  it("marks a persisted default invalid when a refreshed ceiling becomes smaller", async () => {
+    let ceiling = 10_000;
+    const database = databaseWithCapabilities();
+    const account = await createAccount(database, "1");
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return {
+          data: [model("changing", {
+            supported_endpoints: ["/messages"],
+            max_output_tokens: ceiling,
+          })],
+        };
+      },
+    });
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    overrides.set(account.accountId, "changing", {
+      enabled: true,
+      defaultOutputTokens: 8_000,
+    }, 0);
+    const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+    expect(capability(await registry.get(account, signal), "changing").defaultOutputTokens.valid).toBe(true);
+    ceiling = 4_000;
+    registry.invalidate(account.accountId);
+    const refreshed = capability(await registry.get(account, signal), "changing").defaultOutputTokens;
+    expect(refreshed).toMatchObject({ effective: 8_000, valid: false });
+    expect(() => chooseOutputTokenBudget(undefined, refreshed)).toThrow(TypeError);
   });
 });
 

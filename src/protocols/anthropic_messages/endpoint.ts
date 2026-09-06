@@ -1,7 +1,7 @@
 import { AccountDirectoryError, type AccountDirectory, type BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
 import type { CopilotBackend } from "../../copilot/backend.js";
-import { capabilitySnapshotFromCatalog, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
+import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
@@ -265,12 +265,7 @@ async function loadCatalog(
   signal: AbortSignal,
 ) {
   try {
-    const catalog = dependencies.registry !== undefined
-      ? await dependencies.registry.get(account, signal)
-      : capabilitySnapshotFromCatalog(
-        account,
-        await requireCatalog(dependencies).get(account.accountId, signal, account.credentialGeneration),
-      );
+    const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
     dependencies.preferences.markInvalidIfMissing(
       account.accountId,
       new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
@@ -297,13 +292,6 @@ async function loadCatalog(
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
-}
-
-function requireCatalog(dependencies: AnthropicMessagesRouteDependencies): CopilotModelCatalog {
-  if (dependencies.catalog === undefined) {
-    throw new Error("model capability registry is unavailable");
-  }
-  return dependencies.catalog;
 }
 
 function throwIfUpstreamHttp(response: { readonly status: number; readonly headers: Headers }): void {
