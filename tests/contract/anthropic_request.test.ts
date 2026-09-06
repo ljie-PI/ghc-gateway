@@ -64,6 +64,30 @@ describe("Anthropic request route", () => {
     }
   });
 
+  it("applies the registry output default without masking invalid explicit limits", async () => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
+    try {
+      const defaulted = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      }));
+      expect(defaulted.status).toBe(200);
+      expect(decodeChatBody(capturedRequests[0] as ChatRequest).max_tokens).toBe(4096);
+
+      const invalid = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 0,
+        messages: [{ role: "user", content: "hi" }],
+        stream: false,
+      }));
+      expect(invalid.status).toBe(400);
+      expect(capturedRequests).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
   it("resolves missing model only through a valid visible preference and rejects explicit unknown models", async () => {
     const { gw, capturedRequests, close } = await anthropicGateway({ preferredModel: "gpt" });
     try {

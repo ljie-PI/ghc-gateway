@@ -119,8 +119,8 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   }
   const capi: CapiModelsResponse = {
     data: [
-      { id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true },
-      { id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true },
+      { id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+      { id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
     ],
   };
   const catalog = new CopilotModelCatalog({
@@ -187,6 +187,47 @@ function jsonRequest(body: string): Request {
 }
 
 describe("OpenAI Chat endpoint", () => {
+  it("returns an explicit configuration error for unknown native capabilities without inference", async () => {
+    const backend = new CapturingCopilotBackend({});
+    const harness = await openAiGateway(backend, {
+      capiFetch: async () => ({
+        data: [{ id: "unknown", name: "Unknown", vendor: "test", model_picker_enabled: true }],
+      }),
+    });
+    try {
+      const response = await harness.gw.fetch(jsonRequest("{\"model\":\"unknown\",\"messages\":[]}"));
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({
+        error: { message: "model native protocol capability is not configured" },
+      });
+      expect(backend.chatRequests).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("attributes preferred-model capability failures to the resolved model", async () => {
+    const usageUpdates: unknown[] = [];
+    const backend = new CapturingCopilotBackend({});
+    const harness = await openAiGateway(backend, {
+      preferred: "valid",
+      usageUpdates,
+      capiFetch: async () => ({
+        data: [{ id: "gpt", name: "GPT", vendor: "test", model_picker_enabled: true }],
+      }),
+    });
+    try {
+      const response = await harness.gw.fetch(jsonRequest("{\"messages\":[]}"));
+      expect(response.status).toBe(422);
+      expect(usageUpdates).toMatchObject([{
+        resolvedModel: "gpt",
+        outcome: "client_error",
+      }]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("registers only the exact route", async () => {
     const backend = new CapturingCopilotBackend({
       chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },

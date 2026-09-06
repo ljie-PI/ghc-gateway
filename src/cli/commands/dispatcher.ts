@@ -3,11 +3,16 @@ import { AccountDirectoryError, type AccountSummary } from "../../accounts/accou
 import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_flow.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
-import type { NormalizedModelInfo } from "../../copilot/model_metadata.js";
+import {
+  isCapabilitySnapshotCurrent,
+  loadCapabilitySnapshot,
+  type ModelCapabilityRegistry,
+} from "../../copilot/capability_registry.js";
 import type { RuntimeConfigStore } from "../../config/runtime_config.js";
 import { isRuntimeConfigKey, readRuntimeConfigNumber, RUNTIME_CONFIG_RANGES, RuntimeConfigError, withRuntimeConfigNumber } from "../../config/runtime_config.js";
 import type { RuntimeConfigSnapshot } from "../../config/schema.js";
 import { PreferredModelManager } from "../../protocols/model_catalog/preferred.js";
+import { reconcilePreferredModelIfCurrent } from "../../protocols/model_catalog/preferred.js";
 import {
   CliError,
   adminAccountFromSummary,
@@ -23,6 +28,7 @@ export interface CommandDispatcherDependencies {
   readonly directory: AccountDirectory;
   readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll" | "cancel">;
   readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
   readonly runtimeConfig: RuntimeConfigStore;
   readonly updateRuntimeConfig?: (
     candidate: RuntimeConfigSnapshot,
@@ -30,7 +36,6 @@ export interface CommandDispatcherDependencies {
     signal: AbortSignal,
   ) => Readonly<{ revision: number; config: RuntimeConfigSnapshot }>;
   readonly invalidateAccountCaches?: (accountId: string) => void;
-  readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
 }
 
 export class CommandDispatcher {
@@ -134,19 +139,22 @@ export class CommandDispatcher {
     case "models.list": {
       const input = args as ControlOperationMap["models.list"]["args"];
       const accountId = input.accountId ?? this.defaultAccount().accountId;
+      const account = await this.dependencies.directory.bindAccount(accountId, signal);
       const beforePreference = this.dependencies.directory.preferences.get(accountId);
-      const catalog = await this.dependencies.catalog.get(accountId, signal);
-      this.dependencies.directory.preferences.markInvalidIfMissing(
-        accountId,
-        new Set(catalog.models.map((model) => model.id)),
-        catalog.generation,
-        beforePreference?.revision ?? null,
+      const catalog = await loadCapabilitySnapshot(this.dependencies, account, signal);
+      await reconcilePreferredModelIfCurrent(
+        this.dependencies.directory.preferences,
+        this.dependencies.directory,
+        this.dependencies,
+        account,
+        catalog,
+        beforePreference,
+        signal,
       );
       return adminModelsFromCatalog(
         accountId,
         catalog,
         this.dependencies.directory.preferences.get(accountId),
-        this.dependencies.modelMetadata,
       ) as ControlOperationMap[Operation]["result"];
     }
     case "models.current": {
@@ -159,7 +167,13 @@ export class CommandDispatcher {
     case "models.set": {
       const input = args as ControlOperationMap["models.set"]["args"];
       const account = this.defaultAccount();
-      const catalog = await this.dependencies.catalog.get(account.accountId, signal);
+      const bound = await this.dependencies.directory.bindAccount(account.accountId, signal);
+      const catalog = await loadCapabilitySnapshot(this.dependencies, bound, signal);
+      const currentBound = await this.dependencies.directory.bindAccount(account.accountId, signal);
+      if (currentBound.credentialGeneration !== bound.credentialGeneration
+        || !isCapabilitySnapshotCurrent(this.dependencies, catalog)) {
+        throw new PreferenceRevisionError();
+      }
       const current = this.dependencies.directory.preferences.get(account.accountId);
       const manager = new PreferredModelManager(this.dependencies.directory.preferences);
       return manager.setPreferred(account.accountId, input.modelId, current?.revision ?? 0, catalog) as ControlOperationMap[Operation]["result"];

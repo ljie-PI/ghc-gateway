@@ -1,7 +1,9 @@
-import type { AccountDirectory } from "../../accounts/account_directory.js";
+import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
+import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilities.js";
 import {
   normalizeAccountBindingFailure,
   normalizeCatalogFailure,
@@ -19,6 +21,7 @@ import { boundedCleanup } from "../../gateway/stream_execution.js";
 import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
+import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import { convertChatResponse } from "./bridge.js";
 import { convertAnthropicRequest } from "./request.js";
 import { createAnthropicStreamResponse } from "./stream.js";
@@ -28,7 +31,8 @@ import { presentAnthropicFailure } from "./failure_presenter.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
+  readonly catalog?: CopilotModelCatalog;
   readonly preferences: AccountModelPreferences;
   readonly copilot: CopilotBackend;
   readonly createUuid?: () => string;
@@ -77,13 +81,25 @@ async function executeAnthropicMessages(
   }
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
-  const catalog = await loadCatalog(dependencies, account.accountId, scope.signal);
-  const resolved = resolveModel(catalog, requestedModel.value, dependencies.preferences.get(account.accountId));
+  const preference = dependencies.preferences.get(account.accountId);
+  const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
+  const resolved = resolveModel(catalog, requestedModel.value, preference);
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
   usage.setResolvedModel(resolved.upstreamModel);
-  const chatBody = convertAnthropicRequest(request.body, resolved.upstreamModel, requestedModel.value);
+  if (resolved.capability.protocols.value?.includes("chat") !== true) {
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      cause: new ModelCapabilityUnavailableError(),
+    });
+  }
+  const chatBody = convertAnthropicRequest(
+    request.body,
+    resolved.upstreamModel,
+    resolved.capability.profile.chatOutputTokenField.value,
+    resolved.capability.defaultOutputTokens,
+  );
   const stream = chatBody.stream === true;
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
   const chatRequest: ChatRequest = {
@@ -183,15 +199,20 @@ async function bindAccount(
 
 async function loadCatalog(
   dependencies: AnthropicMessagesRouteDependencies,
-  accountId: string,
+  account: Readonly<BoundAccount>,
+  observedPreference: ReturnType<AccountModelPreferences["get"]>,
   signal: AbortSignal,
 ) {
   try {
-    const catalog = await dependencies.catalog.get(accountId, signal);
-    dependencies.preferences.markInvalidIfMissing(
-      accountId,
-      new Set(catalog.models.map((model) => model.id)),
-      catalog.generation,
+    const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
+    await reconcilePreferredModelIfCurrent(
+      dependencies.preferences,
+      dependencies.directory,
+      dependencies,
+      account,
+      catalog,
+      observedPreference,
+      signal,
     );
     return catalog;
   } catch (error: unknown) {

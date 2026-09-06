@@ -1,3 +1,5 @@
+import { parseLiveModelCapabilities, type DeclaredModelCapabilities } from "./model_capabilities.js";
+
 export const DEFAULT_MODEL_CREATED_AT_TIME = 1_677_610_602;
 
 export interface CopilotCatalogModel {
@@ -5,10 +7,7 @@ export interface CopilotCatalogModel {
   readonly name: string;
   readonly vendor: string;
   readonly modelPickerEnabled: boolean;
-  readonly routing?: {
-    readonly mode?: string;
-    readonly supportedEndpoints?: readonly string[];
-  };
+  readonly capabilities: DeclaredModelCapabilities;
 }
 
 export interface CatalogSnapshot {
@@ -16,6 +15,7 @@ export interface CatalogSnapshot {
   readonly models: readonly CopilotCatalogModel[];
   readonly fetchedAt: string;
   readonly generation: number;
+  readonly credentialGeneration: number;
 }
 
 export interface CapiModelsResponse {
@@ -23,7 +23,7 @@ export interface CapiModelsResponse {
 }
 
 export interface CopilotModelsSource {
-  fetch(accountId: string, signal: AbortSignal): Promise<CapiModelsResponse>;
+  fetch(accountId: string, signal: AbortSignal, credentialGeneration?: number): Promise<CapiModelsResponse>;
   close?(): Promise<void> | void;
 }
 
@@ -33,17 +33,33 @@ export interface ModelInfoLookup {
     readonly max_input_tokens?: unknown;
     readonly max_output_tokens?: unknown;
     readonly supported_endpoints?: unknown;
+    readonly default_output_tokens?: unknown;
+    readonly chat_output_token_field?: unknown;
   } | null;
 }
 
 interface CacheEntry {
   catalog: CatalogSnapshot;
   generation: number;
+  credentialGeneration: number;
+}
+
+interface InflightEntry {
+  readonly accountId: string;
+  readonly generation: number;
+  readonly credentialGeneration: number;
+  readonly promise: Promise<CatalogSnapshot>;
+  readonly controller: AbortController;
+  waiters: number;
+  settled: boolean;
 }
 
 export class CopilotModelCatalog {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly generations = new Map<string, number>();
+  private readonly credentialGenerations = new Map<string, number>();
+  private readonly inflight = new Map<string, InflightEntry>();
+  private readonly activeControllers = new Set<AbortController>();
   private closed = false;
 
   constructor(
@@ -51,24 +67,90 @@ export class CopilotModelCatalog {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  async get(accountId: string, signal: AbortSignal): Promise<CatalogSnapshot> {
+  async get(
+    accountId: string,
+    signal: AbortSignal,
+    credentialGeneration = 0,
+  ): Promise<CatalogSnapshot> {
     if (this.closed) {
       throw new DOMException("closed", "AbortError");
     }
+    this.credentialGenerations.set(
+      accountId,
+      Math.max(credentialGeneration, this.credentialGenerations.get(accountId) ?? credentialGeneration),
+    );
     const hit = this.cache.get(accountId);
-    if (hit !== undefined) {
+    if (hit !== undefined && hit.credentialGeneration === credentialGeneration) {
       return hit.catalog;
     }
     const generation = this.generations.get(accountId) ?? 0;
-    const raw = await this.source.fetch(accountId, signal);
+    const pending = this.inflight.get(accountId);
+    if (pending !== undefined
+      && !pending.controller.signal.aborted
+      && pending.generation === generation
+      && pending.credentialGeneration === credentialGeneration) {
+      return await this.waitForInflight(pending, signal);
+    }
+    const controller = new AbortController();
+    const promise = this.fetchCatalog(accountId, generation, credentialGeneration, controller.signal);
+    const entry: InflightEntry = {
+      accountId,
+      generation,
+      credentialGeneration,
+      promise,
+      controller,
+      waiters: 0,
+      settled: false,
+    };
+    this.inflight.set(accountId, entry);
+    this.activeControllers.add(controller);
+    void promise.finally(() => {
+      entry.settled = true;
+      this.activeControllers.delete(controller);
+      if (this.inflight.get(accountId)?.promise === promise) {
+        this.inflight.delete(accountId);
+      }
+    }).catch(() => undefined);
+    return await this.waitForInflight(entry, signal);
+  }
+
+  private async waitForInflight(entry: InflightEntry, signal: AbortSignal): Promise<CatalogSnapshot> {
+    entry.waiters += 1;
+    try {
+      return await waitForCatalog(entry.promise, signal);
+    } finally {
+      entry.waiters -= 1;
+      if (entry.waiters === 0 && !entry.settled) {
+        if (this.inflight.get(entry.accountId) === entry) {
+          this.inflight.delete(entry.accountId);
+        }
+        entry.controller.abort();
+      }
+    }
+  }
+
+  private async fetchCatalog(
+    accountId: string,
+    generation: number,
+    credentialGeneration: number,
+    signal: AbortSignal,
+  ): Promise<CatalogSnapshot> {
+    const raw = await this.source.fetch(accountId, signal, credentialGeneration);
     if (this.closed) {
       throw new DOMException("closed", "AbortError");
     }
     const models = parseCapiModels(raw);
     const fetchedAt = toRfc3339Nano(this.now());
-    const catalog: CatalogSnapshot = { accountId, models, fetchedAt, generation };
-    if ((this.generations.get(accountId) ?? 0) === generation) {
-      this.cache.set(accountId, { catalog, generation });
+    const catalog: CatalogSnapshot = {
+      accountId,
+      models,
+      fetchedAt,
+      generation,
+      credentialGeneration,
+    };
+    if ((this.generations.get(accountId) ?? 0) === generation
+      && this.credentialGenerations.get(accountId) === credentialGeneration) {
+      this.cache.set(accountId, { catalog, generation, credentialGeneration });
     }
     return catalog;
   }
@@ -76,6 +158,11 @@ export class CopilotModelCatalog {
   invalidate(accountId: string): void {
     this.cache.delete(accountId);
     this.generations.set(accountId, (this.generations.get(accountId) ?? 0) + 1);
+  }
+
+  isCurrent(accountId: string, generation: number, credentialGeneration: number): boolean {
+    return (this.generations.get(accountId) ?? 0) === generation
+      && this.credentialGenerations.get(accountId) === credentialGeneration;
   }
 
   clear(): void {
@@ -88,6 +175,11 @@ export class CopilotModelCatalog {
   async close(): Promise<void> {
     this.closed = true;
     this.clear();
+    for (const controller of this.activeControllers) {
+      controller.abort();
+    }
+    this.inflight.clear();
+    this.activeControllers.clear();
     await this.source.close?.();
   }
 }
@@ -112,44 +204,15 @@ export function parseCapiModels(raw: CapiModelsResponse | unknown): CopilotCatal
     if (record.model_picker_enabled !== true) {
       continue;
     }
-    const routing = routingFromRecord(record).routing;
-    const model = {
+    models.push({
       id: record.id,
       name: record.name,
       vendor: record.vendor,
       modelPickerEnabled: true,
-    };
-    models.push(routing === undefined ? model : { ...model, routing });
+      capabilities: parseLiveModelCapabilities(record),
+    });
   }
   return models;
-}
-
-function routingFromRecord(record: Record<string, unknown>): { readonly routing?: CopilotCatalogModel["routing"] } {
-  const raw = modelInfoRecord(record);
-  const mode = typeof raw?.mode === "string" ? raw.mode : undefined;
-  const supportedEndpoints = Array.isArray(raw?.supported_endpoints)
-    ? raw.supported_endpoints.filter((item): item is string => typeof item === "string")
-    : undefined;
-  if (mode !== undefined && supportedEndpoints !== undefined) {
-    return { routing: { mode, supportedEndpoints } };
-  }
-  if (mode !== undefined) {
-    return { routing: { mode } };
-  }
-  if (supportedEndpoints !== undefined) {
-    return { routing: { supportedEndpoints } };
-  }
-  return {};
-}
-
-function modelInfoRecord(record: Record<string, unknown>): Record<string, unknown> | undefined {
-  for (const key of ["model_info", "capabilities"]) {
-    const value = record[key];
-    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-      return value as Record<string, unknown>;
-    }
-  }
-  return undefined;
 }
 
 export function toRfc3339Nano(date: Date): string {
@@ -158,4 +221,26 @@ export function toRfc3339Nano(date: Date): string {
 
 export function capiModelsUrl(endpoint: string): string {
   return `${endpoint}/models`;
+}
+
+async function waitForCatalog(
+  promise: Promise<CatalogSnapshot>,
+  signal: AbortSignal,
+): Promise<CatalogSnapshot> {
+  if (signal.aborted) {
+    throw new DOMException("aborted", "AbortError");
+  }
+  let remove = (): void => undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        remove = () => signal.removeEventListener("abort", onAbort);
+      }),
+    ]);
+  } finally {
+    remove();
+  }
 }

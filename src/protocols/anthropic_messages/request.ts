@@ -1,4 +1,10 @@
 import { GatewayFailureError } from "../../gateway/failures.js";
+import {
+  chooseOutputTokenBudget,
+  ModelCapabilityUnavailableError,
+  type ChatOutputTokenField,
+  type EffectiveOutputDefault,
+} from "../../copilot/model_capabilities.js";
 import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
 import {
   isWireJsonArray,
@@ -28,7 +34,8 @@ export interface ChatRequestBody {
 export function convertAnthropicRequest(
   request: WireJsonObject,
   resolvedModel: string,
-  rawModel: string | undefined,
+  chatOutputTokenField: ChatOutputTokenField | null,
+  outputDefault: Readonly<EffectiveOutputDefault>,
 ): ChatRequestBody {
   const messagesValue = firstMember(request, "messages");
   if (!isWireJsonArray(messagesValue)) {
@@ -36,9 +43,9 @@ export function convertAnthropicRequest(
   }
   const result: ChatRequestBody = {
     model: resolvedModel,
-    messages: convertMessages(request, messagesValue, rawModel ?? resolvedModel),
+    messages: convertMessages(request, messagesValue, resolvedModel),
   };
-  copyMaxTokens(request, result, rawModel);
+  copyMaxTokens(request, result, chatOutputTokenField, outputDefault);
   copyIfPresent(request, "temperature", result, "temperature");
   copyIfPresent(request, "top_p", result, "top_p");
   copyIfPresent(request, "stop_sequences", result, "stop");
@@ -54,7 +61,7 @@ export function convertAnthropicRequest(
   if (toolChoice !== undefined) {
     result.tool_choice = toolChoice;
   }
-  const reasoning = convertReasoning(request, rawModel ?? resolvedModel);
+  const reasoning = convertReasoning(request, resolvedModel);
   if (reasoning !== undefined) {
     result.reasoning_effort = reasoning;
   }
@@ -73,16 +80,33 @@ function copyIfPresent(
   }
 }
 
-function copyMaxTokens(source: WireJsonObject, target: ChatRequestBody, rawModel: string | undefined): void {
+function copyMaxTokens(
+  source: WireJsonObject,
+  target: ChatRequestBody,
+  chatOutputTokenField: ChatOutputTokenField | null,
+  outputDefault: Readonly<EffectiveOutputDefault>,
+): void {
   const value = firstMember(source, "max_tokens");
-  if (value === undefined) {
+  if (chatOutputTokenField === null) {
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      cause: new ModelCapabilityUnavailableError(),
+    });
+  }
+  let budget: number;
+  try {
+    budget = chooseOutputTokenBudget(
+      value === undefined ? undefined : wireToJson(value),
+      outputDefault,
+    );
+  } catch (error: unknown) {
+    throw new GatewayFailureError({ kind: "invalid_request", cause: error });
+  }
+  if (chatOutputTokenField === "max_completion_tokens") {
+    target.max_completion_tokens = budget;
     return;
   }
-  if (rawModel !== undefined && /^o[0-9]/u.test(rawModel)) {
-    target.max_completion_tokens = wireToJson(value);
-    return;
-  }
-  target.max_tokens = wireToJson(value);
+  target.max_tokens = budget;
 }
 
 function convertMessages(

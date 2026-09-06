@@ -1,0 +1,492 @@
+import { describe, expect, it } from "vitest";
+import { AccountDirectory } from "../../src/accounts/account_directory.js";
+import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
+import {
+  MAX_MODEL_CAPABILITY_OVERRIDES_PER_ACCOUNT,
+  ModelCapabilityOverrideError,
+  SqliteModelCapabilityOverrides,
+} from "../../src/copilot/capability_overrides.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
+import {
+  chooseOutputTokenBudget,
+  parseLiveModelCapabilities,
+  type BuiltinModelCapabilityLookup,
+} from "../../src/copilot/model_capabilities.js";
+import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { applyMigrations, embedMigration } from "../../src/persistence/migrations.js";
+import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
+import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
+import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
+import { SqliteDatabase } from "../../src/persistence/sqlite.js";
+
+const signal = new AbortController().signal;
+
+describe("model capability registry", () => {
+  it("normalizes explicit HTTP aliases, excludes ws, and preserves missing, empty, and malformed", async () => {
+    const harness = await createHarness({
+      "github.com/1": [
+        model("dual", { supported_endpoints: ["/chat/completions", "/v1/responses", "/responses"] }),
+        model("non-gpt-responses", { supported_endpoints: ["/responses"] }),
+        model("messages", { supported_endpoints: ["/v1/messages"] }),
+        model("ws-only", { supported_endpoints: ["ws:/responses", "wss://example.test/responses"] }),
+        model("empty", { supported_endpoints: [] }),
+        model("missing", { mode: "chat" }),
+        model("malformed", { supported_endpoints: ["/responses", 42] }),
+        {
+          id: "production-shape",
+          name: "Production",
+          vendor: "test",
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses", "/chat/completions"],
+          capabilities: {
+            limits: {
+              max_prompt_tokens: 200_000,
+              max_output_tokens: 32_000,
+            },
+          },
+        },
+        {
+          id: "live-conflict",
+          name: "Conflict",
+          vendor: "test",
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          model_info: { supported_endpoints: ["/chat/completions"] },
+        },
+        {
+          id: "equivalent-order",
+          name: "Equivalent",
+          vendor: "test",
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses", "/chat/completions"],
+          model_info: { supported_endpoints: ["/v1/chat/completions", "/v1/responses"] },
+        },
+      ],
+    });
+    const snapshot = await harness.registry.get(harness.account1, signal);
+    expect(capability(snapshot, "dual").protocols.value).toEqual(["chat", "responses"]);
+    expect(capability(snapshot, "non-gpt-responses").protocols.value).toEqual(["responses"]);
+    expect(capability(snapshot, "messages").protocols.value).toEqual(["messages"]);
+    expect(capability(snapshot, "ws-only").protocols.value).toEqual([]);
+    expect(capability(snapshot, "empty").protocols).toMatchObject({ value: [], source: "live", liveState: "value" });
+    expect(capability(snapshot, "missing").protocols).toMatchObject({ value: null, source: "unknown", liveState: "missing" });
+    expect(capability(snapshot, "malformed").protocols).toMatchObject({ value: null, source: "unknown", liveState: "malformed" });
+    expect(capability(snapshot, "production-shape")).toMatchObject({
+      protocols: { value: ["chat", "responses"], source: "live" },
+      maxInputTokens: { value: 200_000, source: "live" },
+      maxOutputTokens: { value: 32_000, source: "live" },
+    });
+    expect(capability(snapshot, "live-conflict").protocols).toMatchObject({
+      value: null,
+      source: "unknown",
+      liveState: "malformed",
+    });
+    expect(capability(snapshot, "equivalent-order").protocols.value).toEqual(["chat", "responses"]);
+  });
+
+  it("applies field precedence without unioning conflicts or replacing explicit empty values", async () => {
+    const builtins: BuiltinModelCapabilityLookup = {
+      get(modelId) {
+        if (modelId !== "conflict" && modelId !== "missing") return null;
+        return {
+          revision: "builtin-test",
+          capabilities: parseLiveModelCapabilities({
+            model_info: {
+              supported_endpoints: ["/v1/chat/completions"],
+              max_output_tokens: 16_000,
+              default_output_tokens: 8_000,
+              chat_output_token_field: "max_tokens",
+            },
+          }),
+        };
+      },
+    };
+    const harness = await createHarness({
+      "github.com/1": [
+        model("conflict", { supported_endpoints: ["/v1/responses"], max_output_tokens: 12_000 }),
+        model("missing", {}),
+        model("empty", { supported_endpoints: [] }),
+      ],
+    }, builtins);
+    harness.overrides.set("github.com/1", "conflict", {
+      enabled: true,
+      protocols: ["messages"],
+      defaultOutputTokens: 6_000,
+      chatOutputTokenField: "max_completion_tokens",
+    }, 0);
+    const snapshot = await harness.registry.get(harness.account1, signal);
+    expect(capability(snapshot, "conflict")).toMatchObject({
+      protocols: { value: ["messages"], source: "admin_override", conflict: true },
+      maxOutputTokens: { value: 12_000, source: "live", conflict: true },
+      defaultOutputTokens: {
+        configuration: { value: 6_000, source: "admin_override", conflict: true },
+        effective: 6_000,
+        source: "admin_override",
+      },
+      profile: { chatOutputTokenField: { value: "max_completion_tokens", source: "admin_override", conflict: true } },
+    });
+    expect(capability(snapshot, "missing")).toMatchObject({
+      protocols: { value: ["chat"], source: "builtin" },
+      maxOutputTokens: { value: 16_000, source: "builtin" },
+      defaultOutputTokens: { effective: 8_000, source: "builtin" },
+    });
+    expect(capability(snapshot, "empty").protocols).toMatchObject({ value: [], source: "live" });
+  });
+
+  it("isolates same model IDs by account and exposes configured-only models only when explicitly enabled", async () => {
+    const harness = await createHarness({
+      "github.com/1": [model("same", { supported_endpoints: ["/chat/completions"] })],
+      "github.com/2": [model("same", { supported_endpoints: ["/responses"] })],
+    });
+    harness.overrides.set("github.com/1", "manual", {
+      enabled: true,
+      protocols: ["messages"],
+      defaultOutputTokens: 2048,
+    }, 0);
+    harness.overrides.set("github.com/2", "manual", {
+      enabled: false,
+      protocols: ["chat"],
+    }, 0);
+    const [one, two] = await Promise.all([
+      harness.registry.get(harness.account1, signal),
+      harness.registry.get(harness.account2, signal),
+    ]);
+    expect(capability(one, "same").protocols.value).toEqual(["chat"]);
+    expect(capability(two, "same").protocols.value).toEqual(["responses"]);
+    expect(capability(one, "manual")).toMatchObject({
+      discovered: false, configured: true, verified: false, visible: true,
+      protocols: { value: ["messages"], source: "admin_override" },
+    });
+    expect(capability(two, "manual")).toMatchObject({
+      discovered: false, configured: true, verified: false, visible: false,
+    });
+    expect(Object.isFrozen(one)).toBe(true);
+    expect(Object.isFrozen(capability(one, "manual").protocols.value)).toBe(true);
+  });
+
+  it("does not cache stale refreshes and shares one generation without caller-abort poisoning", async () => {
+    let releaseFirst = (): void => undefined;
+    let fetches = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        fetches += 1;
+        if (fetches === 1) {
+          await new Promise<void>((resolve) => { releaseFirst = resolve; });
+        }
+        return { data: [model(`generation-${fetches}`, { supported_endpoints: ["/responses"] })] };
+      },
+    });
+    const database = databaseWithCapabilities();
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+    const account = await createAccount(database, "1");
+    const firstAbort = new AbortController();
+    const first = registry.get(account, firstAbort.signal);
+    const companion = registry.get(account, signal);
+    firstAbort.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    const laterWaiter = registry.get(account, signal);
+    expect(fetches).toBe(1);
+    releaseFirst();
+    await expect(Promise.all([companion, laterWaiter])).resolves.toEqual([
+      expect.objectContaining({ models: [expect.objectContaining({ modelId: "generation-1" })] }),
+      expect.objectContaining({ models: [expect.objectContaining({ modelId: "generation-1" })] }),
+    ]);
+    expect(fetches).toBe(1);
+
+    let releaseStale = (): void => undefined;
+    const staleCatalog = new CopilotModelCatalog({
+      async fetch() {
+        await new Promise<void>((resolve) => { releaseStale = resolve; });
+        return { data: [model("stale", { supported_endpoints: ["/chat/completions"] })] };
+      },
+    });
+    const staleRegistry = new ModelCapabilityRegistry(staleCatalog, overrides, { get: () => null });
+    const pending = staleRegistry.get(account, signal);
+    staleRegistry.invalidate(account.accountId);
+    releaseStale();
+    await pending;
+    const fresh = staleRegistry.get(account, signal);
+    releaseStale();
+    await fresh;
+    expect(fetches).toBe(1);
+  });
+
+  it("persists monotonic override revisions, reset tombstones, validation, and bounded capacity", async () => {
+    const database = databaseWithCapabilities();
+    await createAccount(database, "1");
+    const firstStore = new SqliteModelCapabilityOverrides(database, () => 100);
+    const set = firstStore.set("github.com/1", "manual", {
+      enabled: true,
+      protocols: ["messages"],
+      maxOutputTokens: 4096,
+      defaultOutputTokens: 2048,
+    }, 0);
+    expect(set.revision).toBe(1);
+    const restarted = new SqliteModelCapabilityOverrides(database, () => 200);
+    expect(restarted.get("github.com/1", "manual")).toEqual(set);
+    expect(() => restarted.set("github.com/1", "manual", { enabled: true }, 0))
+      .toThrow(ModelCapabilityOverrideError);
+    const reset = restarted.reset("github.com/1", "manual", 1);
+    expect(reset).toMatchObject({ revision: 2, value: null });
+    expect(restarted.set("github.com/1", "manual", { enabled: true, protocols: [] }, 2).revision).toBe(3);
+    expect(() => restarted.set("github.com/1", "bad model", { enabled: true }, 0))
+      .toThrow(ModelCapabilityOverrideError);
+    expect(() => restarted.set("github.com/1", "bad-default", {
+      enabled: true, maxOutputTokens: 10, defaultOutputTokens: 11,
+    }, 0)).toThrow(ModelCapabilityOverrideError);
+
+    restarted.reset("github.com/1", "manual", 3);
+    let revision = restarted.revision("github.com/1");
+    for (let index = 0; index < MAX_MODEL_CAPABILITY_OVERRIDES_PER_ACCOUNT; index += 1) {
+      revision = restarted.set(
+        "github.com/1",
+        `configured-${index}`,
+        { enabled: true },
+        revision,
+      ).revision;
+    }
+    expect(() => restarted.set("github.com/1", "overflow", { enabled: true }, revision))
+      .toThrow(ModelCapabilityOverrideError);
+  });
+
+  it("clears account-scoped overrides when account removal starts", async () => {
+    const database = databaseWithCapabilities();
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    const directory = new AccountDirectory(
+      database,
+      new MemoryCredentialStore(),
+      () => 1_700_000_000_000,
+      8,
+      (accountId) => overrides.clearAccount(accountId),
+    );
+    const account = await directory.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "token" },
+    });
+    overrides.set(account.accountId, "manual", { enabled: true, protocols: ["messages"] }, 0);
+    const revision = directory.list().find((item) => item.accountId === account.accountId)?.revision;
+    if (revision === undefined) throw new Error("missing account revision");
+    await directory.remove(account.accountId, revision);
+    expect(overrides.list(account.accountId)).toEqual([]);
+    const reauthenticated = await directory.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "new-token" },
+    });
+    expect(reauthenticated.credentialGeneration).toBe(2);
+  });
+
+  it("keeps reset revision state bounded without retaining per-model tombstones", async () => {
+    const database = databaseWithCapabilities();
+    await createAccount(database, "1");
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    let revision = 0;
+    for (let index = 0; index < 300; index += 1) {
+      revision = overrides.set("github.com/1", `temporary-${index}`, { enabled: true }, revision).revision;
+      revision = overrides.reset("github.com/1", `temporary-${index}`, revision).revision;
+    }
+    expect(database.prepare("SELECT COUNT(*) AS count FROM model_capability_overrides").get())
+      .toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM model_capability_override_state").get())
+      .toEqual({ count: 1 });
+    expect(overrides.revision("github.com/1")).toBe(600);
+  });
+
+  it("rolls back override and revision when preference reconciliation fails", async () => {
+    const database = databaseWithCapabilities();
+    await createAccount(database, "1");
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    expect(() => overrides.set(
+      "github.com/1",
+      "manual",
+      { enabled: true, protocols: ["messages"] },
+      0,
+      () => { throw new Error("preference conflict"); },
+    )).toThrow("preference conflict");
+    expect(overrides.get("github.com/1", "manual")).toEqual({
+      accountId: "github.com/1",
+      modelId: "manual",
+      revision: 0,
+      value: null,
+    });
+  });
+
+  it("rejects capability writes atomically after account removal starts", async () => {
+    const database = databaseWithCapabilities();
+    const account = await createAccount(database, "1");
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    database.prepare(
+      "UPDATE accounts SET credential_state = 'removing' WHERE account_id = ?",
+    ).run(account.accountId);
+    expect(() => overrides.set(
+      account.accountId,
+      "manual",
+      { enabled: true, protocols: ["messages"] },
+      0,
+      () => undefined,
+      account.credentialGeneration,
+    )).toThrow(ModelCapabilityOverrideError);
+    expect(overrides.list(account.accountId)).toEqual([]);
+  });
+
+  it("uses explicit valid output budgets, configured defaults, known ceilings, and unknown fallback", () => {
+    const unknownConfiguration = {
+      value: null, source: "unknown" as const, conflict: false, liveState: "missing" as const,
+    };
+    expect(chooseOutputTokenBudget(1234, {
+      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback", valid: true,
+    })).toBe(1234);
+    expect(chooseOutputTokenBudget(undefined, {
+      configuration: unknownConfiguration, effective: 8192, source: "known_ceiling", valid: true,
+    })).toBe(8192);
+    expect(chooseOutputTokenBudget(undefined, {
+      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback", valid: true,
+    })).toBe(4096);
+    expect(() => chooseOutputTokenBudget(0, {
+      configuration: unknownConfiguration, effective: 4096, source: "unknown_fallback", valid: true,
+    })).toThrow(TypeError);
+  });
+
+  it("marks a persisted default invalid when a refreshed ceiling becomes smaller", async () => {
+    let ceiling = 10_000;
+    const database = databaseWithCapabilities();
+    const account = await createAccount(database, "1");
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return {
+          data: [model("changing", {
+            supported_endpoints: ["/messages"],
+            max_output_tokens: ceiling,
+          })],
+        };
+      },
+    });
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    overrides.set(account.accountId, "changing", {
+      enabled: true,
+      defaultOutputTokens: 8_000,
+    }, 0);
+    const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+    expect(capability(await registry.get(account, signal), "changing").defaultOutputTokens.valid).toBe(true);
+    ceiling = 4_000;
+    registry.invalidate(account.accountId);
+    const refreshed = capability(await registry.get(account, signal), "changing").defaultOutputTokens;
+    expect(refreshed).toMatchObject({ effective: 8_000, valid: false });
+    expect(() => chooseOutputTokenBudget(undefined, refreshed)).toThrow(TypeError);
+  });
+
+  it("supersedes snapshots on override changes and stamps one account revision on previews", async () => {
+    const harness = await createHarness({
+      "github.com/1": [
+        model("one", { supported_endpoints: ["/chat/completions"] }),
+        model("two", { supported_endpoints: ["/responses"] }),
+      ],
+    });
+    const initial = await harness.registry.get(harness.account1, signal);
+    expect(harness.registry.isCurrent(initial)).toBe(true);
+    const preview = await harness.registry.previewOverride(
+      harness.account1,
+      "one",
+      { enabled: false, protocols: ["chat"] },
+      0,
+      signal,
+    );
+    expect(preview.capabilityRevision).toBe(1);
+    expect(preview.models.map((item) => item.revision.overrideRevision)).toEqual([1, 1]);
+    harness.overrides.set("github.com/1", "one", { enabled: false, protocols: ["chat"] }, 0);
+    expect(harness.registry.isCurrent(initial)).toBe(false);
+    expect(harness.registry.isCurrent(preview)).toBe(true);
+  });
+
+  it("captures override configuration before awaiting catalog discovery", async () => {
+    const database = databaseWithCapabilities();
+    const account = await createAccount(database, "1");
+    let release = (): void => undefined;
+    let started = (): void => undefined;
+    const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        started();
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { data: [model("changing", { supported_endpoints: ["/responses"] })] };
+      },
+    });
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+    const pending = registry.get(account, signal);
+    await startedPromise;
+    overrides.set(account.accountId, "changing", {
+      enabled: true,
+      protocols: ["chat"],
+    }, 0);
+    release();
+    const captured = await pending;
+    expect(captured.capabilityRevision).toBe(0);
+    expect(capability(captured, "changing").protocols.value).toEqual(["responses"]);
+    const subsequent = await registry.get(account, signal);
+    expect(subsequent.capabilityRevision).toBe(1);
+    expect(capability(subsequent, "changing").protocols.value).toEqual(["chat"]);
+  });
+});
+
+async function createHarness(
+  data: Readonly<Record<string, readonly unknown[]>>,
+  builtins: BuiltinModelCapabilityLookup = { get: () => null },
+) {
+  const database = databaseWithCapabilities();
+  const account1 = await createAccount(database, "1");
+  const account2 = await createAccount(database, "2");
+  const catalog = new CopilotModelCatalog({
+    async fetch(accountId) {
+      return { data: data[accountId] ?? [] };
+    },
+  });
+  const overrides = new SqliteModelCapabilityOverrides(database);
+  return {
+    database,
+    account1,
+    account2,
+    overrides,
+    registry: new ModelCapabilityRegistry(catalog, overrides, builtins),
+  };
+}
+
+async function createAccount(database: SqliteDatabase, userId: string) {
+  const directory = new AccountDirectory(database, new MemoryCredentialStore(), () => 1_700_000_000_000);
+  return await directory.upsertAuthenticated({
+    host: "github.com",
+    userId,
+    secret: { generation: 0, githubToken: `token-${userId}` },
+  });
+}
+
+function databaseWithCapabilities(): SqliteDatabase {
+  const database = new SqliteDatabase(":memory:");
+  applyMigrations(database, [
+    embedMigration(runtimeConfigMigration),
+    embedMigration(accountsMigration),
+    embedMigration(modelCapabilitiesMigration),
+  ], () => 1_700_000_000_000);
+  return database;
+}
+
+function model(id: string, modelInfo: Readonly<Record<string, unknown>>) {
+  return {
+    id,
+    name: id,
+    vendor: "test",
+    model_picker_enabled: true,
+    model_info: modelInfo,
+  };
+}
+
+function capability(
+  snapshot: Awaited<ReturnType<ModelCapabilityRegistry["get"]>>,
+  modelId: string,
+) {
+  const result = snapshot.models.find((item) => item.modelId === modelId);
+  if (result === undefined) throw new Error(`missing capability ${modelId}`);
+  return result;
+}

@@ -1,10 +1,5 @@
-import { DEFAULT_MODEL_CREATED_AT_TIME, type CatalogSnapshot } from "../../copilot/model_catalog.js";
-
-export interface ModelMetadata {
-  readonly mode?: string;
-  readonly maxInputTokens?: number;
-  readonly maxOutputTokens?: number;
-}
+import type { CapabilityCatalogSnapshot } from "../../copilot/capability_registry.js";
+import { DEFAULT_MODEL_CREATED_AT_TIME } from "../../copilot/model_catalog.js";
 
 export function coerceTokenLimit(value: unknown): number | undefined {
   if (typeof value === "boolean" || value === null || typeof value === "object") {
@@ -21,26 +16,25 @@ export function coerceTokenLimit(value: unknown): number | undefined {
 }
 
 export function serializeOpenAiModels(
-  catalog: CatalogSnapshot,
-  metadata: ReadonlyMap<string, ModelMetadata>,
+  catalog: CapabilityCatalogSnapshot,
   created = DEFAULT_MODEL_CREATED_AT_TIME,
 ): string {
-  const data = catalog.models.map((model) => {
-    const meta = metadata.get(model.id);
+  const data = catalog.models.filter((model) => model.visible).map((model) => {
     const item: Record<string, unknown> = {
-      id: model.id,
+      id: model.modelId,
       object: "model",
       created,
       owned_by: "openai",
     };
-    if (meta?.mode !== undefined) {
-      item.mode = meta.mode;
+    if (model.maxInputTokens.value !== null) {
+      item.max_input_tokens = model.maxInputTokens.value;
     }
-    if (meta?.maxInputTokens !== undefined) {
-      item.max_input_tokens = meta.maxInputTokens;
+    if (model.maxOutputTokens.value !== null) {
+      item.max_output_tokens = model.maxOutputTokens.value;
     }
-    if (meta?.maxOutputTokens !== undefined) {
-      item.max_output_tokens = meta.maxOutputTokens;
+    if (model.configured && !model.verified) {
+      item.x_ghcg_configured = true;
+      item.x_ghcg_verified = false;
     }
     return item;
   });
@@ -48,24 +42,26 @@ export function serializeOpenAiModels(
 }
 
 export function serializeAnthropicModels(
-  catalog: CatalogSnapshot,
-  metadata: ReadonlyMap<string, ModelMetadata>,
+  catalog: CapabilityCatalogSnapshot,
   created = DEFAULT_MODEL_CREATED_AT_TIME,
 ): string {
   const createdAt = new Date(created * 1000).toISOString().replace(/\.\d+Z$/u, "Z");
-  const data = catalog.models.map((model) => {
-    const meta = metadata.get(model.id);
+  const visible = catalog.models.filter((model) => model.visible);
+  const data = visible.map((model) => {
     return {
       type: "model",
-      id: model.id,
-      display_name: model.id,
+      id: model.modelId,
+      display_name: model.modelId,
       created_at: createdAt,
-      max_input_tokens: meta?.maxInputTokens ?? null,
-      max_tokens: meta?.maxOutputTokens ?? null,
+      max_input_tokens: model.maxInputTokens.value,
+      max_tokens: model.maxOutputTokens.value,
+      ...(model.configured && !model.verified
+        ? { x_ghcg_configured: true, x_ghcg_verified: false }
+        : {}),
     };
   });
-  const first = catalog.models[0]?.id ?? null;
-  const last = catalog.models[catalog.models.length - 1]?.id ?? null;
+  const first = visible[0]?.modelId ?? null;
+  const last = visible[visible.length - 1]?.modelId ?? null;
   return JSON.stringify({
     data,
     has_more: false,

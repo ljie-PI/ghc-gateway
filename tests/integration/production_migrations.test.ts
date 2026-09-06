@@ -7,7 +7,7 @@ import { createProductionApplicationContext } from "../../src/main.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { MIGRATION_MANIFEST } from "../../src/persistence/generated_migrations.js";
 
-const EXPECTED_VERSIONS = [1, 10, 20, 21, 30];
+const EXPECTED_VERSIONS = [1, 10, 20, 21, 30, 40];
 
 async function createStartup(): Promise<StartupConfig> {
   return {
@@ -46,6 +46,9 @@ describe("production migration manifest", () => {
       expect(application.database?.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'responses_history_state'",
       ).get()).toEqual({ name: "responses_history_state" });
+      expect(application.database?.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'model_capability_overrides'",
+      ).get()).toEqual({ name: "model_capability_overrides" });
     } finally {
       await application.close?.();
     }

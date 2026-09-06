@@ -10,6 +10,8 @@ import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import type { BoundCopilot, CopilotBackend } from "../../src/copilot/backend.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
+import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
 import { RuntimeConfigStore } from "../../src/config/runtime_config.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import type { DaemonIdentity } from "../../src/daemon/identity_file.js";
@@ -458,12 +460,17 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
           name: "Scripted Chat",
           vendor: "scripted",
           model_picker_enabled: true,
-          model_info: { mode: "chat" },
+          model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" },
         }],
       };
     },
   }, () => new Date(nowMs()));
   const backend = new BenchmarkCopilotBackend();
+  const registry = new ModelCapabilityRegistry(
+    catalog,
+    new SqliteModelCapabilityOverrides(database, nowMs),
+    { get: () => null },
+  );
   const measuredHistory = new MeasuredHistory(database, { nowMs });
   const telemetry = new TelemetryRecorder(database, nowMs);
   const performanceObserver = new BenchmarkPerformanceObserver();
@@ -474,6 +481,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     credentials,
     directory,
     catalog,
+    registry,
     copilot: backend,
     history: measuredHistory,
     telemetry,

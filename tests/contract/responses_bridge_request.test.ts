@@ -61,6 +61,7 @@ describe("Responses bridge request conversion", () => {
     const converted = convertResponsesRequest(request, {
       resolvedModel: "o1",
       toolContext,
+      chatOutputTokenField: "max_completion_tokens",
       reasoningConfig: { supportsEffort: true, effortValueMode: "openrouter" },
       upstreamHost: "api.openai.com",
       promptCacheRouting: "auto",
@@ -254,6 +255,18 @@ describe("Responses bridge request conversion", () => {
     expect(json(converted)).not.toHaveProperty("prompt_cache_key");
   });
 
+  it("classifies a missing Chat token dialect as unavailable capability", () => {
+    const request = requestFromJson("{\"model\":\"chat\",\"input\":\"hi\",\"max_output_tokens\":9}");
+    expect(() => convertResponsesRequest(request, {
+      resolvedModel: "chat",
+      toolContext: buildRequestToolContext(request),
+      reasoningConfig: null,
+      chatOutputTokenField: null,
+    })).toThrow(expect.objectContaining({
+      failure: expect.objectContaining({ kind: "unsupported_semantics" }),
+    }));
+  });
+
   function requestFromJson(source: string) {
     const parsed = parseWireJson(new TextEncoder().encode(source), LIMITS);
     expect(isWireJsonObject(parsed)).toBe(true);
@@ -265,6 +278,29 @@ describe("Responses bridge request conversion", () => {
   }
 
   function resolved(model: string): ResolvedModel {
-    return { upstreamModel: model, source: "explicit", requestedModel: model, routing: { mode: "chat" } };
+    return {
+      upstreamModel: model,
+      source: "explicit",
+      requestedModel: model,
+      capability: capability(model, ["chat"]),
+    };
+  }
+
+  function capability(modelId: string, protocols: readonly ("chat" | "responses")[]): ResolvedModel["capability"] {
+    return {
+      accountId: "test", modelId, name: modelId, vendor: "test",
+      discovered: true, configured: false, verified: true, enabled: true, visible: true, override: null,
+      protocols: { value: protocols, source: "live", conflict: false, liveState: "value" },
+      maxInputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      defaultOutputTokens: {
+        configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+        effective: 4096, source: "unknown_fallback", valid: true,
+      },
+      profile: {
+        chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+      },
+      revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
+    };
   }
 });

@@ -160,13 +160,13 @@ describe("Admin API", () => {
     const dependencies = adminDependencies();
     let releaseCatalog = (): void => undefined;
     let calls = 0;
-    const originalGet = dependencies.catalog.get;
-    dependencies.catalog.get = async (accountId, signal) => {
+    const originalGet = dependencies.registry.get;
+    dependencies.registry.get = async (account, signal) => {
       calls += 1;
       if (calls === 1) {
         await new Promise<void>((resolve) => { releaseCatalog = resolve; });
       }
-      return await originalGet(accountId, signal);
+      return await originalGet(account, signal);
     };
     const harness = await createHarness(dependencies);
     try {
@@ -176,6 +176,7 @@ describe("Admin API", () => {
       const preferred = mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
         accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
       });
+
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(calls).toBe(1);
       releaseCatalog();
@@ -187,17 +188,276 @@ describe("Admin API", () => {
     }
   });
 
+  it("inspects, sets, disables, and resets capability overrides with revisions", async () => {
+    const harness = await createHarness();
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const initial = (await read(harness.gateway, "/admin/api/v1/models", session.cookie)).data as {
+        items: Array<Record<string, unknown>>;
+      };
+      expect(initial.items[0]).toMatchObject({
+        id: "gpt-test",
+        discovered: true,
+        configured: false,
+        protocols: ["chat", "responses"],
+        protocolsSource: "live",
+        defaultOutputTokens: { configured: null, effective: 8192, source: "known_ceiling" },
+        overrideRevision: 0,
+      });
+
+      for (const stale of [
+        { expectedCredentialGeneration: 3, expectedCatalogGeneration: 7 },
+        { expectedCredentialGeneration: 4, expectedCatalogGeneration: 6 },
+      ]) {
+        const response = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+          accountId: "github.com/42",
+          modelId: "manual-model",
+          expectedRevision: 0,
+          ...stale,
+          capabilities: { enabled: true, protocols: ["messages"] },
+        });
+        expect(response.status).toBe(409);
+      }
+
+      const configured = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
+        capabilities: {
+          enabled: true,
+          protocols: ["messages"],
+          defaultOutputTokens: 2048,
+        },
+      });
+      expect(configured.status).toBe(200);
+      expect((await configured.json()) as unknown).toMatchObject({
+        data: {
+          items: [{ id: "gpt-test" }, {
+            id: "manual-model",
+            discovered: false,
+            configured: true,
+            verified: false,
+            enabled: true,
+            protocols: ["messages"],
+            overrideRevision: 1,
+          }],
+        },
+      });
+
+      const conflict = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
+        capabilities: { enabled: true, protocols: ["chat"] },
+      });
+      expect(conflict.status).toBe(409);
+
+      const invalid = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 1,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
+        capabilities: { enabled: true, protocols: ["websocket"] },
+      });
+      expect(invalid.status).toBe(400);
+
+      const reset = await mutate(harness.gateway, "DELETE", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 1,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
+      });
+      expect(reset.status).toBe(200);
+      expect(((await reset.json()) as { data: { items: Array<{ id: string }> } }).data.items)
+        .not.toContainEqual(expect.objectContaining({ id: "manual-model" }));
+
+      harness.dependencies.capabilityOverrides.set = () => { throw Object.assign(new Error(), { code: "capacity" }); };
+      const capacity = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "overflow",
+        expectedRevision: 2,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
+        capabilities: { enabled: true },
+      });
+      expect(capacity.status).toBe(503);
+      expect(await capacity.json()).toEqual({
+        error: { code: "capacity_exceeded", message: "capacity exceeded", requestId: "req_admin_api" },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("does not recreate overrides after removal and completes reconciliation after commit", async () => {
+    const dependencies = adminDependencies();
+    let releaseValidation = (): void => undefined;
+    const originalPreview = dependencies.registry.previewOverride;
+    dependencies.registry.previewOverride = async (...args) => {
+      await new Promise<void>((resolve) => { releaseValidation = resolve; });
+      return await originalPreview(...args);
+    };
+    let writes = 0;
+    const originalSet = dependencies.capabilityOverrides.set;
+    dependencies.capabilityOverrides.set = (...args) => {
+      writes += 1;
+      return originalSet(...args);
+    };
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const pending = mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual",
+        expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
+        capabilities: { enabled: true, protocols: ["messages"] },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const active = dependencies.accounts.list()[0];
+      if (active === undefined) throw new Error("missing test account");
+      dependencies.accounts.list = () => [{ ...active, state: "removed" }];
+      releaseValidation();
+      expect((await pending).status).toBe(404);
+      expect(writes).toBe(0);
+    } finally {
+      await harness.close();
+    }
+
+    const committedDependencies = adminDependencies();
+    const committedHarness = await createHarness(committedDependencies);
+    try {
+      const session = await login(committedHarness.gateway, committedHarness.admin);
+      const abort = new AbortController();
+      const committedSet = committedDependencies.capabilityOverrides.set;
+      committedDependencies.capabilityOverrides.set = (...args) => {
+        const result = committedSet(...args);
+        abort.abort();
+        return result;
+      };
+      await committedHarness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/models/capabilities`, {
+        method: "PUT",
+        signal: abort.signal,
+        headers: {
+          "content-type": "application/json",
+          cookie: session.cookie,
+          origin: ORIGIN,
+          "x-ghcg-csrf": session.csrf,
+        },
+        body: JSON.stringify({
+          accountId: "github.com/42",
+          modelId: "manual",
+          expectedRevision: 0,
+          expectedCredentialGeneration: 4,
+          expectedCatalogGeneration: 7,
+          capabilities: { enabled: true, protocols: ["messages"] },
+        }),
+      }));
+      expect(committedDependencies.calls).toContain("preference-invalidated");
+    } finally {
+      await committedHarness.close();
+    }
+
+    const preferenceRace = adminDependencies();
+    let capabilityWrites = 0;
+    const raceSet = preferenceRace.capabilityOverrides.set;
+    preferenceRace.capabilityOverrides.set = (...args) => {
+      capabilityWrites += 1;
+      return raceSet(...args);
+    };
+    const racePreview = preferenceRace.registry.previewOverride;
+    preferenceRace.registry.previewOverride = async (...args) => {
+      const preview = await racePreview(...args);
+      preferenceRace.preferredModels.setPreferred("github.com/42", "gpt-test", 0, preview);
+      return preview;
+    };
+    const raceHarness = await createHarness(preferenceRace);
+    try {
+      const session = await login(raceHarness.gateway, raceHarness.admin);
+      const response = await mutate(raceHarness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual",
+        expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
+        capabilities: { enabled: true, protocols: ["messages"] },
+      });
+      expect(response.status).toBe(409);
+      expect(capabilityWrites).toBe(0);
+    } finally {
+      await raceHarness.close();
+    }
+  });
+
+  it("rejects catalog-backed mutations when reauthentication changes credential generation", async () => {
+    for (const operation of ["refresh", "preferred", "reset"] as const) {
+      const dependencies = adminDependencies();
+      const originalBind = dependencies.accounts.bindAccount;
+      const originalGet = dependencies.registry.get;
+      const originalPreview = dependencies.registry.previewOverride;
+      let release = (): void => undefined;
+      let started = (): void => undefined;
+      const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+      if (operation === "reset") {
+        dependencies.registry.previewOverride = async (...args) => {
+          started();
+          await new Promise<void>((resolve) => { release = resolve; });
+          return await originalPreview(...args);
+        };
+      } else {
+        dependencies.registry.get = async (...args) => {
+          started();
+          await new Promise<void>((resolve) => { release = resolve; });
+          return await originalGet(...args);
+        };
+      }
+      const harness = await createHarness(dependencies);
+      try {
+        const session = await login(harness.gateway, harness.admin);
+        const responsePromise = operation === "refresh"
+          ? mutate(harness.gateway, "POST", "/admin/api/v1/models/refresh", session, {
+            accountId: "github.com/42",
+          })
+          : operation === "preferred"
+            ? mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
+              accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+            })
+            : mutate(harness.gateway, "DELETE", "/admin/api/v1/models/capabilities", session, {
+              accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+              expectedCredentialGeneration: 4, expectedCatalogGeneration: 7,
+            });
+        await startedPromise;
+        dependencies.accounts.bindAccount = async (accountId, signal) => ({
+          ...(await originalBind(accountId, signal)),
+          credentialGeneration: 5,
+        });
+        release();
+        expect((await responsePromise).status, operation).toBe(409);
+      } finally {
+        await harness.close();
+      }
+    }
+  });
+
   it("keeps model mutations serialized when a queued request aborts", async () => {
     const dependencies = adminDependencies();
     let releaseCatalog = (): void => undefined;
     let calls = 0;
-    const originalGet = dependencies.catalog.get;
-    dependencies.catalog.get = async (accountId, signal) => {
+    const originalGet = dependencies.registry.get;
+    dependencies.registry.get = async (account, signal) => {
       calls += 1;
       if (calls === 1) {
         await new Promise<void>((resolve) => { releaseCatalog = resolve; });
       }
-      return await originalGet(accountId, signal);
+      return await originalGet(account, signal);
     };
     const harness = await createHarness(dependencies);
     try {

@@ -1,1 +1,1 @@
-[{"name":"mode-responses","routing":{"mode":"responses"}},{"name":"mode-chat-wins","routing":{"mode":"chat","supportedEndpoints":["/v1/responses"]}},{"name":"endpoint-fallback","routing":{"supportedEndpoints":["/v1/responses"]}},{"name":"missing","routing":{}}]
+[{"name":"responses","protocols":["responses"]},{"name":"dual-prefers-native","protocols":["chat","responses"]},{"name":"chat-bridge","protocols":["chat"]},{"name":"missing","protocols":null}]

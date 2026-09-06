@@ -4,20 +4,21 @@ import {
   normalizeCatalogFailure,
 } from "../../copilot/failures.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
+import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import {
   serializeAnthropicModels,
   serializeOpenAiModels,
-  type ModelMetadata,
 } from "./wire.js";
+import { reconcilePreferredModelIfCurrent } from "./preferred.js";
 import { presentModelCatalogFailure } from "./failure_presenter.js";
 
 export interface ModelCatalogRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
+  readonly catalog?: CopilotModelCatalog;
   readonly preferences: AccountModelPreferences;
-  readonly metadata?: ReadonlyMap<string, ModelMetadata>;
 }
 
 const JSON_HEADERS = {
@@ -36,10 +37,9 @@ export function createModelCatalogRoutes(dependencies: ModelCatalogRouteDependen
       endpoint: async (request, scope) => {
         const catalog = await loadCatalog(dependencies, scope.signal);
         const anthropic = request.headers.has("anthropic-version");
-        const metadata = dependencies.metadata ?? new Map<string, ModelMetadata>();
         const body = anthropic
-          ? serializeAnthropicModels(catalog, metadata)
-          : serializeOpenAiModels(catalog, metadata);
+          ? serializeAnthropicModels(catalog)
+          : serializeOpenAiModels(catalog);
         return new Response(body, {
           headers: { ...JSON_HEADERS, "x-request-id": scope.requestId },
         });
@@ -59,9 +59,17 @@ async function loadCatalog(
     throw normalizeAccountBindingFailure(error);
   }
   try {
-    const catalog = await dependencies.catalog.get(account.accountId, signal);
-    const visible = new Set(catalog.models.map((model) => model.id));
-    dependencies.preferences.markInvalidIfMissing(account.accountId, visible, catalog.generation);
+    const observedPreference = dependencies.preferences.get(account.accountId);
+    const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
+    await reconcilePreferredModelIfCurrent(
+      dependencies.preferences,
+      dependencies.directory,
+      dependencies,
+      account,
+      catalog,
+      observedPreference,
+      signal,
+    );
     return catalog;
   } catch (error: unknown) {
     throw normalizeCatalogFailure(error, signal);

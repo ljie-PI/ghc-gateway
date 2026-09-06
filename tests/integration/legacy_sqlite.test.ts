@@ -76,10 +76,10 @@ describe("legacy better-sqlite3 database compatibility", () => {
           checksum,
         }));
         expect(MIGRATION_MANIFEST
-          .filter(({ version }) => version !== 21)
+          .filter(({ version }) => version !== 21 && version !== 40)
           .map(({ version, name, checksum }) => ({ version, name, checksum })))
           .toEqual(legacyMigrations);
-        expect(MIGRATION_MANIFEST.map(({ version }) => version)).toEqual([1, 10, 20, 21, 30]);
+        expect(MIGRATION_MANIFEST.map(({ version }) => version)).toEqual([1, 10, 20, 21, 30, 40]);
         for (const [table, rows] of Object.entries(expected)) {
           expect(table).toMatch(/^[a-z_]+$/u);
           if (table === "schema_migrations") {
@@ -94,6 +94,9 @@ describe("legacy better-sqlite3 database compatibility", () => {
           name,
           checksum,
         })));
+        expect(database.prepare(
+          "SELECT COUNT(*) AS count FROM model_capability_overrides",
+        ).get()).toEqual({ count: 0 });
         expect(database.pragma("foreign_key_check")).toEqual([]);
         expect(database.pragma("integrity_check")).toEqual([{ integrity_check: "ok" }]);
       } finally {

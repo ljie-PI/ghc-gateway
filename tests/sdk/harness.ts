@@ -6,11 +6,14 @@ import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
+import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import type { NativeResponsesUpstreamRequest } from "../../src/copilot/upstream_types.js";
 import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
@@ -61,6 +64,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       embedMigration(runtimeConfigMigration),
       embedMigration(accountsMigration),
       embedMigration(responsesHistoryMigration),
+      embedMigration(modelCapabilitiesMigration),
     ],
     nowMs,
   });
@@ -74,14 +78,19 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
     async fetch() {
       return {
         data: [
-          { id: CHAT_MODEL, name: "SDK Chat", vendor: "github", model_picker_enabled: true, model_info: { mode: "chat" } },
-          { id: REASONING_MODEL, name: "SDK Reasoning", vendor: "github", model_picker_enabled: true, model_info: { mode: "chat" } },
-          { id: NATIVE_RESPONSES_MODEL, name: "SDK Responses", vendor: "github", model_picker_enabled: true, model_info: { mode: "responses", supported_endpoints: ["/v1/responses"] } },
+          { id: CHAT_MODEL, name: "SDK Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
+          { id: REASONING_MODEL, name: "SDK Reasoning", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
+          { id: NATIVE_RESPONSES_MODEL, name: "SDK Responses", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/responses"], max_input_tokens: 128_000, max_output_tokens: 16_384 } },
         ],
       };
     },
   }, () => new Date(nowMs()));
   const history = new SqliteResponsesHistory(database, { nowMs });
+  const registry = new ModelCapabilityRegistry(
+    catalog,
+    new SqliteModelCapabilityOverrides(database, nowMs),
+    { get: () => null },
+  );
   const chatRequests: ChatRequest[] = [];
   const responsesRequests: NativeResponsesUpstreamRequest[] = [];
   const cancellation = { chat: 0, responses: 0 };
@@ -129,13 +138,9 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       credentials: new MemoryCredentialStore(),
       directory,
       catalog,
+      registry,
       copilot: backend,
       history,
-      modelMetadata: new Map([
-        [CHAT_MODEL, { mode: "chat", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],
-        [REASONING_MODEL, { mode: "chat", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],
-        [NATIVE_RESPONSES_MODEL, { mode: "responses", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],
-      ]),
       async close() {
         await catalog.close();
         closeState();

@@ -123,7 +123,7 @@ async function responsesGateway(options: {
           name: "Native",
           vendor: "github",
           model_picker_enabled: true,
-          model_info: { mode: "responses" },
+          model_info: { supported_endpoints: ["/responses"] },
         }],
       };
     },

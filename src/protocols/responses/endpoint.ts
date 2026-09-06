@@ -1,6 +1,7 @@
-import type { AccountDirectory } from "../../accounts/account_directory.js";
+import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
 import { iterateChatFrames, type BoundCopilot, type CopilotBackend } from "../../copilot/backend.js";
+import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import {
   normalizeAccountBindingFailure,
@@ -29,6 +30,7 @@ import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serial
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
+import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
 import { prepareChatBridgeRequest } from "./bridge_request.js";
 import { convertChatStream, type ResponsesStreamEmission } from "./bridge_stream.js";
@@ -47,7 +49,8 @@ import { presentResponsesFailure } from "./failure_presenter.js";
 
 export interface ResponsesRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
+  readonly catalog?: CopilotModelCatalog;
   readonly preferences: AccountModelPreferences;
   readonly copilot: CopilotBackend;
   readonly history: ResponsesHistory;
@@ -92,8 +95,9 @@ async function executeResponses(
   }
   const account = await bindAccount(dependencies.directory, scope.signal);
   usage.setAccount(account.accountId);
-  const catalog = await loadCatalog(dependencies, account.accountId, scope.signal);
-  const resolved = resolveModel(catalog, decoded.model, dependencies.preferences.get(account.accountId));
+  const preference = dependencies.preferences.get(account.accountId);
+  const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
+  const resolved = resolveModel(catalog, decoded.model, preference);
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
@@ -455,12 +459,21 @@ async function transportCall<T>(
 
 async function loadCatalog(
   dependencies: ResponsesRouteDependencies,
-  accountId: string,
+  account: Readonly<BoundAccount>,
+  observedPreference: ReturnType<AccountModelPreferences["get"]>,
   signal: AbortSignal,
 ) {
   try {
-    const catalog = await dependencies.catalog.get(accountId, signal);
-    dependencies.preferences.markInvalidIfMissing(accountId, new Set(catalog.models.map((model) => model.id)), catalog.generation);
+    const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
+    await reconcilePreferredModelIfCurrent(
+      dependencies.preferences,
+      dependencies.directory,
+      dependencies,
+      account,
+      catalog,
+      observedPreference,
+      signal,
+    );
     return catalog;
   } catch (error: unknown) {
     throw normalizeCatalogFailure(error, signal);

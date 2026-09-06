@@ -47,7 +47,7 @@ describe("Responses endpoint stream integration", () => {
     });
     const catalog = new CopilotModelCatalog({
       async fetch() {
-        return { data: [{ id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { mode: "chat" } }] };
+        return { data: [{ id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } }] };
       },
     });
     const history = new RecordingHistory();

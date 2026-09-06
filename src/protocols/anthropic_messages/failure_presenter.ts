@@ -4,6 +4,7 @@ import {
   safeRetryAfter,
   type GatewayFailure,
 } from "../../gateway/failures.js";
+import { safeCapabilityFailureMessage } from "../../copilot/model_capabilities.js";
 import { anthropicErrorBody, type AnthropicErrorType } from "./wire.js";
 
 const JSON_HEADERS = {
@@ -21,7 +22,14 @@ export function presentAnthropicFailure(failure: Readonly<GatewayFailure>, reque
     headers.set("retry-after", retryAfter);
   }
   return new Response(
-    anthropicErrorBody(anthropicErrorType(status), safeFailureMessage(failure), requestId),
+    anthropicErrorBody(
+      anthropicErrorType(status),
+      safeCapabilityFailureMessage(
+        failure.kind === "unsupported_semantics" ? failure.cause : undefined,
+        safeFailureMessage(failure),
+      ),
+      requestId,
+    ),
     { status, headers },
   );
 }

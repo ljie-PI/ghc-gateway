@@ -4,6 +4,7 @@ import {
   safeRetryAfter,
   type GatewayFailure,
 } from "../../gateway/failures.js";
+import { safeCapabilityFailureMessage } from "../../copilot/model_capabilities.js";
 import { RESPONSES_JSON_HEADERS, serializeResponsesErrorBody } from "./wire.js";
 
 export function presentResponsesFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
@@ -15,7 +16,8 @@ export function presentResponsesFailure(failure: Readonly<GatewayFailure>, reque
   if (retryAfter !== undefined) {
     headers.set("retry-after", retryAfter);
   }
-  return new Response(serializeResponsesErrorBody(safeFailureMessage(failure), errorTypeForStatus(status)), {
+  const message = safeCapabilityFailureMessage(failure.kind === "unsupported_semantics" ? failure.cause : undefined, safeFailureMessage(failure));
+  return new Response(serializeResponsesErrorBody(message, errorTypeForStatus(status)), {
     status,
     headers,
   });

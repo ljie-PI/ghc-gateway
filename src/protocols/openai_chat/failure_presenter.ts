@@ -4,6 +4,7 @@ import {
   safeRetryAfter,
   type GatewayFailure,
 } from "../../gateway/failures.js";
+import { safeCapabilityFailureMessage } from "../../copilot/model_capabilities.js";
 import { serializeOpenAiErrorBody } from "./wire.js";
 
 const JSON_HEADERS = {
@@ -20,7 +21,8 @@ export function presentOpenAiChatFailure(failure: Readonly<GatewayFailure>, requ
   if (retryAfter !== undefined) {
     headers.set("retry-after", retryAfter);
   }
-  return new Response(serializeOpenAiErrorBody(safeFailureMessage(failure), errorTypeForStatus(status)), {
+  const message = safeCapabilityFailureMessage(failure.kind === "unsupported_semantics" ? failure.cause : undefined, safeFailureMessage(failure));
+  return new Response(serializeOpenAiErrorBody(message, errorTypeForStatus(status)), {
     status,
     headers,
   });

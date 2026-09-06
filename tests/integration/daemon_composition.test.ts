@@ -7,6 +7,8 @@ import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { discoverEndpoint, invalidateEndpoint } from "../../src/copilot/endpoint_discovery.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
+import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
 import { RuntimeConfigStore } from "../../src/config/runtime_config.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -21,6 +23,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 
@@ -261,7 +264,7 @@ describe("production composition", () => {
       });
       expect(removed.status).toBe(200);
       await harness.catalog.get(account.accountId, signal());
-      expect(harness.catalogFetchCount()).toBe(2);
+      expect(harness.catalogFetchCount()).toBe(3);
       await discoverEndpoint(account, endpointSource);
       expect(endpointFetches).toBe(2);
       invalidateEndpoint(account.accountId);
@@ -292,6 +295,7 @@ function compositionHarness(): CompositionHarness {
       embedMigration(accountsMigration),
       embedMigration(telemetryMigration),
       embedMigration(historyMigration),
+      embedMigration(modelCapabilitiesMigration),
     ],
     nowMs: () => NOW,
   });
@@ -303,25 +307,35 @@ function compositionHarness(): CompositionHarness {
   const catalog = new CopilotModelCatalog({
     async fetch() {
       catalogFetches += 1;
-      return { data: [{ id: "gpt-test", name: "GPT Test", vendor: "openai", model_picker_enabled: true }] };
+      return { data: [{
+        id: "gpt-test",
+        name: "GPT Test",
+        vendor: "openai",
+        model_picker_enabled: true,
+        model_info: {
+          supported_endpoints: ["/chat/completions"],
+          max_input_tokens: 200_000,
+          max_output_tokens: 16_384,
+          chat_output_token_field: "max_tokens",
+        },
+      }] };
     },
   }, () => new Date(NOW));
   const history = new SqliteResponsesHistory(database, { nowMs: () => NOW, ttlDays: snapshot.history.ttlDays });
   const telemetry = new TelemetryRecorder(database, () => NOW);
+  const registry = new ModelCapabilityRegistry(catalog, new SqliteModelCapabilityOverrides(database), {
+    get: () => null,
+  });
   const application: ApplicationContext = {
     database,
     credentials,
     directory,
     catalog,
+    registry,
     copilot: new ScriptedCopilotBackend({}),
     history,
     telemetry,
     runtime,
-    modelMetadata: new Map([["gpt-test", {
-      mode: "chat",
-      maxInputTokens: 200_000,
-      maxOutputTokens: 16_384,
-    }]]),
     async close() {
       await telemetry.flush();
       await catalog.close();

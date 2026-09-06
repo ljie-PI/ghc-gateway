@@ -1,7 +1,9 @@
-import type { AccountDirectory } from "../../accounts/account_directory.js";
+import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences, ModelPreference } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
+import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilities.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
 import {
   normalizeAccountBindingFailure,
@@ -45,7 +47,8 @@ import { presentOpenAiChatFailure } from "./failure_presenter.js";
 
 export interface OpenAiChatRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
+  readonly catalog?: CopilotModelCatalog;
   readonly preferences?: Pick<AccountModelPreferences, "get">;
   readonly copilot: CopilotBackend;
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
@@ -97,9 +100,15 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       const preference = decoded.requestedModel === undefined
         ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
         : null;
-      const catalog = await loadCatalog(dependencies.catalog, account.accountId, scope.signal);
+      const catalog = await loadCatalog(dependencies, account, scope.signal);
       const resolved = resolveOpenAiChatModel(decoded, catalog, preference);
       usage.setResolvedModel(resolved.upstreamModel);
+      if (resolved.capability.protocols.value?.includes("chat") !== true) {
+        throw new GatewayFailureError({
+          kind: "unsupported_semantics",
+          cause: new ModelCapabilityUnavailableError(),
+        });
+      }
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
 
@@ -270,7 +279,7 @@ export function prepareOpenAiChatRequest(
 
 function resolveOpenAiChatModel(
   decoded: DecodedOpenAiChatRequest,
-  catalog: Awaited<ReturnType<CopilotModelCatalog["get"]>>,
+  catalog: Awaited<ReturnType<ModelCapabilityRegistry["get"]>>,
   preference: ModelPreference | null,
 ): ResolvedModel {
   const resolved = resolveModel(catalog, decoded.requestedModel, preference);
@@ -288,9 +297,13 @@ async function bindAccount(directory: AccountDirectory, signal: AbortSignal) {
   }
 }
 
-async function loadCatalog(catalog: CopilotModelCatalog, accountId: string, signal: AbortSignal) {
+async function loadCatalog(
+  dependencies: Pick<OpenAiChatRouteDependencies, "registry" | "catalog">,
+  account: Readonly<BoundAccount>,
+  signal: AbortSignal,
+) {
   try {
-    return await catalog.get(accountId, signal);
+    return await loadCapabilitySnapshot(dependencies, account, signal);
   } catch (error: unknown) {
     throw normalizeCatalogFailure(error, signal);
   }

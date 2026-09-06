@@ -400,10 +400,22 @@ describe("CLI commands", () => {
         }
         return current;
       };
-      await expect(client.request("models.list", {}, { dataDir: "unused" })).rejects.toMatchObject({ code: "revision_conflict" });
+      await expect(client.request("models.list", {}, { dataDir: "unused" })).resolves.toMatchObject({
+        accountId: "github.com/42",
+      });
       harness.directory.preferences.get = originalGet;
       expect(await client.request("models.list", {}, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", items: [{ id: "gpt" }] });
       expect(await client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "gpt", validity: "valid" });
+      const isCurrent = harness.catalog.isCurrent.bind(harness.catalog);
+      harness.catalog.isCurrent = () => false;
+      await expect(client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" }))
+        .rejects.toMatchObject({ code: "revision_conflict" });
+      await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });
+      expect(harness.directory.preferences.get("github.com/42")).toMatchObject({
+        modelId: "gpt",
+        validity: "valid",
+      });
+      harness.catalog.isCurrent = isCurrent;
       await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });
       expect(harness.directory.preferences.get("github.com/42")?.validity).toBe("valid");
       harness.catalog.invalidate("github.com/42");
@@ -425,7 +437,8 @@ describe("CLI commands", () => {
         }
         return current;
       };
-      await expect(client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "revision_conflict" });
+      await expect(client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" }))
+        .resolves.toMatchObject({ accountId: "github.com/42" });
       expect(await client.request("config.get", { key: "admission.activeMax" }, { dataDir: "unused" })).toMatchObject({ key: "admission.activeMax", value: 4 });
       await expect(client.request("config.get", { key: "toString" }, { dataDir: "unused" })).rejects.toMatchObject({ code: "not_found" });
       expect(await client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "unused" })).toMatchObject({ config: { admission: { activeMax: 2, queueMax: 16 } } });

@@ -13,6 +13,7 @@ import {
   parseCapiModels,
 } from "../../src/copilot/model_catalog.js";
 import { productionModelInfoLookup } from "../../src/copilot/model_metadata.js";
+import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
 import { CapiFetchError, HttpCopilotModelsSource } from "../../src/copilot/models_source.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -48,11 +49,19 @@ describe("CAPI parse and cache", () => {
       max_input_tokens: 128_000,
       max_output_tokens: 16_000,
       supported_endpoints: ["/v1/chat/completions"],
+      chat_output_token_field: "max_tokens",
     });
     expect(productionModelInfoLookup.get("gemini-3-pro-preview")).toEqual({
       mode: "chat",
       max_input_tokens: 128_000,
       max_output_tokens: 64_000,
+      chat_output_token_field: "max_tokens",
+    });
+    expect(productionModelInfoLookup.get("gpt-4o")).toEqual({
+      mode: "chat",
+      max_input_tokens: 64_000,
+      max_output_tokens: 4_096,
+      chat_output_token_field: "max_tokens",
     });
     expect(productionModelInfoLookup.get("gpt-5.3-codex")).toEqual({
       mode: "responses",
@@ -65,6 +74,7 @@ describe("CAPI parse and cache", () => {
       max_input_tokens: 128_000,
       max_output_tokens: 64_000,
       supported_endpoints: ["/v1/chat/completions"],
+      chat_output_token_field: "max_tokens",
     });
     expect(productionModelInfoLookup.get("mai-code-1-flash-internal")).toEqual(
       productionModelInfoLookup.get("mai-code-1-flash"),
@@ -75,14 +85,14 @@ describe("CAPI parse and cache", () => {
   it("keeps picker-enabled models in upstream order including duplicates", () => {
     const models = parseCapiModels(CAPI);
     expect(models.map((model) => model.id)).toEqual(["keep", "keep"]);
-    expect(models[0]?.routing).toBeUndefined();
+    expect(models[0]?.capabilities.protocols.state).toBe("missing");
   });
 
   it("rejects incomplete CAPI items", () => {
     expect(() => parseCapiModels({ data: [{ id: "x" }] })).toThrow(/invalid/u);
   });
 
-  it("composes injected getModelInfo metadata into catalog routing and one shared public map", async () => {
+  it("preserves explicit live capability fields without a global metadata map", async () => {
     const source = new HttpCopilotModelsSource(
       async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
       async () => new Response(JSON.stringify({ data: [{
@@ -90,33 +100,26 @@ describe("CAPI parse and cache", () => {
         name: "Native",
         vendor: "openai",
         model_picker_enabled: true,
-        capabilities: { mode: "chat", max_input_tokens: 1 },
+        capabilities: {
+          supported_endpoints: ["/responses", "/v1/chat/completions"],
+          max_input_tokens: "128000",
+          max_output_tokens: 64_000,
+          chat_output_token_field: "max_completion_tokens",
+        },
       }] })),
       { connectTimeoutMs: 20, totalTimeoutMs: 100, bodyLimitBytes: 1_024 },
       () => new Agent(),
-      {
-        get: () => ({
-          mode: "responses",
-          max_input_tokens: "128000",
-          max_output_tokens: 64_000.9,
-          supported_endpoints: ["/v1/responses", 1],
-        }),
-      },
     );
     const catalog = new CopilotModelCatalog(source);
     const snapshot = await catalog.get("github.com/1", new AbortController().signal);
-    expect(snapshot.models[0]?.routing).toEqual({
-      mode: "responses",
-      supportedEndpoints: ["/v1/responses"],
+    expect(snapshot.models[0]?.capabilities).toMatchObject({
+      protocols: { state: "value", value: ["chat", "responses"] },
+      maxInputTokens: { state: "value", value: 128_000 },
+      maxOutputTokens: { state: "value", value: 64_000 },
+      chatOutputTokenField: { state: "value", value: "max_completion_tokens" },
     });
-    expect(source.modelMetadata.get("native")).toEqual({
-      mode: "responses",
-      maxInputTokens: 128_000,
-      maxOutputTokens: 64_000,
-      supportedEndpoints: ["/v1/responses"],
-    });
-    expect(JSON.parse(serializeOpenAiModels(snapshot, source.modelMetadata)).data[0]).toMatchObject({
-      mode: "responses",
+    const effective = capabilitySnapshotFromCatalog(bound("github.com/1"), snapshot);
+    expect(JSON.parse(serializeOpenAiModels(effective)).data[0]).toMatchObject({
       max_input_tokens: 128_000,
       max_output_tokens: 64_000,
     });
@@ -136,6 +139,110 @@ describe("CAPI parse and cache", () => {
     expect(snapshot.models[0]?.id).toBe("keep");
     await catalog.get("github.com/1", new AbortController().signal);
     expect(fetches).toBe(2);
+  });
+
+  it("cancels displaced catalog fetches after their last waiter aborts", async () => {
+    let fetches = 0;
+    let aborts = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch(_accountId, signal) {
+        fetches += 1;
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        });
+        return { data: [] };
+      },
+    });
+    for (let index = 0; index < 20; index += 1) {
+      const controller = new AbortController();
+      const pending = catalog.get("github.com/1", controller.signal);
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      catalog.invalidate("github.com/1");
+    }
+    await vi.waitFor(() => expect(aborts).toBe(20));
+    expect(fetches).toBe(20);
+    await catalog.close();
+  });
+
+  it("does not let an aborted orphan poison the next catalog request", async () => {
+    let fetches = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch(_accountId, signal) {
+        fetches += 1;
+        if (fetches > 1) {
+          return { data: [] };
+        }
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            setTimeout(() => reject(new DOMException("aborted", "AbortError")), 20);
+          }, { once: true });
+        });
+        return { data: [] };
+      },
+    });
+    const controller = new AbortController();
+    const first = catalog.get("github.com/1", controller.signal);
+    controller.abort();
+    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(catalog.get("github.com/1", new AbortController().signal)).resolves.toMatchObject({
+      models: [],
+    });
+    expect(fetches).toBe(2);
+    await catalog.close();
+  });
+
+  it("does not let an older credential generation replace a newer cache entry", async () => {
+    const releases = new Map<number, () => void>();
+    let fetches = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch(_accountId, _signal, credentialGeneration = 0) {
+        fetches += 1;
+        await new Promise<void>((resolve) => releases.set(credentialGeneration, resolve));
+        return {
+          data: [{
+            id: `generation-${credentialGeneration}`,
+            name: "Generation",
+            vendor: "test",
+            model_picker_enabled: true,
+          }],
+        };
+      },
+    });
+    const older = catalog.get("github.com/1", new AbortController().signal, 1);
+    const newer = catalog.get("github.com/1", new AbortController().signal, 2);
+    releases.get(2)?.();
+    await expect(newer).resolves.toMatchObject({ credentialGeneration: 2 });
+    releases.get(1)?.();
+    await expect(older).resolves.toMatchObject({ credentialGeneration: 1 });
+    const cached = await catalog.get("github.com/1", new AbortController().signal, 2);
+    expect(cached.models[0]?.id).toBe("generation-2");
+    expect(fetches).toBe(2);
+  });
+
+  it("aborts every displaced in-flight generation during close", async () => {
+    let aborts = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch(_accountId, signal) {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        });
+        return { data: [] };
+      },
+    });
+    const older = catalog.get("github.com/1", new AbortController().signal, 1);
+    const newer = catalog.get("github.com/1", new AbortController().signal, 2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await catalog.close();
+    await expect(older).rejects.toMatchObject({ name: "AbortError" });
+    await expect(newer).rejects.toMatchObject({ name: "AbortError" });
+    expect(aborts).toBe(2);
   });
 
   it("caches empty catalogs per account and does not share them", async () => {
@@ -646,12 +753,22 @@ describe("CAPI parse and cache", () => {
 });
 
 describe("model resolver", () => {
-  const catalog = {
+  const discovered = {
     accountId: "github.com/1",
     fetchedAt: "t",
     generation: 1,
-    models: [{ id: "gpt", name: "GPT", vendor: "x", modelPickerEnabled: true }],
+    credentialGeneration: 1,
+    models: parseCapiModels({
+      data: [{
+        id: "gpt",
+        name: "GPT",
+        vendor: "x",
+        model_picker_enabled: true,
+        capabilities: { supported_endpoints: ["/chat/completions"] },
+      }],
+    }),
   };
+  const catalog = capabilitySnapshotFromCatalog(bound("github.com/1"), discovered);
 
   it("uses valid visible preference only when model is missing", () => {
     const resolved = resolveModel(catalog, undefined, { modelId: "gpt", validity: "valid" });
@@ -715,25 +832,24 @@ describe("listing routes", () => {
 
 describe("serializers", () => {
   it("omits routing metadata from public OpenAI objects", () => {
-    const catalog = {
+    const discovered = {
       accountId: "a",
       fetchedAt: "2026-08-30T05:00:00Z",
       generation: 1,
-      models: [{
-        id: "m",
-        name: "M",
-        vendor: "v",
-        modelPickerEnabled: true,
-        routing: { mode: "responses", supportedEndpoints: ["/v1/responses"] },
-      }],
+      credentialGeneration: 1,
+      models: parseCapiModels({ data: [{
+        id: "m", name: "M", vendor: "v", model_picker_enabled: true,
+        capabilities: { supported_endpoints: ["/v1/responses"] },
+      }] }),
     };
-    const openai = JSON.parse(serializeOpenAiModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
+    const catalog = capabilitySnapshotFromCatalog(bound("a"), discovered);
+    const openai = JSON.parse(serializeOpenAiModels(catalog)) as { data: Array<Record<string, unknown>> };
     expect(openai.data[0]?.supported_endpoints).toBeUndefined();
     expect(openai.data[0]?.supportedEndpoints).toBeUndefined();
     expect(openai.data[0]?.routing).toBeUndefined();
     expect(openai.data[0]?.mode).toBeUndefined();
 
-    const anthropic = JSON.parse(serializeAnthropicModels(catalog, new Map())) as { data: Array<Record<string, unknown>> };
+    const anthropic = JSON.parse(serializeAnthropicModels(catalog)) as { data: Array<Record<string, unknown>> };
     expect(anthropic.data[0]?.display_name).toBe("m");
     expect(anthropic.data[0]?.supported_endpoints).toBeUndefined();
     expect(anthropic.data[0]?.supportedEndpoints).toBeUndefined();
@@ -741,3 +857,22 @@ describe("serializers", () => {
     expect(anthropic.data[0]?.mode).toBeUndefined();
   });
 });
+
+function bound(accountId: string) {
+  return {
+    accountId,
+    environment: {
+      kind: "github.com" as const,
+      host: "github.com" as const,
+      webBaseUrl: "https://github.com" as const,
+      apiBaseUrl: "https://api.github.com" as const,
+      clientId: "Iv1.b507a08c87ecfe98" as const,
+      deviceCodeUrl: "https://github.com/login/device/code" as const,
+      accessTokenUrl: "https://github.com/login/oauth/access_token" as const,
+    },
+    userId: "1",
+    login: null,
+    displayName: null,
+    credentialGeneration: 1,
+  };
+}

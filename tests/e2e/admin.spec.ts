@@ -292,6 +292,98 @@ test("model-refresh-invalidates-preference", async ({ page }) => {
   await expect(page.getByText("claude-beta is now preferred.")).toBeVisible();
 });
 
+test("model-capability-override-lifecycle", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  await page.getByRole("button", { name: "Models" }).click();
+  await page.getByLabel("Model ID").fill("manual-model");
+  await page.getByRole("button", { name: "Add configured model" }).click();
+  const card = page.getByRole("article").filter({ hasText: "manual-model" });
+  await expect(card.getByText(/Configured \/ unverified/)).toBeVisible();
+  await card.getByLabel("messages").check();
+  await card.getByLabel("Default output tokens").fill("2048");
+  await card.getByRole("button", { name: "Save capability override" }).click();
+  await expect(page.getByText("manual-model capability override saved.")).toBeVisible();
+  expect(fixture.requests.find((request) => request.url().endsWith("/models/capabilities")
+    && request.method() === "PUT")?.headers()["x-ghcg-csrf"]).toBe("csrf-memory-only");
+  await card.getByRole("button", { name: "Reset override" }).click();
+  await expect(page.getByRole("article").filter({ hasText: "manual-model" })).toHaveCount(0);
+  await page.getByLabel("Model ID").fill("manual-model");
+  await page.getByRole("button", { name: "Add configured model" }).click();
+  await expect(page.getByRole("article").filter({ hasText: "manual-model" })).toBeVisible();
+});
+
+test("model-account switching ignores stale responses", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  const current = fixture.state.accounts.items[0]!;
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: [...fixture.state.accounts.items, {
+      ...current,
+      accountId: "ghes:2",
+      host: "github.example.test",
+      numericUserId: "2",
+      login: "enterprise",
+      displayName: "Enterprise Admin",
+    }],
+  };
+  fixture.state.modelDelayByAccount[current.accountId] = 300;
+  await page.getByRole("button", { name: "Models" }).click();
+  await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
+  await expect(page.getByText("enterprise-model", { exact: true })).toBeVisible();
+  await page.waitForTimeout(350);
+  await expect(page.getByLabel("Account", { exact: true })).toHaveValue("ghes:2");
+  await expect(page.getByText("enterprise-model", { exact: true })).toBeVisible();
+  await expect(page.getByText("gpt-alpha", { exact: true })).toHaveCount(0);
+});
+
+test("model token override keeps protocol inheritance", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  await page.getByRole("button", { name: "Models" }).click();
+  const card = page.getByRole("article").filter({ hasText: "gpt-alpha" });
+  await expect(card.getByLabel("Override native protocols")).not.toBeChecked();
+  await card.getByLabel("Default output tokens").fill("2048");
+  await card.getByRole("button", { name: "Save capability override" }).click();
+  const request = fixture.requests.findLast((candidate) => (
+    candidate.url().endsWith("/models/capabilities")
+    && candidate.method() === "PUT"
+    && candidate.postData()?.includes("gpt-alpha") === true
+  ));
+  expect(request?.postDataJSON()).toMatchObject({
+    capabilities: { enabled: true, defaultOutputTokens: 2048 },
+  });
+  expect((request?.postDataJSON() as { capabilities?: { protocols?: unknown } }).capabilities?.protocols)
+    .toBeUndefined();
+
+  const beforeClear = fixture.requests.filter((candidate) => (
+    candidate.url().endsWith("/models/capabilities") && candidate.method() === "PUT"
+  )).length;
+  await card.getByLabel("Default output tokens").fill("");
+  await card.getByRole("button", { name: "Save capability override" }).click();
+  await expect.poll(() => fixture.requests.filter((candidate) => (
+    candidate.url().endsWith("/models/capabilities") && candidate.method() === "PUT"
+  )).length).toBe(beforeClear + 1);
+  const cleared = fixture.requests.findLast((candidate) => (
+    candidate.url().endsWith("/models/capabilities")
+    && candidate.method() === "PUT"
+    && candidate.postData()?.includes("gpt-alpha") === true
+  ));
+  expect((cleared?.postDataJSON() as {
+    capabilities?: { defaultOutputTokens?: unknown; protocols?: unknown };
+  }).capabilities).toEqual({ enabled: true });
+});
+
+test("models view renders duplicate catalog IDs without crashing", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  const first = fixture.state.models.items[0]!;
+  fixture.state.models = {
+    ...fixture.state.models,
+    items: [first, { ...first, name: "Duplicate Alpha" }],
+  };
+  await page.getByRole("button", { name: "Models" }).click();
+  await expect(page.getByText("gpt-alpha", { exact: true })).toHaveCount(2);
+  await expect(page.getByRole("heading", { name: "Duplicate Alpha" })).toBeVisible();
+});
+
 test("config-revision-and-security-rejection", async ({ page }) => {
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Configuration" }).click();

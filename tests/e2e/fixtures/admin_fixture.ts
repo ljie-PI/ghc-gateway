@@ -50,6 +50,7 @@ export interface AdminFixture {
     devicePollDelayMs: number;
     deviceNowMs: number;
     accountsDelayMs: number;
+    modelDelayByAccount: Record<string, number>;
     cancelCompletesDeviceFlow: boolean;
     streamBodies: string[];
     streamDelaysMs: number[];
@@ -86,24 +87,26 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       accounts: { defaultRevision: 1, defaultAccountId: github.accountId, items: [github] },
       models: {
         accountId: github.accountId,
+        credentialGeneration: 1,
         catalogGeneration: 1,
         fetchedAt: NOW,
+        capabilityRevision: 0,
         preferredModel: { revision: 1, modelId: "gpt-alpha", validity: "valid" },
         items: [
-          {
+          modelItem({
             id: "gpt-alpha",
             name: "Alpha",
             vendor: "OpenAI",
             maxInputTokens: 128000,
             maxOutputTokens: 16000,
-          },
-          {
+          }),
+          modelItem({
             id: "claude-beta",
             name: "Beta",
             vendor: "Anthropic",
             maxInputTokens: 200000,
             maxOutputTokens: 8192,
-          },
+          }),
         ],
       },
       config: runtimeConfig(),
@@ -127,6 +130,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       devicePollDelayMs: 0,
       deviceNowMs: ADMIN_FIXTURE_NOW_MS,
       accountsDelayMs: 0,
+      modelDelayByAccount: {},
       cancelCompletesDeviceFlow: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
       streamDelaysMs: [],
@@ -172,6 +176,73 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   return fixture;
 }
 
+function modelItem(input: {
+  readonly id: string;
+  readonly name: string;
+  readonly vendor: string;
+  readonly maxInputTokens: number;
+  readonly maxOutputTokens: number;
+}, options: {
+  readonly discovered?: boolean;
+  readonly override?: NonNullable<AdminModels["items"][number]["override"]>;
+  readonly overrideRevision?: number;
+} = {}): AdminModels["items"][number] {
+  const discovered = options.discovered ?? true;
+  const override = options.override ?? null;
+  return {
+    ...input,
+    discovered,
+    configured: override !== null,
+    verified: discovered,
+    enabled: override?.enabled ?? true,
+    visible: override?.enabled ?? true,
+    protocols: override?.protocols ?? ["chat", "responses"],
+    protocolsSource: override?.protocols === undefined ? "live" : "admin_override",
+    protocolsConflict: false,
+    protocolsLiveState: "value",
+    maxInputTokensSource: "builtin",
+    maxInputTokensConflict: false,
+    maxInputTokensLiveState: "missing",
+    maxOutputTokensSource: "builtin",
+    maxOutputTokensConflict: false,
+    maxOutputTokensLiveState: "missing",
+    defaultOutputTokens: {
+      configured: null,
+      configuredSource: "unknown",
+      conflict: false,
+      liveState: "missing",
+      effective: Math.min(8192, input.maxOutputTokens),
+      source: "known_ceiling",
+      valid: true,
+    },
+    chatOutputTokenField: "max_tokens",
+    chatOutputTokenFieldSource: "builtin",
+    chatOutputTokenFieldConflict: false,
+    chatOutputTokenFieldLiveState: "missing",
+    overrideRevision: options.overrideRevision ?? 0,
+    builtinRevision: "test",
+    override,
+  };
+}
+
+function modelsForAccount(fixture: AdminFixture, accountId: string): AdminModels {
+  if (accountId === fixture.state.models.accountId) {
+    return structuredClone(fixture.state.models);
+  }
+  return {
+    ...structuredClone(fixture.state.models),
+    accountId,
+    preferredModel: null,
+    items: [modelItem({
+      id: "enterprise-model",
+      name: "Enterprise Model",
+      vendor: "Enterprise",
+      maxInputTokens: 100_000,
+      maxOutputTokens: 8_000,
+    })],
+  };
+}
+
 async function handle(
   route: Route,
   fixture: AdminFixture,
@@ -213,6 +284,54 @@ async function handle(
         latencyMaxMs: 120,
       },
     });
+  }
+  if (path === "/models/capabilities" && request.method() === "PUT") {
+    const body = request.postDataJSON() as {
+      modelId: string;
+      capabilities: NonNullable<AdminModels["items"][number]["override"]>;
+    };
+    const existing = fixture.state.models.items.find((item) => item.id === body.modelId);
+    const nextRevision = fixture.state.models.capabilityRevision + 1;
+    const next = modelItem({
+      id: body.modelId,
+      name: existing?.name ?? body.modelId,
+      vendor: existing?.vendor ?? "configured",
+      maxInputTokens: body.capabilities.maxInputTokens ?? existing?.maxInputTokens ?? 0,
+      maxOutputTokens: body.capabilities.maxOutputTokens ?? existing?.maxOutputTokens ?? 0,
+    }, {
+      discovered: existing?.discovered ?? false,
+      override: body.capabilities,
+      overrideRevision: nextRevision,
+    });
+    fixture.state.models = {
+      ...fixture.state.models,
+      capabilityRevision: nextRevision,
+      items: existing === undefined
+        ? [...fixture.state.models.items, next]
+        : fixture.state.models.items.map((item) => item.id === body.modelId ? next : item),
+    };
+    return json(route, 200, fixture.state.models);
+  }
+  if (path === "/models/capabilities" && request.method() === "DELETE") {
+    const body = request.postDataJSON() as { modelId: string };
+    const existing = fixture.state.models.items.find((item) => item.id === body.modelId);
+    const nextRevision = fixture.state.models.capabilityRevision + 1;
+    fixture.state.models = {
+      ...fixture.state.models,
+      capabilityRevision: nextRevision,
+      items: existing?.discovered === true
+        ? fixture.state.models.items.map((item) => item.id === body.modelId
+          ? modelItem({
+            id: item.id,
+            name: item.name,
+            vendor: item.vendor,
+            maxInputTokens: item.maxInputTokens ?? 0,
+            maxOutputTokens: item.maxOutputTokens ?? 0,
+          }, { overrideRevision: nextRevision })
+          : item)
+        : fixture.state.models.items.filter((item) => item.id !== body.modelId),
+    };
+    return json(route, 200, fixture.state.models);
   }
   if (path === "/accounts") {
     const accounts = structuredClone(fixture.state.accounts);
@@ -327,7 +446,13 @@ async function handle(
     };
     return json(route, 200, removed);
   }
-  if (path === "/models" && request.method() === "GET") return json(route, 200, fixture.state.models);
+  if (path === "/models" && request.method() === "GET") {
+    const accountId = url.searchParams.get("accountId") ?? fixture.state.models.accountId;
+    const models = modelsForAccount(fixture, accountId);
+    const delay = fixture.state.modelDelayByAccount[accountId] ?? 0;
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    return json(route, 200, models);
+  }
   if (path === "/models/refresh") {
     fixture.state.models = {
       ...fixture.state.models,

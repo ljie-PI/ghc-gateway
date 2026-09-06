@@ -3,8 +3,7 @@ import path from "node:path";
 import { UNSUPPORTED_RUNTIME_MESSAGE } from "../runtime_support.js";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
-import type { CatalogSnapshot } from "../copilot/model_catalog.js";
-import type { NormalizedModelInfo } from "../copilot/model_metadata.js";
+import type { CapabilityCatalogSnapshot } from "../copilot/capability_registry.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import { DaemonIdentityFile, type DaemonIdentity } from "../daemon/identity_file.js";
@@ -649,13 +648,12 @@ export function adminAccountFromSummary(
 
 export function adminModelsFromCatalog(
   accountId: string,
-  catalog: CatalogSnapshot,
+  catalog: CapabilityCatalogSnapshot,
   preferredModel: ModelPreference | null,
-  metadata?: ReadonlyMap<string, NormalizedModelInfo>,
 ): AdminModels {
   return {
     accountId,
-    catalogGeneration: catalog.generation,
+    catalogGeneration: catalog.catalogGeneration,
     fetchedAt: catalog.fetchedAt,
     preferredModel: preferredModel === null
       ? null
@@ -664,14 +662,13 @@ export function adminModelsFromCatalog(
         modelId: preferredModel.modelId,
         validity: preferredModel.validity,
       },
-    items: catalog.models.map((model) => {
-      const modelMetadata = metadata?.get(model.id);
+    items: catalog.models.filter((model) => model.visible).map((model) => {
       return {
-        id: model.id,
+        id: model.modelId,
         name: model.name,
         vendor: model.vendor,
-        maxInputTokens: modelMetadata?.maxInputTokens ?? null,
-        maxOutputTokens: modelMetadata?.maxOutputTokens ?? null,
+        maxInputTokens: model.maxInputTokens.value,
+        maxOutputTokens: model.maxOutputTokens.value,
       };
     }),
   };

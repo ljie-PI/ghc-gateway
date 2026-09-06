@@ -1,5 +1,13 @@
 import type { DeviceFlowCancelResult } from "../accounts/device_flow.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
+import type { BoundAccount } from "../accounts/account_directory.js";
+import type {
+  ModelCapabilityOverrideValue,
+  NativeModelProtocol,
+  CapabilitySource,
+  CapabilityFieldState,
+  ChatOutputTokenField,
+} from "../copilot/model_capabilities.js";
 import { RUNTIME_CONFIG_RANGES } from "../config/schema.js";
 import type { GatewayActivity } from "../gateway/create_gateway.js";
 import type {
@@ -95,15 +103,48 @@ export interface AdminAccounts {
 
 export interface AdminModels {
   readonly accountId: string;
+  readonly credentialGeneration: number;
   readonly catalogGeneration: number;
   readonly fetchedAt: string;
+  readonly capabilityRevision: number;
   readonly preferredModel: AdminPreference | null;
   readonly items: readonly {
     readonly id: string;
     readonly name: string;
     readonly vendor: string;
+    readonly discovered: boolean;
+    readonly configured: boolean;
+    readonly verified: boolean;
+    readonly enabled: boolean;
+    readonly visible: boolean;
+    readonly protocols: readonly NativeModelProtocol[] | null;
+    readonly protocolsSource: CapabilitySource;
+    readonly protocolsConflict: boolean;
+    readonly protocolsLiveState: CapabilityFieldState;
     readonly maxInputTokens: number | null;
+    readonly maxInputTokensSource: CapabilitySource;
+    readonly maxInputTokensConflict: boolean;
+    readonly maxInputTokensLiveState: CapabilityFieldState;
     readonly maxOutputTokens: number | null;
+    readonly maxOutputTokensSource: CapabilitySource;
+    readonly maxOutputTokensConflict: boolean;
+    readonly maxOutputTokensLiveState: CapabilityFieldState;
+    readonly defaultOutputTokens: {
+      readonly configured: number | null;
+      readonly configuredSource: CapabilitySource;
+      readonly conflict: boolean;
+      readonly liveState: CapabilityFieldState;
+      readonly effective: number;
+      readonly source: CapabilitySource | "known_ceiling" | "unknown_fallback";
+      readonly valid: boolean;
+    };
+    readonly chatOutputTokenField: ChatOutputTokenField | null;
+    readonly chatOutputTokenFieldSource: CapabilitySource;
+    readonly chatOutputTokenFieldConflict: boolean;
+    readonly chatOutputTokenFieldLiveState: CapabilityFieldState;
+    readonly overrideRevision: number;
+    readonly builtinRevision: string | null;
+    readonly override: ModelCapabilityOverrideValue | null;
   }[];
 }
 
@@ -132,6 +173,7 @@ export interface AdminAccountDirectory {
     signal?: AbortSignal,
     onRemoving?: () => void,
   ): Promise<AdminAccountSummary>;
+  bindAccount(accountId: string, signal?: AbortSignal): Promise<BoundAccount>;
 }
 
 export interface AdminAccountSummary {
@@ -185,14 +227,75 @@ export type AdminDeviceFlowPoll =
   | { readonly state: "expired" | "denied" | "failed" }
   | { readonly state: "complete"; readonly account: AdminAccount };
 
-export interface AdminCatalog {
-  get(accountId: string, signal: AbortSignal): Promise<{
+export interface AdminCapabilityRegistry {
+  get(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<{
     readonly accountId: string;
-    readonly generation: number;
+    readonly credentialGeneration: number;
+    readonly catalogGeneration: number;
     readonly fetchedAt: string;
-    readonly models: readonly { readonly id: string; readonly name: string; readonly vendor: string }[];
+    readonly capabilityRevision: number;
+    readonly models: readonly {
+      readonly modelId: string;
+      readonly name: string;
+      readonly vendor: string;
+      readonly discovered: boolean;
+      readonly configured: boolean;
+      readonly verified: boolean;
+      readonly enabled: boolean;
+      readonly visible: boolean;
+      readonly protocols: {
+        readonly value: readonly NativeModelProtocol[] | null;
+        readonly source: CapabilitySource;
+        readonly conflict: boolean;
+        readonly liveState: CapabilityFieldState;
+      };
+      readonly maxInputTokens: {
+        readonly value: number | null;
+        readonly source: CapabilitySource;
+        readonly conflict: boolean;
+        readonly liveState: CapabilityFieldState;
+      };
+      readonly maxOutputTokens: {
+        readonly value: number | null;
+        readonly source: CapabilitySource;
+        readonly conflict: boolean;
+        readonly liveState: CapabilityFieldState;
+      };
+      readonly defaultOutputTokens: {
+        readonly configuration: {
+          readonly value: number | null;
+          readonly source: CapabilitySource;
+          readonly conflict: boolean;
+          readonly liveState: CapabilityFieldState;
+        };
+        readonly effective: number;
+        readonly source: CapabilitySource | "known_ceiling" | "unknown_fallback";
+        readonly valid: boolean;
+      };
+      readonly profile: {
+        readonly chatOutputTokenField: {
+          readonly value: ChatOutputTokenField | null;
+          readonly source: CapabilitySource;
+          readonly conflict: boolean;
+          readonly liveState: CapabilityFieldState;
+        };
+      };
+      readonly revision: {
+        readonly overrideRevision: number;
+        readonly builtinRevision: string | null;
+      };
+      readonly override: ModelCapabilityOverrideValue | null;
+    }[];
   }>;
   invalidate(accountId: string): void;
+  isCatalogCurrent(snapshot: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>): boolean;
+  previewOverride(
+    account: Readonly<BoundAccount>,
+    modelId: string,
+    candidate: Readonly<ModelCapabilityOverrideValue> | null,
+    expectedRevision: number,
+    signal: AbortSignal,
+  ): ReturnType<AdminCapabilityRegistry["get"]>;
 }
 
 export interface AdminAccountCaches {
@@ -208,20 +311,31 @@ export interface AdminPreferredModels {
     accountId: string,
     modelId: string,
     expectedRevision: number,
-    catalog: Awaited<ReturnType<AdminCatalog["get"]>>,
+    catalog: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>,
   ): AdminStoredPreference;
   markInvalidIfMissing(
     accountId: string,
-    catalog: Awaited<ReturnType<AdminCatalog["get"]>>,
+    catalog: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>,
     expectedRevision: number | null,
   ): AdminStoredPreference | null;
 }
 
-export interface AdminModelMetadata {
-  get(modelId: string): Readonly<{
-    maxInputTokens?: number;
-    maxOutputTokens?: number;
-  }> | null;
+export interface AdminCapabilityOverrides {
+  set(
+    accountId: string,
+    modelId: string,
+    candidate: Readonly<ModelCapabilityOverrideValue>,
+    expectedRevision: number,
+    afterWrite?: () => void,
+    expectedCredentialGeneration?: number,
+  ): unknown;
+  reset(
+    accountId: string,
+    modelId: string,
+    expectedRevision: number,
+    afterWrite?: () => void,
+    expectedCredentialGeneration?: number,
+  ): unknown;
 }
 
 export interface AdminStoredPreference extends AdminPreference {
@@ -253,10 +367,10 @@ export interface AdminHistory {
 export interface AdminApiDependencies {
   readonly accounts: AdminAccountDirectory;
   readonly deviceFlows: AdminDeviceFlows;
-  readonly catalog: AdminCatalog;
+  readonly registry: AdminCapabilityRegistry;
   readonly preferences: AdminPreferences;
   readonly preferredModels: AdminPreferredModels;
-  readonly modelMetadata: AdminModelMetadata;
+  readonly capabilityOverrides: AdminCapabilityOverrides;
   readonly runtimeConfig: AdminRuntimeConfigManager;
   readonly history: AdminHistory;
   readonly telemetry: AdminTelemetry;
@@ -383,7 +497,8 @@ export class AdminManagementApi {
     if (resolved === null || this.requireAccount(resolved).state !== "active") {
       throw new AdminApiError("not_found");
     }
-    const catalog = await this.dependencies.catalog.get(resolved, signal);
+    const account = await this.dependencies.accounts.bindAccount(resolved, signal);
+    const catalog = await this.dependencies.registry.get(account, signal);
     signal.throwIfAborted();
     return this.modelsDto(catalog);
   }
@@ -392,10 +507,11 @@ export class AdminManagementApi {
     return await this.withModelMutation(accountId, signal, async () => {
       this.requireActiveAccount(accountId);
       const before = this.dependencies.preferences.get(accountId);
-      this.dependencies.catalog.invalidate(accountId);
-      const catalog = await this.dependencies.catalog.get(accountId, signal);
+      this.dependencies.registry.invalidate(accountId);
+      const account = await this.dependencies.accounts.bindAccount(accountId, signal);
+      const catalog = await this.dependencies.registry.get(account, signal);
       signal.throwIfAborted();
-      this.requireActiveAccount(accountId);
+      await this.requireSameCredentialGeneration(accountId, account, signal);
       this.dependencies.preferredModels.markInvalidIfMissing(
         accountId,
         catalog,
@@ -413,9 +529,10 @@ export class AdminManagementApi {
   ): Promise<{ readonly accountId: string; readonly preferredModel: AdminPreference }> {
     return await this.withModelMutation(accountId, signal, async () => {
       this.requireActiveAccount(accountId);
-      const catalog = await this.dependencies.catalog.get(accountId, signal);
+      const account = await this.dependencies.accounts.bindAccount(accountId, signal);
+      const catalog = await this.dependencies.registry.get(account, signal);
       signal.throwIfAborted();
-      this.requireActiveAccount(accountId);
+      await this.requireSameCredentialGeneration(accountId, account, signal);
       let preference: AdminStoredPreference;
       try {
         preference = this.dependencies.preferredModels.setPreferred(
@@ -431,6 +548,100 @@ export class AdminManagementApi {
         throw error;
       }
       return { accountId, preferredModel: preferenceDto(preference) };
+    });
+  }
+
+  async setModelCapabilities(
+    accountId: string,
+    modelId: string,
+    expectedRevision: number,
+    expectedCredentialGeneration: number,
+    expectedCatalogGeneration: number,
+    candidate: Readonly<ModelCapabilityOverrideValue>,
+    signal: AbortSignal,
+  ): Promise<AdminModels> {
+    return await this.withModelMutation(accountId, signal, async () => {
+      this.requireActiveAccount(accountId);
+      const before = this.dependencies.preferences.get(accountId);
+      const validatedAccount = await this.dependencies.accounts.bindAccount(accountId, signal);
+      if (validatedAccount.credentialGeneration !== expectedCredentialGeneration) {
+        throw new AdminApiError("revision_conflict");
+      }
+      const preview = await this.dependencies.registry.previewOverride(
+        validatedAccount,
+        modelId,
+        candidate,
+        expectedRevision,
+        signal,
+      );
+      if (preview.catalogGeneration !== expectedCatalogGeneration
+        || !this.dependencies.registry.isCatalogCurrent(preview)) {
+        throw new AdminApiError("revision_conflict");
+      }
+      signal.throwIfAborted();
+      await this.requireSameCredentialGeneration(accountId, validatedAccount, signal);
+      if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {
+        throw new AdminApiError("revision_conflict");
+      }
+      this.dependencies.capabilityOverrides.set(
+        accountId,
+        modelId,
+        candidate,
+        expectedRevision,
+        () => this.dependencies.preferredModels.markInvalidIfMissing(
+          accountId,
+          preview,
+          before?.revision ?? null,
+        ),
+        validatedAccount.credentialGeneration,
+      );
+      return this.modelsDto(preview);
+    });
+  }
+
+  async resetModelCapabilities(
+    accountId: string,
+    modelId: string,
+    expectedRevision: number,
+    expectedCredentialGeneration: number,
+    expectedCatalogGeneration: number,
+    signal: AbortSignal,
+  ): Promise<AdminModels> {
+    return await this.withModelMutation(accountId, signal, async () => {
+      this.requireActiveAccount(accountId);
+      const before = this.dependencies.preferences.get(accountId);
+      const account = await this.dependencies.accounts.bindAccount(accountId, signal);
+      if (account.credentialGeneration !== expectedCredentialGeneration) {
+        throw new AdminApiError("revision_conflict");
+      }
+      const preview = await this.dependencies.registry.previewOverride(
+        account,
+        modelId,
+        null,
+        expectedRevision,
+        signal,
+      );
+      if (preview.catalogGeneration !== expectedCatalogGeneration
+        || !this.dependencies.registry.isCatalogCurrent(preview)) {
+        throw new AdminApiError("revision_conflict");
+      }
+      signal.throwIfAborted();
+      await this.requireSameCredentialGeneration(accountId, account, signal);
+      if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {
+        throw new AdminApiError("revision_conflict");
+      }
+      this.dependencies.capabilityOverrides.reset(
+        accountId,
+        modelId,
+        expectedRevision,
+        () => this.dependencies.preferredModels.markInvalidIfMissing(
+          accountId,
+          preview,
+          before?.revision ?? null,
+        ),
+        account.credentialGeneration,
+      );
+      return this.modelsDto(preview);
     });
   }
 
@@ -486,22 +697,52 @@ export class AdminManagementApi {
     };
   }
 
-  private modelsDto(catalog: Awaited<ReturnType<AdminCatalog["get"]>>): AdminModels {
+  private modelsDto(catalog: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>): AdminModels {
     return {
       accountId: catalog.accountId,
-      catalogGeneration: catalog.generation,
+      credentialGeneration: catalog.credentialGeneration,
+      catalogGeneration: catalog.catalogGeneration,
       fetchedAt: catalog.fetchedAt,
+      capabilityRevision: catalog.capabilityRevision,
       preferredModel: nullablePreference(this.dependencies.preferences.get(catalog.accountId)),
-      items: catalog.models.map((model) => {
-        const metadata = this.dependencies.modelMetadata.get(model.id);
-        return {
-          id: model.id,
-          name: model.name,
-          vendor: model.vendor,
-          maxInputTokens: metadata?.maxInputTokens ?? null,
-          maxOutputTokens: metadata?.maxOutputTokens ?? null,
-        };
-      }),
+      items: catalog.models.map((model) => ({
+        id: model.modelId,
+        name: model.name,
+        vendor: model.vendor,
+        discovered: model.discovered,
+        configured: model.configured,
+        verified: model.verified,
+        enabled: model.enabled,
+        visible: model.visible,
+        protocols: model.protocols.value,
+        protocolsSource: model.protocols.source,
+        protocolsConflict: model.protocols.conflict,
+        protocolsLiveState: model.protocols.liveState,
+        maxInputTokens: model.maxInputTokens.value,
+        maxInputTokensSource: model.maxInputTokens.source,
+        maxInputTokensConflict: model.maxInputTokens.conflict,
+        maxInputTokensLiveState: model.maxInputTokens.liveState,
+        maxOutputTokens: model.maxOutputTokens.value,
+        maxOutputTokensSource: model.maxOutputTokens.source,
+        maxOutputTokensConflict: model.maxOutputTokens.conflict,
+        maxOutputTokensLiveState: model.maxOutputTokens.liveState,
+        defaultOutputTokens: {
+          configured: model.defaultOutputTokens.configuration.value,
+          configuredSource: model.defaultOutputTokens.configuration.source,
+          conflict: model.defaultOutputTokens.configuration.conflict,
+          liveState: model.defaultOutputTokens.configuration.liveState,
+          effective: model.defaultOutputTokens.effective,
+          source: model.defaultOutputTokens.source,
+          valid: model.defaultOutputTokens.valid,
+        },
+        chatOutputTokenField: model.profile.chatOutputTokenField.value,
+        chatOutputTokenFieldSource: model.profile.chatOutputTokenField.source,
+        chatOutputTokenFieldConflict: model.profile.chatOutputTokenField.conflict,
+        chatOutputTokenFieldLiveState: model.profile.chatOutputTokenField.liveState,
+        overrideRevision: model.revision.overrideRevision,
+        builtinRevision: model.revision.builtinRevision,
+        override: model.override,
+      })),
     };
   }
 
@@ -519,6 +760,21 @@ export class AdminManagementApi {
       throw new AdminApiError("not_found");
     }
     return account;
+  }
+
+  private async requireSameCredentialGeneration(
+    accountId: string,
+    expected: Readonly<BoundAccount>,
+    signal: AbortSignal,
+  ): Promise<BoundAccount> {
+    signal.throwIfAborted();
+    const current = await this.dependencies.accounts.bindAccount(accountId, signal);
+    signal.throwIfAborted();
+    this.requireActiveAccount(accountId);
+    if (current.credentialGeneration !== expected.credentialGeneration) {
+      throw new AdminApiError("revision_conflict");
+    }
+    return current;
   }
 
   private runtimeConfigDto(

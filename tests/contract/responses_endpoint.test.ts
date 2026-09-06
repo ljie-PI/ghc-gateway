@@ -531,8 +531,8 @@ describe("Responses endpoint", () => {
         }
         return {
           data: [
-            { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { mode: "responses" } },
-            { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { mode: "chat" } },
+            { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] } },
+            { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
           ],
         };
       },
