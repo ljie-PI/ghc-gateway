@@ -103,7 +103,6 @@ export function createHonoApp(
   app.all("/admin/api/v1", (context) => handleAdmin(context.req.raw));
   app.all("/admin/api/v1/*", (context) => handleAdmin(context.req.raw));
 
-  app.get("/api/version", () => compactJson(200, { version: VERSION }));
   app.get("/healthz", () => compactJson(200, { status: "ok", version: VERSION }));
   app.get("/readyz", () => {
     if (dependencies.isReady()) {

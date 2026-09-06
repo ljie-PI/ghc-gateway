@@ -1,4 +1,4 @@
-import { DEFAULT_MODEL_CREATED_AT_TIME, type CatalogSnapshot, type CopilotCatalogModel } from "../../copilot/model_catalog.js";
+import { DEFAULT_MODEL_CREATED_AT_TIME, type CatalogSnapshot } from "../../copilot/model_catalog.js";
 
 export interface ModelMetadata {
   readonly mode?: string;
@@ -74,30 +74,6 @@ export function serializeAnthropicModels(
   });
 }
 
-export function serializeOllamaTags(catalog: CatalogSnapshot): string {
-  return JSON.stringify({
-    models: catalog.models.map((model) => serializeOllamaModel(model, catalog.fetchedAt)),
-  });
-}
-
-function serializeOllamaModel(model: CopilotCatalogModel, fetchedAt: string): unknown {
-  return {
-    name: model.id,
-    model: model.id,
-    modified_at: fetchedAt,
-    size: 0,
-    digest: `copilot-${model.id}`,
-    details: {
-      parent_model: "",
-      format: "Copilot API",
-      family: "GitHub Copilot",
-      families: ["GitHub Copilot"],
-      parameter_size: "unknown",
-      quantization_level: "unknown",
-    },
-  };
-}
-
 export function serializeOpenAiModelsError(status: number): string {
   const type = status === 401 || status === 403
     ? "authentication_error"
@@ -112,8 +88,4 @@ export function serializeOpenAiModelsError(status: number): string {
       code: String(status),
     },
   });
-}
-
-export function serializeOllamaTagsError(): string {
-  return JSON.stringify({ error: "Failed to list GitHub Copilot models" });
 }

@@ -30,10 +30,10 @@ describe("daemon JSONL logger", () => {
     const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-log-"));
     const dir = path.join(root, "logs");
     const logger = new JsonlLogger(dir, () => 1_700_000_000_000, testWindowsSecurity);
-    logger.write({ protocol: "ollama", token: "SECRET", prompt: "CANARY" });
+    logger.write({ protocol: "anthropic", token: "SECRET", prompt: "CANARY" });
     const active = path.join(dir, "gateway.jsonl");
     const first = readFileSync(active, "utf8");
-    expect(first).toContain("ollama");
+    expect(first).toContain("anthropic");
     expect(first).not.toContain("SECRET");
     expect(first).not.toContain("CANARY");
 

@@ -94,7 +94,7 @@ describe("AdminStaticModule", () => {
       new Request("http://127.0.0.1:31400/admin/api/v1/status"),
       new Request("http://127.0.0.1:31400/__ghcg/control/v1/status"),
       new Request("http://127.0.0.1:31400/v1/models"),
-      new Request("http://127.0.0.1:31400/api/tags"),
+      new Request("http://127.0.0.1:31400/v1/chat/completions"),
       new Request("http://127.0.0.1:31400/healthz"),
       new Request("http://127.0.0.1:31400/readyz"),
       new Request("http://127.0.0.1:31400/admin", { method: "HEAD" }),

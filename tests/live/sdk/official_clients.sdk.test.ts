@@ -1,6 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import { Ollama, type ChatRequest as OllamaChatRequest, type Message as OllamaMessage, type Tool as OllamaTool } from "ollama";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   assertLiveSdkTestsEnabled,
@@ -65,26 +64,12 @@ const ANTHROPIC_WEATHER_TOOL = {
 
 const ANTHROPIC_WEATHER_CHOICE = { type: "tool", name: "get_weather" } as const;
 
-const OLLAMA_WEATHER_TOOL = {
-  type: "function",
-  function: {
-    name: "get_weather",
-    description: "Get deterministic weather for a city",
-    parameters: {
-      type: "object",
-      properties: { city: { type: "string", description: "City name" } },
-      required: ["city"],
-    },
-  },
-} satisfies OllamaTool;
-
 const CHAT_SCENARIO_TOKENS = 256;
 const NATIVE_RESPONSES_SCENARIO_TOKENS = 512;
 
 describe("guarded live official SDK smoke", () => {
   let openai: OpenAI;
   let anthropic: Anthropic;
-  let ollama: Ollama;
   let chatModel: string;
   let visionModel: string;
   let reasoningModel: string;
@@ -97,35 +82,32 @@ describe("guarded live official SDK smoke", () => {
     const guardedFetch = loopbackOnlyFetch(baseUrl);
     openai = new OpenAI({ apiKey: "local-gateway", baseURL: `${baseUrl}/v1`, fetch: guardedFetch, maxRetries: 0, logLevel: "off" });
     anthropic = new Anthropic({ apiKey: "local-gateway", baseURL: baseUrl, fetch: guardedFetch, maxRetries: 0, logLevel: "off" });
-    ollama = new Ollama({ host: baseUrl, fetch: guardedFetch });
 
-    const [openAiModels, anthropicModels, ollamaModels] = await Promise.all([
+    const [openAiModels, anthropicModels] = await Promise.all([
       openai.models.list(),
       anthropic.models.list(),
-      ollama.list(),
     ]);
     const openAiIds = openAiModels.data.map((model) => model.id);
     const anthropicIds = new Set(anthropicModels.data.map((model) => model.id));
-    const ollamaIds = new Set(ollamaModels.models.map((model) => model.model));
-    const sharedIds = openAiIds.filter((id) => anthropicIds.has(id) && ollamaIds.has(id));
+    const sharedIds = openAiIds.filter((id) => anthropicIds.has(id));
     const explicitChat = process.env.GHC_GATEWAY_LIVE_CHAT_MODEL;
     chatModel = explicitChat ?? "";
     if (chatModel === "" || !sharedIds.includes(chatModel)) {
-      throw new Error("GHC_GATEWAY_LIVE_CHAT_MODEL must select a model shared by all three SDK catalogs");
+      throw new Error("GHC_GATEWAY_LIVE_CHAT_MODEL must select a model shared by the OpenAI and Anthropic SDK catalogs");
     }
     if (modelMode(openAiModels.data.find((model) => model.id === chatModel)) === "responses") {
       throw new Error("GHC_GATEWAY_LIVE_CHAT_MODEL must not be Responses-only");
     }
     visionModel = process.env.GHC_GATEWAY_LIVE_VISION_MODEL ?? "";
     if (visionModel === "" || !sharedIds.includes(visionModel)) {
-      throw new Error("GHC_GATEWAY_LIVE_VISION_MODEL must select a model shared by all three SDK catalogs");
+      throw new Error("GHC_GATEWAY_LIVE_VISION_MODEL must select a model shared by the OpenAI and Anthropic SDK catalogs");
     }
     if (modelMode(openAiModels.data.find((model) => model.id === visionModel)) === "responses") {
       throw new Error("GHC_GATEWAY_LIVE_VISION_MODEL must not be Responses-only");
     }
     reasoningModel = process.env.GHC_GATEWAY_LIVE_REASONING_MODEL ?? "";
     if (reasoningModel === "" || !sharedIds.includes(reasoningModel)) {
-      throw new Error("GHC_GATEWAY_LIVE_REASONING_MODEL must select a model shared by all three SDK catalogs");
+      throw new Error("GHC_GATEWAY_LIVE_REASONING_MODEL must select a model shared by the OpenAI and Anthropic SDK catalogs");
     }
     if (modelMode(openAiModels.data.find((model) => model.id === reasoningModel)) === "responses") {
       throw new Error("GHC_GATEWAY_LIVE_REASONING_MODEL must not be Responses-only");
@@ -497,142 +479,6 @@ describe("guarded live official SDK smoke", () => {
     recordLiveStatus("anthropic_scenarios", "passing", [chatModel]);
   });
 
-  it("calls Ollama chat non-stream, stream, and cancellation", async () => {
-    const response = await ollama.chat({
-      model: chatModel,
-      messages: [{ role: "user", content: "Reply with OK." }],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: false,
-    });
-    expect(response.done).toBe(true);
-    const stream = await ollama.chat({
-      model: chatModel,
-      messages: [{ role: "user", content: "Reply with OK." }],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: true,
-    });
-    expect(await consumeAtLeastOne(stream)).toBeGreaterThan(0);
-    const cancelled = await ollama.chat({
-      model: chatModel,
-      messages: [{ role: "user", content: "Count from one to five." }],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: true,
-    });
-    await expectCancelledStream(cancelled, () => cancelled.abort());
-    recordLiveStatus("ollama_chat", "passing", [chatModel]);
-  });
-
-  it("covers Ollama rich official-SDK scenarios", async () => {
-    const ordinary = await ollama.chat({
-      model: chatModel,
-      messages: [
-        { role: "system", content: "Answer concisely." },
-        { role: "user", content: "Remember the exact token SDK-NONCE-42." },
-        { role: "assistant", content: "I will remember SDK-NONCE-42." },
-        { role: "user", content: "Repeat only the token from the first turn." },
-      ],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: false,
-    });
-    assertOllamaOutput(ordinary.message, "Ollama multi-turn response was empty");
-
-    const image = await ollama.chat({
-      model: visionModel,
-      messages: [{ role: "user", content: "Inspect this valid PNG.", images: [PNG_BASE64] }],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: false,
-    });
-    assertOllamaOutput(image.message, "Ollama image response was empty");
-
-    const toolPrompt: OllamaMessage = { role: "user", content: "You must call get_weather for Tokyo now." };
-    const first = await ollama.chat({
-      model: chatModel,
-      messages: [toolPrompt],
-      tools: [OLLAMA_WEATHER_TOOL],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: false,
-    });
-    const toolCall = first.message.tool_calls?.[0];
-    if (toolCall === undefined) {
-      throw new Error("Ollama did not return a tool call");
-    }
-    const toolCallId = Reflect.get(toolCall, "id");
-    if (typeof toolCallId !== "string") {
-      throw new Error("Ollama tool call omitted its ID");
-    }
-    const toolArguments = parseWeatherArguments(toolCall.function.arguments);
-    expect(toolCallId.length).toBeGreaterThan(0);
-    expect(toolCall.function.name).toBe("get_weather");
-    getWeather(toolArguments.city);
-    const weather = getWeather(toolArguments.city);
-    const toolResult: OllamaMessage & { readonly tool_call_id: string } = {
-      role: "tool",
-      content: JSON.stringify(weather),
-      tool_name: toolCall.function.name,
-      tool_call_id: toolCallId,
-    };
-    const second = await ollama.chat({
-      model: chatModel,
-      messages: [toolPrompt, first.message, toolResult],
-      tools: [OLLAMA_WEATHER_TOOL],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: false,
-    });
-    assertOllamaOutput(second.message, "Ollama tool-result response was empty");
-    expect(toolResult.tool_call_id).toBe(toolCallId);
-
-    const mixed = await ollama.chat({
-      model: visionModel,
-      messages: [{
-        role: "user",
-        content: "Inspect this PNG, then you must call get_weather for Tokyo.",
-        images: [PNG_BASE64],
-      }],
-      tools: [OLLAMA_WEATHER_TOOL],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: false,
-    });
-    const mixedCall = mixed.message.tool_calls?.[0];
-    if (mixedCall === undefined) {
-      throw new Error("Ollama mixed scenario did not return a tool call");
-    }
-    const mixedCallId = Reflect.get(mixedCall, "id");
-    expect(typeof mixedCallId === "string" ? mixedCallId.length : 0).toBeGreaterThan(0);
-    expect(mixedCall.function.name).toBe("get_weather");
-    getWeather(parseWeatherArguments(mixedCall.function.arguments).city);
-
-    let streamedCall: NonNullable<OllamaMessage["tool_calls"]>[number] | undefined;
-    for (let attempt = 0; attempt < 3 && streamedCall === undefined; attempt += 1) {
-      const stream = await ollama.chat({
-        model: chatModel,
-        messages: [{ role: "user", content: "You must stream a get_weather call for Tokyo." }],
-        tools: [OLLAMA_WEATHER_TOOL],
-        options: { num_predict: CHAT_SCENARIO_TOKENS },
-        stream: true,
-      });
-      for await (const chunk of stream) {
-        streamedCall = chunk.message.tool_calls?.[0] ?? streamedCall;
-      }
-    }
-    if (streamedCall === undefined) {
-      throw new Error("Ollama stream did not assemble a tool call");
-    }
-    const streamedCallId = Reflect.get(streamedCall, "id");
-    expect(typeof streamedCallId === "string" ? streamedCallId.length : 0).toBeGreaterThan(0);
-    expect(streamedCall.function.name).toBe("get_weather");
-    getWeather(parseWeatherArguments(streamedCall.function.arguments).city);
-
-    const reasoningRequest: OllamaChatRequest & { readonly stream: false } = {
-      model: reasoningModel,
-      messages: [{ role: "user", content: "Use low reasoning effort for this request." }],
-      options: { num_predict: CHAT_SCENARIO_TOKENS },
-      stream: false,
-      think: "low",
-    };
-    const reasoning = await ollama.chat(reasoningRequest);
-    assertOllamaOutput(reasoning.message, "Ollama reasoning response was empty");
-    recordLiveStatus("ollama_scenarios", "passing", [chatModel]);
-  });
 });
 
 async function runResponsesScenarios(
@@ -814,14 +660,6 @@ function hasOpenAiChatOutput(message: OpenAI.ChatCompletionMessage | undefined):
   return (typeof message.content === "string" && message.content.trim().length > 0)
     || (typeof reasoning === "string" && reasoning.trim().length > 0)
     || (message.tool_calls?.length ?? 0) > 0;
-}
-
-function assertOllamaOutput(message: OllamaMessage, error: string): void {
-  if (message.content.trim().length === 0
-    && (message.thinking?.trim().length ?? 0) === 0
-    && (message.tool_calls?.length ?? 0) === 0) {
-    throw new Error(error);
-  }
 }
 
 function modelMode(model: unknown): string | undefined {

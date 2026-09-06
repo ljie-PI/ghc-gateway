@@ -170,7 +170,6 @@ describe("probes and route surface", () => {
   it("returns exact probe bodies and headers", async () => {
     const gw = await gatewayWith([]);
     for (const [route, file] of [
-      ["/api/version", "version.expected.json"],
       ["/healthz", "healthz.expected.json"],
       ["/readyz", "readyz.expected.json"],
     ] as const) {
@@ -199,7 +198,7 @@ describe("probes and route surface", () => {
 
   it("does not register inference aliases or stub routes", async () => {
     const gw = await gatewayWith([]);
-    for (const url of ["/v1/chat/completions", "/models", "/responses", "/v1/chat/completions/"]) {
+    for (const url of ["/v1/chat/completions", "/models", "/responses", "/v1/chat/completions/", "/api/chat"]) {
       const response = await gw.fetch(new Request(`http://127.0.0.1:31400${url}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -207,6 +206,8 @@ describe("probes and route surface", () => {
       }));
       expect(response.status, url).toBe(404);
     }
+    expect((await gw.fetch(new Request("http://127.0.0.1:31400/api/tags"))).status).toBe(404);
+    expect((await gw.fetch(new Request("http://127.0.0.1:31400/api/version"))).status).toBe(404);
     expect((await gw.fetch(new Request("http://127.0.0.1:31400/healthz/"))).status).toBe(404);
     expect((await gw.fetch(new Request("http://127.0.0.1:31400/healthz", { method: "POST" }))).status).toBe(404);
     await gw.close();

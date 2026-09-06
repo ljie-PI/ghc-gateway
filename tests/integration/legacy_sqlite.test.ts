@@ -244,6 +244,19 @@ describe("legacy better-sqlite3 database compatibility", () => {
         expect(firstUsagePage.totals).toEqual(totals);
         expect(firstUsagePage.items.map((item) => item.protocol)).toEqual(["anthropic", "ollama"]);
         expect(firstUsagePage.nextCursor).not.toBeNull();
+        const legacyOllama = await admin.queryUsage({
+          ...usageQuery, protocol: "ollama", limit: 10,
+        }, signal);
+        expect(legacyOllama.items).toEqual([{
+          utcHour: "2023-11-14T22:00:00.000Z", accountId: PRIMARY_ACCOUNT,
+          protocol: "ollama", resolvedModel: "synthetic-model", outcome: "success",
+          requestCount: 1, errorCount: 0, inputTokens: 11, outputTokens: 7, cacheTokens: 3,
+          latencySumMs: 12.5, latencyMaxMs: 12.5,
+        }]);
+        expect(legacyOllama.totals).toEqual({
+          requestCount: 1, errorCount: 0, inputTokens: 11, outputTokens: 7, cacheTokens: 3,
+          latencySumMs: 12.5, latencyMaxMs: 12.5,
+        });
         const secondUsagePage = await admin.queryUsage({
           ...usageQuery, cursor: firstUsagePage.nextCursor,
         }, signal);
