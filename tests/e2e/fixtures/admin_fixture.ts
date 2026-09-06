@@ -40,6 +40,7 @@ export interface AdminFixture {
     history: AdminHistorySummary;
     status: AdminStatus;
     events: AdminOperationalEvent[];
+    failStatus: boolean;
     rejectSecurity: boolean;
     conflictAccount: boolean;
     conflictConfig: boolean;
@@ -120,6 +121,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       },
       status: status("healthy"),
       events: [operationalEvent(40, "gateway_started")],
+      failStatus: false,
       rejectSecurity: false,
       conflictAccount: false,
       conflictConfig: false,
@@ -269,7 +271,10 @@ async function handle(
     fixture.state.authenticated = false;
     return route.fulfill({ status: 204 });
   }
-  if (path === "/status") return json(route, 200, fixture.state.status);
+  if (path === "/status") {
+    if (fixture.state.failStatus) return failure(route, 500, "internal_error");
+    return json(route, 200, fixture.state.status);
+  }
   if (path === "/usage") {
     return json(route, 200, {
       items: [],

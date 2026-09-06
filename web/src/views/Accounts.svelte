@@ -3,7 +3,7 @@
   import { ApiError, errorMessage, type AdminClient } from "../api.js";
   import type { AdminAccounts, DeviceFlow } from "../types.js";
 
-  let { client }: { client: AdminClient } = $props();
+  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let data: AdminAccounts | null = $state(null);
   let host = $state("github.com");
   let flow: DeviceFlow | null = $state(null);
@@ -71,7 +71,7 @@
         if (canceled.state === "complete") {
           const refreshed = await load();
           if (generation !== pollGeneration) return;
-          message = connectedMessage(canceled.account, refreshed);
+          reportConnected(canceled.account, refreshed);
           return;
         }
       }
@@ -126,7 +126,7 @@
         const completionGeneration = pollGeneration;
         const refreshed = await load(false, completionGeneration);
         if (completionGeneration !== pollGeneration) return;
-        message = connectedMessage(result.account, refreshed);
+        reportConnected(result.account, refreshed);
         return;
       }
       finishFlow(generation, "Authorization expired. Start a new login.");
@@ -161,7 +161,7 @@
         const completionGeneration = pollGeneration;
         const refreshed = await load(false, completionGeneration);
         if (completionGeneration !== pollGeneration) return;
-        message = connectedMessage(result.account, refreshed);
+        reportConnected(result.account, refreshed);
       } else if (result.state === "pending") {
         pollIntervalSeconds = result.pollIntervalSeconds;
         nextPollAtMs = Date.parse(result.nextPollAt);
@@ -216,7 +216,7 @@
       if (canceled.state === "complete") {
         const refreshed = await load();
         if (cancellationGeneration !== pollGeneration) return;
-        message = connectedMessage(canceled.account, refreshed);
+        reportConnected(canceled.account, refreshed);
       }
     } catch (error: unknown) {
       if (cancellationGeneration !== pollGeneration) return;
@@ -263,16 +263,24 @@
   ): string {
     const identity = account.login === null ? account.numericUserId : `@${account.login}`;
     if (refreshed === null) {
-      return `Connected ${identity}. Refresh accounts to confirm the current default.`;
+      return `Connected ${identity}. Refresh accounts to confirm which account is in use.`;
     }
     if (refreshed.defaultAccountId === account.accountId) {
-      return `Connected ${identity}; it is the default account.`;
+      return `Connected ${identity}; it is in use for new requests.`;
     }
     const currentDefault = refreshed.items.find((item) => item.accountId === refreshed.defaultAccountId);
     const defaultIdentity = currentDefault?.login ?? currentDefault?.numericUserId;
     return defaultIdentity === undefined
-      ? `Connected ${identity}. No default account is currently selected.`
-      : `Connected ${identity}. Current default is ${currentDefault?.login === null ? defaultIdentity : `@${defaultIdentity}`}.`;
+      ? `Connected ${identity}. No account is currently selected.`
+      : `Connected ${identity}. Account in use is ${currentDefault?.login === null ? defaultIdentity : `@${defaultIdentity}`}.`;
+  }
+
+  function reportConnected(
+    account: NonNullable<AdminAccounts["items"][number]>,
+    refreshed: AdminAccounts | null,
+  ): void {
+    failure = "";
+    message = connectedMessage(account, refreshed);
   }
 
   function isAbort(error: unknown): boolean {
@@ -285,7 +293,7 @@
     failure = "";
     try {
       await client.useAccount(id, data.defaultRevision);
-      message = "Default account updated.";
+      message = "Account is now in use for new requests.";
       await load();
     } catch (error: unknown) {
       failure = errorMessage(error);
@@ -314,11 +322,11 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">IDENTITY ROSTER</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Accounts</h1>
-    <p>Connect GitHub.com or GHES and choose the request identity.</p>
+    <p>Connect GitHub.com or GHES and choose the identity used by new gateway requests.</p>
   </div>
-  <button class="quiet" onclick={() => void load()}>Refresh</button>
+  <button onclick={() => void load()}>Refresh</button>
 </header>
 
 {#if message}
@@ -328,8 +336,8 @@
   <p class="notice error" role="alert">{failure}</p>
 {/if}
 
-<section class="section-block connect-panel">
-  <div>
+<section class="connect-panel">
+  <div class="device-actions">
     <p class="eyebrow">DEVICE AUTHORIZATION</p>
     <h2>Connect an account</h2>
   </div>
@@ -386,40 +394,113 @@
     <p>Start a device authorization above. Credentials never enter browser storage.</p>
   </section>
 {:else if data}
-  <section class="card-list" aria-label="Connected accounts">
-    {#each data.items as account (account.accountId)}
-      <article class:muted-card={account.state !== "active"}>
-        <div class="avatar" aria-hidden="true">
-          {(account.login ?? account.host).slice(0, 2).toUpperCase()}
-        </div>
-        <div class="grow">
-          <div class="account-title">
-            <h2>{account.displayName ?? account.login ?? account.numericUserId}</h2>
-            {#if data.defaultAccountId === account.accountId}<span class="chip">DEFAULT</span>{/if}
-            <span class="chip state-{account.state}">{account.state}</span>
-          </div>
-          <p>{account.login ? `@${account.login} · ` : ""}{account.host}</p>
-          <small>
-            Authenticated {account.authenticatedAt
-              ? new Date(account.authenticatedAt).toLocaleString()
-              : "not active"}
-          </small>
-        </div>
-        <div class="card-actions">
-          {#if account.state === "active" && data.defaultAccountId !== account.accountId}
-            <button onclick={() => useAccount(account.accountId)} disabled={busy === account.accountId}>
-              Make default
-            </button>
-          {/if}
-          {#if account.state !== "removed"}
-            <button
-              class="danger-text"
-              onclick={() => remove(account.accountId, account.revision)}
-              disabled={busy === account.accountId}
-            >Remove</button>
-          {/if}
-        </div>
-      </article>
-    {/each}
+  {@const defaultAccountId = data.defaultAccountId}
+  {@const selected = data.items.find((account) => account.accountId === defaultAccountId)}
+  <div class="fact-strip" aria-label="Account selection summary">
+    <div>
+      <span>Selected identity</span>
+      <strong>{selected ? (selected.login === null ? selected.numericUserId : `@${selected.login}`) : "No account selected"}</strong>
+    </div>
+    <div>
+      <span>Connected accounts</span>
+      <strong>{data.items.filter((account) => account.state === "active").length}</strong>
+    </div>
+    <div>
+      <span>Request selection</span>
+      <strong>{selected ? "Explicit account" : "Fallback applies"}</strong>
+    </div>
+  </div>
+  <section class="section" aria-labelledby="connected-identities">
+    <div class="section-heading">
+      <h2 id="connected-identities"><span class="section-number">[01]</span>Connected identities</h2>
+    </div>
+    <div class="table-scroll">
+      <table class="account-table">
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>Authorization</th>
+            <th>Authenticated</th>
+            <th>Request identity</th>
+            <th><span class="visually-hidden">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each data.items as account (account.accountId)}
+            <tr
+              class:current-row={defaultAccountId === account.accountId}
+              class:muted-row={account.state !== "active"}
+            >
+              <td data-label="Account">
+                <div class="identity">
+                  <span class="avatar" aria-hidden="true">
+                    {(account.login ?? account.host).slice(0, 2).toUpperCase()}
+                  </span>
+                  <span>
+                    <strong>{account.displayName ?? account.login ?? account.numericUserId}</strong>
+                    <small>{account.login ? `@${account.login} · ` : ""}{account.host}</small>
+                  </span>
+                </div>
+              </td>
+              <td data-label="Authorization">
+                <span class:good={account.state === "active"} class="badge state-{account.state}">
+                  {account.state === "active" ? "Connected" : account.state}
+                </span>
+              </td>
+              <td data-label="Authenticated">{account.authenticatedAt ? new Date(account.authenticatedAt).toLocaleString() : "Not active"}</td>
+              <td data-label="Request identity">
+                {#if defaultAccountId === account.accountId}
+                  <span class="badge strong">In use</span>
+                {:else if account.state === "active"}
+                  <button
+                    class="primary"
+                    onclick={() => useAccount(account.accountId)}
+                    disabled={busy !== ""}
+                  >{busy === account.accountId ? "Switching..." : "Use this account"}</button>
+                {:else}
+                  <span class="muted">Unavailable</span>
+                {/if}
+              </td>
+              <td data-label="Actions">
+                <div class="row-actions">
+                  {#if account.state !== "removed"}
+                    <button
+                      class="danger-text"
+                      onclick={() => remove(account.accountId, account.revision)}
+                      disabled={busy !== ""}
+                    >{busy === account.accountId ? "Working..." : "Remove"}</button>
+                  {/if}
+                </div>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    <div class="hint-line">
+      <span aria-hidden="true">[i]</span>
+      <p>
+        Use this account changes the identity for new requests. Requests already running keep their
+        bound account. Connected accounts are not rotated automatically after errors or rate limits.
+      </p>
+    </div>
+    {#if data.defaultAccountId === null}
+      <p class="notice warning" role="status">
+        No account is explicitly selected. New requests use the gateway's existing fallback rule;
+        this page does not choose one automatically.
+      </p>
+    {/if}
+  </section>
+  <section class="section">
+    <div class="section-heading">
+      <h2><span class="section-number">[02]</span>From your terminal</h2>
+    </div>
+    <div class="command-block">
+      <div class="command-lines">
+        <span class="muted">The same selection is available in the CLI. Account IDs come from the list command.</span>
+        <code>$ ghcg accounts list</code>
+        <code>$ ghcg accounts use &lt;account-id&gt;</code>
+      </div>
+    </div>
   </section>
 {/if}

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   ADMIN_FIXTURE_NOW_MS,
@@ -17,8 +17,7 @@ async function openAdmin(page: Page) {
 }
 
 async function keyboardNavigate(page: Page, name: string): Promise<void> {
-  await page.getByRole("button", { name: "End session" }).focus();
-  await page.keyboard.press("Tab");
+  await page.getByRole("button", { name: "Overview" }).focus();
   await page.keyboard.press("Tab");
   if (name !== "Accounts") throw new Error("keyboardNavigate currently starts at Accounts");
   await expect(page.getByRole("button", { name })).toBeFocused();
@@ -83,7 +82,7 @@ test("bootstrap-and-session-expiry", async ({ page }) => {
   }))).toEqual(expect.objectContaining({ local: 0, session: 0 }));
   fixture.state.authenticated = false;
   await page.getByRole("button", { name: "Refresh" }).click();
-  await expect(page.getByRole("heading", { name: "Control room locked" })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
   await expect(page.getByText("admin session ended")).toBeVisible();
   expect(fixture.requests.some((request) => request.url().endsWith("/auth/logout"))).toBe(false);
   expect(fixture.requests.filter((request) => request.url().endsWith("/status"))).toHaveLength(2);
@@ -103,30 +102,30 @@ test("github-and-ghes-account-lifecycle", async ({ page }) => {
   await expect.poll(() => devicePollRequests(fixture).length).toBe(1);
   await advanceDeviceClock(page, fixture, 10_000);
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Current default is @octo");
+  await expect(page.getByRole("status")).toContainText("Account in use is @octo");
   expect(fixture.state.accounts.defaultAccountId).toBe("github:1");
   fixture.state.conflictAccount = true;
-  await page.getByRole("button", { name: "Make default" }).click();
+  await page.getByRole("button", { name: "Use this account" }).click();
   await expect(page.getByRole("alert")).toContainText("changed elsewhere");
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
-  await page.getByRole("button", { name: "Make default" }).click();
+  await page.getByRole("button", { name: "Use this account" }).click();
   expect(fixture.requests.find((request) => request.url().endsWith("/accounts/default"))?.headers()["x-ghcg-csrf"])
     .toBe("csrf-memory-only");
   fixture.state.failAccountRemoval = true;
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("article")
+  await page.getByRole("row")
     .filter({ hasText: "Enterprise Admin" })
     .getByRole("button", { name: "Remove" })
     .click();
   await expect(page.getByRole("alert")).toContainText("internal error");
-  await expect(page.getByRole("article").filter({ hasText: "Enterprise Admin" }).getByText("removing"))
+  await expect(page.getByRole("row").filter({ hasText: "Enterprise Admin" }).getByText("removing"))
     .toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("article")
+  await page.getByRole("row")
     .filter({ hasText: "Enterprise Admin" })
     .getByRole("button", { name: "Remove" })
     .click();
-  await expect(page.getByRole("article").filter({ hasText: "Enterprise Admin" }).getByText("removed"))
+  await expect(page.getByRole("row").filter({ hasText: "Enterprise Admin" }).getByText("removed"))
     .toBeVisible();
 });
 
@@ -162,7 +161,7 @@ test("device-flow disposal and terminal failures clean up polling", async ({ pag
   await page.getByRole("button", { name: "Start login" }).click();
   fixture.state.authenticated = false;
   await advanceDeviceClock(page, fixture, 5_000);
-  await expect(page.getByRole("heading", { name: "Control room locked" })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
   await advanceDeviceClock(page, fixture, 20_000);
   expect(devicePollRequests(fixture)).toHaveLength(4);
 });
@@ -178,6 +177,7 @@ test("device-flow retries network failures without accepting stale responses", a
   await expect(page.getByText("retrying automatically")).toBeVisible();
   await advanceDeviceClock(page, fixture, 5_000);
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
 
   fixture.state.accounts = {
     ...fixture.state.accounts,
@@ -297,8 +297,9 @@ test("model-capability-override-lifecycle", async ({ page }) => {
   await page.getByRole("button", { name: "Models" }).click();
   await page.getByLabel("Model ID").fill("manual-model");
   await page.getByRole("button", { name: "Add configured model" }).click();
-  const card = page.getByRole("article").filter({ hasText: "manual-model" });
-  await expect(card.getByText(/Configured \/ unverified/)).toBeVisible();
+  const card = page.locator('tbody[data-model-id="manual-model"]');
+  await expect(card.getByText("Configured / unverified", { exact: true })).toBeVisible();
+  await card.getByText("Capability details and override").click();
   await card.getByLabel("messages").check();
   await card.getByLabel("Default output tokens").fill("2048");
   await card.getByRole("button", { name: "Save capability override" }).click();
@@ -306,10 +307,10 @@ test("model-capability-override-lifecycle", async ({ page }) => {
   expect(fixture.requests.find((request) => request.url().endsWith("/models/capabilities")
     && request.method() === "PUT")?.headers()["x-ghcg-csrf"]).toBe("csrf-memory-only");
   await card.getByRole("button", { name: "Reset override" }).click();
-  await expect(page.getByRole("article").filter({ hasText: "manual-model" })).toHaveCount(0);
+  await expect(page.locator('tbody[data-model-id="manual-model"]')).toHaveCount(0);
   await page.getByLabel("Model ID").fill("manual-model");
   await page.getByRole("button", { name: "Add configured model" }).click();
-  await expect(page.getByRole("article").filter({ hasText: "manual-model" })).toBeVisible();
+  await expect(page.locator('tbody[data-model-id="manual-model"]')).toBeVisible();
 });
 
 test("model-account switching ignores stale responses", async ({ page }) => {
@@ -339,10 +340,13 @@ test("model-account switching ignores stale responses", async ({ page }) => {
 test("model token override keeps protocol inheritance", async ({ page }) => {
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Models" }).click();
-  const card = page.getByRole("article").filter({ hasText: "gpt-alpha" });
+  const card = page.locator('tbody[data-model-id="gpt-alpha"]').first();
+  await card.getByText("Capability details and override").click();
   await expect(card.getByLabel("Override native protocols")).not.toBeChecked();
   await card.getByLabel("Default output tokens").fill("2048");
   await card.getByRole("button", { name: "Save capability override" }).click();
+  await expect(page.getByText("gpt-alpha capability override saved.")).toBeVisible();
+  await expect(card.getByText("Configured override", { exact: true })).toBeVisible();
   const request = fixture.requests.findLast((candidate) => (
     candidate.url().endsWith("/models/capabilities")
     && candidate.method() === "PUT"
@@ -358,6 +362,7 @@ test("model token override keeps protocol inheritance", async ({ page }) => {
     candidate.url().endsWith("/models/capabilities") && candidate.method() === "PUT"
   )).length;
   await card.getByLabel("Default output tokens").fill("");
+  await expect(card.getByLabel("Default output tokens")).toHaveValue("");
   await card.getByRole("button", { name: "Save capability override" }).click();
   await expect.poll(() => fixture.requests.filter((candidate) => (
     candidate.url().endsWith("/models/capabilities") && candidate.method() === "PUT"
@@ -381,7 +386,7 @@ test("models view renders duplicate catalog IDs without crashing", async ({ page
   };
   await page.getByRole("button", { name: "Models" }).click();
   await expect(page.getByText("gpt-alpha", { exact: true })).toHaveCount(2);
-  await expect(page.getByRole("heading", { name: "Duplicate Alpha" })).toBeVisible();
+  await expect(page.getByText("Duplicate Alpha", { exact: true })).toBeVisible();
 });
 
 test("config-revision-and-security-rejection", async ({ page }) => {
@@ -389,6 +394,8 @@ test("config-revision-and-security-rejection", async ({ page }) => {
   await page.getByRole("button", { name: "Configuration" }).click();
   await expect(page.getByRole("heading", { name: "Configuration", exact: true })).toBeFocused();
   await expect(page.getByText("REVISION 7")).toBeVisible();
+  await expect(page.getByRole("group")).toHaveCount(7);
+  await expect(page.getByRole("spinbutton")).toHaveCount(15);
   fixture.state.conflictConfig = true;
   await page.getByRole("button", { name: "Apply configuration" }).click();
   await expect(page.getByRole("alert")).toContainText("changed elsewhere");
@@ -401,12 +408,12 @@ test("responses-history-inspect-and-clear", async ({ page }) => {
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Responses History" }).click();
   await expect(page.getByRole("heading", { name: "Responses History", exact: true })).toBeFocused();
-  await expect(page.getByText("12", { exact: true })).toBeVisible();
+  await expect(page.getByText("12 / 512", { exact: true })).toBeVisible();
   fixture.state.conflictHistory = true;
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Clear history" }).click();
   await expect(page.getByRole("alert")).toContainText("changed elsewhere");
-  await expect(page.getByText("12", { exact: true })).toBeVisible();
+  await expect(page.getByText("12 / 512", { exact: true })).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Clear history" }).click();
   await expect(page.getByRole("heading", { name: "History is empty" })).toBeVisible();
@@ -435,7 +442,7 @@ test("events-and-degraded-recovery", async ({ page }) => {
   ];
 
   await page.goto("/admin/#bootstrap_token=event-secret");
-  await expect(page.getByText("connecting", { exact: true })).toBeVisible();
+  await expect(page.getByRole("banner").getByText("connecting", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Gateway is degraded" })).toBeVisible();
   await expect(page.getByRole("banner").getByText("live", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Events" }).click();
@@ -450,11 +457,11 @@ test("events-and-degraded-recovery", async ({ page }) => {
   await expect(page.getByText("EVENT 521", { exact: true })).toHaveCount(0);
   await expect(page.getByText("EVENT 522", { exact: true })).toHaveCount(0);
   await expect(page.getByText("EVENT 523", { exact: true })).toHaveCount(1);
-  await expect(page.locator(".timeline > li")).toHaveCount(501);
+  await expect(page.getByRole("list", { name: "Operational events" }).getByRole("listitem")).toHaveCount(501);
   await expect(page.getByText("EVENT 520", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Load newer events" }).click();
   await expect(page.getByText("EVENT 520", { exact: true })).toBeVisible();
-  await expect(page.locator(".timeline > li")).toHaveCount(512);
+  await expect(page.getByRole("list", { name: "Operational events" }).getByRole("listitem")).toHaveCount(512);
   await page.getByRole("button", { name: "Overview" }).click();
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeFocused();
   await expect(page.getByRole("heading", { name: "Gateway is degraded" })).toHaveCount(0);
@@ -463,8 +470,158 @@ test("events-and-degraded-recovery", async ({ page }) => {
 test("daemon-restart-invalidates-session", async ({ page }) => {
   const fixture = await openAdmin(page);
   fixture.state.authenticated = false;
-  await expect(page.getByRole("heading", { name: "Control room locked" })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
   await expect(page.getByText("admin session ended")).toBeVisible();
   expect(fixture.requests.some((request) => request.url().endsWith("/auth/session"))).toBe(true);
   expect(await page.evaluate(() => localStorage.length + sessionStorage.length)).toBe(0);
+});
+
+test("responsive shell centers the right column and contains long content", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 390, height: 900 });
+  const fixture = await openAdmin(page);
+  const baseAccount = fixture.state.accounts.items[0]!;
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: [
+      baseAccount,
+      {
+        ...baseAccount,
+        accountId: "ghes:long",
+        host: `${"enterprise-".repeat(12)}example.test`,
+        numericUserId: "99999999999999999999",
+        login: `${"long-login-".repeat(12)}account`,
+        displayName: `${"Long directory identity ".repeat(8)}`,
+      },
+    ],
+  };
+  fixture.state.models = {
+    ...fixture.state.models,
+    items: fixture.state.models.items.map((model, index) => index === 0
+      ? { ...model, id: `model-${"long-".repeat(40)}` }
+      : model),
+  };
+  fixture.state.events = [{
+    ...operationalEvent(99),
+    metadata: { source: "x".repeat(600) },
+  }];
+
+  const assertDocumentShape = async (): Promise<void> => {
+    await expect(page.getByRole("main")).toHaveCount(1);
+    await expect(page.locator("h1")).toHaveCount(1);
+    const overflow = await page.evaluate(() => {
+      window.scrollTo({ left: 10_000 });
+      const rootScrollX = window.scrollX;
+      window.scrollTo({ left: 0 });
+      return {
+        title: document.querySelector("h1")?.textContent ?? "",
+        rootScrollX,
+        tableContainersFit: [...document.querySelectorAll<HTMLElement>(".table-scroll")]
+          .every((element) => element.getBoundingClientRect().right <= document.documentElement.clientWidth + 1),
+      };
+    });
+    expect(overflow, overflow.title).toEqual({ title: overflow.title, rootScrollX: 0, tableContainersFit: true });
+  };
+
+  await assertDocumentShape();
+  const menu = page.getByRole("button", { name: "Open navigation" });
+  const sidebar = page.locator('[data-layout-region="navigation"]');
+  await expect(sidebar).toHaveAttribute("aria-hidden", "true");
+  await expect(sidebar).toHaveAttribute("inert", "");
+  await menu.click();
+  await expect(page.getByRole("button", { name: "Overview" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeFocused();
+  await expect(sidebar).toHaveAttribute("aria-hidden", "true");
+
+  for (const view of ["Accounts", "Models", "Configuration", "Responses History", "Events", "Overview"]) {
+    await menu.click();
+    await expect(sidebar).toHaveAttribute("aria-hidden", "false");
+    await page.getByRole("button", { name: view }).click();
+    await expect(page.getByRole("heading", { name: view, exact: true })).toBeFocused();
+    await assertDocumentShape();
+  }
+
+  for (const width of [900, 1600, 2560, 3440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await expect(sidebar).not.toHaveAttribute("aria-hidden", "true");
+    for (const view of ["Overview", "Accounts", "Models", "Configuration", "Responses History", "Events"]) {
+      await page.getByRole("button", { name: view }).click();
+      await expect(page.getByRole("heading", { name: view, exact: true })).toBeFocused();
+      const gaps = await page.evaluate(() => {
+        const column = document.querySelector<HTMLElement>('[data-layout-region="main-column"]')!
+          .getBoundingClientRect();
+        const frame = document.querySelector<HTMLElement>('[data-layout-region="content-frame"]')!
+          .getBoundingClientRect();
+        return {
+          left: frame.left - column.left,
+          right: column.right - frame.right,
+        };
+      });
+      expect(Math.abs(gaps.left - gaps.right)).toBeLessThanOrEqual(1);
+      await assertDocumentShape();
+    }
+  }
+});
+
+test("responsive authentication, empty, and error states stay contained", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  const fixture = await installAdminFixture(page);
+  await page.goto("/admin/");
+  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
+  await expect(page.getByRole("main")).toHaveCount(1);
+  await expect(page.locator("h1")).toHaveCount(1);
+
+  await page.evaluate(() => {
+    location.hash = "bootstrap_token=state-secret";
+  });
+  await page.getByRole("button", { name: "Try current session" }).click();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  fixture.state.accounts = { ...fixture.state.accounts, defaultAccountId: null, items: [] };
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await page.getByRole("button", { name: "Accounts" }).click();
+  await expect(page.getByRole("heading", { name: "No accounts connected" })).toBeVisible();
+
+  fixture.state.failStatus = true;
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await page.getByRole("button", { name: "Overview" }).click();
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await expect(page.getByRole("alert")).toContainText("Overview unavailable");
+  const rootScrollX = await page.evaluate(() => {
+    window.scrollTo({ left: 10_000 });
+    return window.scrollX;
+  });
+  expect(rootScrollX).toBe(0);
+});
+
+test("live SSE deduplicates replay before applying the 512 event bound", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  fixture.state.events = [];
+  const unique = Array.from({ length: 512 }, (_, index) => {
+    const event = operationalEvent(index + 1);
+    return `id: ${event.eventId}\n${sse("operational", { kind: "operational", event })}`;
+  }).join("");
+  const replayed = operationalEvent(512);
+  fixture.state.streamBodies = [
+    `${unique}id: ${replayed.eventId}\n${sse("operational", { kind: "operational", event: replayed })}`,
+  ];
+  fixture.state.streamHoldsMs = [1_000];
+
+  await page.goto("/admin/#bootstrap_token=dedupe-secret");
+  await page.getByRole("button", { name: "Events" }).click();
+  const eventList = page.getByRole("list", { name: "Operational events" });
+  await expect(eventList.getByRole("listitem")).toHaveCount(512);
+  await expect(page.getByText("EVENT 1", { exact: true })).toBeVisible();
+  await expect(page.getByText("EVENT 512", { exact: true })).toHaveCount(1);
+});
+
+test("production Admin bundle excludes prototype content", async () => {
+  const root = path.resolve("dist", "admin");
+  const files = await readdir(root, { recursive: true });
+  const text = (await Promise.all(files
+    .filter((file) => /\.(?:css|html|js)$/u.test(file))
+    .map((file) => readFile(path.join(root, file), "utf8")))).join("\n");
+  expect(text).not.toMatch(
+    /MOCK DATA|Simulate connection|Reset preview|sample-a|sample-b|ljie-PI|jl87pi|resp_preview_|SIMULATED SESSION|SAMPLE FEED|variant-pick|DESIGN PREVIEW/u,
+  );
 });

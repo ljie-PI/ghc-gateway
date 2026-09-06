@@ -3,7 +3,7 @@
   import { ApiError, errorMessage, type AdminClient } from "../api.js";
   import type { AdminHistorySummary } from "../types.js";
 
-  let { client }: { client: AdminClient } = $props();
+  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let data: AdminHistorySummary | null = $state(null);
   let loading = $state(true);
   let clearing = $state(false);
@@ -42,7 +42,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">CONVERSATION CONTINUITY</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Responses History</h1>
     <p>Inspect bounded bridge checkpoints without exposing response content.</p>
   </div>
@@ -61,27 +61,20 @@
 {#if loading}
   <p class="loading-line" aria-busy="true">Inspecting history...</p>
 {:else if data}
-  <section class="history-orbit">
-    <div class="orb"><strong>{data.count}</strong><span>of {data.maxResponses}</span></div>
-    <div>
+  <section class="history-summary">
+    <div class="fact-strip">
+      <div><span>Checkpoints</span><strong>{data.count} / {data.maxResponses}</strong></div>
+      <div><span>Oldest</span><strong>{data.oldestAt ? new Date(data.oldestAt).toLocaleString() : "None"}</strong></div>
+      <div><span>Newest</span><strong>{data.newestAt ? new Date(data.newestAt).toLocaleString() : "None"}</strong></div>
+      <div><span>TTL / revision</span><strong>{data.ttlDays} days · {data.revision}</strong></div>
+    </div>
+    <div class="history-copy">
       <p class="eyebrow">RETAINED CHECKPOINTS</p>
       <h2>{data.count === 0 ? "History is empty" : "History is within bounds"}</h2>
       <p>
-        Only completed semantic checkpoints from bridged Responses are retained. Native Responses
-        never enter this store.
+        Only completed Semantic Checkpoints from bridged Responses are retained. Native Responses
+        never enter this store, and response content is not shown here.
       </p>
     </div>
-  </section>
-  <section class="stat-row history-stats">
-    <div>
-      <span>Oldest checkpoint</span>
-      <strong>{data.oldestAt ? new Date(data.oldestAt).toLocaleString() : "None"}</strong>
-    </div>
-    <div>
-      <span>Newest checkpoint</span>
-      <strong>{data.newestAt ? new Date(data.newestAt).toLocaleString() : "None"}</strong>
-    </div>
-    <div><span>Time to live</span><strong>{data.ttlDays} days</strong></div>
-    <div><span>Revision</span><strong>{data.revision}</strong></div>
   </section>
 {/if}

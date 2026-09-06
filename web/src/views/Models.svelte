@@ -15,7 +15,7 @@
     chatOutputTokenField: "" | "max_tokens" | "max_completion_tokens";
   };
 
-  let { client }: { client: AdminClient } = $props();
+  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let accounts: AdminAccounts | null = $state(null);
   let data: AdminModels | null = $state(null);
   let accountId = $state("");
@@ -243,9 +243,9 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">CATALOG CONTROL</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Models</h1>
-    <p>Inspect native capabilities and explicitly configure each account's models.</p>
+    <p>Inspect real capability provenance and explicitly configure each account's catalog.</p>
   </div>
   <button class="primary" onclick={refresh} disabled={!accountId || busy === "refresh"}>
     {busy === "refresh" ? "Refreshing..." : "Refresh catalog"}
@@ -301,102 +301,190 @@
     <p>The account returned no visible models. Add an exact model ID or refresh discovery.</p>
   </section>
 {:else if data}
-  <section class="model-grid" aria-label="Account models">
-    {#each data.items as model, index (`${model.id}:${index}`)}
-      {@const editor = editors[model.id]}
-      <article class:preferred={data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid"}>
-        <div class="model-vendor">{model.vendor}</div>
-        <h2>{model.name}</h2>
-        <code>{model.id}</code>
-        <p class="subtle">
-          {model.discovered ? "Discovered" : "Configured / unverified"} ·
-          {model.enabled ? "enabled" : "disabled"} · revision {model.overrideRevision}
-        </p>
-        <dl>
-          <div><dt>Native HTTP protocols</dt><dd>{model.protocols?.join(", ") || (model.protocols === null ? "Unknown" : "None")}</dd></div>
-          <div><dt>Protocol source</dt><dd>{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""}</dd></div>
-          <div><dt>Live declaration</dt><dd>{model.protocolsLiveState}</dd></div>
-          <div><dt>Input window</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {model.maxInputTokensSource}{model.maxInputTokensConflict ? " · conflict" : ""} · live {model.maxInputTokensLiveState}</dd></div>
-          <div><dt>Output window</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} · {model.maxOutputTokensSource}{model.maxOutputTokensConflict ? " · conflict" : ""} · live {model.maxOutputTokensLiveState}</dd></div>
-          <div><dt>Default output</dt><dd>{model.defaultOutputTokens.effective.toLocaleString()} · {model.defaultOutputTokens.source}{model.defaultOutputTokens.conflict ? " · conflict" : ""}{model.defaultOutputTokens.valid ? "" : " · invalid for current ceiling"} · live {model.defaultOutputTokens.liveState}</dd></div>
-          <div><dt>Chat budget field</dt><dd>{model.chatOutputTokenField ?? "Unknown"} · {model.chatOutputTokenFieldSource}{model.chatOutputTokenFieldConflict ? " · conflict" : ""} · live {model.chatOutputTokenFieldLiveState}</dd></div>
-          <div><dt>Built-in revision</dt><dd>{model.builtinRevision ?? "None"}</dd></div>
-        </dl>
+  <section class="section" aria-labelledby="model-directory-title">
+    <div class="section-heading">
+      <h2 id="model-directory-title"><span class="section-number">[01]</span>Model directory</h2>
+      <span class="badge">{data.items.length} models</span>
+    </div>
+    <div class="table-scroll">
+      <table class="model-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Native interfaces</th>
+            <th>Source</th>
+            <th>Limits</th>
+            <th>Preference</th>
+          </tr>
+        </thead>
+        {#each data.items as model, index (`${model.id}:${index}`)}
+          {@const editor = editors[model.id]}
+          {@const preferred = data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid"}
+          <tbody data-model-id={model.id}>
+            <tr class:current-row={preferred}>
+              <td>
+                <div class="model-summary">
+                  <strong>{model.name}</strong>
+                  <code>{model.id}</code>
+                  <small>{model.vendor}</small>
+                </div>
+              </td>
+              <td>
+                <div class="tag-group">
+                  {#if model.protocols === null}
+                    <span class="badge warning">Unknown</span>
+                  {:else if model.protocols.length === 0}
+                    <span class="badge">None</span>
+                  {:else}
+                    {#each model.protocols as protocol (protocol)}
+                      <span class="badge">{protocol}</span>
+                    {/each}
+                  {/if}
+                </div>
+              </td>
+              <td>
+                <div class="model-source">
+                  <div class="tag-group">
+                    {#if model.discovered}<span class="badge">Discovered</span>{/if}
+                    {#if model.configured}
+                      <span class="badge" class:warning={!model.verified}>
+                        {model.verified ? "Configured override" : "Configured / unverified"}
+                      </span>
+                    {/if}
+                  </div>
+                  <small class="muted">{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""}</small>
+                </div>
+              </td>
+              <td>
+                <span>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} in</span><br />
+                <span>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} out</span>
+              </td>
+              <td>
+                <div class="row-actions">
+                  {#if model.visible}
+                    <button
+                      class:primary={!preferred}
+                      onclick={() => prefer(model.id)}
+                      disabled={busy === `prefer:${model.id}` || preferred}
+                    >{preferred ? "Preferred" : "Set preferred"}</button>
+                  {:else}
+                    <span class="badge">Hidden</span>
+                  {/if}
+                </div>
+              </td>
+            </tr>
+            <tr class="model-editor-row">
+              <td colspan="5">
+                <details class="model-editor">
+                  <summary>Capability details and override</summary>
+                  <div class="capability-grid">
+                    <dl>
+                      <div>
+                        <dt>Catalog state</dt>
+                        <dd>
+                          {model.discovered ? "Discovered" : "Not discovered"} ·
+                          {model.configured
+                            ? (model.verified ? "Configured override" : "Configured / unverified")
+                            : "No Admin override"} ·
+                          {model.enabled ? "enabled" : "disabled"} · override revision {model.overrideRevision}
+                        </dd>
+                      </div>
+                      <div><dt>Native HTTP protocols</dt><dd>{model.protocols?.join(", ") || (model.protocols === null ? "Unknown" : "None")}</dd></div>
+                      <div><dt>Protocol provenance</dt><dd>{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""} · live {model.protocolsLiveState}</dd></div>
+                      <div><dt>Input window</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {model.maxInputTokensSource}{model.maxInputTokensConflict ? " · conflict" : ""} · live {model.maxInputTokensLiveState}</dd></div>
+                      <div><dt>Output window</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} · {model.maxOutputTokensSource}{model.maxOutputTokensConflict ? " · conflict" : ""} · live {model.maxOutputTokensLiveState}</dd></div>
+                      <div><dt>Default output</dt><dd>{model.defaultOutputTokens.effective.toLocaleString()} · {model.defaultOutputTokens.source}{model.defaultOutputTokens.conflict ? " · conflict" : ""}{model.defaultOutputTokens.valid ? "" : " · invalid for current ceiling"} · live {model.defaultOutputTokens.liveState}</dd></div>
+                      <div><dt>Chat budget field</dt><dd>{model.chatOutputTokenField ?? "Unknown"} · {model.chatOutputTokenFieldSource}{model.chatOutputTokenFieldConflict ? " · conflict" : ""} · live {model.chatOutputTokenFieldLiveState}</dd></div>
+                      <div><dt>Built-in revision</dt><dd>{model.builtinRevision ?? "None"}</dd></div>
+                    </dl>
 
-        {#if editor}
-          <label>
-            <input type="checkbox" bind:checked={editor.enabled} />
-            Enabled and visible
-          </label>
-          <label>
-            <input type="checkbox" bind:checked={editor.overrideProtocols} />
-            Override native protocols
-          </label>
-          <fieldset disabled={!editor.overrideProtocols}>
-            <legend>Native HTTP protocols</legend>
-            {#each ["chat", "messages", "responses"] as protocol (protocol)}
-              <label>
-                <input
-                  type="checkbox"
-                  checked={editor.protocols.includes(protocol as Protocol)}
-                  onchange={(event) => toggleProtocol(model.id, protocol as Protocol, event.currentTarget.checked)}
-                />
-                {protocol}
-              </label>
-            {/each}
-          </fieldset>
-          <label for={`input-limit-${model.id}`}>Override input ceiling</label>
-          <input
-            id={`input-limit-${model.id}`}
-            type="number"
-            min="1"
-            value={editor.maxInputTokens ?? ""}
-            oninput={(event) => { editor.maxInputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
-            placeholder="use live/builtin"
-          />
-          <label for={`output-limit-${model.id}`}>Override output ceiling</label>
-          <input
-            id={`output-limit-${model.id}`}
-            type="number"
-            min="1"
-            value={editor.maxOutputTokens ?? ""}
-            oninput={(event) => { editor.maxOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
-            placeholder="use live/builtin"
-          />
-          <label for={`default-output-${model.id}`}>Default output tokens</label>
-          <input
-            id={`default-output-${model.id}`}
-            type="number"
-            min="1"
-            value={editor.defaultOutputTokens ?? ""}
-            oninput={(event) => { editor.defaultOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
-            placeholder="automatic policy"
-          />
-          <label for={`chat-field-${model.id}`}>Chat output token field</label>
-          <select id={`chat-field-${model.id}`} bind:value={editor.chatOutputTokenField}>
-            <option value="">Use live/builtin/unknown</option>
-            <option value="max_tokens">max_tokens</option>
-            <option value="max_completion_tokens">max_completion_tokens</option>
-          </select>
-          <button onclick={() => save(model)} disabled={busy === `save:${model.id}`}>
-            {busy === `save:${model.id}` ? "Saving..." : "Save capability override"}
-          </button>
-          {#if model.configured}
-            <button onclick={() => reset(model)} disabled={busy === `reset:${model.id}`}>
-              {busy === `reset:${model.id}` ? "Resetting..." : "Reset override"}
-            </button>
-          {/if}
-        {/if}
-
-        {#if model.visible}
-          <button
-            onclick={() => prefer(model.id)}
-            disabled={busy === `prefer:${model.id}` || (data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid")}
-          >
-            {data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid" ? "Preferred" : "Set preferred"}
-          </button>
-        {/if}
-      </article>
-    {/each}
+                    {#if editor}
+                      <fieldset
+                        class="override-form"
+                        aria-label={`${model.id} capability override`}
+                        disabled={busy === `save:${model.id}` || busy === `reset:${model.id}`}
+                      >
+                        <label class="check">
+                          <input type="checkbox" bind:checked={editor.enabled} />
+                          Enabled and visible
+                        </label>
+                        <label class="check">
+                          <input type="checkbox" bind:checked={editor.overrideProtocols} />
+                          Override native protocols
+                        </label>
+                        <fieldset class="protocol-fieldset" disabled={!editor.overrideProtocols}>
+                          <legend>Native HTTP protocols</legend>
+                          {#each ["chat", "messages", "responses"] as protocol (protocol)}
+                            <label>
+                              <input
+                                type="checkbox"
+                                checked={editor.protocols.includes(protocol as Protocol)}
+                                onchange={(event) => toggleProtocol(model.id, protocol as Protocol, event.currentTarget.checked)}
+                              />
+                              {protocol}
+                            </label>
+                          {/each}
+                        </fieldset>
+                        <label for={`input-limit-${index}`}>
+                          Override input ceiling
+                          <input
+                            id={`input-limit-${index}`}
+                            type="number"
+                            min="1"
+                            value={editor.maxInputTokens ?? ""}
+                            oninput={(event) => { editor.maxInputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
+                            placeholder="use live/builtin"
+                          />
+                        </label>
+                        <label for={`output-limit-${index}`}>
+                          Override output ceiling
+                          <input
+                            id={`output-limit-${index}`}
+                            type="number"
+                            min="1"
+                            value={editor.maxOutputTokens ?? ""}
+                            oninput={(event) => { editor.maxOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
+                            placeholder="use live/builtin"
+                          />
+                        </label>
+                        <label for={`default-output-${index}`}>
+                          Default output tokens
+                          <input
+                            id={`default-output-${index}`}
+                            type="number"
+                            min="1"
+                            value={editor.defaultOutputTokens ?? ""}
+                            oninput={(event) => { editor.defaultOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
+                            placeholder="automatic policy"
+                          />
+                        </label>
+                        <label for={`chat-field-${index}`}>
+                          Chat output token field
+                          <select id={`chat-field-${index}`} bind:value={editor.chatOutputTokenField}>
+                            <option value="">Use live/builtin/unknown</option>
+                            <option value="max_tokens">max_tokens</option>
+                            <option value="max_completion_tokens">max_completion_tokens</option>
+                          </select>
+                        </label>
+                        <div class="model-actions">
+                          <button class="primary" onclick={() => save(model)} disabled={busy === `save:${model.id}`}>
+                            {busy === `save:${model.id}` ? "Saving..." : "Save capability override"}
+                          </button>
+                          {#if model.configured}
+                            <button onclick={() => reset(model)} disabled={busy === `reset:${model.id}`}>
+                              {busy === `reset:${model.id}` ? "Resetting..." : "Reset override"}
+                            </button>
+                          {/if}
+                        </div>
+                      </fieldset>
+                    {/if}
+                  </div>
+                </details>
+              </td>
+            </tr>
+          </tbody>
+        {/each}
+      </table>
+    </div>
   </section>
 {/if}

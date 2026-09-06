@@ -13,6 +13,7 @@
   import Models from "./views/Models.svelte";
   import Overview from "./views/Overview.svelte";
   import ResponsesHistory from "./views/ResponsesHistory.svelte";
+  import TerminalMark from "./TerminalMark.svelte";
 
   const views = ["Overview", "Accounts", "Models", "Configuration", "Responses History", "Events"] as const;
   type View = typeof views[number];
@@ -25,15 +26,30 @@
   let liveStatus: AdminStatus | null = $state(null);
   let liveEvents: AdminOperationalEvent[] = $state([]);
   let resetVersion = $state(0);
+  let navOpen = $state(false);
+  let mobileNavigation = $state(false);
   let stream: EventSource | null = null;
   let signedOutPanel: HTMLElement | null = $state(null);
   let workspace: HTMLElement | null = $state(null);
+  let menuButton: HTMLButtonElement | null = $state(null);
+  let navigation: HTMLElement | null = $state(null);
+  let pageNumber = $derived(String(views.indexOf(view) + 1).padStart(2, "0"));
   const client = new AdminClient(teardown);
 
   onMount(() => {
+    updateNavigationMode();
+    window.addEventListener("resize", updateNavigationMode);
     void authenticate();
-    return closeStream;
+    return () => {
+      window.removeEventListener("resize", updateNavigationMode);
+      closeStream();
+    };
   });
+
+  function updateNavigationMode(): void {
+    mobileNavigation = menuButton !== null && getComputedStyle(menuButton).display !== "none";
+    if (!mobileNavigation) navOpen = false;
+  }
 
   async function authenticate(): Promise<void> {
     phase = "loading";
@@ -42,10 +58,12 @@
     try {
       session = token === null ? await client.session() : await client.bootstrap(token);
       phase = "ready";
+      await tick();
+      updateNavigationMode();
       openStream();
     } catch (error: unknown) {
       phase = "signed-out";
-      authError = token === null ? "Open this control room with `ghcg admin open`." : errorMessage(error);
+      authError = token === null ? "Open Admin with `ghcg admin open`." : errorMessage(error);
       requestAnimationFrame(() => signedOutPanel?.focus());
     }
   }
@@ -67,7 +85,10 @@
     });
     stream.addEventListener("operational", (event) => {
       const value = JSON.parse((event as MessageEvent<string>).data) as { event: AdminOperationalEvent };
-      liveEvents = [...liveEvents, value.event].slice(-512);
+      liveEvents = [
+        ...liveEvents.filter((item) => item.eventId !== value.event.eventId),
+        value.event,
+      ].slice(-512);
     });
     stream.addEventListener("reset", () => {
       liveEvents = [];
@@ -86,6 +107,7 @@
     session = null;
     liveStatus = null;
     liveEvents = [];
+    navOpen = false;
     phase = "signed-out";
     authError = "Your admin session ended. Run `ghcg admin open` to reconnect.";
     requestAnimationFrame(() => signedOutPanel?.focus());
@@ -102,8 +124,25 @@
 
   async function navigate(next: View): Promise<void> {
     view = next;
+    navOpen = false;
     await tick();
     workspace?.querySelector<HTMLElement>("h1")?.focus();
+  }
+
+  async function openNavigation(): Promise<void> {
+    navOpen = true;
+    await tick();
+    navigation?.querySelector<HTMLElement>('[aria-current="page"]')?.focus();
+  }
+
+  function closeNavigation(restoreFocus = true): void {
+    if (!navOpen) return;
+    navOpen = false;
+    if (restoreFocus) requestAnimationFrame(() => menuButton?.focus());
+  }
+
+  function handleKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape" && navOpen) closeNavigation();
   }
 </script>
 
@@ -111,10 +150,12 @@
   <meta name="description" content="Local ghc-gateway administration" />
 </svelte:head>
 
+<svelte:window onkeydown={handleKeydown} />
+
 {#if phase === "loading"}
   <main class="auth-stage" aria-busy="true">
-    <div class="boot-mark" aria-hidden="true"></div>
-    <p class="eyebrow">LOCAL CONTROL PLANE</p>
+    <TerminalMark class="auth-mark" />
+    <p class="eyebrow">LOCAL ADMINISTRATION</p>
     <h1>Establishing a secure session</h1>
     <p class="muted">The one-time bootstrap is being exchanged in memory.</p>
   </main>
@@ -123,41 +164,47 @@
     <section class="signed-out" aria-labelledby="signed-out-title">
       <span class="status-dot stopped" aria-hidden="true"></span>
       <p class="eyebrow">SESSION CLOSED</p>
-      <h1 id="signed-out-title" tabindex="-1" bind:this={signedOutPanel}>Control room locked</h1>
+      <h1 id="signed-out-title" tabindex="-1" bind:this={signedOutPanel}>Admin session closed</h1>
       <p>{authError}</p>
       <button class="primary" onclick={authenticate}>Try current session</button>
     </section>
   </main>
 {:else}
+  <a class="skip-link" href="#admin-content">Skip to content</a>
   <div class="shell">
-    <header class="topbar">
+    <aside
+      id="admin-navigation"
+      class:open={navOpen}
+      class="sidebar"
+      aria-label="Primary navigation"
+      aria-hidden={mobileNavigation && !navOpen}
+      inert={mobileNavigation && !navOpen ? true : undefined}
+      data-layout-region="navigation"
+    >
       <div class="brand">
-        <span class="brand-glyph">G</span>
-        <div><strong>ghc-gateway</strong><small>CONTROL ROOM</small></div>
+        <TerminalMark class="brand-mark" />
+        <strong>ghc-gateway</strong>
       </div>
-      <div class="top-actions">
-        <span class="stream-state" aria-live="polite">
-          <span class:reconnecting={streamState !== "live"} class="status-dot"></span>
-          {streamState}
-        </span>
-        <button class="quiet" onclick={logout}>End session</button>
-      </div>
-    </header>
-    <aside class="rail" aria-label="Primary">
-      <nav>
+      <p class="nav-caption">WORKSPACE</p>
+      <nav bind:this={navigation}>
         {#each views as item, index (item)}
           <button
+            class="nav-item"
             class:active={view === item}
             aria-current={view === item ? "page" : undefined}
             onclick={() => void navigate(item)}
           >
-            <span class="nav-index">0{index + 1}</span>
+            <span class="nav-index">[{String(index + 1).padStart(2, "0")}]</span>
             <span>{item}</span>
           </button>
         {/each}
       </nav>
-      <div class="rail-foot">
-        <span>SESSION</span>
+      <div class="sidebar-foot">
+        <span class="stream-state" aria-live="polite">
+          <span class:reconnecting={streamState !== "live"} class="status-dot"></span>
+          {streamState}
+        </span>
+        <span>Admin Session</span>
         <time datetime={session?.idleExpiresAt}>
           idle until {session
             ? new Date(session.idleExpiresAt).toLocaleTimeString([], {
@@ -168,20 +215,51 @@
         </time>
       </div>
     </aside>
-    <main class="workspace" bind:this={workspace}>
-      {#if view === "Overview"}
-        <Overview {client} {liveStatus} />
-      {:else if view === "Accounts"}
-        <Accounts {client} />
-      {:else if view === "Models"}
-        <Models {client} />
-      {:else if view === "Configuration"}
-        <Configuration {client} />
-      {:else if view === "Responses History"}
-        <ResponsesHistory {client} />
-      {:else}
-        <Events {client} {liveEvents} {resetVersion} {streamState} />
-      {/if}
-    </main>
+    {#if navOpen}
+      <button class="nav-backdrop" aria-label="Close navigation" onclick={() => closeNavigation()}></button>
+    {/if}
+    <div class="main-column" data-layout-region="main-column">
+      <div class="content-frame" data-layout-region="content-frame">
+        <header class="utility-bar">
+          <div class="utility-location">
+            <button
+              class="mobile-menu"
+              aria-label="Open navigation"
+              aria-expanded={navOpen}
+              aria-controls="admin-navigation"
+              bind:this={menuButton}
+              onclick={() => void openNavigation()}
+            >[=]</button>
+            <span>ADMIN / {view.toUpperCase()}</span>
+          </div>
+          <div class="utility-actions">
+            <span class="desktop-stream stream-state" aria-live="polite">
+              <span class:reconnecting={streamState !== "live"} class="status-dot"></span>
+              {streamState}
+            </span>
+            <button class="text-button" onclick={logout}>End session</button>
+          </div>
+        </header>
+        <main id="admin-content" class="workspace" bind:this={workspace}>
+          {#if view === "Overview"}
+            <Overview {client} {liveStatus} {pageNumber} />
+          {:else if view === "Accounts"}
+            <Accounts {client} {pageNumber} />
+          {:else if view === "Models"}
+            <Models {client} {pageNumber} />
+          {:else if view === "Configuration"}
+            <Configuration {client} {pageNumber} />
+          {:else if view === "Responses History"}
+            <ResponsesHistory {client} {pageNumber} />
+          {:else}
+            <Events {client} {liveEvents} {resetVersion} {streamState} {pageNumber} />
+          {/if}
+        </main>
+        <footer class="footer-note">
+          <span>ghc-gateway / local administration</span>
+          <span>Loopback only · content-free operations</span>
+        </footer>
+      </div>
+    </div>
   </div>
 {/if}
