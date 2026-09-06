@@ -585,7 +585,8 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_delta",
-        key: responseStreamMessageKey(payload),
+        key: responseContentKey(payload, "text"),
+        orderKey: responseStreamMessageKey(payload),
         delta: stringMember(payload, "delta") ?? "",
       };
       continue;
@@ -596,7 +597,8 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_done",
-        key: responseStreamMessageKey(payload),
+        key: responseContentKey(payload, "text"),
+        orderKey: responseStreamMessageKey(payload),
         text: stringMember(payload, "text") ?? "",
       };
       continue;
@@ -607,7 +609,8 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_delta",
-        key: responseStreamMessageKey(payload),
+        key: responseContentKey(payload, "refusal"),
+        orderKey: responseStreamMessageKey(payload),
         delta: stringMember(payload, "delta") ?? "",
       };
       continue;
@@ -618,7 +621,8 @@ async function* decodeResponsesStream(
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_done",
-        key: responseStreamMessageKey(payload),
+        key: responseContentKey(payload, "refusal"),
+        orderKey: responseStreamMessageKey(payload),
         refusal: stringMember(payload, "refusal") ?? "",
       };
       continue;
@@ -889,7 +893,8 @@ function* finalItemEvents(
         }
         yield {
           kind: "text_done",
-          key: `responses:${outputIndex}:message`,
+          key: `responses:${outputIndex}:${contentIndex}:text`,
+          orderKey: `responses:${outputIndex}:message`,
           text,
         };
       } else if (partType === "refusal") {
@@ -899,7 +904,8 @@ function* finalItemEvents(
         }
         yield {
           kind: "refusal_done",
-          key: `responses:${outputIndex}:message`,
+          key: `responses:${outputIndex}:${contentIndex}:refusal`,
+          orderKey: `responses:${outputIndex}:message`,
           refusal,
         };
       } else {

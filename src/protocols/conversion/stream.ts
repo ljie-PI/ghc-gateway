@@ -70,28 +70,28 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "text_delta") {
-      ledger.appendText(event.key, event.delta);
-      yield* emitter.textDelta(event.key, event.delta);
+      ledger.appendText(event.key, event.delta, event.orderKey);
+      yield* emitter.textDelta(event.orderKey ?? event.key, event.delta);
       continue;
     }
     if (event.kind === "text_done") {
       const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
       if (suffix.length > 0) {
-        ledger.appendText(event.key, suffix);
-        yield* emitter.textDelta(event.key, suffix);
+        ledger.appendText(event.key, suffix, event.orderKey);
+        yield* emitter.textDelta(event.orderKey ?? event.key, suffix);
       }
       continue;
     }
     if (event.kind === "refusal_delta") {
-      ledger.appendRefusal(event.key, event.delta);
-      yield* emitter.refusalDelta(event.key, event.delta);
+      ledger.appendRefusal(event.key, event.delta, event.orderKey);
+      yield* emitter.refusalDelta(event.orderKey ?? event.key, event.delta);
       continue;
     }
     if (event.kind === "refusal_done") {
       const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
       if (suffix.length > 0) {
-        ledger.appendRefusal(event.key, suffix);
-        yield* emitter.refusalDelta(event.key, suffix);
+        ledger.appendRefusal(event.key, suffix, event.orderKey);
+        yield* emitter.refusalDelta(event.orderKey ?? event.key, suffix);
       }
       continue;
     }

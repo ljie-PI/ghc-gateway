@@ -368,6 +368,33 @@ describe("shared conversion response codecs", () => {
     expect(text.match(/event: message_stop/gu)).toHaveLength(1);
   });
 
+  it("preserves multiple content parts within one final-only Responses message", async () => {
+    const response = {
+      id: "resp_parts",
+      object: "response",
+      status: "completed",
+      output: [{
+        id: "msg_parts",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "one", annotations: [] },
+          { type: "output_text", text: "two", annotations: [] },
+        ],
+      }],
+      usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+    };
+    const text = wireText(await collectStream(
+      "responses",
+      "chat",
+      chunks(encoder.encode(responseEvent(0, "response.completed", { response }))),
+    ));
+    expect(text).toContain("one");
+    expect(text).toContain("two");
+    expect(text.match(/data: \[DONE\]/gu)).toHaveLength(1);
+  });
+
   it("keeps token-limited partial tool arguments incomplete instead of validating fabricated JSON", async () => {
     const source = [
       "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":\"length\"}]}\n\n",

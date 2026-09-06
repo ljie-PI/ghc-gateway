@@ -17,11 +17,18 @@ interface MessageState {
   refusal: string;
 }
 
+interface MessagePartState {
+  readonly groupKey: string;
+  text: string;
+  refusal: string;
+}
+
 export class SemanticItemLedger {
   private readonly encoder = new TextEncoder();
   private usedBytes = 0;
   private readonly tools = new Map<string, ToolState>();
   private readonly messages = new Map<string, MessageState>();
+  private readonly messageParts = new Map<string, MessagePartState>();
   private readonly order: Array<{ readonly kind: "message" | "tool"; readonly key: string }> = [];
 
   constructor(private readonly maxBytes: number) {}
@@ -30,14 +37,16 @@ export class SemanticItemLedger {
     this.message(key);
   }
 
-  appendText(key: string, delta: string): void {
+  appendText(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
-    this.message(key).text += delta;
+    this.message(orderKey).text += delta;
+    this.messagePart(key, orderKey).text += delta;
   }
 
-  appendRefusal(key: string, delta: string): void {
+  appendRefusal(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
-    this.message(key).refusal += delta;
+    this.message(orderKey).refusal += delta;
+    this.messagePart(key, orderKey).refusal += delta;
   }
 
   startTool(input: {
@@ -146,11 +155,11 @@ export class SemanticItemLedger {
   }
 
   textValue(key: string): string {
-    return this.messages.get(key)?.text ?? "";
+    return this.messageParts.get(key)?.text ?? "";
   }
 
   refusalValue(key: string): string {
-    return this.messages.get(key)?.refusal ?? "";
+    return this.messageParts.get(key)?.refusal ?? "";
   }
 
   private reserve(value: string): void {
@@ -173,6 +182,20 @@ export class SemanticItemLedger {
       this.order.push({ kind: "message", key });
     }
     return message;
+  }
+
+  private messagePart(key: string, groupKey: string): MessagePartState {
+    let part = this.messageParts.get(key);
+    if (part === undefined) {
+      if (key !== groupKey) {
+        this.reserve(key);
+      }
+      part = { groupKey, text: "", refusal: "" };
+      this.messageParts.set(key, part);
+    } else if (part.groupKey !== groupKey) {
+      invalid();
+    }
+    return part;
   }
 }
 
