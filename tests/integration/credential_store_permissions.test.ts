@@ -38,7 +38,7 @@ describe("credential file protection", () => {
     const filePath = path.join(dir, "credentials.json");
     const store = new FileCredentialStore(filePath);
     await store.putGeneration("github.com/1", 1, { generation: 1, githubToken: "tok" });
-    execFileSync("icacls", [filePath, "/grant", "*S-1-1-0:(R)"], { stdio: "ignore" });
+    execFileSync("icacls", [filePath, "/grant", "*S-1-1-0:(R)"], { stdio: "ignore", windowsHide: true });
     await expect(store.readGeneration("github.com/1", 1)).rejects.toThrow();
   });
 
@@ -55,7 +55,7 @@ describe("credential file protection", () => {
   });
 
   function windowsAclPrincipals(target: string): readonly string[] {
-    const output = execFileSync("icacls", [target], { encoding: "utf8" });
+    const output = execFileSync("icacls", [target], { encoding: "utf8", windowsHide: true });
     const principals: string[] = [];
     for (const rawLine of output.split(/\r?\n/u)) {
       const line = rawLine.trim();
