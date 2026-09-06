@@ -26,7 +26,6 @@ import type {
   UpstreamByteResponse,
   UpstreamByteStream,
 } from "../../src/protocols/chat_completions/types.js";
-import { litellmStyleTokenCounter } from "../../src/protocols/ollama_chat/token_counter.js";
 import {
   SqliteResponsesHistory,
   type ResponsesHistoryRecord,
@@ -476,7 +475,6 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     nowMs,
     createUuid: () => `00000000-0000-4000-8000-${(++uuid).toString().padStart(12, "0")}`,
     runtime: runtimeConfig,
-    tokenCounter: litellmStyleTokenCounter,
     async close() {
       if (closed) return;
       closed = true;

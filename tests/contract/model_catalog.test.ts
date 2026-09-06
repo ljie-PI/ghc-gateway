@@ -23,7 +23,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { createModelCatalogRoutes } from "../../src/protocols/model_catalog/routes.js";
 import { resolveModel } from "../../src/protocols/model_catalog/resolver.js";
-import { serializeAnthropicModels, serializeOllamaTags, serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
+import { serializeAnthropicModels, serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 
@@ -421,7 +421,7 @@ describe("model resolver", () => {
 });
 
 describe("listing routes", () => {
-  it("serializes one snapshot as OpenAI, Anthropic, and Ollama shapes", async () => {
+  it("serializes one snapshot as OpenAI and Anthropic shapes", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-cat-"));
     const database = openDatabase({
       path: path.join(dir, "state.db"),
@@ -463,11 +463,6 @@ describe("listing routes", () => {
       expect(anthropicBody.data[0]?.type).toBe("model");
       expect(anthropicBody.data[0]?.max_tokens).toBeNull();
 
-      const tags = await gw.fetch(new Request("http://127.0.0.1:31400/api/tags"));
-      const tagsBody = JSON.parse(await tags.text()) as { models: Array<{ name: string; digest: string }> };
-      expect(tagsBody.models[0]?.name).toBe("keep");
-      expect(tagsBody.models[0]?.digest).toBe("copilot-keep");
-
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/models"))).status).toBe(404);
     } finally {
       await gw.close();
@@ -502,12 +497,5 @@ describe("serializers", () => {
     expect(anthropic.data[0]?.supportedEndpoints).toBeUndefined();
     expect(anthropic.data[0]?.routing).toBeUndefined();
     expect(anthropic.data[0]?.mode).toBeUndefined();
-
-    const ollama = JSON.parse(serializeOllamaTags(catalog)) as { models: Array<Record<string, unknown>> };
-    expect(ollama.models[0]?.modified_at).toBe("2026-08-30T05:00:00Z");
-    expect(ollama.models[0]?.supported_endpoints).toBeUndefined();
-    expect(ollama.models[0]?.supportedEndpoints).toBeUndefined();
-    expect(ollama.models[0]?.routing).toBeUndefined();
-    expect(ollama.models[0]?.mode).toBeUndefined();
   });
 });

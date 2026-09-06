@@ -6,8 +6,6 @@ import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import type { FailurePresenter, RouteRegistration } from "../../gateway/hono_app.js";
 import {
   serializeAnthropicModels,
-  serializeOllamaTags,
-  serializeOllamaTagsError,
   serializeOpenAiModels,
   serializeOpenAiModelsError,
   type ModelMetadata,
@@ -34,15 +32,6 @@ export function createModelCatalogRoutes(dependencies: ModelCatalogRouteDependen
     }
     return new Response(serializeOpenAiModelsError(status), { status, headers });
   };
-  const tagsPresenter: FailurePresenter = (failure) => {
-    const status = statusFor(failure.kind, failure);
-    const headers = new Headers(JSON_HEADERS);
-    if (failure.kind === "upstream_http" && failure.retryAfter !== undefined) {
-      headers.set("retry-after", failure.retryAfter);
-    }
-    return new Response(serializeOllamaTagsError(), { status, headers });
-  };
-
   return [
     {
       method: "GET",
@@ -60,17 +49,6 @@ export function createModelCatalogRoutes(dependencies: ModelCatalogRouteDependen
         return new Response(body, {
           headers: { ...JSON_HEADERS, "x-request-id": scope.requestId },
         });
-      },
-    },
-    {
-      method: "GET",
-      path: "/api/tags",
-      admission: "none",
-      body: "none",
-      presentFailure: tagsPresenter,
-      endpoint: async (_request, scope) => {
-        const catalog = await loadCatalog(dependencies, scope.signal);
-        return new Response(serializeOllamaTags(catalog), { headers: JSON_HEADERS });
       },
     },
   ];

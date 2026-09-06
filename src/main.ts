@@ -26,10 +26,7 @@ import { MIGRATION_MANIFEST } from "./persistence/generated_migrations.js";
 import { AccountDirectory as SqliteAccountDirectory } from "./accounts/account_directory.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { createModelCatalogRoutes } from "./protocols/model_catalog/routes.js";
-import type { OllamaTokenCounter } from "./protocols/ollama_chat/bridge.js";
-import { litellmStyleTokenCounter } from "./protocols/ollama_chat/token_counter.js";
 import { createOpenAiChatRoute } from "./protocols/openai_chat/endpoint.js";
-import { createOllamaChatRoutes } from "./protocols/ollama_chat/endpoint.js";
 import { createAnthropicMessagesRoute } from "./protocols/anthropic_messages/endpoint.js";
 import { createResponsesRoute } from "./protocols/responses/endpoint.js";
 import { PreferredModelManager } from "./protocols/model_catalog/preferred.js";
@@ -70,7 +67,6 @@ export interface ApplicationContext {
   readonly modelsSource?: CopilotModelsSource;
   readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
   readonly runtime?: RuntimeConfigStore;
-  readonly tokenCounter: OllamaTokenCounter;
   close?(): Promise<void> | void;
   forceClose?(): Promise<void> | void;
 }
@@ -126,14 +122,6 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       catalog: context.catalog,
       preferences,
       copilot: context.copilot,
-      ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
-      ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
-      ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
-    }),
-    ...createOllamaChatRoutes({
-      directory: context.directory,
-      copilot: context.copilot,
-      tokenCounter: context.tokenCounter,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
       ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
@@ -222,7 +210,6 @@ export async function createProductionApplicationContext(
     modelsSource,
     modelMetadata: modelsSource.modelMetadata,
     runtime,
-    tokenCounter: litellmStyleTokenCounter,
     async close() {
       await telemetryRuntime.close();
       await catalog.close();

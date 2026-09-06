@@ -4,11 +4,11 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AccountDirectory, type BoundAccount } from "../../src/accounts/account_directory.js";
+import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { formatAccountId, normalizeGitHubHost } from "../../src/accounts/github_environment.js";
 import { assertNode24 } from "./node_version.js";
-import { outboundHeaders, ScriptedCopilotBackend, type BoundCopilot, type CopilotBackend, type CopilotTarget } from "../../src/copilot/backend.js";
+import { outboundHeaders, ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { parseChatSse } from "../../src/copilot/chat_sse.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
@@ -25,7 +25,6 @@ import { convertAnthropicRequest } from "../../src/protocols/anthropic_messages/
 import { createAnthropicStreamResponse } from "../../src/protocols/anthropic_messages/stream.js";
 import { anthropicErrorBody } from "../../src/protocols/anthropic_messages/wire.js";
 import { decodeOpenAiChatRequest, prepareOpenAiChatRequest } from "../../src/protocols/openai_chat/endpoint.js";
-import { createOllamaChatRoutes } from "../../src/protocols/ollama_chat/endpoint.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "../../src/protocols/openai_chat/wire.js";
 import { convertResponsesRequest, buildChatBridgeRequest, type ReasoningConfig } from "../../src/protocols/responses/bridge_request.js";
 import { convertChatResponseToResponses } from "../../src/protocols/responses/bridge_nonstream.js";
@@ -40,7 +39,7 @@ import { buildRequestToolContext } from "../../src/protocols/responses/tool_cont
 import { encodeResponsesSseEvent } from "../../src/protocols/responses/wire.js";
 import { canonicalizeWireJson } from "../../src/serialization/canonical_json.js";
 import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, WireJsonError, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
-import type { ChatRequest, ChatResponse, NativeResponsesUpstreamRequest, UpstreamByteResponse, UpstreamByteStream } from "../../src/protocols/chat_completions/types.js";
+import type { UpstreamByteStream } from "../../src/protocols/chat_completions/types.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 export interface FixtureManifestEntry {
@@ -61,7 +60,6 @@ const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, F
   ["copilot-transport", expectedCopilotTransportFixture],
   ["model-catalog", expectedModelCatalogFixture],
   ["openai-chat", expectedOpenAiChatFixture],
-  ["ollama", expectedOllamaFixture],
   ["anthropic", expectedAnthropicFixture],
   ["responses-history", expectedResponsesHistoryFixture],
   ["responses-native", expectedResponsesNativeFixture],
@@ -70,25 +68,6 @@ const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, F
   ["responses-bridge-stream", expectedResponsesBridgeStreamFixture],
   ["responses-endpoint", expectedResponsesEndpointFixture],
 ]);
-
-type GoReferenceJson =
-  | null
-  | boolean
-  | number
-  | string
-  | GoReferenceJson[]
-  | GoReferenceObject;
-
-interface GoReferenceObject {
-  readonly kind: "go-reference-object";
-  readonly members: readonly GoReferenceMember[];
-}
-
-interface GoReferenceMember {
-  readonly key: string;
-  readonly value: GoReferenceJson | undefined;
-  readonly omitEmpty?: boolean;
-}
 
 async function findManifests(root: string): Promise<string[]> {
   if (!existsSync(root)) {
@@ -357,279 +336,6 @@ async function expectedResponsesHistoryFixture(entry: FixtureManifestEntry): Pro
   } finally {
     closeDatabase(database);
   }
-}
-
-async function expectedOllamaFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
-  if (entry.caseId !== "ollama.request.capture" && entry.caseId !== "ollama.nonstream.success" && entry.caseId !== "ollama.stream.success") {
-    return undefined;
-  }
-  const input = await readFile(path.join(FIXTURE_ROOT, "ollama", entry.input), "utf8");
-  if (entry.caseId === "ollama.nonstream.success") {
-    return ollamaNonstreamSuccessReference();
-  }
-  if (entry.caseId === "ollama.stream.success") {
-    return ollamaStreamSuccessReference();
-  }
-  const backend = new FixtureOllamaBackend();
-  const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-ollama-fixture-"));
-  const database = openDatabase({
-    path: path.join(dir, "state.db"),
-    migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
-    nowMs: () => 0,
-  });
-  const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => 0);
-  await accounts.upsertAuthenticated({
-    host: "github.com",
-    userId: "1",
-    secret: { generation: 0, githubToken: "fixture" },
-  });
-  const gateway = await createGateway({
-    startup: parseStartupConfig([], {}, { homedir: dir }),
-    runtime: defaultRuntimeConfigSnapshot(),
-  }, createOllamaChatRoutes({
-    directory: accounts,
-    copilot: backend,
-    now: () => new Date(0),
-    tokenCounter: (input) => input.text === undefined ? 1 : 0,
-  }), {
-    createRequestId: () => "req_fixture",
-  });
-  try {
-    const response = await gateway.fetch(new Request("http://127.0.0.1:31400/api/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: input,
-    }));
-    await response.arrayBuffer();
-  } finally {
-    await gateway.close();
-    closeDatabase(database);
-  }
-
-  function ollamaStreamSuccessReference(): string {
-    return `${stringifyGoReference(goObject([
-      { key: "model", value: "gpt" },
-      { key: "remote_model", value: undefined, omitEmpty: true },
-      { key: "remote_host", value: undefined, omitEmpty: true },
-      { key: "created_at", value: "2026-01-02T03:04:05.12Z" },
-      { key: "message", value: goObject([
-        { key: "role", value: "assistant" },
-        { key: "content", value: "hello" },
-        { key: "thinking", value: undefined, omitEmpty: true },
-        { key: "images", value: undefined, omitEmpty: true },
-        { key: "tool_calls", value: undefined, omitEmpty: true },
-        { key: "tool_name", value: undefined, omitEmpty: true },
-        { key: "tool_call_id", value: undefined, omitEmpty: true },
-      ]) },
-      { key: "done", value: false },
-      { key: "done_reason", value: undefined, omitEmpty: true },
-    ]))}\n${stringifyGoReference(goObject([
-      { key: "model", value: "gpt" },
-      { key: "remote_model", value: undefined, omitEmpty: true },
-      { key: "remote_host", value: undefined, omitEmpty: true },
-      { key: "created_at", value: "2026-01-02T03:04:05.12Z" },
-      { key: "message", value: goObject([
-        { key: "role", value: "assistant" },
-        { key: "content", value: "" },
-        { key: "thinking", value: undefined, omitEmpty: true },
-        { key: "images", value: undefined, omitEmpty: true },
-        { key: "tool_calls", value: undefined, omitEmpty: true },
-        { key: "tool_name", value: undefined, omitEmpty: true },
-        { key: "tool_call_id", value: undefined, omitEmpty: true },
-      ]) },
-      { key: "done", value: true },
-      { key: "done_reason", value: "stop", omitEmpty: true },
-    ]))}\n`;
-  }
-
-  function ollamaNonstreamSuccessReference(): string {
-    return stringifyGoReference(goObject([
-      { key: "model", value: "gpt" },
-      { key: "remote_model", value: undefined, omitEmpty: true },
-      { key: "remote_host", value: undefined, omitEmpty: true },
-      { key: "created_at", value: "2023-11-14T22:13:20Z" },
-      {
-        key: "message",
-        value: goObject([
-          { key: "role", value: "assistant" },
-          { key: "content", value: "visible" },
-          { key: "thinking", value: "hidden", omitEmpty: true },
-          { key: "images", value: undefined, omitEmpty: true },
-          {
-            key: "tool_calls",
-            value: [
-              goObject([
-                { key: "id", value: "call_1", omitEmpty: true },
-                {
-                  key: "function",
-                  value: goObject([
-                    { key: "index", value: 2 },
-                    { key: "name", value: "weather" },
-                    { key: "arguments", value: goObject([
-                      { key: "city", value: "Tokyo" },
-                      { key: "unit", value: "c" },
-                    ]) },
-                  ]),
-                },
-              ]),
-            ],
-            omitEmpty: true,
-          },
-          { key: "tool_name", value: undefined, omitEmpty: true },
-          { key: "tool_call_id", value: undefined, omitEmpty: true },
-        ]),
-      },
-      { key: "done", value: true },
-      { key: "done_reason", value: "stop", omitEmpty: true },
-      { key: "_debug_info", value: undefined, omitEmpty: true },
-      {
-        key: "logprobs",
-        value: [
-          goObject([
-            { key: "token", value: "visible" },
-            { key: "logprob", value: -0.5 },
-            { key: "bytes", value: [118, 105], omitEmpty: true },
-            {
-              key: "top_logprobs",
-              value: [goObject([
-                { key: "token", value: "visible" },
-                { key: "logprob", value: -0.5 },
-                { key: "bytes", value: [118], omitEmpty: true },
-              ])],
-              omitEmpty: true,
-            },
-          ]),
-        ],
-        omitEmpty: true,
-      },
-      { key: "total_duration", value: undefined, omitEmpty: true },
-      { key: "load_duration", value: undefined, omitEmpty: true },
-      { key: "prompt_eval_count", value: 12, omitEmpty: true },
-      { key: "prompt_eval_duration", value: undefined, omitEmpty: true },
-      { key: "eval_count", value: 6, omitEmpty: true },
-      { key: "eval_duration", value: undefined, omitEmpty: true },
-    ]));
-  }
-
-  function goObject(members: readonly GoReferenceMember[]): GoReferenceObject {
-    return { kind: "go-reference-object", members };
-  }
-
-  function stringifyGoReference(value: GoReferenceJson): string {
-    return goEscapeJson(writeGoReference(value));
-  }
-
-  function writeGoReference(value: GoReferenceJson): string {
-    if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
-      return JSON.stringify(value);
-    }
-    if (Array.isArray(value)) {
-      return `[${value.map(writeGoReference).join(",")}]`;
-    }
-    const members = value.members.filter((member) => !member.omitEmpty || !isGoEmpty(member.value));
-    return `{${members.map((member) => `${JSON.stringify(member.key)}:${writeGoReference(member.value as GoReferenceJson)}`).join(",")}}`;
-  }
-
-  function isGoEmpty(value: GoReferenceJson | undefined): boolean {
-    return value === undefined
-      || value === null
-      || value === false
-      || value === 0
-      || value === ""
-      || (Array.isArray(value) && value.length === 0);
-  }
-
-  function goEscapeJson(json: string): string {
-    return json
-      .replace(/</gu, "\\u003c")
-      .replace(/>/gu, "\\u003e")
-      .replace(/&/gu, "\\u0026")
-      .replace(/\u2028/gu, "\\u2028")
-      .replace(/\u2029/gu, "\\u2029");
-  }
-
-  const request = backend.requests[0];
-  if (request === undefined) {
-    throw new Error("ollama.request.capture did not call Chat upstream");
-  }
-  const headers = outboundHeaders("fixture-token", new Headers({ "content-type": "application/json" }));
-  return JSON.stringify({
-    upstreamUrl: "https://api.githubcopilot.com/chat/completions",
-    headers: {
-      "content-type": headers.get("content-type"),
-      "copilot-integration-id": headers.get("copilot-integration-id"),
-      "editor-version": headers.get("editor-version"),
-      "editor-plugin-version": headers.get("editor-plugin-version"),
-      "user-agent": headers.get("user-agent"),
-      "x-github-api-version": headers.get("x-github-api-version"),
-    },
-    hasVisionInput: request.hasVisionInput,
-    chatCallCount: 1,
-    body: decodeBytes(request.body),
-  });
-}
-
-class FixtureOllamaBackend implements CopilotBackend {
-  readonly requests: ChatRequest[] = [];
-
-  async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
-    const target: CopilotTarget = { endpoint: "https://api.githubcopilot.com", token: "fixture-token" };
-    return {
-      accountId: account.accountId,
-      target,
-      completeChat: async (request): Promise<ChatResponse> => {
-        this.requests.push(request);
-        return {
-          status: 200,
-          headers: new Headers(),
-          body: new TextEncoder().encode(JSON.stringify({
-            created: 1_700_000_000,
-            choices: [{
-              index: 0,
-              message: {
-                content: "<think>hidden</thinking>visible",
-                tool_calls: [{
-                  id: "call_1",
-                  index: 2,
-                  type: "function",
-                  function: { name: "weather", arguments: "{\"city\":\"Tokyo\",\"unit\":\"c\"}" },
-                }],
-              },
-              finish_reason: "tool_calls",
-              logprobs: {
-                content: [{
-                  token: "visible",
-                  logprob: -0.5,
-                  bytes: [118, 105],
-                  top_logprobs: [{ token: "visible", logprob: -0.5, bytes: [118] }],
-                }],
-              },
-            }],
-            usage: { prompt_tokens: 12, completion_tokens: 6 },
-          })),
-        };
-      },
-      openChatStream: async (request): Promise<UpstreamByteStream> => {
-        this.requests.push(request);
-        return {
-          status: 200,
-          headers: new Headers({ "content-type": "text/event-stream" }),
-          bytes: streamFixtureBytes("data: [DONE]\n\n"),
-          cancel: async () => undefined,
-        };
-      },
-      completeResponses: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteResponse> => {
-        throw new Error("Responses must not be called by Ollama fixture");
-      },
-      openResponsesStream: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteStream> => {
-        throw new Error("Responses stream must not be called by Ollama fixture");
-      },
-    };
-  }
-}
-
-async function* streamFixtureBytes(text: string): AsyncIterable<Uint8Array> {
-  yield new TextEncoder().encode(text);
 }
 
 async function expectedOpenAiChatFixture(entry: FixtureManifestEntry): Promise<string | undefined> {

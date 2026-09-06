@@ -102,7 +102,7 @@ describe("model routes errors and preferences", () => {
 
       retryAfter = undefined;
       catalog.invalidate("github.com/1");
-      const invalid = await gw.fetch(new Request("http://127.0.0.1:31400/api/tags"));
+      const invalid = await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       expect(invalid.status).toBe(429);
       expect(invalid.headers.get("retry-after")).toBeNull();
     } finally {

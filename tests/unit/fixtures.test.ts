@@ -11,7 +11,7 @@ describe("fixture family closure", () => {
     const entries = await verifyFixtureManifests();
     const count = (family: string): number => entries.filter((entry) => entry.family === family).length;
 
-    expect(entries).toHaveLength(54);
+    expect(entries).toHaveLength(50);
     for (const entry of entries) {
       expect(entry).not.toHaveProperty("source");
       expect(entry).not.toHaveProperty("owner");

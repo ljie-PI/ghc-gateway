@@ -1,12 +1,5 @@
 [
   {
-    "caseId": "gateway-http-host.probe.version",
-    "family": "gateway-http-host",
-    "input": "probe/version.input.txt",
-    "expected": "probe/version.expected.json",
-    "encoder": "probe"
-  },
-  {
     "caseId": "gateway-http-host.probe.healthz",
     "family": "gateway-http-host",
     "input": "probe/healthz.input.txt",

@@ -1,1 +1,0 @@
-{"model":"gpt","messages":[{"role":"Assistant","content":"","thinking":"checking","tool_calls":[{"id":"call_1","function":{"index":0,"name":"weather","arguments":{"city":"Tokyo"}}}]},{"role":"tool","content":"sunny","tool_name":"weather","tool_call_id":"call_1"}],"stream":true,"think":"medium","options":{"num_predict":256,"stop":["END"]}}

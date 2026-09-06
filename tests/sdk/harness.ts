@@ -130,7 +130,6 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       catalog,
       copilot: backend,
       history,
-      tokenCounter: () => 0,
       modelMetadata: new Map([
         [CHAT_MODEL, { mode: "chat", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],
         [REASONING_MODEL, { mode: "chat", maxInputTokens: 128_000, maxOutputTokens: 16_384 }],

@@ -1,6 +1,6 @@
 # GHC Gateway
 
-GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI, Anthropic, and Ollama-compatible APIs. It runs as one Node.js process and includes a local Admin UI for account, model, runtime configuration, history, usage, and operational-event management.
+GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages APIs. It runs as one Node.js process and includes a local Admin UI for account, model, runtime configuration, history, usage, and operational-event management.
 
 ## Requirements
 
@@ -111,14 +111,12 @@ All routes use the same loopback listener. Inference routes do not require a sep
 | `POST` | `/v1/responses` | OpenAI Responses, native or Chat bridge |
 | `POST` | `/v1/messages` | Anthropic Messages |
 | `GET` | `/v1/models` | OpenAI models; Anthropic shape with `anthropic-version` |
-| `POST` | `/api/chat` | Ollama Chat |
-| `GET` | `/api/tags` | Ollama model listing |
-| `GET` | `/api/version` | Ollama-compatible version probe |
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/readyz` | Runtime readiness |
 | `GET` | `/admin/*` | Admin static application |
 
 No unversioned, compact, trailing-slash, or legacy route aliases are registered.
+The retired Ollama-compatible routes `/api/chat`, `/api/tags`, and `/api/version` are not registered.
 
 ## Configuration
 

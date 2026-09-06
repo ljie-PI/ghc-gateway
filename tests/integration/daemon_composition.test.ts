@@ -17,7 +17,6 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
-import { litellmStyleTokenCounter } from "../../src/protocols/ollama_chat/token_counter.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 
@@ -230,7 +229,6 @@ function compositionHarness(): CompositionHarness {
       maxInputTokens: 200_000,
       maxOutputTokens: 16_384,
     }]]),
-    tokenCounter: litellmStyleTokenCounter,
     async close() {
       await telemetry.flush();
       await catalog.close();

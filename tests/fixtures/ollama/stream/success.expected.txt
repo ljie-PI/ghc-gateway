@@ -1,2 +1,0 @@
-{"model":"gpt","created_at":"2026-01-02T03:04:05.12Z","message":{"role":"assistant","content":"hello"},"done":false}
-{"model":"gpt","created_at":"2026-01-02T03:04:05.12Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}
