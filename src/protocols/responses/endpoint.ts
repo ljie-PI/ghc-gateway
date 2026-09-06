@@ -52,6 +52,7 @@ import {
 } from "./history.js";
 import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
 import type { ChatBridgePlan } from "./planner.js";
+import { buildRequestToolContext } from "./tool_context.js";
 import { RESPONSES_JSON_HEADERS, RESPONSES_STREAM_HEADERS } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
@@ -443,9 +444,42 @@ function mergeExtendedResponseOutput(
       return item;
     }
     const callId = memberValue(item, "call_id");
-    return typeof callId === "string" ? extendedByCallId.get(callId) ?? item : item;
+    const extended = typeof callId === "string" ? extendedByCallId.get(callId) : undefined;
+    return isWireJsonObject(extended) ? mergeExtendedItem(item, extended) : item;
   });
   return replaceWireMember(shared, "output", { kind: "array", items: output });
+}
+
+function mergeExtendedItem(shared: WireJsonObject, extended: WireJsonObject): WireJsonObject {
+  const sharedId = memberValue(shared, "id");
+  const sharedStatus = memberValue(shared, "status");
+  let hasId = false;
+  let hasStatus = false;
+  const members = extended.members.map((member) => {
+    if (member.key === "id") {
+      hasId = true;
+    }
+    if (member.key === "status") {
+      hasStatus = true;
+    }
+    if (member.key === "id" && sharedId !== undefined) {
+      return { key: "id", value: sharedId };
+    }
+    if (member.key === "status" && sharedStatus !== undefined) {
+      return { key: "status", value: sharedStatus };
+    }
+    return member;
+  });
+  if (!hasId && sharedId !== undefined) {
+    members.push({ key: "id", value: sharedId });
+  }
+  if (!hasStatus && sharedStatus !== undefined) {
+    members.push({ key: "status", value: sharedStatus });
+  }
+  return {
+    kind: "object",
+    members,
+  };
 }
 
 function replaceWireMember(object: WireJsonObject, key: string, value: WireJson): WireJsonObject {
@@ -732,6 +766,7 @@ function validateExtendedResponsesRequest(
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
   const toolNames = new Set<string>();
+  let expectedChatTools = 0;
   for (const tool of tools.items) {
     if (!isWireJsonObject(tool) || duplicateMemberNames(tool).length > 0) {
       throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
@@ -740,6 +775,7 @@ function validateExtendedResponsesRequest(
     if (type === "function") {
       const functionObject = validateExtendedFunctionTool(tool);
       toolNames.add(memberValue(functionObject, "name") as string);
+      expectedChatTools += 1;
       continue;
     }
     if (type === "custom") {
@@ -761,6 +797,7 @@ function validateExtendedResponsesRequest(
         }
       }
       toolNames.add(memberValue(tool, "name") as string);
+      expectedChatTools += 1;
       continue;
     }
     if (type === "namespace") {
@@ -780,14 +817,24 @@ function validateExtendedResponsesRequest(
         }
         const functionObject = validateExtendedFunctionTool(child);
         toolNames.add(memberValue(functionObject, "name") as string);
+        expectedChatTools += 1;
       }
       continue;
     }
     if (type === "tool_search") {
       assertExtendedToolKeys(tool, new Set(["type"]));
       toolNames.add("tool_search");
+      expectedChatTools += 1;
       continue;
     }
+    throw new GatewayFailureError({
+      kind: "unsupported_semantics",
+      source: "converter",
+      phase: "convert",
+    });
+  }
+  const toolContext = buildRequestToolContext(decodeResponsesRequest(body));
+  if (toolContext.chatTools.length !== expectedChatTools) {
     throw new GatewayFailureError({
       kind: "unsupported_semantics",
       source: "converter",
@@ -855,6 +902,25 @@ function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
       continue;
     }
     const type = memberValue(item, "type");
+    if (type === "function_call" && memberValue(item, "namespace") !== undefined) {
+      assertExtendedToolKeys(
+        item,
+        new Set(["type", "id", "call_id", "name", "namespace", "arguments", "status"]),
+      );
+      if (
+        typeof memberValue(item, "namespace") !== "string"
+        || typeof memberValue(item, "call_id") !== "string"
+        || typeof memberValue(item, "name") !== "string"
+        || typeof memberValue(item, "arguments") !== "string"
+      ) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+      }
+      ordinary.push({
+        kind: "object",
+        members: item.members.filter((member) => member.key !== "namespace"),
+      });
+      continue;
+    }
     if (type === "custom_tool_call" || type === "tool_search_call") {
       assertExtendedToolKeys(
         item,
@@ -873,6 +939,8 @@ function sanitizedExtendedInput(value: WireJson | undefined): WireJson {
         ) {
           throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
         }
+      } else if (!isWireJsonObject(memberValue(item, "arguments"))) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
       }
       calls.add(callId);
       continue;
@@ -932,6 +1000,7 @@ function validateExtendedFunctionTool(tool: WireJsonObject): WireJsonObject {
     (description !== undefined && typeof description !== "string")
     || !isWireJsonObject(parameters)
     || duplicateMemberNames(parameters).length > 0
+    || memberValue(parameters, "type") !== "object"
     || (strict !== undefined && typeof strict !== "boolean")
   ) {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
@@ -950,7 +1019,14 @@ function rejectExtendedInstructionReordering(input: WireJson | undefined): void 
       continue;
     }
     const role = memberValue(item, "role");
-    if (role === "system" || role === "developer") {
+    if (role === "developer") {
+      throw new GatewayFailureError({
+        kind: "unsupported_semantics",
+        source: "converter",
+        phase: "convert",
+      });
+    }
+    if (role === "system") {
       if (ordinarySeen) {
         throw new GatewayFailureError({
           kind: "unsupported_semantics",

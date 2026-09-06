@@ -143,6 +143,87 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("round-trips a buffered namespace tool and preserves incomplete item status", async () => {
+    const harness = await matrixGateway();
+    try {
+      const first = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "namespace",
+        tools: [{
+          type: "namespace",
+          name: "ns",
+          tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+        }],
+      }));
+      const firstBody = await first.json() as {
+        id: string;
+        output: Array<{ type: string; call_id?: string; namespace?: string }>;
+      };
+      const call = firstBody.output.find((item) => item.type === "function_call");
+      expect(call).toMatchObject({ call_id: "call_namespace", namespace: "ns" });
+      const second = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        previous_response_id: firstBody.id,
+        input: [{ type: "function_call_output", call_id: "call_namespace", output: "done" }],
+        tools: [{
+          type: "namespace",
+          name: "ns",
+          tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+        }],
+      }));
+      expect(second.status).toBe(200);
+
+      const incomplete = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "partial-custom",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      expect(await incomplete.json()).toMatchObject({
+        status: "incomplete",
+        output: expect.arrayContaining([
+          expect.objectContaining({ type: "custom_tool_call", status: "incomplete" }),
+        ]),
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it.each([
+    {
+      input: "collision",
+      tools: [
+        { type: "function", name: "ns__lookup", parameters: { type: "object" } },
+        {
+          type: "namespace",
+          name: "ns",
+          tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+        },
+      ],
+    },
+    {
+      input: [{ type: "tool_search_call", call_id: "call_search" }],
+      tools: [{ type: "tool_search" }],
+    },
+    {
+      input: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "unsafe" }] }],
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+    },
+  ])("rejects lossy extended tool variants before inference", async (request) => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        ...request,
+      }));
+      expect([400, 422]).toContain(response.status);
+      await response.text();
+      expect(harness.backend.captured).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it.each([
     ["chat", "native-chat", "chat-stream", "[DONE]"],
     ["chat", "native-messages", "messages-stream", "[DONE]"],
@@ -362,6 +443,25 @@ async function matrixGateway(): Promise<MatrixHarness> {
       };
       const hasToolResult = captured.messages?.some((message) => message.role === "tool") === true;
       const custom = captured.tools?.some((tool) => tool.function?.name === "render") === true;
+      const namespace = captured.tools?.some((tool) => tool.function?.name === "ns__lookup") === true;
+      const partialCustom = decoder.decode(request.body).includes("partial-custom");
+      const toolCall = partialCustom
+        ? {
+          id: "call_custom",
+          type: "function",
+          function: { name: "render", arguments: "{\"input\":\"x\"" },
+        }
+        : namespace
+          ? {
+            id: "call_namespace",
+            type: "function",
+            function: { name: "ns__lookup", arguments: "{}" },
+          }
+          : {
+            id: "call_custom",
+            type: "function",
+            function: { name: "render", arguments: "{\"input\":\"hello\"}" },
+          };
       return {
         status: 200,
         headers: new Headers(),
@@ -372,18 +472,16 @@ async function matrixGateway(): Promise<MatrixHarness> {
           model: "matrix",
           choices: [{
             index: 0,
-            message: custom && !hasToolResult
+            message: (custom || namespace) && !hasToolResult
               ? {
                 role: "assistant",
                 content: null,
-                tool_calls: [{
-                  id: "call_custom",
-                  type: "function",
-                  function: { name: "render", arguments: "{\"input\":\"hello\"}" },
-                }],
+                tool_calls: [toolCall],
               }
               : { role: "assistant", content: "ok" },
-            finish_reason: custom && !hasToolResult ? "tool_calls" : "stop",
+            finish_reason: partialCustom
+              ? "length"
+              : (custom || namespace) && !hasToolResult ? "tool_calls" : "stop",
           }],
           usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
         })),
