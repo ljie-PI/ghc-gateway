@@ -50,6 +50,7 @@ export interface AdminFixture {
     devicePollDelayMs: number;
     deviceNowMs: number;
     accountsDelayMs: number;
+    modelDelayByAccount: Record<string, number>;
     cancelCompletesDeviceFlow: boolean;
     streamBodies: string[];
     streamDelaysMs: number[];
@@ -129,6 +130,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       devicePollDelayMs: 0,
       deviceNowMs: ADMIN_FIXTURE_NOW_MS,
       accountsDelayMs: 0,
+      modelDelayByAccount: {},
       cancelCompletesDeviceFlow: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
       streamDelaysMs: [],
@@ -220,6 +222,24 @@ function modelItem(input: {
     overrideRevision: options.overrideRevision ?? 0,
     builtinRevision: "test",
     override,
+  };
+}
+
+function modelsForAccount(fixture: AdminFixture, accountId: string): AdminModels {
+  if (accountId === fixture.state.models.accountId) {
+    return structuredClone(fixture.state.models);
+  }
+  return {
+    ...structuredClone(fixture.state.models),
+    accountId,
+    preferredModel: null,
+    items: [modelItem({
+      id: "enterprise-model",
+      name: "Enterprise Model",
+      vendor: "Enterprise",
+      maxInputTokens: 100_000,
+      maxOutputTokens: 8_000,
+    })],
   };
 }
 
@@ -426,7 +446,13 @@ async function handle(
     };
     return json(route, 200, removed);
   }
-  if (path === "/models" && request.method() === "GET") return json(route, 200, fixture.state.models);
+  if (path === "/models" && request.method() === "GET") {
+    const accountId = url.searchParams.get("accountId") ?? fixture.state.models.accountId;
+    const models = modelsForAccount(fixture, accountId);
+    const delay = fixture.state.modelDelayByAccount[accountId] ?? 0;
+    if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    return json(route, 200, models);
+  }
   if (path === "/models/refresh") {
     fixture.state.models = {
       ...fixture.state.models,

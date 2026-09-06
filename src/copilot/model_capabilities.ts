@@ -234,7 +234,7 @@ export function sameProtocols(
   left: readonly NativeModelProtocol[],
   right: readonly NativeModelProtocol[],
 ): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+  return left.length === right.length && left.every((value) => right.includes(value));
 }
 
 function parseLocations<T>(
@@ -293,7 +293,9 @@ function parseEndpointProtocols(input: unknown): DeclaredField<readonly NativeMo
       protocols.push(protocol);
     }
   }
-  return value(Object.freeze(protocols));
+  return value(Object.freeze(
+    (["chat", "messages", "responses"] as const).filter((protocol) => protocols.includes(protocol)),
+  ));
 }
 
 function endpointProtocol(endpoint: string): NativeModelProtocol | null {

@@ -7,6 +7,7 @@
   type Protocol = NonNullable<ModelItem["protocols"]>[number];
   type Editor = {
     enabled: boolean;
+    overrideProtocols: boolean;
     protocols: Protocol[];
     maxInputTokens: string;
     maxOutputTokens: string;
@@ -24,6 +25,7 @@
   let message = $state("");
   let editors = $state<Record<string, Editor>>({});
   let newModelId = $state("");
+  let requestGeneration = 0;
 
   onMount(async () => {
     try {
@@ -40,19 +42,26 @@
 
   async function load(preserveFailure = false): Promise<void> {
     if (!accountId) {
+      requestGeneration += 1;
       loading = false;
       data = null;
       return;
     }
+    const targetAccountId = accountId;
+    const generation = ++requestGeneration;
     loading = true;
+    busy = "";
     if (!preserveFailure) failure = "";
     try {
-      data = await client.models(accountId);
+      const loaded = await client.models(targetAccountId);
+      if (!isCurrentRequest(generation, targetAccountId)) return;
+      data = loaded;
       syncEditors();
     } catch (error: unknown) {
+      if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
     } finally {
-      loading = false;
+      if (isCurrentRequest(generation, targetAccountId)) loading = false;
     }
   }
 
@@ -62,6 +71,7 @@
       const override = model.override;
       next[model.id] = {
         enabled: override?.enabled ?? model.enabled,
+        overrideProtocols: override?.protocols !== undefined,
         protocols: [...(override?.protocols ?? model.protocols ?? [])],
         maxInputTokens: numberText(override?.maxInputTokens),
         maxOutputTokens: numberText(override?.maxOutputTokens),
@@ -74,50 +84,61 @@
 
   async function refresh(): Promise<void> {
     if (!accountId) return;
+    const targetAccountId = accountId;
+    const generation = ++requestGeneration;
     busy = "refresh";
     failure = "";
     try {
-      data = await client.refreshModels(accountId);
+      const refreshed = await client.refreshModels(targetAccountId);
+      if (!isCurrentRequest(generation, targetAccountId)) return;
+      data = refreshed;
       syncEditors();
       message = data.preferredModel?.validity === "invalid"
         ? "Catalog refreshed. Your previous preference is no longer available."
         : "Catalog refreshed.";
     } catch (error: unknown) {
+      if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
     } finally {
-      busy = "";
+      if (isCurrentRequest(generation, targetAccountId)) busy = "";
     }
   }
 
   async function prefer(id: string): Promise<void> {
-    if (!data) return;
+    if (!data || data.accountId !== accountId) return;
+    const targetAccountId = data.accountId;
+    const generation = ++requestGeneration;
     busy = `prefer:${id}`;
     failure = "";
     try {
-      await client.preferModel(data.accountId, id, data.preferredModel?.revision ?? 0);
+      await client.preferModel(targetAccountId, id, data.preferredModel?.revision ?? 0);
+      if (!isCurrentRequest(generation, targetAccountId)) return;
       message = `${id} is now preferred.`;
       await load();
     } catch (error: unknown) {
+      if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
       if (error instanceof ApiError && error.status === 409) await load(true);
     } finally {
-      busy = "";
+      if (accountId === targetAccountId) busy = "";
     }
   }
 
   async function save(model: ModelItem): Promise<void> {
     const editor = editors[model.id];
-    if (!data || editor === undefined) return;
+    if (!data || data.accountId !== accountId || editor === undefined) return;
+    const targetAccountId = data.accountId;
+    const generation = ++requestGeneration;
     busy = `save:${model.id}`;
     failure = "";
     try {
-      data = await client.setModelCapabilities(
-        data.accountId,
+      const saved = await client.setModelCapabilities(
+        targetAccountId,
         model.id,
         model.overrideRevision,
         {
           enabled: editor.enabled,
-          protocols: editor.protocols,
+          ...(editor.overrideProtocols ? { protocols: editor.protocols } : {}),
           ...optionalNumber("maxInputTokens", editor.maxInputTokens),
           ...optionalNumber("maxOutputTokens", editor.maxOutputTokens),
           ...optionalNumber("defaultOutputTokens", editor.defaultOutputTokens),
@@ -126,53 +147,67 @@
           }),
         },
       );
+      if (!isCurrentRequest(generation, targetAccountId)) return;
+      data = saved;
       syncEditors();
       message = `${model.id} capability override saved.`;
     } catch (error: unknown) {
+      if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
       if (error instanceof ApiError && error.status === 409) await load(true);
     } finally {
-      busy = "";
+      if (isCurrentRequest(generation, targetAccountId)) busy = "";
     }
   }
 
   async function reset(model: ModelItem): Promise<void> {
-    if (!data) return;
+    if (!data || data.accountId !== accountId) return;
+    const targetAccountId = data.accountId;
+    const generation = ++requestGeneration;
     busy = `reset:${model.id}`;
     failure = "";
     try {
-      data = await client.resetModelCapabilities(data.accountId, model.id, model.overrideRevision);
+      const resetData = await client.resetModelCapabilities(targetAccountId, model.id, model.overrideRevision);
+      if (!isCurrentRequest(generation, targetAccountId)) return;
+      data = resetData;
       syncEditors();
       message = `${model.id} capability override reset.`;
     } catch (error: unknown) {
+      if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
       if (error instanceof ApiError && error.status === 409) await load(true);
     } finally {
-      busy = "";
+      if (isCurrentRequest(generation, targetAccountId)) busy = "";
     }
   }
 
   async function addConfiguredModel(): Promise<void> {
-    if (!data || !newModelId) return;
+    if (!data || data.accountId !== accountId || !newModelId) return;
+    const targetAccountId = data.accountId;
+    const generation = ++requestGeneration;
+    const modelId = newModelId;
     busy = "add";
     failure = "";
     try {
-      data = await client.setModelCapabilities(
-        data.accountId,
-        newModelId,
+      const configured = await client.setModelCapabilities(
+        targetAccountId,
+        modelId,
         data.capabilityRevision,
         {
         enabled: true,
         protocols: [],
         },
       );
-      message = `${newModelId} added as configured and unverified.`;
+      if (!isCurrentRequest(generation, targetAccountId)) return;
+      data = configured;
+      message = `${modelId} added as configured and unverified.`;
       newModelId = "";
       syncEditors();
     } catch (error: unknown) {
+      if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
     } finally {
-      busy = "";
+      if (isCurrentRequest(generation, targetAccountId)) busy = "";
     }
   }
 
@@ -193,6 +228,10 @@
 
   function numberText(value: number | undefined): string {
     return value === undefined ? "" : String(value);
+  }
+
+  function isCurrentRequest(generation: number, targetAccountId: string): boolean {
+    return requestGeneration === generation && accountId === targetAccountId;
   }
 </script>
 
@@ -283,7 +322,11 @@
             <input type="checkbox" bind:checked={editor.enabled} />
             Enabled and visible
           </label>
-          <fieldset>
+          <label>
+            <input type="checkbox" bind:checked={editor.overrideProtocols} />
+            Override native protocols
+          </label>
+          <fieldset disabled={!editor.overrideProtocols}>
             <legend>Native HTTP protocols</legend>
             {#each ["chat", "messages", "responses"] as protocol (protocol)}
               <label>

@@ -101,6 +101,7 @@ async function executeAnthropicMessages(
     request.body,
     resolved.upstreamModel,
     resolved.capability.profile.chatOutputTokenField.value,
+    resolved.capability.defaultOutputTokens,
   );
   const stream = chatBody.stream === true;
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);

@@ -53,6 +53,14 @@ describe("model capability registry", () => {
           supported_endpoints: ["/responses"],
           model_info: { supported_endpoints: ["/chat/completions"] },
         },
+        {
+          id: "equivalent-order",
+          name: "Equivalent",
+          vendor: "test",
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses", "/chat/completions"],
+          model_info: { supported_endpoints: ["/v1/chat/completions", "/v1/responses"] },
+        },
       ],
     });
     const snapshot = await harness.registry.get(harness.account1, signal);
@@ -64,7 +72,7 @@ describe("model capability registry", () => {
     expect(capability(snapshot, "missing").protocols).toMatchObject({ value: null, source: "unknown", liveState: "missing" });
     expect(capability(snapshot, "malformed").protocols).toMatchObject({ value: null, source: "unknown", liveState: "malformed" });
     expect(capability(snapshot, "production-shape")).toMatchObject({
-      protocols: { value: ["responses", "chat"], source: "live" },
+      protocols: { value: ["chat", "responses"], source: "live" },
       maxInputTokens: { value: 200_000, source: "live" },
       maxOutputTokens: { value: 32_000, source: "live" },
     });
@@ -73,6 +81,7 @@ describe("model capability registry", () => {
       source: "unknown",
       liveState: "malformed",
     });
+    expect(capability(snapshot, "equivalent-order").protocols.value).toEqual(["chat", "responses"]);
   });
 
   it("applies field precedence without unioning conflicts or replacing explicit empty values", async () => {
@@ -302,6 +311,24 @@ describe("model capability registry", () => {
       revision: 0,
       value: null,
     });
+  });
+
+  it("rejects capability writes atomically after account removal starts", async () => {
+    const database = databaseWithCapabilities();
+    const account = await createAccount(database, "1");
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    database.prepare(
+      "UPDATE accounts SET credential_state = 'removing' WHERE account_id = ?",
+    ).run(account.accountId);
+    expect(() => overrides.set(
+      account.accountId,
+      "manual",
+      { enabled: true, protocols: ["messages"] },
+      0,
+      () => undefined,
+      account.credentialGeneration,
+    )).toThrow(ModelCapabilityOverrideError);
+    expect(overrides.list(account.accountId)).toEqual([]);
   });
 
   it("uses explicit valid output budgets, configured defaults, known ceilings, and unknown fallback", () => {

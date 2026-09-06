@@ -326,8 +326,15 @@ export interface AdminCapabilityOverrides {
     candidate: Readonly<ModelCapabilityOverrideValue>,
     expectedRevision: number,
     afterWrite?: () => void,
+    expectedCredentialGeneration?: number,
   ): unknown;
-  reset(accountId: string, modelId: string, expectedRevision: number, afterWrite?: () => void): unknown;
+  reset(
+    accountId: string,
+    modelId: string,
+    expectedRevision: number,
+    afterWrite?: () => void,
+    expectedCredentialGeneration?: number,
+  ): unknown;
 }
 
 export interface AdminStoredPreference extends AdminPreference {
@@ -576,6 +583,7 @@ export class AdminManagementApi {
           preview,
           before?.revision ?? null,
         ),
+        validatedAccount.credentialGeneration,
       );
       return this.modelsDto(preview);
     });
@@ -612,6 +620,7 @@ export class AdminManagementApi {
           preview,
           before?.revision ?? null,
         ),
+        account.credentialGeneration,
       );
       return this.modelsDto(preview);
     });

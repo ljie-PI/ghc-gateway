@@ -472,8 +472,15 @@ function resolvedModel(upstreamModel: string): ResolvedModel {
 async function expectedAnthropicFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
   const inputPath = path.join(fixtureFamilyRoot(entry), entry.input);
   switch (entry.caseId) {
-  case "anthropic.request.tools-media-reasoning":
-    return JSON.stringify(convertAnthropicRequest(await readWireObject(inputPath), "gpt-5", "max_tokens"));
+  case "anthropic.request.tools-media-reasoning": {
+    const capability = fixtureCapability("gpt-5", ["chat"]);
+    return JSON.stringify(convertAnthropicRequest(
+      await readWireObject(inputPath),
+      "gpt-5",
+      "max_tokens",
+      capability.defaultOutputTokens,
+    ));
+  }
   case "anthropic.nonstream.tools-usage":
     return JSON.stringify(convertAnthropicChatResponse({
       status: 200,

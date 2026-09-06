@@ -312,6 +312,49 @@ test("model-capability-override-lifecycle", async ({ page }) => {
   await expect(page.getByRole("article").filter({ hasText: "manual-model" })).toBeVisible();
 });
 
+test("model-account switching ignores stale responses", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  const current = fixture.state.accounts.items[0]!;
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: [...fixture.state.accounts.items, {
+      ...current,
+      accountId: "ghes:2",
+      host: "github.example.test",
+      numericUserId: "2",
+      login: "enterprise",
+      displayName: "Enterprise Admin",
+    }],
+  };
+  fixture.state.modelDelayByAccount[current.accountId] = 300;
+  await page.getByRole("button", { name: "Models" }).click();
+  await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
+  await expect(page.getByText("enterprise-model", { exact: true })).toBeVisible();
+  await page.waitForTimeout(350);
+  await expect(page.getByLabel("Account", { exact: true })).toHaveValue("ghes:2");
+  await expect(page.getByText("enterprise-model", { exact: true })).toBeVisible();
+  await expect(page.getByText("gpt-alpha", { exact: true })).toHaveCount(0);
+});
+
+test("model token override keeps protocol inheritance", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  await page.getByRole("button", { name: "Models" }).click();
+  const card = page.getByRole("article").filter({ hasText: "gpt-alpha" });
+  await expect(card.getByLabel("Override native protocols")).not.toBeChecked();
+  await card.getByLabel("Default output tokens").fill("2048");
+  await card.getByRole("button", { name: "Save capability override" }).click();
+  const request = fixture.requests.findLast((candidate) => (
+    candidate.url().endsWith("/models/capabilities")
+    && candidate.method() === "PUT"
+    && candidate.postData()?.includes("gpt-alpha") === true
+  ));
+  expect(request?.postDataJSON()).toMatchObject({
+    capabilities: { enabled: true, defaultOutputTokens: 2048 },
+  });
+  expect((request?.postDataJSON() as { capabilities?: { protocols?: unknown } }).capabilities?.protocols)
+    .toBeUndefined();
+});
+
 test("config-revision-and-security-rejection", async ({ page }) => {
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Configuration" }).click();

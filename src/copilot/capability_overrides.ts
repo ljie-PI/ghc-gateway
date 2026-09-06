@@ -58,6 +58,7 @@ export class SqliteModelCapabilityOverrides {
     candidate: Readonly<ModelCapabilityOverrideValue>,
     expectedRevision: number,
     afterWrite: () => void = () => undefined,
+    expectedCredentialGeneration?: number,
   ): StoredModelCapabilityOverride {
     validateModelId(modelId);
     validateOverride(candidate);
@@ -81,6 +82,7 @@ export class SqliteModelCapabilityOverrides {
     });
     const updatedAt = this.nowMs();
     this.database.transaction(() => {
+      this.requireActiveGeneration(accountId, expectedCredentialGeneration);
       this.database.prepare(
         `INSERT INTO model_capability_overrides (
            account_id, model_id, revision, configuration_json, updated_at_ms
@@ -101,6 +103,7 @@ export class SqliteModelCapabilityOverrides {
     modelId: string,
     expectedRevision: number,
     afterWrite: () => void = () => undefined,
+    expectedCredentialGeneration?: number,
   ): StoredModelCapabilityOverride {
     validateModelId(modelId);
     const currentRevision = this.revision(accountId);
@@ -114,6 +117,7 @@ export class SqliteModelCapabilityOverrides {
     const nextRevision = currentRevision + 1;
     const updatedAt = this.nowMs();
     this.database.transaction(() => {
+      this.requireActiveGeneration(accountId, expectedCredentialGeneration);
       this.database.prepare(
         "DELETE FROM model_capability_overrides WHERE account_id = ? AND model_id = ?",
       ).run(accountId, modelId);
@@ -151,6 +155,19 @@ export class SqliteModelCapabilityOverrides {
          revision = excluded.revision,
          updated_at_ms = excluded.updated_at_ms`,
     ).run(accountId, revision, updatedAt);
+  }
+
+  private requireActiveGeneration(accountId: string, expectedCredentialGeneration: number | undefined): void {
+    if (expectedCredentialGeneration === undefined) {
+      return;
+    }
+    const account = this.database.prepare(
+      "SELECT credential_state, credential_generation FROM accounts WHERE account_id = ?",
+    ).get(accountId) as { credential_state: string; credential_generation: number | null } | undefined;
+    if (account?.credential_state !== "active"
+      || account.credential_generation !== expectedCredentialGeneration) {
+      throw new ModelCapabilityOverrideError("revision_conflict");
+    }
   }
 }
 
