@@ -259,7 +259,13 @@ function convertInputItems(items: readonly WireJson[], state: MessageState, tool
     }
     if (type === "custom_tool_call_output" || type === "tool_search_output") {
       const extracted = extractMediaFromToolOutput(item);
-      state.output.push(toolMessage(callId(item), canonicalString(extracted.value)));
+      const content = canonicalString(extracted.value);
+      state.output.push(toolMessage(
+        callId(item),
+        memberValues(item, "status")[0] === "failed"
+          ? `[cc-switch:tool-result-error]\n${content}`
+          : content,
+      ));
       if (extracted.media.length > 0) {
         state.output.push(mediaMessage(callId(item), extracted.media));
       }
@@ -407,9 +413,15 @@ function functionOutputContent(item: WireJsonObject): string {
   const value = memberValues(item, "output")[0];
   if (typeof value === "string") {
     const parsed = parseJsonString(value);
-    return parsed === undefined ? value : canonicalString(parsed);
+    const content = parsed === undefined ? value : canonicalString(parsed);
+    return memberValues(item, "status")[0] === "failed"
+      ? `[cc-switch:tool-result-error]\n${content}`
+      : content;
   }
-  return value === undefined ? "" : canonicalString(value);
+  const content = value === undefined ? "" : canonicalString(value);
+  return memberValues(item, "status")[0] === "failed"
+    ? `[cc-switch:tool-result-error]${content.length === 0 ? "" : `\n${content}`}`
+    : content;
 }
 
 function normalizedArguments(value: WireJson | undefined): string {

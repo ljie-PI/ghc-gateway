@@ -170,7 +170,7 @@ async function executeResponses(
         && protocols?.includes("responses") !== true
         && protocols?.includes("chat") === true));
   if (extendedChat) {
-    validateExtendedResponsesRequest(
+    const validatedCommon = validateExtendedResponsesRequest(
       planningRequest.body,
       resolved.upstreamModel,
       resolved.capability,
@@ -195,7 +195,15 @@ async function executeResponses(
       originalRequest: planningRequest,
       resolvedModel: resolved,
     };
-    return await extendedBridgeNonstreamResponse(dependencies, ownership, bound, extendedPlan, scope, usage);
+    return await extendedBridgeNonstreamResponse(
+      dependencies,
+      ownership,
+      bound,
+      extendedPlan,
+      validatedCommon,
+      scope,
+      usage,
+    );
   }
   const plan = planProtocolExecution({
     source: "responses",
@@ -346,6 +354,7 @@ async function extendedBridgeNonstreamResponse(
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: ChatBridgePlan,
+  validatedCommon: WireJsonObject,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
 ): Promise<Response> {
@@ -353,7 +362,12 @@ async function extendedBridgeNonstreamResponse(
     reasoningConfig: null,
     chatOutputTokenField: plan.resolvedModel.capability.profile.chatOutputTokenField.value,
   }, scope.signal);
-  const request = extendedChatRequest(prepared.body, plan.resolvedModel.upstreamModel, false, scope);
+  const request = extendedChatRequest(
+    applyValidatedExtendedBudget(prepared.body, validatedCommon),
+    plan.resolvedModel.upstreamModel,
+    false,
+    scope,
+  );
   const upstream = await transportCall(() => bound.completeChat(request), request.signal);
   assertUpstreamSuccess(upstream);
   const measured = measure(dependencies.performanceObserver, "buffered", () => {
@@ -689,6 +703,24 @@ function extendedChatRequest(
   };
 }
 
+function applyValidatedExtendedBudget(
+  legacy: WireJsonObject,
+  validated: WireJsonObject,
+): WireJsonObject {
+  const budget = validated.members.find((member) => (
+    member.key === "max_tokens" || member.key === "max_completion_tokens"
+  ));
+  return {
+    kind: "object",
+    members: [
+      ...legacy.members.filter((member) => (
+        member.key !== "max_tokens" && member.key !== "max_completion_tokens"
+      )),
+      ...(budget === undefined ? [] : [budget]),
+    ],
+  };
+}
+
 function nativeOptions(scope: Readonly<RequestScope>) {
   return {
     requestId: scope.requestId,
@@ -734,7 +766,7 @@ function validateExtendedResponsesRequest(
   body: WireJsonObject,
   model: string,
   capability: Parameters<typeof prepareConvertedRequest>[4],
-): void {
+): WireJsonObject {
   if (
     duplicateMemberNames(body).length > 0
     || body.members.some((member) => !EXTENDED_RESPONSES_KEYS.has(member.key))
@@ -852,9 +884,10 @@ function validateExtendedResponsesRequest(
       ))
       .concat({ key: "input", value: sanitizedExtendedInput(memberValue(body, "input")) }),
   };
-  prepareConvertedRequest("responses", "chat", sanitized, model, capability);
+  const validated = prepareConvertedRequest("responses", "chat", sanitized, model, capability);
   rejectExtendedInstructionReordering(memberValue(body, "input"));
   rejectUnsafeExtendedHistory(memberValue(body, "input"));
+  return validated.body;
 }
 
 function validateExtendedToolChoice(value: WireJson | undefined, keys: ReadonlySet<string>): void {
@@ -1224,7 +1257,22 @@ function containsExtendedToolMedia(value: WireJson | undefined, depth = 0): bool
     return false;
   }
   if (typeof value === "string") {
-    return value.trim().startsWith("data:image/");
+    const trimmed = value.trim();
+    if (trimmed.startsWith("data:image/")) {
+      return true;
+    }
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const bytes = new TextEncoder().encode(trimmed);
+        return containsExtendedToolMedia(
+          parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 32 }),
+          depth + 1,
+        );
+      } catch {
+        return false;
+      }
+    }
+    return false;
   }
   if (isWireJsonArray(value)) {
     return value.items.some((item) => containsExtendedToolMedia(item, depth + 1));

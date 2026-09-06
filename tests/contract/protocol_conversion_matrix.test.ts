@@ -164,7 +164,12 @@ describe("protocol conversion matrix", () => {
       const second = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "native-chat",
         previous_response_id: firstBody.id,
-        input: [{ type: "function_call_output", call_id: "call_namespace", output: "done" }],
+        input: [{
+          type: "function_call_output",
+          call_id: "call_namespace",
+          output: "failed",
+          status: "failed",
+        }],
         tools: [{
           type: "namespace",
           name: "ns",
@@ -172,6 +177,7 @@ describe("protocol conversion matrix", () => {
         }],
       }));
       expect(second.status).toBe(200);
+      expect(decoder.decode(harness.chatBodies[1])).toContain("[cc-switch:tool-result-error]");
 
       const incomplete = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "native-chat",
@@ -341,6 +347,31 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("rejects JSON-encoded extended result media before inference", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: [
+          { type: "custom_tool_call", call_id: "call_1", name: "render", input: "x" },
+          {
+            type: "custom_tool_call_output",
+            call_id: "call_1",
+            output: JSON.stringify({
+              content: [{ type: "input_image", image_url: "data:image/png;base64,QUJD" }],
+            }),
+          },
+        ],
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      expect(response.status).toBe(422);
+      await response.text();
+      expect(harness.backend.captured).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it.each([
     ["chat", "native-chat", "chat-stream", "[DONE]"],
     ["chat", "native-messages", "messages-stream", "[DONE]"],
@@ -468,6 +499,7 @@ describe("protocol conversion matrix", () => {
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "native-chat",
         input: "render",
+        max_completion_tokens: 7,
         tools: [{ type: "custom", name: "render", format: { type: "text" } }],
         tool_choice: { type: "custom", name: "render" },
       }));
@@ -479,6 +511,8 @@ describe("protocol conversion matrix", () => {
           name: "render",
           input: "hello",
       })]));
+      expect(JSON.parse(decoder.decode(harness.chatBodies[0]))).toMatchObject({ max_tokens: 7 });
+      expect(decoder.decode(harness.chatBodies[0])).not.toContain("max_completion_tokens");
       expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
     } finally {
       await harness.close();
