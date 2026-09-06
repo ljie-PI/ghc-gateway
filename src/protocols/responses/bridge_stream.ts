@@ -9,6 +9,7 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import { boundedCleanup } from "../../gateway/stream_execution.js";
 import type { ChatChunk, ChatStreamFrame } from "../chat_completions/types.js";
 import type { ResponsesRequest } from "./dto.js";
 import type { ResponsesHistoryRecord } from "./history.js";
@@ -146,7 +147,9 @@ export async function* convertChatStream(
 
     yield* finalizeStream(state);
   } finally {
-    await iterator.return?.().catch(() => undefined);
+    if (iterator.return !== undefined) {
+      void boundedCleanup(iterator.return());
+    }
   }
 }
 

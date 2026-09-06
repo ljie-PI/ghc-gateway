@@ -40,6 +40,7 @@ import { encodeResponsesSseEvent } from "../../src/protocols/responses/wire.js";
 import { canonicalizeWireJson } from "../../src/serialization/canonical_json.js";
 import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, WireJsonError, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 import type { UpstreamByteStream } from "../../src/copilot/upstream_types.js";
+import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 export interface FixtureManifestEntry {
@@ -481,14 +482,21 @@ async function expectedAnthropicFixture(entry: FixtureManifestEntry): Promise<st
       bytes: asBytes(input.endsWith("\n\n") ? input : `${input}\n`),
       cancel: async () => undefined,
     };
-    const response = createAnthropicStreamResponse({
+    const signal = new AbortController().signal;
+    const response = await createAnthropicStreamResponse({
       upstream,
       model: "gpt",
       createUuid: () => "00000000-0000-4000-8000-000000000001",
       scope: {
         requestId: "req_fixture",
-        signal: new AbortController().signal,
+        signal,
+        deliverySignal: signal,
         config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_fixture",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
       },
     });
     return response.text();

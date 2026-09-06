@@ -37,7 +37,7 @@ describe("Responses endpoint", () => {
       }));
       expect(response.status).toBe(400);
       expect(usageUpdates).toMatchObject([{
-        protocol: "openai_responses_bridge",
+        protocol: "openai_responses_unknown",
         outcome: "client_error",
         requestCount: 1,
         errorCount: 1,
@@ -60,7 +60,7 @@ describe("Responses endpoint", () => {
       expect(await unknown.text()).toBe("{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}");
       expect(backend.captured).toEqual([]);
       expect(usageUpdates).toMatchObject([{
-        protocol: "openai_responses_bridge",
+        protocol: "openai_responses_unknown",
         outcome: "client_error",
         accountId: "github.com/1",
         resolvedModel: "missing",
@@ -195,15 +195,23 @@ describe("Responses endpoint", () => {
   });
 
   it("returns a pre-commit JSON error for malformed native stream before first byte", async () => {
+    const usageUpdates: UsageUpdate[] = [];
     const backend = new ScriptedCopilotBackend({
       responsesStream: [text("event: wrong\ndata: {\"type\":\"response.completed\"}\n\n")],
     });
-    const { gw, close } = await responsesGateway({ backend });
+    const { gw, close } = await responsesGateway({ backend, usageUpdates });
     try {
       const response = await gw.fetch(responsesRequest({ model: "native", input: "hi", stream: true }));
       expect(response.status).toBe(502);
       expect(response.headers.get("content-type")).toBe("application/json; charset=utf-8");
       expect(await response.text()).toBe("{\"error\":{\"message\":\"invalid upstream response\",\"type\":\"api_error\",\"param\":null,\"code\":null}}");
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "github.com/1",
+        protocol: "openai_responses_native",
+        resolvedModel: "native",
+        outcome: "upstream_error",
+      }]);
     } finally {
       await close();
     }
@@ -295,6 +303,7 @@ describe("Responses endpoint", () => {
   });
 
   it.each(["native", "chat"] as const)("keeps %s internal deadline distinct from client abort before commitment", async (model) => {
+    const timeoutUsage: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.totalMs = 1;
     const timedOutGateway = await responsesGateway({
@@ -303,6 +312,7 @@ describe("Responses endpoint", () => {
         responsesStream: (request) => stalledStream(request.signal),
         chatStream: (request) => stalledStream(request.signal),
       }),
+      usageUpdates: timeoutUsage,
     });
     try {
       const response = await timedOutGateway.gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
@@ -311,15 +321,22 @@ describe("Responses endpoint", () => {
       expect(await response.text()).toBe(
         "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
       );
+      expect(timeoutUsage).toHaveLength(1);
+      expect(timeoutUsage).toMatchObject([{
+        protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
+        outcome: "timeout",
+      }]);
     } finally {
       await timedOutGateway.close();
     }
 
+    const abortedUsage: UsageUpdate[] = [];
     const clientGateway = await responsesGateway({
       backend: new ScriptedCopilotBackend({
         responsesStream: (request) => stalledStream(request.signal),
         chatStream: (request) => stalledStream(request.signal),
       }),
+      usageUpdates: abortedUsage,
     });
     try {
       const controller = new AbortController();
@@ -331,8 +348,42 @@ describe("Responses endpoint", () => {
       controller.abort();
       const response = await pending;
       expect(response.body).toBeNull();
+      expect(abortedUsage).toHaveLength(1);
+      expect(abortedUsage).toMatchObject([{
+        protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
+        outcome: "aborted",
+      }]);
     } finally {
       await clientGateway.close();
+    }
+  });
+
+  it.each(["native", "chat"] as const)("does not let %s comments satisfy the first semantic deadline", async (model) => {
+    const usageUpdates: UsageUpdate[] = [];
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const { gw, close } = await responsesGateway({
+      runtime,
+      usageUpdates,
+      backend: new ScriptedCopilotBackend({
+        responsesStream: (request) => commentThenStall(request.signal),
+        chatStream: (request) => commentThenStall(request.signal),
+      }),
+    });
+    try {
+      const response = await gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
+        outcome: "timeout",
+      }]);
+    } finally {
+      await close();
     }
   });
 
@@ -421,6 +472,13 @@ describe("Responses endpoint", () => {
       signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
     });
     yield text("");
+  }
+
+  async function* commentThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
+    yield text(": keepalive\n\n");
+    await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
   }
 
   function text(value: string): Uint8Array {

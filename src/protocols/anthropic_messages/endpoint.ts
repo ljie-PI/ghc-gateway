@@ -9,21 +9,20 @@ import {
   normalizeTransportFailure,
 } from "../../copilot/failures.js";
 import {
-  failureFromSignal,
-  failureFromUnknown,
-  failureOutcome,
   GatewayFailureError,
   safeRetryAfter,
 } from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
+import { createRequestAttempt } from "../../gateway/request_attempt.js";
+import { boundedCleanup } from "../../gateway/stream_execution.js";
 import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { convertChatResponse } from "./bridge.js";
 import { convertAnthropicRequest } from "./request.js";
 import { createAnthropicStreamResponse } from "./stream.js";
-import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { TelemetryRecorder } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentAnthropicFailure } from "./failure_presenter.js";
 
@@ -44,19 +43,20 @@ const JSON_HEADERS = {
 } as const;
 
 export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRouteDependencies): RouteRegistration {
-  const attempts = new Map<string, ReturnType<typeof createUsageAttempt>>();
   return {
     method: "POST",
     path: "/v1/messages",
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentAnthropicFailure,
-    observeFailure: (failure, requestId) => {
-      const usage = attempts.get(requestId) ?? createUsageAttempt(dependencies, new AbortController().signal);
-      usage.failure(new GatewayFailureError(failure));
-      attempts.delete(requestId);
-    },
-    endpoint: (request, scope) => executeAnthropicMessages(dependencies, request, scope, attempts),
+    createAttempt: (requestId) => createRequestAttempt({
+      requestId,
+      protocol: "anthropic",
+      abortedErrorCount: 1,
+      ...(dependencies.usageRecorder === undefined ? {} : { recorder: dependencies.usageRecorder }),
+      ...(dependencies.nowMs === undefined ? {} : { nowMs: dependencies.nowMs }),
+    }),
+    endpoint: (request, scope) => executeAnthropicMessages(dependencies, request, scope),
   };
 }
 
@@ -64,19 +64,15 @@ async function executeAnthropicMessages(
   dependencies: AnthropicMessagesRouteDependencies,
   request: Readonly<DecodedHttpRequest>,
   scope: Readonly<RequestScope>,
-  attempts: Map<string, ReturnType<typeof createUsageAttempt>>,
 ): Promise<Response> {
-  const usage = createUsageAttempt(dependencies, scope.signal, () => attempts.delete(scope.requestId));
-  if (dependencies.usageRecorder !== undefined) {
-    attempts.set(scope.requestId, usage);
-  }
+  const usage = scope.attempt;
   if (request.body === undefined) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   assertAnthropicVersion(request.headers);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
-    usage.setModel(requestedModel.value);
+    usage.setRequestedModel(requestedModel.value);
   }
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
@@ -85,7 +81,7 @@ async function executeAnthropicMessages(
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
-  usage.setModel(resolved.upstreamModel);
+  usage.setResolvedModel(resolved.upstreamModel);
   const chatBody = convertAnthropicRequest(request.body, resolved.upstreamModel, requestedModel.value);
   const stream = chatBody.stream === true;
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
@@ -132,18 +128,19 @@ async function executeAnthropicMessages(
   }
 
   const upstream = await openChatStream(copilot, chatRequest);
+  if (upstream.status >= 400) {
+    await boundedCleanup(upstream.cancel());
+  }
   throwIfUpstreamHttp(upstream);
-  return createAnthropicStreamResponse({
+  return await createAnthropicStreamResponse({
     upstream,
     model: resolved.upstreamModel,
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     scope,
     ...(dependencies.performanceObserver === undefined ? {} : { performanceObserver: dependencies.performanceObserver }),
-    ...(dependencies.usageRecorder === undefined ? {} : {
-      onTerminal: (result: Parameters<NonNullable<Parameters<typeof createAnthropicStreamResponse>[0]["onTerminal"]>>[0]) => result.kind === "success"
-        ? usage.success(result.usage)
-        : usage.failure(result.error),
-    }),
+    onTerminal: (result) => result.kind === "success"
+      ? usage.success(result.usage)
+      : usage.failure(result.error),
   });
 }
 
@@ -264,70 +261,6 @@ interface UsageTokens {
   readonly cacheTokens: number;
 }
 
-const ZERO_USAGE: UsageTokens = { inputTokens: 0, outputTokens: 0, cacheTokens: 0 };
-const NOOP_USAGE_ATTEMPT = {
-  setAccount: (_accountId: string): void => undefined,
-  setModel: (_model: string): void => undefined,
-  success: (_tokens: UsageTokens): void => undefined,
-  failure: (_error: unknown): void => undefined,
-};
-
-function createUsageAttempt(
-  dependencies: AnthropicMessagesRouteDependencies,
-  signal: AbortSignal,
-  onFinished?: () => void,
-): {
-  setAccount(accountId: string): void;
-  setModel(model: string): void;
-  success(tokens: UsageTokens): void;
-  failure(error: unknown): void;
-} {
-  if (dependencies.usageRecorder === undefined) {
-    return NOOP_USAGE_ATTEMPT;
-  }
-  const nowMs = dependencies.nowMs ?? Date.now;
-  const startedAtMs = nowMs();
-  let accountId = "unbound";
-  let model = "unresolved";
-  let recorded = false;
-  const finish = (outcome: UsageUpdate["outcome"], tokens: UsageTokens): void => {
-    if (recorded) {
-      return;
-    }
-    recorded = true;
-    signal.removeEventListener("abort", onAbort);
-    onFinished?.();
-    const occurredAtMs = nowMs();
-    try {
-      dependencies.usageRecorder?.recordUsage({
-        occurredAtMs,
-        accountId,
-        protocol: "anthropic",
-        resolvedModel: model,
-        outcome,
-        requestCount: 1,
-        errorCount: outcome === "success" ? 0 : 1,
-        ...tokens,
-        latencyMs: Math.max(0, occurredAtMs - startedAtMs),
-      });
-    } catch (_error: unknown) {
-      // Telemetry is noncritical and cannot affect protocol behavior.
-    }
-  };
-  const onAbort = (): void => {
-    if (abortOutcome(signal) === "aborted") {
-      finish("aborted", ZERO_USAGE);
-    }
-  };
-  signal.addEventListener("abort", onAbort, { once: true });
-  return {
-    setAccount: (value) => { accountId = value; },
-    setModel: (value) => { model = value; },
-    success: (tokens) => finish("success", tokens),
-    failure: (error) => finish(usageOutcome(error, signal), ZERO_USAGE),
-  };
-}
-
 function anthropicUsageTokens(response: unknown): UsageTokens {
   const root = asObject(response);
   const usage = asObject(root?.usage);
@@ -346,15 +279,4 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 
 function safeInteger(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-
-function usageOutcome(error: unknown, signal: AbortSignal): UsageUpdate["outcome"] {
-  if (signal.aborted) {
-    return abortOutcome(signal);
-  }
-  return failureOutcome(failureFromUnknown(error, { source: "gateway", phase: "internal" }));
-}
-
-function abortOutcome(signal: AbortSignal): UsageUpdate["outcome"] {
-  return failureOutcome(failureFromSignal(signal, { source: "gateway", phase: "deadline" }));
 }

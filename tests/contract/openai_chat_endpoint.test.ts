@@ -814,6 +814,131 @@ describe("OpenAI Chat endpoint", () => {
       await close();
     }
   });
+
+  it("records a pre-endpoint malformed request exactly once as unbound", async () => {
+    const usageUpdates: unknown[] = [];
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend, { usageUpdates });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":"));
+      expect(response.status).toBe(400);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "unbound",
+        protocol: "openai_chat",
+        resolvedModel: "unresolved",
+        outcome: "client_error",
+        requestCount: 1,
+        errorCount: 1,
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([
+    {
+      name: "upstream error event",
+      bytes: () => streamFromText([
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n",
+        "event: error\ndata: {\"error\":{\"message\":\"private\"}}\n\n",
+      ].join(""), 1024),
+      runtime: defaultRuntimeConfigSnapshot(),
+    },
+    {
+      name: "network failure",
+      bytes: () => failingBytes(new TypeError("network failed")),
+      runtime: defaultRuntimeConfigSnapshot(),
+    },
+    {
+      name: "truncated EOF",
+      bytes: () => streamFromText("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n", 1024),
+      runtime: defaultRuntimeConfigSnapshot(),
+    },
+    {
+      name: "idle timeout",
+      bytes: () => hangingStreamAfter("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n"),
+      runtime: (() => {
+        const runtime = defaultRuntimeConfigSnapshot();
+        runtime.timeouts.streamIdleMs = 1;
+        return runtime;
+      })(),
+    },
+  ])("records one attributed failure for committed Chat $name without Done", async ({ bytes, runtime }) => {
+    const usageUpdates: unknown[] = [];
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: bytes(),
+        cancel: async () => undefined,
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime, usageUpdates });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      const reader = response.body?.getReader();
+      const first = await reader?.read();
+      const delivered = decoder.decode(first?.value);
+      expect(delivered).toContain("\"choices\":[]");
+      await expect(reader?.read()).rejects.toThrow();
+      expect(delivered).not.toContain("[DONE]");
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "github.com/1",
+        protocol: "openai_chat",
+        resolvedModel: "gpt",
+        outcome: runtime.timeouts.streamIdleMs === 1 ? "timeout" : "upstream_error",
+        requestCount: 1,
+        errorCount: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheTokens: 0,
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("records client cancellation once as aborted after Chat commitment", async () => {
+    const usageUpdates: unknown[] = [];
+    const controller = new AbortController();
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: cancelableBytes(
+          () => undefined,
+          encoder.encode("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n"),
+        ),
+        cancel: async () => undefined,
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { usageUpdates });
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"model\":\"gpt\",\"stream\":true}",
+        signal: controller.signal,
+      }));
+      const reader = response.body?.getReader();
+      expect(decoder.decode((await reader?.read())?.value)).toContain("\"choices\":[]");
+      controller.abort();
+      await reader?.read().catch(() => undefined);
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "github.com/1",
+        protocol: "openai_chat",
+        resolvedModel: "gpt",
+        outcome: "aborted",
+        errorCount: 0,
+      }]);
+    } finally {
+      await close();
+    }
+  });
 });
 
 async function* streamFromText(text: string, split: number): AsyncIterable<Uint8Array> {
@@ -826,6 +951,11 @@ async function* streamFromText(text: string, split: number): AsyncIterable<Uint8
 async function* hangingStreamAfter(text: string): AsyncIterable<Uint8Array> {
   yield encoder.encode(text);
   await new Promise<void>(() => undefined);
+}
+
+async function* failingBytes(error: Error): AsyncIterable<Uint8Array> {
+  yield encoder.encode("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n");
+  throw error;
 }
 
 function cancelableBytes(onCancel: () => void, first?: Uint8Array): AsyncIterable<Uint8Array> {
