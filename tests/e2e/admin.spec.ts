@@ -186,19 +186,28 @@ test("device-flow retries network failures without accepting stale responses", a
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
   fixture.state.devicePollStates = ["complete"];
-  fixture.state.devicePollDelayMs = 100;
-  await page.getByRole("button", { name: "Start login" }).click();
-  await advanceDeviceClock(page, fixture, 5_000);
-  await page.getByRole("button", { name: "Cancel" }).click();
-  await page.waitForTimeout(150);
+  const heldPoll = fixture.holdNextDevicePoll();
+  try {
+    await page.getByRole("button", { name: "Start login" }).click();
+    await advanceDeviceClock(page, fixture, 5_000);
+    await heldPoll.started;
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await expect.poll(() => fixture.requests.filter((request) => (
+      request.method() === "DELETE" && request.url().endsWith("/device-flows/flow-1")
+    )).length).toBe(1);
+  } finally {
+    heldPoll.release();
+  }
+  await heldPoll.responseFinished;
+  await expect.poll(() => fixture.state.accounts.items.some((account) => account.login === "enterprise")).toBe(true);
   await expect(page.getByText("ABCD-1234")).toHaveCount(0);
   await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
+  await expect(page.getByRole("status")).toContainText("Authorization canceled in this view");
 
   fixture.state.accounts = {
     ...fixture.state.accounts,
     items: fixture.state.accounts.items.filter((account) => account.login !== "enterprise"),
   };
-  fixture.state.devicePollDelayMs = 0;
   fixture.state.accountsDelayMs = 1_000;
   const staleRefreshCount = fixture.requests.filter((request) => request.url().endsWith("/accounts")).length;
   await page.getByRole("button", { name: "Refresh" }).click();
