@@ -3,7 +3,11 @@
   import { errorMessage, type AdminClient } from "../api.js";
   import type { AdminStatus, AdminUsagePage } from "../types.js";
 
-  let { client, liveStatus }: { client: AdminClient; liveStatus: AdminStatus | null } = $props();
+  let {
+    client,
+    liveStatus,
+    pageNumber,
+  }: { client: AdminClient; liveStatus: AdminStatus | null; pageNumber: string } = $props();
   let status: AdminStatus | null = $state(null);
   let usage: AdminUsagePage | null = $state(null);
   let loading = $state(true);
@@ -29,7 +33,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">[01] LOCAL ADMINISTRATION</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Overview</h1>
     <p>Health, usage, performance and bounded storage from the running gateway.</p>
   </div>

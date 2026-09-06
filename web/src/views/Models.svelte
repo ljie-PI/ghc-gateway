@@ -15,7 +15,7 @@
     chatOutputTokenField: "" | "max_tokens" | "max_completion_tokens";
   };
 
-  let { client }: { client: AdminClient } = $props();
+  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let accounts: AdminAccounts | null = $state(null);
   let data: AdminModels | null = $state(null);
   let accountId = $state("");
@@ -243,7 +243,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">[03] LOCAL ADMINISTRATION</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Models</h1>
     <p>Inspect real capability provenance and explicitly configure each account's catalog.</p>
   </div>
@@ -344,7 +344,14 @@
               </td>
               <td>
                 <div class="model-source">
-                  <span>{model.discovered ? "Discovered" : "Configured / unverified"}</span>
+                  <div class="tag-group">
+                    {#if model.discovered}<span class="badge">Discovered</span>{/if}
+                    {#if model.configured}
+                      <span class="badge" class:warning={!model.verified}>
+                        {model.verified ? "Configured override" : "Configured / unverified"}
+                      </span>
+                    {/if}
+                  </div>
                   <small class="muted">{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""}</small>
                 </div>
               </td>
@@ -372,7 +379,16 @@
                   <summary>Capability details and override</summary>
                   <div class="capability-grid">
                     <dl>
-                      <div><dt>Catalog state</dt><dd>{model.discovered ? "Discovered" : "Configured / unverified"} · {model.enabled ? "enabled" : "disabled"} · override revision {model.overrideRevision}</dd></div>
+                      <div>
+                        <dt>Catalog state</dt>
+                        <dd>
+                          {model.discovered ? "Discovered" : "Not discovered"} ·
+                          {model.configured
+                            ? (model.verified ? "Configured override" : "Configured / unverified")
+                            : "No Admin override"} ·
+                          {model.enabled ? "enabled" : "disabled"} · override revision {model.overrideRevision}
+                        </dd>
+                      </div>
                       <div><dt>Native HTTP protocols</dt><dd>{model.protocols?.join(", ") || (model.protocols === null ? "Unknown" : "None")}</dd></div>
                       <div><dt>Protocol provenance</dt><dd>{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""} · live {model.protocolsLiveState}</dd></div>
                       <div><dt>Input window</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {model.maxInputTokensSource}{model.maxInputTokensConflict ? " · conflict" : ""} · live {model.maxInputTokensLiveState}</dd></div>

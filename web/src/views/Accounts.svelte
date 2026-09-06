@@ -3,7 +3,7 @@
   import { ApiError, errorMessage, type AdminClient } from "../api.js";
   import type { AdminAccounts, DeviceFlow } from "../types.js";
 
-  let { client }: { client: AdminClient } = $props();
+  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let data: AdminAccounts | null = $state(null);
   let host = $state("github.com");
   let flow: DeviceFlow | null = $state(null);
@@ -71,7 +71,7 @@
         if (canceled.state === "complete") {
           const refreshed = await load();
           if (generation !== pollGeneration) return;
-          message = connectedMessage(canceled.account, refreshed);
+          reportConnected(canceled.account, refreshed);
           return;
         }
       }
@@ -126,7 +126,7 @@
         const completionGeneration = pollGeneration;
         const refreshed = await load(false, completionGeneration);
         if (completionGeneration !== pollGeneration) return;
-        message = connectedMessage(result.account, refreshed);
+        reportConnected(result.account, refreshed);
         return;
       }
       finishFlow(generation, "Authorization expired. Start a new login.");
@@ -161,7 +161,7 @@
         const completionGeneration = pollGeneration;
         const refreshed = await load(false, completionGeneration);
         if (completionGeneration !== pollGeneration) return;
-        message = connectedMessage(result.account, refreshed);
+        reportConnected(result.account, refreshed);
       } else if (result.state === "pending") {
         pollIntervalSeconds = result.pollIntervalSeconds;
         nextPollAtMs = Date.parse(result.nextPollAt);
@@ -216,7 +216,7 @@
       if (canceled.state === "complete") {
         const refreshed = await load();
         if (cancellationGeneration !== pollGeneration) return;
-        message = connectedMessage(canceled.account, refreshed);
+        reportConnected(canceled.account, refreshed);
       }
     } catch (error: unknown) {
       if (cancellationGeneration !== pollGeneration) return;
@@ -272,7 +272,15 @@
     const defaultIdentity = currentDefault?.login ?? currentDefault?.numericUserId;
     return defaultIdentity === undefined
       ? `Connected ${identity}. No account is currently selected.`
-      : `Connected ${identity}. Current account in use is ${currentDefault?.login === null ? defaultIdentity : `@${defaultIdentity}`}.`;
+      : `Connected ${identity}. Account in use is ${currentDefault?.login === null ? defaultIdentity : `@${defaultIdentity}`}.`;
+  }
+
+  function reportConnected(
+    account: NonNullable<AdminAccounts["items"][number]>,
+    refreshed: AdminAccounts | null,
+  ): void {
+    failure = "";
+    message = connectedMessage(account, refreshed);
   }
 
   function isAbort(error: unknown): boolean {
@@ -314,7 +322,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">[02] LOCAL ADMINISTRATION</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Accounts</h1>
     <p>Connect GitHub.com or GHES and choose the identity used by new gateway requests.</p>
   </div>
@@ -390,7 +398,7 @@
   {@const selected = data.items.find((account) => account.accountId === defaultAccountId)}
   <div class="fact-strip" aria-label="Account selection summary">
     <div>
-      <span>Current identity</span>
+      <span>Selected identity</span>
       <strong>{selected ? (selected.login === null ? selected.numericUserId : `@${selected.login}`) : "No account selected"}</strong>
     </div>
     <div>

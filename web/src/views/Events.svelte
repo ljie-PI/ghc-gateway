@@ -8,11 +8,13 @@
     liveEvents,
     resetVersion,
     streamState,
+    pageNumber,
   }: {
     client: AdminClient;
     liveEvents: AdminOperationalEvent[];
     resetVersion: number;
     streamState: StreamState;
+    pageNumber: string;
   } = $props();
   let persisted: AdminOperationalEvent[] = $state([]);
   let cursor: string | null = $state(null);
@@ -71,7 +73,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">[06] LOCAL ADMINISTRATION</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Events</h1>
     <p>Persisted diagnostics joined with the bounded live SSE feed.</p>
   </div>

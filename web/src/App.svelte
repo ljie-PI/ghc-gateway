@@ -13,6 +13,7 @@
   import Models from "./views/Models.svelte";
   import Overview from "./views/Overview.svelte";
   import ResponsesHistory from "./views/ResponsesHistory.svelte";
+  import TerminalMark from "./TerminalMark.svelte";
 
   const views = ["Overview", "Accounts", "Models", "Configuration", "Responses History", "Events"] as const;
   type View = typeof views[number];
@@ -32,22 +33,23 @@
   let workspace: HTMLElement | null = $state(null);
   let menuButton: HTMLButtonElement | null = $state(null);
   let navigation: HTMLElement | null = $state(null);
+  let pageNumber = $derived(String(views.indexOf(view) + 1).padStart(2, "0"));
   const client = new AdminClient(teardown);
 
   onMount(() => {
-    const media = matchMedia("(max-width: 850px)");
-    const updateNavigationMode = (): void => {
-      mobileNavigation = media.matches;
-      if (!mobileNavigation) navOpen = false;
-    };
     updateNavigationMode();
-    media.addEventListener("change", updateNavigationMode);
+    window.addEventListener("resize", updateNavigationMode);
     void authenticate();
     return () => {
-      media.removeEventListener("change", updateNavigationMode);
+      window.removeEventListener("resize", updateNavigationMode);
       closeStream();
     };
   });
+
+  function updateNavigationMode(): void {
+    mobileNavigation = menuButton !== null && getComputedStyle(menuButton).display !== "none";
+    if (!mobileNavigation) navOpen = false;
+  }
 
   async function authenticate(): Promise<void> {
     phase = "loading";
@@ -56,6 +58,8 @@
     try {
       session = token === null ? await client.session() : await client.bootstrap(token);
       phase = "ready";
+      await tick();
+      updateNavigationMode();
       openStream();
     } catch (error: unknown) {
       phase = "signed-out";
@@ -81,7 +85,10 @@
     });
     stream.addEventListener("operational", (event) => {
       const value = JSON.parse((event as MessageEvent<string>).data) as { event: AdminOperationalEvent };
-      liveEvents = [...liveEvents, value.event].slice(-512);
+      liveEvents = [
+        ...liveEvents.filter((item) => item.eventId !== value.event.eventId),
+        value.event,
+      ].slice(-512);
     });
     stream.addEventListener("reset", () => {
       liveEvents = [];
@@ -147,10 +154,7 @@
 
 {#if phase === "loading"}
   <main class="auth-stage" aria-busy="true">
-    <svg class="auth-mark" viewBox="0 0 40 40" aria-hidden="true">
-      <rect x="2" y="2" width="36" height="36" rx="4" fill="currentColor" />
-      <path d="m11 13 7 7-7 7m12 0h6" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" />
-    </svg>
+    <TerminalMark class="auth-mark" />
     <p class="eyebrow">LOCAL ADMINISTRATION</p>
     <h1>Establishing a secure session</h1>
     <p class="muted">The one-time bootstrap is being exchanged in memory.</p>
@@ -175,12 +179,10 @@
       aria-label="Primary navigation"
       aria-hidden={mobileNavigation && !navOpen}
       inert={mobileNavigation && !navOpen ? true : undefined}
+      data-layout-region="navigation"
     >
       <div class="brand">
-        <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true" focusable="false">
-          <rect x="2" y="2" width="36" height="36" rx="4" fill="currentColor" />
-          <path d="m11 13 7 7-7 7m12 0h6" fill="none" stroke="var(--canvas)" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" />
-        </svg>
+        <TerminalMark class="brand-mark" />
         <strong>ghc-gateway</strong>
       </div>
       <p class="nav-caption">WORKSPACE</p>
@@ -216,8 +218,8 @@
     {#if navOpen}
       <button class="nav-backdrop" aria-label="Close navigation" onclick={() => closeNavigation()}></button>
     {/if}
-    <div class="main-column">
-      <div class="content-frame">
+    <div class="main-column" data-layout-region="main-column">
+      <div class="content-frame" data-layout-region="content-frame">
         <header class="utility-bar">
           <div class="utility-location">
             <button
@@ -240,17 +242,17 @@
         </header>
         <main id="admin-content" class="workspace" bind:this={workspace}>
           {#if view === "Overview"}
-            <Overview {client} {liveStatus} />
+            <Overview {client} {liveStatus} {pageNumber} />
           {:else if view === "Accounts"}
-            <Accounts {client} />
+            <Accounts {client} {pageNumber} />
           {:else if view === "Models"}
-            <Models {client} />
+            <Models {client} {pageNumber} />
           {:else if view === "Configuration"}
-            <Configuration {client} />
+            <Configuration {client} {pageNumber} />
           {:else if view === "Responses History"}
-            <ResponsesHistory {client} />
+            <ResponsesHistory {client} {pageNumber} />
           {:else}
-            <Events {client} {liveEvents} {resetVersion} {streamState} />
+            <Events {client} {liveEvents} {resetVersion} {streamState} {pageNumber} />
           {/if}
         </main>
         <footer class="footer-note">

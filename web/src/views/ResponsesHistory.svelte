@@ -3,7 +3,7 @@
   import { ApiError, errorMessage, type AdminClient } from "../api.js";
   import type { AdminHistorySummary } from "../types.js";
 
-  let { client }: { client: AdminClient } = $props();
+  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let data: AdminHistorySummary | null = $state(null);
   let loading = $state(true);
   let clearing = $state(false);
@@ -42,7 +42,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">[05] LOCAL ADMINISTRATION</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Responses History</h1>
     <p>Inspect bounded bridge checkpoints without exposing response content.</p>
   </div>

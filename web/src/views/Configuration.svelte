@@ -13,7 +13,7 @@
     readonly write: (config: RuntimeConfig, value: number) => void;
   }
 
-  let { client }: { client: AdminClient } = $props();
+  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let data: AdminRuntimeConfig | null = $state(null);
   let loading = $state(true);
   let saving = $state(false);
@@ -94,7 +94,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">[04] LOCAL ADMINISTRATION</p>
+    <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Configuration</h1>
     <p>Revision-safe limits, admission and retention controls.</p>
   </div>

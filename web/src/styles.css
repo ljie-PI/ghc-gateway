@@ -397,6 +397,37 @@ tr.current-row > td:last-child { padding-right: 12px; }
   .main-column { padding-inline: 25px; }
   .fact-strip > div, .hero-metrics article, .stat-row > div { padding: 15px; }
   .capability-grid { grid-template-columns: 1fr; }
+  .account-table { min-width: 0; }
+  .account-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+  .account-table tbody, .account-table tr, .account-table td { display: block; width: 100%; }
+  .account-table tr { padding: 13px 0; border-bottom: 1px solid var(--line); }
+  .account-table td, .account-table td:first-child, .account-table td:last-child {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 7px 0;
+    border: 0;
+  }
+  .account-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: .5px;
+    text-transform: uppercase;
+  }
+  .account-table tr.current-row > td:first-child {
+    padding-left: 10px;
+    border-left: 2px solid var(--ink);
+  }
+  .account-table tr.current-row > td:not(:first-child) { padding-left: 12px; }
+  .account-table .row-actions { justify-content: flex-start; }
 }
 
 @media (max-width: 850px) {
@@ -441,37 +472,6 @@ tr.current-row > td:last-child { padding-right: 12px; }
   .fact-strip > div:last-child, .stat-row > div:last-child { border-bottom: 0; }
   .fact-strip span { display: inline; margin-right: 10px; }
   .fact-strip strong { font-size: 13px; }
-  .account-table { min-width: 0; }
-  .account-table thead {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-  }
-  .account-table tbody, .account-table tr, .account-table td { display: block; width: 100%; }
-  .account-table tr { padding: 13px 0; border-bottom: 1px solid var(--line); }
-  .account-table td, .account-table td:first-child, .account-table td:last-child {
-    display: grid;
-    grid-template-columns: 110px minmax(0, 1fr);
-    align-items: center;
-    gap: 12px;
-    padding: 7px 0;
-    border: 0;
-  }
-  .account-table td::before {
-    content: attr(data-label);
-    color: var(--muted);
-    font-size: 10px;
-    letter-spacing: .5px;
-    text-transform: uppercase;
-  }
-  .account-table tr.current-row > td:first-child {
-    padding-left: 10px;
-    border-left: 2px solid var(--ink);
-  }
-  .account-table tr.current-row > td:not(:first-child) { padding-left: 12px; }
-  .account-table .row-actions { justify-content: flex-start; }
   .split-panels, .two-columns, .config-grid, .override-form { grid-template-columns: 1fr; }
   .metric-list li { grid-template-columns: minmax(0, 1fr) auto; }
   .metric-list small { grid-column: 1 / -1; }
