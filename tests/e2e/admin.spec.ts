@@ -353,6 +353,23 @@ test("model token override keeps protocol inheritance", async ({ page }) => {
   });
   expect((request?.postDataJSON() as { capabilities?: { protocols?: unknown } }).capabilities?.protocols)
     .toBeUndefined();
+
+  const beforeClear = fixture.requests.filter((candidate) => (
+    candidate.url().endsWith("/models/capabilities") && candidate.method() === "PUT"
+  )).length;
+  await card.getByLabel("Default output tokens").fill("");
+  await card.getByRole("button", { name: "Save capability override" }).click();
+  await expect.poll(() => fixture.requests.filter((candidate) => (
+    candidate.url().endsWith("/models/capabilities") && candidate.method() === "PUT"
+  )).length).toBe(beforeClear + 1);
+  const cleared = fixture.requests.findLast((candidate) => (
+    candidate.url().endsWith("/models/capabilities")
+    && candidate.method() === "PUT"
+    && candidate.postData()?.includes("gpt-alpha") === true
+  ));
+  expect((cleared?.postDataJSON() as {
+    capabilities?: { defaultOutputTokens?: unknown; protocols?: unknown };
+  }).capabilities).toEqual({ enabled: true });
 });
 
 test("models view renders duplicate catalog IDs without crashing", async ({ page }) => {

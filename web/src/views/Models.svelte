@@ -9,9 +9,9 @@
     enabled: boolean;
     overrideProtocols: boolean;
     protocols: Protocol[];
-    maxInputTokens: string;
-    maxOutputTokens: string;
-    defaultOutputTokens: string;
+    maxInputTokens: number | null;
+    maxOutputTokens: number | null;
+    defaultOutputTokens: number | null;
     chatOutputTokenField: "" | "max_tokens" | "max_completion_tokens";
   };
 
@@ -73,9 +73,9 @@
         enabled: override?.enabled ?? model.enabled,
         overrideProtocols: override?.protocols !== undefined,
         protocols: [...(override?.protocols ?? model.protocols ?? [])],
-        maxInputTokens: numberText(override?.maxInputTokens),
-        maxOutputTokens: numberText(override?.maxOutputTokens),
-        defaultOutputTokens: numberText(override?.defaultOutputTokens),
+        maxInputTokens: override?.maxInputTokens ?? null,
+        maxOutputTokens: override?.maxOutputTokens ?? null,
+        defaultOutputTokens: override?.defaultOutputTokens ?? null,
         chatOutputTokenField: override?.chatOutputTokenField ?? "",
       };
     }
@@ -231,13 +231,9 @@
 
   function optionalNumber<Key extends "maxInputTokens" | "maxOutputTokens" | "defaultOutputTokens">(
     key: Key,
-    text: string,
+    value: number | null | undefined,
   ): Partial<Record<Key, number>> {
-    return text === "" ? {} : { [key]: Number(text) } as Partial<Record<Key, number>>;
-  }
-
-  function numberText(value: number | undefined): string {
-    return value === undefined ? "" : String(value);
+    return value == null ? {} : { [key]: value } as Partial<Record<Key, number>>;
   }
 
   function isCurrentRequest(generation: number, targetAccountId: string): boolean {
@@ -350,11 +346,32 @@
             {/each}
           </fieldset>
           <label for={`input-limit-${model.id}`}>Override input ceiling</label>
-          <input id={`input-limit-${model.id}`} type="number" min="1" bind:value={editor.maxInputTokens} placeholder="use live/builtin" />
+          <input
+            id={`input-limit-${model.id}`}
+            type="number"
+            min="1"
+            value={editor.maxInputTokens ?? ""}
+            oninput={(event) => { editor.maxInputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
+            placeholder="use live/builtin"
+          />
           <label for={`output-limit-${model.id}`}>Override output ceiling</label>
-          <input id={`output-limit-${model.id}`} type="number" min="1" bind:value={editor.maxOutputTokens} placeholder="use live/builtin" />
+          <input
+            id={`output-limit-${model.id}`}
+            type="number"
+            min="1"
+            value={editor.maxOutputTokens ?? ""}
+            oninput={(event) => { editor.maxOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
+            placeholder="use live/builtin"
+          />
           <label for={`default-output-${model.id}`}>Default output tokens</label>
-          <input id={`default-output-${model.id}`} type="number" min="1" bind:value={editor.defaultOutputTokens} placeholder="automatic policy" />
+          <input
+            id={`default-output-${model.id}`}
+            type="number"
+            min="1"
+            value={editor.defaultOutputTokens ?? ""}
+            oninput={(event) => { editor.defaultOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
+            placeholder="automatic policy"
+          />
           <label for={`chat-field-${model.id}`}>Chat output token field</label>
           <select id={`chat-field-${model.id}`} bind:value={editor.chatOutputTokenField}>
             <option value="">Use live/builtin/unknown</option>
