@@ -3,11 +3,16 @@ import { AccountDirectoryError, type AccountSummary } from "../../accounts/accou
 import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_flow.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
-import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
+import {
+  isCapabilitySnapshotCurrent,
+  loadCapabilitySnapshot,
+  type ModelCapabilityRegistry,
+} from "../../copilot/capability_registry.js";
 import type { RuntimeConfigStore } from "../../config/runtime_config.js";
 import { isRuntimeConfigKey, readRuntimeConfigNumber, RUNTIME_CONFIG_RANGES, RuntimeConfigError, withRuntimeConfigNumber } from "../../config/runtime_config.js";
 import type { RuntimeConfigSnapshot } from "../../config/schema.js";
 import { PreferredModelManager } from "../../protocols/model_catalog/preferred.js";
+import { reconcilePreferredModelIfCurrent } from "../../protocols/model_catalog/preferred.js";
 import {
   CliError,
   adminAccountFromSummary,
@@ -122,11 +127,14 @@ export class CommandDispatcher {
       const account = await this.dependencies.directory.bindAccount(accountId, signal);
       const beforePreference = this.dependencies.directory.preferences.get(accountId);
       const catalog = await loadCapabilitySnapshot(this.dependencies, account, signal);
-      this.dependencies.directory.preferences.markInvalidIfMissing(
-        accountId,
-        new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
-        catalog.catalogGeneration,
-        beforePreference?.revision ?? null,
+      await reconcilePreferredModelIfCurrent(
+        this.dependencies.directory.preferences,
+        this.dependencies.directory,
+        this.dependencies,
+        account,
+        catalog,
+        beforePreference,
+        signal,
       );
       return adminModelsFromCatalog(
         accountId,
@@ -146,6 +154,11 @@ export class CommandDispatcher {
       const account = this.defaultAccount();
       const bound = await this.dependencies.directory.bindAccount(account.accountId, signal);
       const catalog = await loadCapabilitySnapshot(this.dependencies, bound, signal);
+      const currentBound = await this.dependencies.directory.bindAccount(account.accountId, signal);
+      if (currentBound.credentialGeneration !== bound.credentialGeneration
+        || !isCapabilitySnapshotCurrent(this.dependencies, catalog)) {
+        throw new PreferenceRevisionError();
+      }
       const current = this.dependencies.directory.preferences.get(account.accountId);
       const manager = new PreferredModelManager(this.dependencies.directory.preferences);
       return manager.setPreferred(account.accountId, input.modelId, current?.revision ?? 0, catalog) as ControlOperationMap[Operation]["result"];
