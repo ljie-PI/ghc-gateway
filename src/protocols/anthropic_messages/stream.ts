@@ -1,5 +1,9 @@
 import { iterateChatFrames } from "../../copilot/backend.js";
-import { GatewayFailureError } from "../../gateway/failures.js";
+import {
+  normalizeChatStreamFailure,
+  upstreamStreamEventFailure,
+} from "../../copilot/failures.js";
+import { failureFromSignal, GatewayFailureError } from "../../gateway/failures.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
@@ -68,7 +72,7 @@ export function createAnthropicStreamResponse(input: {
         }
         observeTerminal(input.onTerminal, {
           kind: "failure",
-          error: new GatewayFailureError({ kind: "upstream_stream_error" }),
+          error: upstreamStreamEventFailure(),
         });
         writer.close();
         return;
@@ -81,12 +85,21 @@ export function createAnthropicStreamResponse(input: {
       observeTerminal(input.onTerminal, { kind: "success", usage: observedUsage });
       writer.close();
     } catch (error: unknown) {
-      observeTerminal(input.onTerminal, { kind: "failure", error });
+      observeTerminal(input.onTerminal, {
+        kind: "failure",
+        error: normalizeChatStreamFailure(error, input.scope.signal),
+      });
       writer.abort();
     }
   })();
   input.scope.signal.addEventListener("abort", () => {
-    observeTerminal(input.onTerminal, { kind: "failure", error: new GatewayFailureError({ kind: "aborted" }) });
+    observeTerminal(input.onTerminal, {
+      kind: "failure",
+      error: new GatewayFailureError(failureFromSignal(input.scope.signal, {
+        source: "parser",
+        phase: "stream",
+      })),
+    });
   }, { once: true });
   return writer.response;
 }

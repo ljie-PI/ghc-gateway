@@ -37,6 +37,7 @@ export interface CopilotBackend {
 }
 
 export interface ScriptedCopilotHandlers {
+  bindError?: unknown;
   chat?: ChatResponse | ((request: ChatRequest) => ChatResponse | Promise<ChatResponse>);
   chatStream?: Uint8Array[] | AsyncIterable<Uint8Array> | ((request: ChatRequest) => Uint8Array[] | AsyncIterable<Uint8Array>);
   responses?: UpstreamByteResponse | ((request: NativeResponsesUpstreamRequest) => UpstreamByteResponse | Promise<UpstreamByteResponse>);
@@ -58,6 +59,9 @@ export class ScriptedCopilotBackend implements CopilotBackend {
   async bind(account: Readonly<BoundAccount>, _signal: AbortSignal): Promise<BoundCopilot> {
     if (this.closed) {
       throw new DOMException("closed", "AbortError");
+    }
+    if (this.handlers.bindError !== undefined) {
+      throw this.handlers.bindError;
     }
     const target = { endpoint: this.endpoint, token: this.token };
     const captured = this.captured;

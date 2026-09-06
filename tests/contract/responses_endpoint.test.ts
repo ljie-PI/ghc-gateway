@@ -6,6 +6,9 @@ import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { CapiFetchError } from "../../src/copilot/models_source.js";
+import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
+import { UpstreamTimeoutError } from "../../src/copilot/transport.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
@@ -23,6 +26,27 @@ import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 const nowMs = (): number => 1_700_000_000_000;
 
 describe("Responses endpoint", () => {
+  it("observes pre-endpoint body failures once without coupling accounting to the presenter", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const { gw, close } = await responsesGateway({ usageUpdates });
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"input\":",
+      }));
+      expect(response.status).toBe(400);
+      expect(usageUpdates).toMatchObject([{
+        protocol: "openai_responses_bridge",
+        outcome: "client_error",
+        requestCount: 1,
+        errorCount: 1,
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
   it("registers only /v1/responses and rejects explicit unknown models before upstream", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const { gw, backend, close } = await responsesGateway({ usageUpdates });
@@ -185,9 +209,138 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it("normalizes catalog timeout and bind authentication with safe Responses errors", async () => {
+    const timeoutUsage: UsageUpdate[] = [];
+    const timeoutGateway = await responsesGateway({
+      catalogError: new CapiFetchError(502, undefined, "upstream_timeout"),
+      usageUpdates: timeoutUsage,
+    });
+    try {
+      const response = await timeoutGateway.gw.fetch(responsesRequest({ model: "native", input: "hi" }));
+      expect(response.status).toBe(504);
+      expect(response.headers.get("x-request-id")).toBe("req_responses");
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+      expect(timeoutUsage).toMatchObject([{ outcome: "timeout" }]);
+    } finally {
+      await timeoutGateway.close();
+    }
+
+    const authUsage: UsageUpdate[] = [];
+    const authGateway = await responsesGateway({
+      backend: new ScriptedCopilotBackend({
+        bindError: new TokenRefreshError("unauthorized", "secret-token https://unsafe.example/private"),
+      }),
+      usageUpdates: authUsage,
+    });
+    try {
+      const response = await authGateway.gw.fetch(responsesRequest({ model: "native", input: "hi" }));
+      expect(response.status).toBe(401);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"authentication failed\",\"type\":\"authentication_error\",\"param\":null,\"code\":null}}",
+      );
+      expect(authUsage).toMatchObject([{ outcome: "authentication_error" }]);
+    } finally {
+      await authGateway.close();
+    }
+  });
+
+  it.each(["native", "chat"] as const)("normalizes %s transport timeout before commitment", async (model) => {
+    const timeout = (): never => {
+      throw new UpstreamTimeoutError();
+    };
+    const backend = new ScriptedCopilotBackend({
+      responses: timeout,
+      chat: timeout,
+    });
+    const { gw, close } = await responsesGateway({ backend });
+    try {
+      const response = await gw.fetch(responsesRequest({ model, input: "hi" }));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("normalizes native truncation and bridge error events before commitment", async () => {
+    const nativeGateway = await responsesGateway({
+      backend: new ScriptedCopilotBackend({ responsesStream: [] }),
+    });
+    try {
+      const response = await nativeGateway.gw.fetch(responsesRequest({ model: "native", input: "hi", stream: true }));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toContain("\"message\":\"upstream request failed\"");
+    } finally {
+      await nativeGateway.close();
+    }
+
+    const bridgeGateway = await responsesGateway({
+      backend: new ScriptedCopilotBackend({
+        chatStream: [text("event: error\ndata: {\"error\":{\"message\":\"secret-token https://unsafe.example/private\"}}\n\n")],
+      }),
+    });
+    try {
+      const response = await bridgeGateway.gw.fetch(responsesRequest({ model: "chat", input: "hi", stream: true }));
+      expect(response.status).toBe(502);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream request failed\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await bridgeGateway.close();
+    }
+  });
+
+  it.each(["native", "chat"] as const)("keeps %s internal deadline distinct from client abort before commitment", async (model) => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.totalMs = 1;
+    const timedOutGateway = await responsesGateway({
+      runtime,
+      backend: new ScriptedCopilotBackend({
+        responsesStream: (request) => stalledStream(request.signal),
+        chatStream: (request) => stalledStream(request.signal),
+      }),
+    });
+    try {
+      const response = await timedOutGateway.gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
+      expect(response.status).toBe(504);
+      expect(response.headers.get("x-request-id")).toBe("req_responses");
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await timedOutGateway.close();
+    }
+
+    const clientGateway = await responsesGateway({
+      backend: new ScriptedCopilotBackend({
+        responsesStream: (request) => stalledStream(request.signal),
+        chatStream: (request) => stalledStream(request.signal),
+      }),
+    });
+    try {
+      const controller = new AbortController();
+      const pending = clientGateway.gw.fetch(responsesRequest(
+        { model, input: "hi", stream: true },
+        controller.signal,
+      ));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      controller.abort();
+      const response = await pending;
+      expect(response.body).toBeNull();
+    } finally {
+      await clientGateway.close();
+    }
+  });
+
   async function responsesGateway(options: {
     readonly backend?: ScriptedCopilotBackend;
     readonly usageUpdates?: UsageUpdate[];
+    readonly catalogError?: unknown;
+    readonly runtime?: ReturnType<typeof defaultRuntimeConfigSnapshot>;
   } = {}): Promise<{
     readonly gw: Gateway;
     readonly backend: ScriptedCopilotBackend;
@@ -212,6 +365,9 @@ describe("Responses endpoint", () => {
     });
     const catalog = new CopilotModelCatalog({
       async fetch() {
+        if (options.catalogError !== undefined) {
+          throw options.catalogError;
+        }
         return {
           data: [
             { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { mode: "responses" } },
@@ -227,7 +383,7 @@ describe("Responses endpoint", () => {
     });
     const gw = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: dir }),
-      runtime: defaultRuntimeConfigSnapshot(),
+      runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
     }, [createResponsesRoute({
       directory: accounts,
       catalog,
@@ -251,12 +407,20 @@ describe("Responses endpoint", () => {
     };
   }
 
-  function responsesRequest(body: unknown): Request {
+  function responsesRequest(body: unknown, signal?: AbortSignal): Request {
     return new Request("http://127.0.0.1:31400/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      ...(signal === undefined ? {} : { signal }),
     });
+  }
+
+  async function* stalledStream(signal: AbortSignal): AsyncIterable<Uint8Array> {
+    await new Promise<void>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    });
+    yield text("");
   }
 
   function text(value: string): Uint8Array {
