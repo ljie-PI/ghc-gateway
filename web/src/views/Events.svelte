@@ -59,9 +59,7 @@
   }
 
   function metadata(event: AdminOperationalEvent): string {
-    return Object.entries(event.metadata)
-      .map(([key, value]) => `${key}: ${String(value)}`)
-      .join(" · ") || "No additional metadata";
+    return JSON.stringify(event.metadata, null, 2);
   }
 
   function newestFirst(a: AdminOperationalEvent, b: AdminOperationalEvent): number {
@@ -73,7 +71,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">SANITIZED OPERATIONS</p>
+    <p class="eyebrow">[06] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Events</h1>
     <p>Persisted diagnostics joined with the bounded live SSE feed.</p>
   </div>
@@ -107,19 +105,16 @@
     <p>Operational events contain sanitized metadata only.</p>
   </section>
 {:else}
-  <ol class="timeline" aria-label="Operational events">
+  <ol class="event-list" aria-label="Operational events">
     {#each all as event (event.eventId)}
-      <li class="severity-{event.severity}">
-        <div class="timeline-mark"></div>
-        <article>
-          <header>
-            <time datetime={event.occurredAt}>{new Date(event.occurredAt).toLocaleString()}</time>
-            <span class="chip">{event.severity}</span>
-          </header>
-          <h2>{event.kind.replaceAll("_", " ")}</h2>
-          <p>{metadata(event)}</p>
-          <small>EVENT {event.eventId}</small>
-        </article>
+      <li class="event-row severity-{event.severity}">
+        <time datetime={event.occurredAt}>{new Date(event.occurredAt).toLocaleString()}</time>
+        <span class="chip">{event.severity}</span>
+        <details>
+          <summary>{event.kind.replaceAll("_", " ")}</summary>
+          <pre>{metadata(event)}</pre>
+        </details>
+        <span class="event-id">EVENT {event.eventId}</span>
       </li>
     {/each}
   </ol>

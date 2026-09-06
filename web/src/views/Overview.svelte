@@ -29,11 +29,11 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">SYSTEM PULSE</p>
+    <p class="eyebrow">[01] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Overview</h1>
-    <p>Health, throughput and pressure at a glance.</p>
+    <p>Health, usage, performance and bounded storage from the running gateway.</p>
   </div>
-  <button class="quiet" onclick={load}>Refresh</button>
+  <button onclick={load}>Refresh</button>
 </header>
 
 {#if loading}
@@ -52,11 +52,10 @@
     </section>
   {/if}
   <section class="hero-metrics" aria-label="Gateway status">
-    <article class="health-card">
-      <span class="status-dot"></span>
-      <p>Gateway health</p>
-      <strong>{current.health === "ok" ? "Nominal" : current.health}</strong>
-      <small>v{current.version} · up {Math.floor(current.uptimeMs / 60000)} min</small>
+    <article>
+      <p>Gateway</p>
+      <strong>{current.health === "ok" ? "Running" : current.health}</strong>
+      <small><span class="status-dot"></span> v{current.version} · up {Math.floor(current.uptimeMs / 60000)} min</small>
     </article>
     <article>
       <p>Active requests</p>
@@ -71,11 +70,12 @@
       <small>{current.admission.queuedRequests} queued</small>
     </article>
   </section>
-  <section class="section-block">
-    <div class="section-title">
-      <div><p class="eyebrow">LAST 24 HOURS</p><h2>Usage ledger</h2></div>
+  <section class="section">
+    <div class="section-heading">
+      <h2><span class="section-number">[01]</span>Usage ledger</h2>
       <span class="chip">{usage.items.length} buckets</span>
     </div>
+    <p class="muted small">Content-free totals for the last 24 hours.</p>
     <div class="stat-row">
       <div><span>Requests</span><strong>{number(usage.totals.requestCount)}</strong></div>
       <div><span>Errors</span><strong>{number(usage.totals.errorCount)}</strong></div>
@@ -83,10 +83,10 @@
       <div><span>Output tokens</span><strong>{number(usage.totals.outputTokens)}</strong></div>
     </div>
   </section>
-  <section class="split-panels">
-    <article class="section-block">
-      <div class="section-title">
-        <h2>Performance windows</h2>
+  <section class="split-panels section">
+    <article>
+      <div class="section-heading">
+        <h2><span class="section-number">[02]</span>Performance windows</h2>
         <span class:warning={current.performance === "degraded"} class="chip">{current.performance}</span>
       </div>
       <ul class="metric-list">
@@ -99,8 +99,8 @@
         {/each}
       </ul>
     </article>
-    <article class="section-block">
-      <div class="section-title"><h2>Bounded storage</h2></div>
+    <article>
+      <div class="section-heading"><h2><span class="section-number">[03]</span>Bounded storage</h2></div>
       <ul class="storage-list">
         <li><span>Responses history</span><strong>{current.storage.historyCount}</strong></li>
         <li><span>Usage buckets</span><strong>{current.storage.usageBucketCount}</strong></li>

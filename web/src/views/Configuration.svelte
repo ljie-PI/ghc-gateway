@@ -94,7 +94,7 @@
 
 <header class="page-head">
   <div>
-    <p class="eyebrow">RUNTIME ENVELOPE</p>
+    <p class="eyebrow">[04] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Configuration</h1>
     <p>Revision-safe limits, admission and retention controls.</p>
   </div>
@@ -114,7 +114,7 @@
   <form class="config-form" onsubmit={(event) => { event.preventDefault(); void save(); }}>
     {#each groups as group (group)}
       <fieldset>
-        <legend>{group}</legend>
+        <legend>{group} settings</legend>
         <div class="config-grid">
           {#each fields.filter((configField) => configField.key.startsWith(`${group}.`)) as configField (configField.key)}
             <label>
