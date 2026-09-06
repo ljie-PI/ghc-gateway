@@ -9,7 +9,9 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import { boundedCleanup } from "../../gateway/stream_execution.js";
 import type { ChatChunk, ChatStreamFrame } from "../chat_completions/types.js";
+import { isSemanticChatChunk } from "../chat_completions/stream_semantics.js";
 import type { ResponsesRequest } from "./dto.js";
 import type { ResponsesHistoryRecord } from "./history.js";
 import type { RequestToolContext, ToolBinding } from "./tool_context.js";
@@ -92,7 +94,7 @@ interface CompletedItem {
 }
 
 interface FirstChunk {
-  readonly chunk?: ChatChunk;
+  readonly chunks: readonly ChatChunk[];
   readonly ids: StreamIds;
 }
 
@@ -121,8 +123,8 @@ export async function* convertChatStream(
     yield eventEmission(eventWithResponse(state, "response.created", initialResponse(state)));
     yield eventEmission(eventWithResponse(state, "response.in_progress", initialResponse(state)));
 
-    if (first.chunk !== undefined) {
-      yield* processChunk(state, first.chunk);
+    for (const chunk of first.chunks) {
+      yield* processChunk(state, chunk);
     }
 
     for (;;) {
@@ -146,7 +148,9 @@ export async function* convertChatStream(
 
     yield* finalizeStream(state);
   } finally {
-    await iterator.return?.().catch(() => undefined);
+    if (iterator.return !== undefined) {
+      await boundedCleanup(iterator.return());
+    }
   }
 }
 
@@ -172,16 +176,24 @@ async function readFirstNonNullChunk(
   iterator: AsyncIterator<ResponsesBridgeStreamInput>,
   context: ResponsesBridgeStreamContext,
 ): Promise<FirstChunk> {
+  const chunks: ChatChunk[] = [];
+  let firstResponseId: string | undefined;
   for (;;) {
     const next = await iterator.next();
     if (next.done === true) {
-      const rawResponseId = `resp_${context.uuid()}`;
-      return { ids: { rawResponseId, responseId: encodeManagedResponseId(rawResponseId, context) ?? rawResponseId } };
+      const rawResponseId = firstResponseId ?? `resp_${context.uuid()}`;
+      return {
+        chunks,
+        ids: { rawResponseId, responseId: encodeManagedResponseId(rawResponseId, context) ?? rawResponseId },
+      };
     }
     const input = next.value;
     if (isDoneFrame(input)) {
-      const rawResponseId = `resp_${context.uuid()}`;
-      return { ids: { rawResponseId, responseId: encodeManagedResponseId(rawResponseId, context) ?? rawResponseId } };
+      const rawResponseId = firstResponseId ?? `resp_${context.uuid()}`;
+      return {
+        chunks,
+        ids: { rawResponseId, responseId: encodeManagedResponseId(rawResponseId, context) ?? rawResponseId },
+      };
     }
     if (isErrorFrame(input)) {
       throw streamFrameError(input.value);
@@ -190,9 +202,14 @@ async function readFirstNonNullChunk(
     if (chunk.payload === null) {
       continue;
     }
-    const rawResponseId = stringMember(asObject(chunk.payload), "id") ?? `resp_${context.uuid()}`;
+    chunks.push(chunk);
+    firstResponseId ??= stringMember(asObject(chunk.payload), "id");
+    if (!isSemanticChatChunk(chunk)) {
+      continue;
+    }
+    const rawResponseId = firstResponseId ?? `resp_${context.uuid()}`;
     return {
-      chunk,
+      chunks,
       ids: { rawResponseId, responseId: encodeManagedResponseId(rawResponseId, context) ?? rawResponseId },
     };
   }

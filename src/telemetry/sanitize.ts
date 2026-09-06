@@ -11,12 +11,12 @@ const ALLOWLIST = new Set([
 const EVENT_KEYS: Readonly<Record<string, Readonly<Record<string, (value: unknown) => boolean>>>> = {
   gateway_started: {
     status: fixedString(["ready", "started"]),
-    protocol: fixedString(["openai_chat", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]),
+    protocol: fixedString(["openai_chat", "openai_responses_unknown", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]),
   },
   gateway_stopped: {},
   request_failed: {
     requestId: safeRequestId,
-    protocol: fixedString(["openai_chat", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]),
+    protocol: fixedString(["openai_chat", "openai_responses_unknown", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]),
     status: httpStatus,
     category: fixedString(["invalid_request", "unsupported_semantics", "authentication", "model_not_found", "upstream_error", "upstream_http", "upstream_timeout", "upstream_network", "invalid_upstream_response", "upstream_stream_truncated", "aborted", "internal"]),
     outcome: fixedString(["success", "client_error", "authentication_error", "overloaded", "upstream_error", "timeout", "aborted", "internal_error"]),

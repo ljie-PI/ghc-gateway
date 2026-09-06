@@ -6,7 +6,14 @@ import {
 import { failureFromSignal, GatewayFailureError } from "../../gateway/failures.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
+import {
+  createExchangeCancellation,
+  createOwnedStreamCleanup,
+  withByteIdleDeadlines,
+} from "../../gateway/stream_execution.js";
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
+import type { ChatStreamFrame } from "../chat_completions/types.js";
+import { readThroughFirstSemanticChatFrame } from "../chat_completions/stream_semantics.js";
 import { anthropicStopReason, anthropicUsage } from "./bridge.js";
 import { asRecord, normalizeToolId, wireToJson } from "./common.js";
 import { encodeAnthropicSse, type AnthropicEvent } from "./wire.js";
@@ -17,7 +24,7 @@ const STREAM_HEADERS = {
   "Cache-Control": "no-store",
 } as const;
 
-export function createAnthropicStreamResponse(input: {
+export async function createAnthropicStreamResponse(input: {
   readonly upstream: UpstreamByteStream;
   readonly model: string;
   readonly createUuid: () => string;
@@ -27,13 +34,65 @@ export function createAnthropicStreamResponse(input: {
     | { readonly kind: "success"; readonly usage: { readonly inputTokens: number; readonly outputTokens: number; readonly cacheTokens: number } }
     | { readonly kind: "failure"; readonly error: unknown }
   >) => void;
-}): Response {
+}): Promise<Response> {
   const converter = new AnthropicStreamConverter(input.model, input.createUuid);
+  const cancelExchange = createExchangeCancellation(input.upstream);
+  const timedUpstream = {
+    ...input.upstream,
+    bytes: withByteIdleDeadlines(
+      input.upstream.bytes,
+      input.scope.signal,
+      input.scope.config.timeouts.firstByteMs,
+      input.scope.config.timeouts.streamIdleMs,
+      cancelExchange,
+    ),
+  };
+  const frames = iterateChatFrames(timedUpstream);
+  const cleanupUpstream = createOwnedStreamCleanup(input.upstream, frames, 1_000, cancelExchange);
+  let firstFrames: readonly ChatStreamFrame[];
+  try {
+    firstFrames = await readThroughFirstSemanticChatFrame(
+      frames,
+      input.scope.signal,
+      input.scope.config.timeouts.firstByteMs,
+    );
+  } catch (error: unknown) {
+    await cleanupUpstream();
+    throw normalizeChatStreamFailure(error, input.scope.signal);
+  }
+  if (firstFrames.at(-1)?.kind === "error") {
+    await cleanupUpstream();
+    throw upstreamStreamEventFailure();
+  }
+
   let observedUsage = { inputTokens: 0, outputTokens: 0, cacheTokens: 0 };
   const writer = createStreamResponseWriter({
     signal: input.scope.signal,
     headers: { ...STREAM_HEADERS, "request-id": input.scope.requestId },
+    onCancel: async () => await closeStream(),
   });
+  let closed = false;
+  let cleanup: Promise<void> | undefined;
+  const closeStream = async (): Promise<void> => {
+    if (closed) {
+      await cleanup;
+      return;
+    }
+    closed = true;
+    input.scope.signal.removeEventListener("abort", onAbort);
+    cleanup = cleanupUpstream();
+    await cleanup;
+  };
+  const onAbort = (): void => {
+    observeTerminal(input.onTerminal, {
+      kind: "failure",
+      error: new GatewayFailureError(failureFromSignal(input.scope.signal, {
+        source: "parser",
+        phase: "stream",
+      })),
+    });
+    void closeStream();
+  };
   void (async () => {
     try {
       for (const event of converter.start()) {
@@ -41,8 +100,21 @@ export function createAnthropicStreamResponse(input: {
           return;
         }
       }
-      for await (const frame of iterateChatFrames(input.upstream)) {
+      const pending = [...firstFrames];
+      for (;;) {
+        const next = pending.length === 0
+          ? await frames.next()
+          : { done: false as const, value: pending.shift() as ChatStreamFrame };
+        if (next.done === true) {
+          throw new GatewayFailureError({
+            kind: "upstream_stream_truncated",
+            source: "parser",
+            phase: "stream",
+          });
+        }
+        const frame = next.value;
         if (input.scope.signal.aborted) {
+          await closeStream();
           writer.abort();
           return;
         }
@@ -58,51 +130,41 @@ export function createAnthropicStreamResponse(input: {
               return;
             }
           }
-          continue;
-        }
-        if (frame.kind === "done") {
+        } else if (frame.kind === "done") {
           for (const event of converter.finish()) {
             if (!await writer.enqueue(encodeAnthropicSse(event))) {
               return;
             }
           }
           observeTerminal(input.onTerminal, { kind: "success", usage: observedUsage });
+          await closeStream();
+          writer.close();
+          return;
+        } else {
+          observeTerminal(input.onTerminal, {
+            kind: "failure",
+            error: upstreamStreamEventFailure(),
+          });
+          await closeStream();
           writer.close();
           return;
         }
-        observeTerminal(input.onTerminal, {
-          kind: "failure",
-          error: upstreamStreamEventFailure(),
-        });
-        writer.close();
-        return;
       }
-      for (const event of converter.finish()) {
-        if (!await writer.enqueue(encodeAnthropicSse(event))) {
-          return;
-        }
-      }
-      observeTerminal(input.onTerminal, { kind: "success", usage: observedUsage });
-      writer.close();
     } catch (error: unknown) {
       observeTerminal(input.onTerminal, {
         kind: "failure",
         error: normalizeChatStreamFailure(error, input.scope.signal),
       });
+      await closeStream();
       writer.abort();
+    } finally {
+      await closeStream();
     }
   })();
-  input.scope.signal.addEventListener("abort", () => {
-    observeTerminal(input.onTerminal, {
-      kind: "failure",
-      error: new GatewayFailureError(failureFromSignal(input.scope.signal, {
-        source: "parser",
-        phase: "stream",
-      })),
-    });
-  }, { once: true });
+  input.scope.signal.addEventListener("abort", onAbort, { once: true });
   return writer.response;
 }
+
 
 function measureEvents<T>(observer: ProtocolPerformanceObserver | undefined, work: () => T): T {
   return observer === undefined ? work() : observer.measure("event", work);

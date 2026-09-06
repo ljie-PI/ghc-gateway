@@ -645,6 +645,30 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
+  it.each(["[]", "[{}]"])("does not let empty Chat choices %s satisfy the first semantic deadline", async (choices) => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: hangingStreamAfter(`data: {"choices":${choices}}\n\n`),
+        cancel: async () => undefined,
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
   it("accepts an upstream SSE event at the inclusive event limit", async () => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.limits.sseEventBytes = 65_536;
@@ -693,7 +717,7 @@ describe("OpenAI Chat endpoint", () => {
       chatStream: {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
-        bytes: hangingStreamAfter("data: {\"choices\":[]}\n\n"),
+        bytes: hangingStreamAfter("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
         cancel: async () => undefined,
       },
     });
@@ -702,7 +726,7 @@ describe("OpenAI Chat endpoint", () => {
       const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
       const reader = response.body?.getReader();
       const first = await reader?.read();
-      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[]}\n\n");
+      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
       await expect(reader?.read()).rejects.toThrow(/stream error/u);
     } finally {
       await close();
@@ -785,7 +809,7 @@ describe("OpenAI Chat endpoint", () => {
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: cancelableBytes(() => {
           canceled = true;
-        }, encoder.encode("data: {\"choices\":[]}\n\n")),
+        }, encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")),
         cancel: async () => {
           canceled = true;
         },
@@ -802,7 +826,7 @@ describe("OpenAI Chat endpoint", () => {
       }));
       const reader = response.body?.getReader();
       const first = await reader?.read();
-      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[]}\n\n");
+      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
       controller.abort();
       const next = await reader?.read().catch(() => ({ done: true, value: undefined }));
       expect(next?.value === undefined ? "" : decoder.decode(next.value)).not.toContain("[DONE]");
@@ -810,6 +834,131 @@ describe("OpenAI Chat endpoint", () => {
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
       expect(canceled).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  it("records a pre-endpoint malformed request exactly once as unbound", async () => {
+    const usageUpdates: unknown[] = [];
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend, { usageUpdates });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":"));
+      expect(response.status).toBe(400);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "unbound",
+        protocol: "openai_chat",
+        resolvedModel: "unresolved",
+        outcome: "client_error",
+        requestCount: 1,
+        errorCount: 1,
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([
+    {
+      name: "upstream error event",
+      bytes: () => streamFromText([
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n",
+        "event: error\ndata: {\"error\":{\"message\":\"private\"}}\n\n",
+      ].join(""), 1024),
+      runtime: defaultRuntimeConfigSnapshot(),
+    },
+    {
+      name: "network failure",
+      bytes: () => failingBytes(new TypeError("network failed")),
+      runtime: defaultRuntimeConfigSnapshot(),
+    },
+    {
+      name: "truncated EOF",
+      bytes: () => streamFromText("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n", 1024),
+      runtime: defaultRuntimeConfigSnapshot(),
+    },
+    {
+      name: "idle timeout",
+      bytes: () => hangingStreamAfter("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n"),
+      runtime: (() => {
+        const runtime = defaultRuntimeConfigSnapshot();
+        runtime.timeouts.streamIdleMs = 1;
+        return runtime;
+      })(),
+    },
+  ])("records one attributed failure for committed Chat $name without Done", async ({ bytes, runtime }) => {
+    const usageUpdates: unknown[] = [];
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: bytes(),
+        cancel: async () => undefined,
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime, usageUpdates });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      const reader = response.body?.getReader();
+      const first = await reader?.read();
+      const delivered = decoder.decode(first?.value);
+      expect(delivered).toContain("\"content\":\"partial\"");
+      await expect(reader?.read()).rejects.toThrow();
+      expect(delivered).not.toContain("[DONE]");
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "github.com/1",
+        protocol: "openai_chat",
+        resolvedModel: "gpt",
+        outcome: runtime.timeouts.streamIdleMs === 1 ? "timeout" : "upstream_error",
+        requestCount: 1,
+        errorCount: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheTokens: 0,
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("records client cancellation once as aborted after Chat commitment", async () => {
+    const usageUpdates: unknown[] = [];
+    const controller = new AbortController();
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: cancelableBytes(
+          () => undefined,
+          encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n"),
+        ),
+        cancel: async () => undefined,
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { usageUpdates });
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"model\":\"gpt\",\"stream\":true}",
+        signal: controller.signal,
+      }));
+      const reader = response.body?.getReader();
+      expect(decoder.decode((await reader?.read())?.value)).toContain("\"content\":\"partial\"");
+      controller.abort();
+      await reader?.read().catch(() => undefined);
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        accountId: "github.com/1",
+        protocol: "openai_chat",
+        resolvedModel: "gpt",
+        outcome: "aborted",
+        errorCount: 0,
+      }]);
     } finally {
       await close();
     }
@@ -826,6 +975,11 @@ async function* streamFromText(text: string, split: number): AsyncIterable<Uint8
 async function* hangingStreamAfter(text: string): AsyncIterable<Uint8Array> {
   yield encoder.encode(text);
   await new Promise<void>(() => undefined);
+}
+
+async function* failingBytes(error: Error): AsyncIterable<Uint8Array> {
+  yield encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n");
+  throw error;
 }
 
 function cancelableBytes(onCancel: () => void, first?: Uint8Array): AsyncIterable<Uint8Array> {

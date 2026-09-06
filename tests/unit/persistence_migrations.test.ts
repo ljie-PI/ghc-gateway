@@ -12,6 +12,7 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
+import { migration as responsesUnknownProtocolMigration } from "../../src/persistence/migrations/021_responses_unknown_protocol.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import {
   applyMigrations,
@@ -173,6 +174,38 @@ describe("migrations", () => {
     expect(database.prepare("SELECT 1 AS ok FROM sqlite_master WHERE name = 'ok_probe'").get()).toBeUndefined();
     database.close();
   });
+
+  it("preserves existing usage while adding an unknown Responses attribution", () => {
+    const database = new Database(":memory:");
+    const base = [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(telemetryMigration),
+      embedMigration(responsesHistoryMigration),
+    ];
+    applyMigrations(database, base, nowMs);
+    database.prepare(
+      `INSERT INTO usage_buckets VALUES (
+        1, 'github.com/1', 'openai_responses_bridge', 'gpt', 'success',
+        1, 0, 2, 3, 0, 4, 4
+      )`,
+    ).run();
+
+    applyMigrations(database, [...base, embedMigration(responsesUnknownProtocolMigration)], nowMs);
+    database.prepare(
+      `INSERT INTO usage_buckets VALUES (
+        1, 'unbound', 'openai_responses_unknown', 'unresolved', 'client_error',
+        1, 1, 0, 0, 0, 0, 0
+      )`,
+    ).run();
+
+    expect(database.prepare(
+      "SELECT protocol, request_count FROM usage_buckets ORDER BY protocol",
+    ).all()).toEqual([
+      { protocol: "openai_responses_bridge", request_count: 1 },
+      { protocol: "openai_responses_unknown", request_count: 1 },
+    ]);
+    database.close();
+  });
 });
 
 describe("generate_migrations", () => {
@@ -182,6 +215,7 @@ describe("generate_migrations", () => {
       embedMigration(runtimeConfigMigration),
       embedMigration(accountsMigration),
       embedMigration(telemetryMigration),
+      embedMigration(responsesUnknownProtocolMigration),
       embedMigration(responsesHistoryMigration),
     ]);
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-manifest-"));

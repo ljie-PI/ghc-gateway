@@ -6,7 +6,7 @@ import {
   type StartupConfig,
 } from "../config/startup_config.js";
 import { AdmissionController, defaultDelay, type DelayFn } from "./admission.js";
-import { createHonoApp, type RouteRegistration } from "./hono_app.js";
+import { createHonoApp, type InflightRequest, type RouteRegistration } from "./hono_app.js";
 import type { TimeoutScheduler } from "./timeouts.js";
 
 export interface GatewayListener {
@@ -114,7 +114,7 @@ export async function createGateway(
   const delay = dependencies.delay ?? defaultDelay;
   const scheduler: TimeoutScheduler = { nowMs, delay };
   const admission = new AdmissionController(delay, nowMs);
-  const inflight = new Set<AbortController>();
+  const inflight = new Set<InflightRequest>();
   const mountedInflight = new Set<AbortController>();
   let activeStreams = 0;
   let closed = false;
@@ -224,10 +224,7 @@ export async function createGateway(
     } catch (error: unknown) {
       closeError ??= error;
     }
-    for (const controller of inflight) {
-      controller.abort();
-    }
-    inflight.clear();
+    const requestCleanup = [...inflight].map(async (request) => await request.abortForShutdown());
     const current = listener;
     listener = undefined;
     listenPromise = undefined;
@@ -249,6 +246,7 @@ export async function createGateway(
           closeError ??= error;
         }
       }
+      await Promise.allSettled(requestCleanup);
       try {
         await dependencies.onClose?.();
       } catch (error: unknown) {
