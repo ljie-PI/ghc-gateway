@@ -97,8 +97,7 @@ describe("Anthropic stream lifecycle", () => {
       const text = await response.text();
       expect(text).toContain("\"text\": \"h\\u00e9\"");
       expect(text).toContain("\"id\": \"call.1__thought__sigA\"");
-      expect(text).toContain("\"partial_json\": \"{\\\"a\\\":\"");
-      expect(text).toContain("\"partial_json\": \"1}\"");
+      expect(text).toContain("\"partial_json\": \"{\\\"a\\\":1}\"");
       expect(text).not.toContain("thinking_delta");
       expect(text).not.toContain("signature_delta");
       expect(text.match(/event: message_stop/gu)).toHaveLength(1);

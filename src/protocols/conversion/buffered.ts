@@ -401,9 +401,7 @@ function messagesEnvelope(
   for (const item of response.items) {
     if (item.type === "message") {
       for (const part of item.content) {
-        content.push(part.type === "text"
-          ? wireObject([["type", "text"], ["text", part.text]])
-          : wireObject([["type", "refusal"], ["refusal", part.text]]));
+        content.push(wireObject([["type", "text"], ["text", part.text]]));
       }
     } else {
       content.push(wireObject([

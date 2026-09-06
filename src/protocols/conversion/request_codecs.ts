@@ -1245,6 +1245,12 @@ function encodeMessagesRequest(
   if (request.outputFormat?.kind === "json_object") {
     unsupported("REQ-TARGET-M-JSON-OBJECT");
   }
+  const targetReasoning = request.reasoning?.effort === "minimal"
+    ? { effort: "low" as const }
+    : request.reasoning;
+  const targetDegradations: ConversionDegradationRule[] = request.reasoning?.effort === "minimal"
+    ? ["reasoning.budget_coarsened"]
+    : [];
   const budget = outputBudget(request.maxOutputTokens, context.capability);
   const split = splitMessagesInstructions(request);
   const body = wireObject([
@@ -1258,10 +1264,10 @@ function encodeMessagesRequest(
     ["stream", request.stream ? true : undefined],
     ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeMessagesTool))],
     ["tool_choice", encodeMessagesToolChoice(request.toolChoice, request.parallelToolCalls)],
-    ["output_config", encodeMessagesOutputConfig(request.outputFormat, request.reasoning)],
+    ["output_config", encodeMessagesOutputConfig(request.outputFormat, targetReasoning)],
     ["metadata", request.metadata],
   ]);
-  return encodedRequest(request, body);
+  return encodedRequest(request, body, targetDegradations);
 }
 
 function splitMessagesInstructions(request: Readonly<SemanticRequest>): {
@@ -1335,8 +1341,8 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
         ["role", "tool"],
         ["tool_call_id", result.callId],
         ["content", images.length === 0
-          ? text
-          : `${text}${text.length === 0 ? "" : "\n"}[cc-switch: tool result media moved to the following user message]`],
+          ? toolResultText(text, result.isError)
+          : `${toolResultText(text, result.isError)}${text.length === 0 && !result.isError ? "" : "\n"}[cc-switch: tool result media moved to the following user message]`],
       ]));
       if (images.length > 0) {
         mediaContent.push(
@@ -1373,8 +1379,7 @@ function encodeResponsesItems(items: readonly SemanticRequestItem[]): WireJsonOb
       output.push(wireObject([
         ["type", "function_call_output"],
         ["call_id", item.callId],
-        ["output", encodeResponsesToolResultContent(item.content)],
-        ["status", item.isError ? "failed" : undefined],
+        ["output", encodeResponsesToolResultContent(item.content, item.isError)],
       ]));
     }
   }
@@ -1480,11 +1485,19 @@ function encodeResponsesContent(content: SemanticContent, assistant: boolean): W
   return wireObject([["type", assistant ? "output_text" : "input_text"], ["text", content.text]]);
 }
 
-function encodeResponsesToolResultContent(content: readonly SemanticContent[]): WireJson {
-  if (content.length === 1 && content[0]?.type === "text") {
+function encodeResponsesToolResultContent(
+  content: readonly SemanticContent[],
+  isError: boolean,
+): WireJson {
+  if (!isError && content.length === 1 && content[0]?.type === "text") {
     return content[0].text;
   }
-  return wireArray(content.map((part) => encodeResponsesContent(part, false)));
+  return wireArray([
+    ...(isError
+      ? [wireObject([["type", "input_text"], ["text", "[cc-switch:tool-result-error]"]])]
+      : []),
+    ...content.map((part) => encodeResponsesContent(part, false)),
+  ]);
 }
 
 function encodeMessagesContent(content: SemanticContent): WireJsonObject {
@@ -1634,6 +1647,7 @@ function namedSchemaEntries(
 function encodedRequest(
   request: Readonly<SemanticRequest>,
   body: WireJsonObject,
+  additionalDegradations: readonly ConversionDegradationRule[] = [],
 ): EncodedConversionRequest {
   const firstItem = request.items[0];
   return Object.freeze({
@@ -1647,7 +1661,7 @@ function encodedRequest(
       )),
     initiator: firstItem?.type === "message" && firstItem.role === "assistant" ? "agent" : "user",
     messagesBetaFeatures: [],
-    degradations: request.degradations,
+    degradations: [...new Set([...request.degradations, ...additionalDegradations])],
   });
 }
 
@@ -1815,6 +1829,12 @@ function textContent(content: readonly SemanticContent[]): string | undefined {
     .map((part) => part.text)
     .join("");
   return text.length === 0 ? undefined : text;
+}
+
+function toolResultText(text: string, isError: boolean): string {
+  return isError
+    ? `[cc-switch:tool-result-error]${text.length === 0 ? "" : `\n${text}`}`
+    : text;
 }
 
 function appendMember(object: WireJsonObject, key: string, value: WireJson): void {

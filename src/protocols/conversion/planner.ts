@@ -138,7 +138,7 @@ function validateSemanticBindings(request: Readonly<SemanticRequest>): void {
   const openCalls = new Set<string>();
   for (const item of request.items) {
     if (item.type === "message") {
-      if (openCalls.size > 0) {
+      if (openCalls.size > 0 && item.role !== "assistant") {
         throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-ORDER");
       }
       continue;

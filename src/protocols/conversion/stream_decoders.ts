@@ -205,7 +205,7 @@ async function* decodeMessagesStream(
   accumulatorBytes: number,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
-  const blocks = new Map<number, { readonly kind: "text" | "refusal" | "tool" | "ignored"; readonly key?: string }>();
+  const blocks = new Map<number, MessageBlockState>();
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
   let observedUsage = emptyUsage();
   for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
@@ -260,18 +260,18 @@ async function* decodeMessagesStream(
           invalid();
         }
         const key = `messages:${index}`;
-        blocks.set(index, { kind: "tool", key });
+        const input = objectMember(block, "input");
+        blocks.set(index, {
+          kind: "tool",
+          key,
+          initialArguments: input === undefined
+            ? undefined
+            : new TextDecoder().decode(serializeWireJson(input)),
+          sawArgumentsDelta: false,
+        });
         budget.reserve(callId);
         budget.reserve(name);
         yield { kind: "tool_start", key, callId, name };
-        const input = objectMember(block, "input");
-        if (input !== undefined && input.members.length > 0) {
-          yield {
-            kind: "tool_arguments_delta",
-            key,
-            delta: new TextDecoder().decode(serializeWireJson(input)),
-          };
-        }
       } else if (blockType === "thinking" || blockType === "redacted_thinking") {
         blocks.set(index, { kind: "ignored" });
       } else {
@@ -296,6 +296,7 @@ async function* decodeMessagesStream(
           delta: stringMember(delta, "refusal") ?? stringMember(delta, "text") ?? "",
         };
       } else if (block.kind === "tool" && deltaType === "input_json_delta" && block.key !== undefined) {
+        block.sawArgumentsDelta = true;
         yield {
           kind: "tool_arguments_delta",
           key: block.key,
@@ -313,6 +314,13 @@ async function* decodeMessagesStream(
         invalid();
       }
       if (block.kind === "tool" && block.key !== undefined) {
+        if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
+          yield {
+            kind: "tool_arguments_delta",
+            key: block.key,
+            delta: block.initialArguments,
+          };
+        }
         yield { kind: "tool_done", key: block.key };
       }
       continue;
@@ -358,6 +366,7 @@ async function* decodeResponsesStream(
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const toolsByIndex = new Map<number, ResponseToolIdentity>();
+  const observedOutputIndexes = new Set<number>();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
     if (record.data === "[DONE]") {
@@ -381,6 +390,7 @@ async function* decodeResponsesStream(
       if (outputIndex === undefined || item === undefined) {
         invalid();
       }
+      observedOutputIndexes.add(outputIndex);
       if (stringMember(item, "type") === "function_call") {
         const key = `responses:${outputIndex}`;
         const callId = stringMember(item, "call_id");
@@ -413,6 +423,7 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.output_text.delta") {
+      observedOutputIndexes.add(requiredOutputIndex(payload));
       yield {
         kind: "text_delta",
         key: responseContentKey(payload, "text"),
@@ -421,6 +432,7 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.output_text.done") {
+      observedOutputIndexes.add(requiredOutputIndex(payload));
       yield {
         kind: "text_done",
         key: responseContentKey(payload, "text"),
@@ -429,6 +441,7 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.refusal.delta") {
+      observedOutputIndexes.add(requiredOutputIndex(payload));
       yield {
         kind: "refusal_delta",
         key: responseContentKey(payload, "refusal"),
@@ -437,6 +450,7 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.refusal.done") {
+      observedOutputIndexes.add(requiredOutputIndex(payload));
       yield {
         kind: "refusal_done",
         key: responseContentKey(payload, "refusal"),
@@ -445,20 +459,22 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.function_call_arguments.delta") {
-      const outputIndex = integerMember(payload, "output_index");
-      const identity = outputIndex === undefined ? undefined : toolsByIndex.get(outputIndex);
+      const outputIndex = requiredOutputIndex(payload);
+      const identity = toolsByIndex.get(outputIndex);
       if (identity === undefined) {
         invalid();
       }
+      observedOutputIndexes.add(outputIndex);
       yield { kind: "tool_arguments_delta", key: identity.key, delta: stringMember(payload, "delta") ?? "" };
       continue;
     }
     if (type === "response.function_call_arguments.done") {
-      const outputIndex = integerMember(payload, "output_index");
-      const identity = outputIndex === undefined ? undefined : toolsByIndex.get(outputIndex);
+      const outputIndex = requiredOutputIndex(payload);
+      const identity = toolsByIndex.get(outputIndex);
       if (identity === undefined) {
         invalid();
       }
+      observedOutputIndexes.add(outputIndex);
       yield { kind: "tool_done", key: identity.key, argumentsJson: stringMember(payload, "arguments") };
       continue;
     }
@@ -468,6 +484,7 @@ async function* decodeResponsesStream(
       if (outputIndex === undefined || item === undefined) {
         invalid();
       }
+      observedOutputIndexes.add(outputIndex);
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
       continue;
     }
@@ -476,6 +493,7 @@ async function* decodeResponsesStream(
       if (response === undefined) {
         invalid();
       }
+      validateTerminalResponse(type, response, observedOutputIndexes);
       if (type === "response.failed") {
         throw new GatewayFailureError({
           kind: "upstream_stream_error",
@@ -483,6 +501,7 @@ async function* decodeResponsesStream(
           phase: "stream",
         });
       }
+
       yield* finalResponseEvents(response, toolsByIndex);
       const usage = objectMember(response, "usage");
       if (usage !== undefined) {
@@ -496,10 +515,13 @@ async function* decodeResponsesStream(
         status: type === "response.incomplete" ? "incomplete" : "completed",
         finishReason: type === "response.incomplete"
           ? incompleteReason === "content_filter" ? "content_filter" : "length"
-          : toolsByIndex.size > 0 ? "tool_calls" : "stop",
+          : responseHasRefusal(response)
+            ? "refusal"
+            : toolsByIndex.size > 0 ? "tool_calls" : "stop",
       };
       return;
     }
+
     if (
       type === "response.created"
       || type === "response.in_progress"
@@ -519,6 +541,50 @@ async function* decodeResponsesStream(
     invalid();
   }
   invalidTruncated();
+}
+
+function validateTerminalResponse(
+  eventType: string,
+  response: WireJsonObject,
+  observedOutputIndexes: ReadonlySet<number>,
+): void {
+  const expectedStatus = eventType === "response.completed"
+    ? "completed"
+    : eventType === "response.incomplete"
+      ? "incomplete"
+      : "failed";
+  if (stringMember(response, "status") !== expectedStatus) {
+    invalid();
+  }
+  const output = arrayMember(response, "output");
+  if (output === undefined) {
+    invalid();
+  }
+  for (const index of observedOutputIndexes) {
+    if (index < 0 || index >= output.items.length || !isWireJsonObject(output.items[index])) {
+      invalid();
+    }
+  }
+}
+
+function requiredOutputIndex(object: WireJsonObject): number {
+  const value = integerMember(object, "output_index");
+  if (value === undefined || value < 0) {
+    invalid();
+  }
+  return value;
+}
+
+function responseHasRefusal(response: WireJsonObject): boolean {
+  const output = arrayMember(response, "output");
+  return output?.items.some((item) => {
+    if (!isWireJsonObject(item) || stringMember(item, "type") !== "message") {
+      return false;
+    }
+    return arrayMember(item, "content")?.items.some((part) => (
+      isWireJsonObject(part) && stringMember(part, "type") === "refusal"
+    )) === true;
+  }) === true;
 }
 
 function* finalResponseEvents(
@@ -622,6 +688,15 @@ interface ResponseToolIdentity {
   readonly callId: string;
   readonly name: string;
 }
+
+type MessageBlockState =
+  | { readonly kind: "text" | "refusal" | "ignored" }
+  | {
+    readonly kind: "tool";
+    readonly key: string;
+    readonly initialArguments?: string | undefined;
+    sawArgumentsDelta: boolean;
+  };
 
 function parseEventObject(data: string, eventLimitBytes: number): WireJsonObject {
   try {

@@ -420,6 +420,88 @@ describe("shared conversion request codecs", () => {
     }), "target", capability(["messages"]))).toThrow();
   });
 
+  it("preserves a valid Messages text/tool/text round followed by its bound result", () => {
+    const converted = prepareConvertedRequest("messages", "responses", body({
+      model: "source",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "before" },
+            { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+            { type: "text", text: "after" },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }],
+        },
+      ],
+      max_tokens: 8,
+    }), "target", capability(["responses"]));
+    expect(decoded(converted.bytes)).toMatchObject({
+      input: [
+        { type: "message", role: "assistant", content: [{ text: "before" }] },
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        { type: "message", role: "assistant", content: [{ text: "after" }] },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
+    });
+  });
+
+  it("preserves Messages tool errors with explicit compatible markers", () => {
+    const request = {
+      model: "source",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_1", content: "failed", is_error: true }],
+        },
+      ],
+      max_tokens: 8,
+    };
+    const responses = decoded(prepareConvertedRequest(
+      "messages",
+      "responses",
+      body(request),
+      "target",
+      capability(["responses"]),
+    ).bytes);
+    expect(responses).toMatchObject({
+      input: [{
+        type: "function_call",
+      }, {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: [
+          { type: "input_text", text: "[cc-switch:tool-result-error]" },
+          { type: "input_text", text: "failed" },
+        ],
+      }],
+    });
+    const chat = JSON.stringify(decoded(prepareConvertedRequest(
+      "messages",
+      "chat",
+      body(request),
+      "target",
+      capability(["chat"]),
+    ).bytes));
+    expect(chat).toContain("[cc-switch:tool-result-error]");
+  });
+
+  it("coarsens minimal reasoning to a supported Messages effort", () => {
+    const converted = prepareConvertedRequest("chat", "messages", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "minimal",
+    }), "target", capability(["messages"]));
+    expect(decoded(converted.bytes)).toMatchObject({
+      output_config: { effort: "low" },
+    });
+    expect(converted.degradations).toContain("reasoning.budget_coarsened");
+  });
+
   it("extracts documented JSON-encoded content media without scanning unrelated business keys", () => {
     const embedded = JSON.stringify({
       content: [{

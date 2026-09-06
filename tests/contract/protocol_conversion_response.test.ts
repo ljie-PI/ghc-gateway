@@ -313,7 +313,8 @@ describe("shared conversion response codecs", () => {
     const text = wireText(emissions);
     expect(text).toContain("\"text\": \"one\"");
     expect(text).toContain("\"text\": \"two\"");
-    expect(text).toContain("\"refusal\": \"refused\"");
+    expect(text).toContain("\"text\": \"refused\"");
+    expect(text).toContain("\"stop_reason\": \"refusal\"");
     expect(text.match(/event: message_stop/gu)).toHaveLength(1);
   });
 
@@ -383,6 +384,87 @@ describe("shared conversion response codecs", () => {
     await expect(async () => {
       for await (const _emission of convertProtocolStream(
         chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("preserves an explicit empty Messages tool input when no deltas follow", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_empty_tool",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const text = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
+    expect(text).toContain("\"arguments\":\"{}\"");
+    expect(text).toContain("response.completed");
+  });
+
+  it("rejects contradictory Responses terminal status and missing final observed items", async () => {
+    const contradictory = responseEvent(0, "response.completed", {
+      response: {
+        id: "resp_bad",
+        object: "response",
+        status: "incomplete",
+        output: [],
+      },
+    });
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(contradictory)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+
+    const missing = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "msg_1", type: "message", status: "in_progress", role: "assistant", content: [] },
+      }),
+      responseEvent(1, "response.output_text.delta", {
+        item_id: "msg_1",
+        output_index: 0,
+        content_index: 0,
+        delta: "partial",
+      }),
+      responseEvent(2, "response.completed", {
+        response: {
+          id: "resp_bad",
+          object: "response",
+          status: "completed",
+          output: [],
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(missing)),
         streamContext("responses", "chat"),
       )) {
         void _emission;

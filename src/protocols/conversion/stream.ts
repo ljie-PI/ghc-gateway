@@ -106,6 +106,9 @@ export async function* convertProtocolStream(
       if (suffix.length > 0) {
         yield* emitter.toolArgumentsDelta(event.key, suffix);
       }
+      if (context.target === "messages") {
+        yield* emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson);
+      }
       continue;
     }
     if (event.kind === "terminal") {
@@ -255,10 +258,14 @@ class ChatEmitter implements StreamEmitter {
 class MessagesEmitter implements StreamEmitter {
   private readonly id: string;
   private nextIndex = 0;
-  private readonly textIndexes = new Map<string, number>();
-  private readonly refusalIndexes = new Map<string, number>();
-  private readonly toolIndexes = new Map<string, number>();
-  private readonly openIndexes = new Set<number>();
+  private activeText: { readonly key: string; readonly index: number } | undefined;
+  private bufferedBytes = 0;
+  private readonly tools = new Map<string, {
+    readonly callId: string;
+    readonly name: string;
+    argumentsJson: string;
+    emitted: boolean;
+  }>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `msg_${context.createUuid()}`;
@@ -286,16 +293,17 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   *textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    let index = this.textIndexes.get(key);
-    if (index === undefined) {
-      index = this.open({ type: "text", text: "" });
-      this.textIndexes.set(key, index);
+    if (this.activeText?.key !== key) {
+      yield* this.closeActiveText();
+      const index = this.nextIndex++;
+      this.activeText = { key, index };
       yield this.event({
         type: "content_block_start",
         index,
         content_block: { type: "text", text: "" },
       });
     }
+    const index = this.activeText.index;
     yield this.event({
       type: "content_block_delta",
       index,
@@ -304,53 +312,65 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   *refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    let index = this.refusalIndexes.get(key);
-    if (index === undefined) {
-      index = this.open({ type: "refusal", refusal: "" });
-      this.refusalIndexes.set(key, index);
-      yield this.event({
-        type: "content_block_start",
-        index,
-        content_block: { type: "refusal", refusal: "" },
-      });
-    }
-    yield this.event({
-      type: "content_block_delta",
-      index,
-      delta: { type: "refusal_delta", refusal: delta },
-    });
+    yield* this.textDelta(`refusal:${key}`, delta);
   }
 
   *toolStart(key: string, callId: string, name: string): Iterable<ConvertedStreamEmission> {
-    const index = this.open({ type: "tool_use" });
-    this.toolIndexes.set(key, index);
+    yield* this.closeActiveText();
+    if (this.tools.has(key)) {
+      invalid();
+    }
+    this.tools.set(key, { callId, name, argumentsJson: "", emitted: false });
+  }
+
+  toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    const tool = this.tools.get(key);
+    if (tool === undefined || tool.emitted) {
+      invalid();
+    }
+    this.bufferedBytes += new TextEncoder().encode(delta).byteLength;
+    if (this.bufferedBytes > this.context.accumulatorBytes) {
+      invalid();
+    }
+    tool.argumentsJson += delta;
+    return [];
+  }
+
+  *toolDone(key: string, argumentsJson: string): Iterable<ConvertedStreamEmission> {
+    yield* this.closeActiveText();
+    const tool = this.tools.get(key);
+    if (tool === undefined || tool.emitted) {
+      return;
+    }
+    if (argumentsJson !== tool.argumentsJson) {
+      invalid();
+    }
+    tool.emitted = true;
+    const index = this.nextIndex++;
     yield this.event({
       type: "content_block_start",
       index,
-      content_block: { type: "tool_use", id: callId, name, input: {} },
+      content_block: { type: "tool_use", id: tool.callId, name: tool.name, input: {} },
     });
-  }
-
-  *toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    const index = this.toolIndexes.get(key);
-    if (index === undefined) {
-      invalid();
+    if (tool.argumentsJson.length > 0) {
+      yield this.event({
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
+      });
     }
-    yield this.event({
-      type: "content_block_delta",
-      index,
-      delta: { type: "input_json_delta", partial_json: delta },
-    });
+    yield this.event({ type: "content_block_stop", index });
   }
-
-  *toolDone(_key: string, _argumentsJson: string): Iterable<ConvertedStreamEmission> {}
 
   *finish(
     terminal: Extract<SemanticStreamEvent, { readonly kind: "terminal" }>,
     usage: Readonly<SemanticUsage>,
   ): Iterable<ConvertedStreamEmission> {
-    for (const index of [...this.openIndexes].sort((left, right) => left - right)) {
-      yield this.event({ type: "content_block_stop", index });
+    yield* this.closeActiveText();
+    for (const [key, tool] of this.tools) {
+      if (!tool.emitted) {
+        yield* this.toolDone(key, tool.argumentsJson);
+      }
     }
     yield this.event({
       type: "message_delta",
@@ -362,11 +382,12 @@ class MessagesEmitter implements StreamEmitter {
     yield this.event({ type: "message_stop" });
   }
 
-  private open(_block: unknown): number {
-    const index = this.nextIndex;
-    this.nextIndex += 1;
-    this.openIndexes.add(index);
-    return index;
+  private *closeActiveText(): Iterable<ConvertedStreamEmission> {
+    if (this.activeText === undefined) {
+      return;
+    }
+    yield this.event({ type: "content_block_stop", index: this.activeText.index });
+    this.activeText = undefined;
   }
 
   private event(value: Record<string, unknown>): ConvertedStreamEmission {
