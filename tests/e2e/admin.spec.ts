@@ -355,6 +355,18 @@ test("model token override keeps protocol inheritance", async ({ page }) => {
     .toBeUndefined();
 });
 
+test("models view renders duplicate catalog IDs without crashing", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  const first = fixture.state.models.items[0]!;
+  fixture.state.models = {
+    ...fixture.state.models,
+    items: [first, { ...first, name: "Duplicate Alpha" }],
+  };
+  await page.getByRole("button", { name: "Models" }).click();
+  await expect(page.getByText("gpt-alpha", { exact: true })).toHaveCount(2);
+  await expect(page.getByRole("heading", { name: "Duplicate Alpha" })).toBeVisible();
+});
+
 test("config-revision-and-security-rejection", async ({ page }) => {
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Configuration" }).click();

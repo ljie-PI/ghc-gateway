@@ -168,6 +168,8 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         return capabilitySnapshot(bound, capabilityOverrides, capabilityRevision);
       },
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
+      isCatalogCurrent: (snapshot) => snapshot.catalogGeneration === 7
+        && snapshot.credentialGeneration === 4,
       previewOverride: async (account, modelId, candidate, expectedRevision, signal) => {
         signal.throwIfAborted();
         if (expectedRevision !== capabilityRevision) throw coded("revision_conflict");

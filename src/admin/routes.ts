@@ -42,6 +42,8 @@ const ModelCapabilitiesSchema = Type.Object({
   accountId: Type.String({ minLength: 1 }),
   modelId: ModelIdSchema,
   expectedRevision: Type.Integer({ minimum: 0 }),
+  expectedCredentialGeneration: Type.Integer({ minimum: 1 }),
+  expectedCatalogGeneration: Type.Integer({ minimum: 0 }),
   capabilities: Type.Object({
     enabled: Type.Boolean(),
     protocols: Type.Optional(Type.Array(
@@ -61,6 +63,8 @@ const ModelCapabilitiesResetSchema = Type.Object({
   accountId: Type.String({ minLength: 1 }),
   modelId: ModelIdSchema,
   expectedRevision: Type.Integer({ minimum: 0 }),
+  expectedCredentialGeneration: Type.Integer({ minimum: 1 }),
+  expectedCatalogGeneration: Type.Integer({ minimum: 0 }),
 }, { additionalProperties: false });
 const RuntimeConfigUpdateSchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 0 }),
@@ -261,6 +265,8 @@ async function dispatch(
       value.accountId,
       value.modelId,
       value.expectedRevision,
+      value.expectedCredentialGeneration,
+      value.expectedCatalogGeneration,
       value.capabilities,
       context.signal,
     ), context.requestId);
@@ -272,6 +278,8 @@ async function dispatch(
       value.accountId,
       value.modelId,
       value.expectedRevision,
+      value.expectedCredentialGeneration,
+      value.expectedCatalogGeneration,
       context.signal,
     ), context.requestId);
     break;

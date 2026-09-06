@@ -136,6 +136,8 @@
         targetAccountId,
         model.id,
         model.overrideRevision,
+        data.credentialGeneration,
+        data.catalogGeneration,
         {
           enabled: editor.enabled,
           ...(editor.overrideProtocols ? { protocols: editor.protocols } : {}),
@@ -167,7 +169,13 @@
     busy = `reset:${model.id}`;
     failure = "";
     try {
-      const resetData = await client.resetModelCapabilities(targetAccountId, model.id, model.overrideRevision);
+      const resetData = await client.resetModelCapabilities(
+        targetAccountId,
+        model.id,
+        model.overrideRevision,
+        data.credentialGeneration,
+        data.catalogGeneration,
+      );
       if (!isCurrentRequest(generation, targetAccountId)) return;
       data = resetData;
       syncEditors();
@@ -193,6 +201,8 @@
         targetAccountId,
         modelId,
         data.capabilityRevision,
+        data.credentialGeneration,
+        data.catalogGeneration,
         {
         enabled: true,
         protocols: [],
@@ -296,7 +306,7 @@
   </section>
 {:else if data}
   <section class="model-grid" aria-label="Account models">
-    {#each data.items as model (model.id)}
+    {#each data.items as model, index (`${model.id}:${index}`)}
       {@const editor = editors[model.id]}
       <article class:preferred={data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid"}>
         <div class="model-vendor">{model.vendor}</div>

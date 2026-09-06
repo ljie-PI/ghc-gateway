@@ -288,6 +288,7 @@ export interface AdminCapabilityRegistry {
     }[];
   }>;
   invalidate(accountId: string): void;
+  isCatalogCurrent(snapshot: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>): boolean;
   previewOverride(
     account: Readonly<BoundAccount>,
     modelId: string,
@@ -554,6 +555,8 @@ export class AdminManagementApi {
     accountId: string,
     modelId: string,
     expectedRevision: number,
+    expectedCredentialGeneration: number,
+    expectedCatalogGeneration: number,
     candidate: Readonly<ModelCapabilityOverrideValue>,
     signal: AbortSignal,
   ): Promise<AdminModels> {
@@ -561,6 +564,9 @@ export class AdminManagementApi {
       this.requireActiveAccount(accountId);
       const before = this.dependencies.preferences.get(accountId);
       const validatedAccount = await this.dependencies.accounts.bindAccount(accountId, signal);
+      if (validatedAccount.credentialGeneration !== expectedCredentialGeneration) {
+        throw new AdminApiError("revision_conflict");
+      }
       const preview = await this.dependencies.registry.previewOverride(
         validatedAccount,
         modelId,
@@ -568,6 +574,10 @@ export class AdminManagementApi {
         expectedRevision,
         signal,
       );
+      if (preview.catalogGeneration !== expectedCatalogGeneration
+        || !this.dependencies.registry.isCatalogCurrent(preview)) {
+        throw new AdminApiError("revision_conflict");
+      }
       signal.throwIfAborted();
       await this.requireSameCredentialGeneration(accountId, validatedAccount, signal);
       if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {
@@ -593,12 +603,17 @@ export class AdminManagementApi {
     accountId: string,
     modelId: string,
     expectedRevision: number,
+    expectedCredentialGeneration: number,
+    expectedCatalogGeneration: number,
     signal: AbortSignal,
   ): Promise<AdminModels> {
     return await this.withModelMutation(accountId, signal, async () => {
       this.requireActiveAccount(accountId);
       const before = this.dependencies.preferences.get(accountId);
       const account = await this.dependencies.accounts.bindAccount(accountId, signal);
+      if (account.credentialGeneration !== expectedCredentialGeneration) {
+        throw new AdminApiError("revision_conflict");
+      }
       const preview = await this.dependencies.registry.previewOverride(
         account,
         modelId,
@@ -606,6 +621,10 @@ export class AdminManagementApi {
         expectedRevision,
         signal,
       );
+      if (preview.catalogGeneration !== expectedCatalogGeneration
+        || !this.dependencies.registry.isCatalogCurrent(preview)) {
+        throw new AdminApiError("revision_conflict");
+      }
       signal.throwIfAborted();
       await this.requireSameCredentialGeneration(accountId, account, signal);
       if (this.dependencies.preferences.get(accountId)?.revision !== before?.revision) {

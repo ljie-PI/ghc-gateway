@@ -205,10 +205,26 @@ describe("Admin API", () => {
         overrideRevision: 0,
       });
 
+      for (const stale of [
+        { expectedCredentialGeneration: 3, expectedCatalogGeneration: 7 },
+        { expectedCredentialGeneration: 4, expectedCatalogGeneration: 6 },
+      ]) {
+        const response = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+          accountId: "github.com/42",
+          modelId: "manual-model",
+          expectedRevision: 0,
+          ...stale,
+          capabilities: { enabled: true, protocols: ["messages"] },
+        });
+        expect(response.status).toBe(409);
+      }
+
       const configured = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
         accountId: "github.com/42",
         modelId: "manual-model",
         expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
         capabilities: {
           enabled: true,
           protocols: ["messages"],
@@ -234,6 +250,8 @@ describe("Admin API", () => {
         accountId: "github.com/42",
         modelId: "manual-model",
         expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
         capabilities: { enabled: true, protocols: ["chat"] },
       });
       expect(conflict.status).toBe(409);
@@ -242,6 +260,8 @@ describe("Admin API", () => {
         accountId: "github.com/42",
         modelId: "manual-model",
         expectedRevision: 1,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
         capabilities: { enabled: true, protocols: ["websocket"] },
       });
       expect(invalid.status).toBe(400);
@@ -250,6 +270,8 @@ describe("Admin API", () => {
         accountId: "github.com/42",
         modelId: "manual-model",
         expectedRevision: 1,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
       });
       expect(reset.status).toBe(200);
       expect(((await reset.json()) as { data: { items: Array<{ id: string }> } }).data.items)
@@ -260,6 +282,8 @@ describe("Admin API", () => {
         accountId: "github.com/42",
         modelId: "overflow",
         expectedRevision: 2,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
         capabilities: { enabled: true },
       });
       expect(capacity.status).toBe(503);
@@ -292,6 +316,8 @@ describe("Admin API", () => {
         accountId: "github.com/42",
         modelId: "manual",
         expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
         capabilities: { enabled: true, protocols: ["messages"] },
       });
 
@@ -330,6 +356,8 @@ describe("Admin API", () => {
           accountId: "github.com/42",
           modelId: "manual",
           expectedRevision: 0,
+          expectedCredentialGeneration: 4,
+          expectedCatalogGeneration: 7,
           capabilities: { enabled: true, protocols: ["messages"] },
         }),
       }));
@@ -358,6 +386,8 @@ describe("Admin API", () => {
         accountId: "github.com/42",
         modelId: "manual",
         expectedRevision: 0,
+        expectedCredentialGeneration: 4,
+        expectedCatalogGeneration: 7,
         capabilities: { enabled: true, protocols: ["messages"] },
       });
       expect(response.status).toBe(409);
@@ -402,6 +432,7 @@ describe("Admin API", () => {
             })
             : mutate(harness.gateway, "DELETE", "/admin/api/v1/models/capabilities", session, {
               accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+              expectedCredentialGeneration: 4, expectedCatalogGeneration: 7,
             });
         await startedPromise;
         dependencies.accounts.bindAccount = async (accountId, signal) => ({

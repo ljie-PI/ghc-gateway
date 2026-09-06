@@ -148,11 +148,16 @@ export class ModelCapabilityRegistry {
   }
 
   isCurrent(snapshot: Readonly<CapabilityCatalogSnapshot>): boolean {
+    return this.isCatalogCurrent(snapshot)
+      && this.overrides.revision(snapshot.accountId) === snapshot.capabilityRevision;
+  }
+
+  isCatalogCurrent(snapshot: Readonly<CapabilityCatalogSnapshot>): boolean {
     return this.catalog.isCurrent(
       snapshot.accountId,
       snapshot.catalogGeneration,
       snapshot.credentialGeneration,
-    ) && this.overrides.revision(snapshot.accountId) === snapshot.capabilityRevision;
+    );
   }
 
   async close(): Promise<void> {
