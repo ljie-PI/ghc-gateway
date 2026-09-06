@@ -60,11 +60,20 @@ export async function createConvertedStreamResponse(input: {
     reasoningTokens: 0,
   };
   const prefetched: Uint8Array[] = [];
+  const firstSemanticStartedAt = Date.now();
   try {
     for (;;) {
+      const elapsed = Date.now() - firstSemanticStartedAt;
+      if (elapsed >= input.scope.config.timeouts.firstByteMs) {
+        throw new GatewayFailureError({
+          kind: "upstream_timeout",
+          source: "converter",
+          phase: "stream",
+        });
+      }
       const next = await nextWithDeadline(
         iterator,
-        input.scope.config.timeouts.firstByteMs,
+        input.scope.config.timeouts.firstByteMs - elapsed,
         input.scope.signal,
         { source: "converter", phase: "stream" },
       );

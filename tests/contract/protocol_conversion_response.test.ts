@@ -8,6 +8,7 @@ import type {
 import { createNativeMessagesStreamResponse } from "../../src/protocols/anthropic_messages/native.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
+import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -665,6 +666,126 @@ describe("shared conversion response codecs", () => {
         void _emission;
       }
     }).rejects.toThrow();
+  });
+
+  it("bounds ignored Responses item indexes and requires Messages tool block closure", async () => {
+    const reasoningEvents = Array.from({ length: 10 }, (_, index) => responseEvent(
+      index,
+      "response.output_item.added",
+      {
+        output_index: index,
+        item: { id: `rs_${index}`, type: "reasoning", status: "in_progress", summary: [] },
+      },
+    )).join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(reasoningEvents)),
+        { ...streamContext("responses", "chat"), accumulatorBytes: 64 },
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+
+    const unclosedTool = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_unclosed",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{}" },
+      }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(unclosedTool)),
+        streamContext("messages", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("uses one absolute first-semantic deadline across usage-only emissions", async () => {
+    async function* delayedUsage(): AsyncIterable<Uint8Array> {
+      for (let index = 0; index < 4; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        yield encoder.encode(`data: ${JSON.stringify({
+          id: "usage_only",
+          choices: [],
+          usage: { prompt_tokens: index + 1 },
+        })}\n\n`);
+      }
+      yield encoder.encode(`data: ${JSON.stringify({
+        id: "late",
+        choices: [{ index: 0, delta: { content: "late" }, finish_reason: "stop" }],
+      })}\n\ndata: [DONE]\n\n`);
+    }
+    const config = defaultRuntimeConfigSnapshot();
+    const signal = new AbortController().signal;
+    await expect(createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: delayedUsage(),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "responses",
+        target: "chat",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: [],
+        },
+      },
+      scope: {
+        requestId: "req_deadline",
+        signal,
+        deliverySignal: signal,
+        config: {
+          ...config,
+          timeouts: { ...config.timeouts, firstByteMs: 50 },
+        },
+        attempt: createRequestAttempt({
+          requestId: "req_deadline",
+          protocol: "openai_responses_bridge",
+          abortedErrorCount: 1,
+        }),
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      onTerminal: () => undefined,
+    })).rejects.toMatchObject({ failure: { kind: "upstream_timeout" } });
   });
 
   it("finishes a native Messages stream at message_stop without waiting for upstream EOF", async () => {

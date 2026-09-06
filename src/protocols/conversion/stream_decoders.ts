@@ -242,13 +242,13 @@ async function* decodeMessagesStream(
       budget.reserveEntry();
       const blockType = stringMember(block, "type");
       if (blockType === "text") {
-        blocks.set(index, { kind: "text" });
+        blocks.set(index, { kind: "text", closed: false });
         const text = stringMember(block, "text");
         if (text !== undefined && text.length > 0) {
           yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
         }
       } else if (blockType === "refusal") {
-        blocks.set(index, { kind: "refusal" });
+        blocks.set(index, { kind: "refusal", closed: false });
         const refusal = stringMember(block, "refusal") ?? stringMember(block, "text");
         if (refusal !== undefined && refusal.length > 0) {
           yield { kind: "refusal_delta", key: `messages:${index}:refusal`, delta: refusal };
@@ -264,6 +264,7 @@ async function* decodeMessagesStream(
         blocks.set(index, {
           kind: "tool",
           key,
+          closed: false,
           initialArguments: input === undefined
             ? undefined
             : new TextDecoder().decode(serializeWireJson(input)),
@@ -273,7 +274,7 @@ async function* decodeMessagesStream(
         budget.reserve(name);
         yield { kind: "tool_start", key, callId, name };
       } else if (blockType === "thinking" || blockType === "redacted_thinking") {
-        blocks.set(index, { kind: "ignored" });
+        blocks.set(index, { kind: "ignored", closed: false });
       } else {
         invalid();
       }
@@ -284,6 +285,9 @@ async function* decodeMessagesStream(
       const delta = objectMember(payload, "delta");
       const block = index === undefined ? undefined : blocks.get(index);
       if (block === undefined || delta === undefined) {
+        invalid();
+      }
+      if (block.closed) {
         invalid();
       }
       const deltaType = stringMember(delta, "type");
@@ -313,6 +317,10 @@ async function* decodeMessagesStream(
       if (block === undefined) {
         invalid();
       }
+      if (block.closed) {
+        invalid();
+      }
+      block.closed = true;
       if (block.kind === "tool" && block.key !== undefined) {
         if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
           yield {
@@ -342,6 +350,9 @@ async function* decodeMessagesStream(
       if (pendingFinish === undefined) {
         invalid();
       }
+      if ([...blocks.values()].some((block) => !block.closed)) {
+        invalid();
+      }
       yield {
         kind: "terminal",
         status: pendingFinish === "length" || pendingFinish === "content_filter" || pendingFinish === "refusal"
@@ -367,6 +378,8 @@ async function* decodeResponsesStream(
   const budget = new DecoderBudget(accumulatorBytes);
   const toolsByIndex = new Map<number, ResponseToolIdentity>();
   const observedOutputIndexes = new Set<number>();
+  const observedOutputTypes = new Map<number, string>();
+  const observedContent = new Map<string, "output_text" | "refusal">();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
     if (record.data === "[DONE]") {
@@ -390,8 +403,13 @@ async function* decodeResponsesStream(
       if (outputIndex === undefined || item === undefined) {
         invalid();
       }
-      observedOutputIndexes.add(outputIndex);
-      if (stringMember(item, "type") === "function_call") {
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const itemType = stringMember(item, "type");
+      if (itemType === undefined) {
+        invalid();
+      }
+      observedOutputTypes.set(outputIndex, itemType);
+      if (itemType === "function_call") {
         const key = `responses:${outputIndex}`;
         const callId = stringMember(item, "call_id");
         const name = stringMember(item, "name");
@@ -405,7 +423,6 @@ async function* decodeResponsesStream(
           name,
         };
         toolsByIndex.set(outputIndex, identity);
-        budget.reserveEntry();
         budget.reserve(callId);
         budget.reserve(name);
         yield {
@@ -423,7 +440,9 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.output_text.delta") {
-      observedOutputIndexes.add(requiredOutputIndex(payload));
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observedContent.set(responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_delta",
         key: responseContentKey(payload, "text"),
@@ -432,7 +451,9 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.output_text.done") {
-      observedOutputIndexes.add(requiredOutputIndex(payload));
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observedContent.set(responseContentKey(payload, "text"), "output_text");
       yield {
         kind: "text_done",
         key: responseContentKey(payload, "text"),
@@ -441,7 +462,9 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.refusal.delta") {
-      observedOutputIndexes.add(requiredOutputIndex(payload));
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observedContent.set(responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_delta",
         key: responseContentKey(payload, "refusal"),
@@ -450,7 +473,9 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type === "response.refusal.done") {
-      observedOutputIndexes.add(requiredOutputIndex(payload));
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observedContent.set(responseContentKey(payload, "refusal"), "refusal");
       yield {
         kind: "refusal_done",
         key: responseContentKey(payload, "refusal"),
@@ -464,7 +489,7 @@ async function* decodeResponsesStream(
       if (identity === undefined) {
         invalid();
       }
-      observedOutputIndexes.add(outputIndex);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       yield { kind: "tool_arguments_delta", key: identity.key, delta: stringMember(payload, "delta") ?? "" };
       continue;
     }
@@ -474,7 +499,7 @@ async function* decodeResponsesStream(
       if (identity === undefined) {
         invalid();
       }
-      observedOutputIndexes.add(outputIndex);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       yield { kind: "tool_done", key: identity.key, argumentsJson: stringMember(payload, "arguments") };
       continue;
     }
@@ -484,7 +509,16 @@ async function* decodeResponsesStream(
       if (outputIndex === undefined || item === undefined) {
         invalid();
       }
-      observedOutputIndexes.add(outputIndex);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const itemType = stringMember(item, "type");
+      if (itemType === undefined) {
+        invalid();
+      }
+      const observedType = observedOutputTypes.get(outputIndex);
+      if (observedType !== undefined && observedType !== itemType) {
+        invalid();
+      }
+      observedOutputTypes.set(outputIndex, itemType);
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
       continue;
     }
@@ -493,7 +527,13 @@ async function* decodeResponsesStream(
       if (response === undefined) {
         invalid();
       }
-      validateTerminalResponse(type, response, observedOutputIndexes);
+      validateTerminalResponse(
+        type,
+        response,
+        observedOutputIndexes,
+        observedOutputTypes,
+        observedContent,
+      );
       if (type === "response.failed") {
         throw new GatewayFailureError({
           kind: "upstream_stream_error",
@@ -547,6 +587,8 @@ function validateTerminalResponse(
   eventType: string,
   response: WireJsonObject,
   observedOutputIndexes: ReadonlySet<number>,
+  observedOutputTypes: ReadonlyMap<number, string>,
+  observedContent: ReadonlyMap<string, "output_text" | "refusal">,
 ): void {
   const expectedStatus = eventType === "response.completed"
     ? "completed"
@@ -561,9 +603,39 @@ function validateTerminalResponse(
     invalid();
   }
   for (const index of observedOutputIndexes) {
-    if (index < 0 || index >= output.items.length || !isWireJsonObject(output.items[index])) {
+    const item = output.items[index];
+    if (index < 0 || index >= output.items.length || !isWireJsonObject(item)) {
       invalid();
     }
+    const observedType = observedOutputTypes.get(index);
+    if (observedType !== undefined && stringMember(item, "type") !== observedType) {
+      invalid();
+    }
+  }
+  for (const [key, expectedType] of observedContent) {
+    const match = /^responses:(\d+):(\d+):(text|refusal)$/u.exec(key);
+    if (match?.[1] === undefined || match[2] === undefined) {
+      invalid();
+    }
+    const outputIndex = Number.parseInt(match[1], 10);
+    const contentIndex = Number.parseInt(match[2], 10);
+    const item = output.items[outputIndex];
+    const content = isWireJsonObject(item) ? arrayMember(item, "content") : undefined;
+    const part = content?.items[contentIndex];
+    if (!isWireJsonObject(part) || stringMember(part, "type") !== expectedType) {
+      invalid();
+    }
+  }
+}
+
+function observeOutputIndex(
+  indexes: Set<number>,
+  budget: DecoderBudget,
+  outputIndex: number,
+): void {
+  if (!indexes.has(outputIndex)) {
+    budget.reserveEntry();
+    indexes.add(outputIndex);
   }
 }
 
@@ -690,12 +762,13 @@ interface ResponseToolIdentity {
 }
 
 type MessageBlockState =
-  | { readonly kind: "text" | "refusal" | "ignored" }
+  | { readonly kind: "text" | "refusal" | "ignored"; closed: boolean }
   | {
     readonly kind: "tool";
     readonly key: string;
     readonly initialArguments?: string | undefined;
     sawArgumentsDelta: boolean;
+    closed: boolean;
   };
 
 function parseEventObject(data: string, eventLimitBytes: number): WireJsonObject {
