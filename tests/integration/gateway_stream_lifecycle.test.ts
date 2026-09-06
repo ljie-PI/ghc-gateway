@@ -157,6 +157,36 @@ describe("stream route lifecycle", () => {
     }
   });
 
+  it("waits for response cancellation cleanup before application close hooks", async () => {
+    let cleanupComplete = false;
+    let closeSawCleanup = false;
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/cleanup-barrier",
+      admission: "inference",
+      body: "none",
+      presentFailure: () => new Response("{}"),
+      endpoint: async () => new Response(new ReadableStream<Uint8Array>({
+        async cancel(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          cleanupComplete = true;
+        },
+      })),
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [route], {
+      onClose: () => {
+        closeSawCleanup = cleanupComplete;
+      },
+    });
+    const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/cleanup-barrier", { method: "POST" }));
+    expect(response.body).not.toBeNull();
+    await gw.close();
+    expect(closeSawCleanup).toBe(true);
+  });
+
   it("holds the inference slot until the stream body ends", async () => {
     const writers: ReturnType<typeof createStreamResponseWriter>[] = [];
     const runtime = defaultRuntimeConfigSnapshot();

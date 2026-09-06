@@ -387,6 +387,33 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it("keeps bridge response.created behind an empty upstream Chat chunk", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const { gw, close } = await responsesGateway({
+      runtime,
+      usageUpdates,
+      backend: new ScriptedCopilotBackend({
+        chatStream: (request) => emptyChatThenStall(request.signal),
+      }),
+    });
+    try {
+      const response = await gw.fetch(responsesRequest({ model: "chat", input: "hi", stream: true }));
+      expect(response.status).toBe(504);
+      const body = await response.text();
+      expect(body).not.toContain("response.created");
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{
+        protocol: "openai_responses_bridge",
+        outcome: "timeout",
+      }]);
+    } finally {
+      await close();
+    }
+  });
+
   it.each([
     { model: "native" as const, deadline: "idle" as const },
     { model: "chat" as const, deadline: "idle" as const },
@@ -531,6 +558,11 @@ describe("Responses endpoint", () => {
 
   async function* chatEventThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
     yield text("data: {\"id\":\"chatcmpl_live\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
+    await waitForAbort(signal);
+  }
+
+  async function* emptyChatThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
+    yield text("data: {\"id\":\"chatcmpl_empty\",\"choices\":[]}\n\n");
     await waitForAbort(signal);
   }
 

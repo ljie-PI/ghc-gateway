@@ -162,17 +162,14 @@ async function handleRoute(
   const settled = new Promise<void>((resolve) => {
     resolveSettled = resolve;
   });
-  const abort = (failure: GatewayFailure): void => {
+  const abortDelivery = (failure: GatewayFailure): void => {
     const error = new GatewayFailureError(failure);
     attempt.failure(error);
+    if (!deliveryController.signal.aborted) {
+      deliveryController.abort(error);
+    }
     if (!workController.signal.aborted) {
       workController.abort(error);
-    }
-  };
-  const abortDelivery = (failure: GatewayFailure): void => {
-    abort(failure);
-    if (!deliveryController.signal.aborted) {
-      deliveryController.abort(new GatewayFailureError(failure));
     }
   };
   const inflight: InflightRequest = {
@@ -346,10 +343,15 @@ function attachLifecycle(
   };
 
   const reader = body.getReader();
+  let cancellation: Promise<void> | undefined;
+  const cancelBody = async (): Promise<void> => {
+    cancellation ??= boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS);
+    await cancellation;
+  };
   const stream = new ReadableStream<Uint8Array>({
     async pull(streamController): Promise<void> {
       if (deliverySignal.aborted) {
-        await boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS);
+        await cancelBody();
         once();
         streamController.close();
         return;
@@ -357,6 +359,7 @@ function attachLifecycle(
       try {
         const next = await reader.read();
         if (next.done) {
+          await cancellation;
           once();
           streamController.close();
           return;
@@ -372,13 +375,13 @@ function attachLifecycle(
     },
     async cancel(): Promise<void> {
       abortDelivery();
-      await boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS);
+      await cancelBody();
       once();
     },
   });
 
   deliverySignal.addEventListener("abort", () => {
-    void boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS).finally(once);
+    void cancelBody().finally(once);
   }, { once: true });
 
   return new Response(stream, {

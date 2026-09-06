@@ -20,8 +20,10 @@ import { createRequestAttempt, type AttemptUsage, type RequestAttempt } from "..
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
   boundedCleanup,
+  createExchangeCancellation,
   createOwnedStreamCleanup,
   nextWithDeadline,
+  withByteIdleDeadlines,
 } from "../../gateway/stream_execution.js";
 import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
@@ -156,13 +158,21 @@ async function nativeStreamResponse(
     await boundedCleanup(upstream.cancel());
   }
   assertUpstreamSuccess(upstream);
-  const bytes = withStreamTimeouts(upstream.bytes, upstream, scope);
+  const cancelExchange = createExchangeCancellation(upstream);
+  const bytes = withByteIdleDeadlines(
+    upstream.bytes,
+    scope.signal,
+    scope.config.timeouts.firstByteMs,
+    scope.config.timeouts.streamIdleMs,
+    cancelExchange,
+  );
   const observed = usage.enabled ? createNativeStreamObservation(usage) : undefined;
   return await streamBytesResponse(
     normalizeNativeResponsesStream(bytes, scope.config.limits.sseEventBytes, observed?.observe, performanceObserver),
     upstream,
     scope,
     usage.failure,
+    cancelExchange,
   );
 }
 
@@ -215,7 +225,17 @@ async function bridgeStreamResponse(
     await boundedCleanup(upstream.cancel());
   }
   assertUpstreamSuccess(upstream);
-  const timedUpstream = { ...upstream, bytes: withStreamTimeouts(upstream.bytes, upstream, scope) };
+  const cancelExchange = createExchangeCancellation(upstream);
+  const timedUpstream = {
+    ...upstream,
+    bytes: withByteIdleDeadlines(
+      upstream.bytes,
+      scope.signal,
+      scope.config.timeouts.firstByteMs,
+      scope.config.timeouts.streamIdleMs,
+      cancelExchange,
+    ),
+  };
   const emissions = convertChatStream(normalizeChatFrames(iterateChatFrames(timedUpstream), scope.signal), {
     originalRequest: plan.originalRequest,
     toolContext: prepared.toolContext,
@@ -232,41 +252,8 @@ async function bridgeStreamResponse(
     scope,
     usage,
     dependencies.performanceObserver,
+    cancelExchange,
   );
-}
-
-async function* withStreamTimeouts(
-  source: AsyncIterable<Uint8Array>,
-  upstream: UpstreamByteStream,
-  scope: Readonly<RequestScope>,
-): AsyncIterable<Uint8Array> {
-  const iterator = source[Symbol.asyncIterator]();
-  const cleanup = createOwnedStreamCleanup(upstream, iterator);
-  let seenBytes = false;
-  try {
-    for (;;) {
-      const timeoutMs = seenBytes ? scope.config.timeouts.streamIdleMs : scope.config.timeouts.firstByteMs;
-      const next = await nextWithTimeout(iterator, timeoutMs, scope.signal);
-      if (next.done === true) {
-        return;
-      }
-      seenBytes = true;
-      yield next.value;
-    }
-  } finally {
-    void cleanup();
-  }
-}
-
-async function nextWithTimeout(
-  iterator: AsyncIterator<Uint8Array>,
-  timeoutMs: number,
-  signal: AbortSignal,
-): Promise<IteratorResult<Uint8Array>> {
-  return await nextWithDeadline(iterator, timeoutMs, signal, {
-    source: "parser",
-    phase: "stream",
-  });
 }
 
 async function streamEmissionsResponse(
@@ -276,6 +263,7 @@ async function streamEmissionsResponse(
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
   performanceObserver?: ProtocolPerformanceObserver,
+  cancelExchange?: () => Promise<void>,
 ): Promise<Response> {
   const bytes = (async function* (): AsyncIterable<Uint8Array> {
     for await (const emission of emissions) {
@@ -295,7 +283,7 @@ async function streamEmissionsResponse(
       yield measure(performanceObserver, "event", () => encodeResponsesSseEvent(emission.event));
     }
   })();
-  return await streamBytesResponse(bytes, upstream, scope, usage.failure);
+  return await streamBytesResponse(bytes, upstream, scope, usage.failure, cancelExchange);
 }
 
 function measure<T>(
@@ -319,9 +307,10 @@ async function streamBytesResponse(
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
   onFailure: (error: unknown) => void,
+  cancelExchange = createExchangeCancellation(upstream),
 ): Promise<Response> {
   const iterator = bytes[Symbol.asyncIterator]();
-  const cleanup = createOwnedStreamCleanup(upstream, iterator);
+  const cleanup = createOwnedStreamCleanup(upstream, iterator, 1_000, cancelExchange);
   let first: IteratorResult<Uint8Array>;
   try {
     first = await nextWithDeadline(
@@ -363,9 +352,11 @@ async function streamBytesResponse(
           return;
         }
       }
+      await cleanup();
       writer.close();
     } catch (error: unknown) {
       onFailure(error);
+      await cleanup();
       writer.abort();
     } finally {
       scope.signal.removeEventListener("abort", onAbort);

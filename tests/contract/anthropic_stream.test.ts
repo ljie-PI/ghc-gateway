@@ -199,6 +199,31 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 
+  it("does not let empty Chat chunks release synthetic Messages preambles", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const backend = new ScriptedCopilotBackend({
+      chatStream: (request) => emptyChunkThenStall(request.signal),
+    });
+    const { gw, close } = await anthropicGateway({ backend, runtime, usageUpdates });
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }));
+      expect(response.status).toBe(504);
+      expect(await response.text()).not.toContain("message_start");
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{ outcome: "timeout" }]);
+    } finally {
+      await close();
+    }
+  });
+
   it("records a committed Messages idle timeout without message_stop", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
@@ -245,4 +270,11 @@ async function* commentThenStall(signal: AbortSignal): AsyncIterable<Uint8Array>
 async function* contentThenStall(): AsyncIterable<Uint8Array> {
   yield sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] });
   await new Promise<void>(() => undefined);
+}
+
+async function* emptyChunkThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
+  yield sse({ id: "chunk_empty", choices: [] });
+  await new Promise<void>((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+  });
 }

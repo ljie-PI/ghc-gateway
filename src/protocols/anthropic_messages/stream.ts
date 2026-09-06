@@ -7,12 +7,13 @@ import { failureFromSignal, GatewayFailureError } from "../../gateway/failures.j
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
-  cleanupOwnedStream,
-  nextWithDeadline,
+  createExchangeCancellation,
+  createOwnedStreamCleanup,
   withByteIdleDeadlines,
 } from "../../gateway/stream_execution.js";
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { ChatStreamFrame } from "../chat_completions/types.js";
+import { readThroughFirstSemanticChatFrame } from "../chat_completions/stream_semantics.js";
 import { anthropicStopReason, anthropicUsage } from "./bridge.js";
 import { asRecord, normalizeToolId, wireToJson } from "./common.js";
 import { encodeAnthropicSse, type AnthropicEvent } from "./wire.js";
@@ -35,39 +36,32 @@ export async function createAnthropicStreamResponse(input: {
   >) => void;
 }): Promise<Response> {
   const converter = new AnthropicStreamConverter(input.model, input.createUuid);
+  const cancelExchange = createExchangeCancellation(input.upstream);
   const timedUpstream = {
     ...input.upstream,
     bytes: withByteIdleDeadlines(
       input.upstream.bytes,
-      input.upstream,
       input.scope.signal,
       input.scope.config.timeouts.firstByteMs,
       input.scope.config.timeouts.streamIdleMs,
+      cancelExchange,
     ),
   };
   const frames = iterateChatFrames(timedUpstream);
-  let first: Awaited<ReturnType<typeof frames.next>>;
+  const cleanupUpstream = createOwnedStreamCleanup(input.upstream, frames, 1_000, cancelExchange);
+  let firstFrames: readonly ChatStreamFrame[];
   try {
-    first = await nextWithDeadline(
+    firstFrames = await readThroughFirstSemanticChatFrame(
       frames,
-      input.scope.config.timeouts.firstByteMs,
       input.scope.signal,
-      { source: "parser", phase: "stream" },
+      input.scope.config.timeouts.firstByteMs,
     );
   } catch (error: unknown) {
-    void cleanupOwnedStream(input.upstream, frames);
+    await cleanupUpstream();
     throw normalizeChatStreamFailure(error, input.scope.signal);
   }
-  if (first.done === true) {
-    void cleanupOwnedStream(input.upstream, frames);
-    throw new GatewayFailureError({
-      kind: "upstream_stream_truncated",
-      source: "parser",
-      phase: "stream",
-    });
-  }
-  if (first.value.kind === "error") {
-    void cleanupOwnedStream(input.upstream, frames);
+  if (firstFrames.at(-1)?.kind === "error") {
+    await cleanupUpstream();
     throw upstreamStreamEventFailure();
   }
 
@@ -86,7 +80,7 @@ export async function createAnthropicStreamResponse(input: {
     }
     closed = true;
     input.scope.signal.removeEventListener("abort", onAbort);
-    cleanup = cleanupOwnedStream(input.upstream, frames);
+    cleanup = cleanupUpstream();
     await cleanup;
   };
   const onAbort = (): void => {
@@ -106,12 +100,11 @@ export async function createAnthropicStreamResponse(input: {
           return;
         }
       }
-      let pending: ChatStreamFrame | undefined = first.value;
+      const pending = [...firstFrames];
       for (;;) {
-        const next = pending === undefined
+        const next = pending.length === 0
           ? await frames.next()
-          : { done: false as const, value: pending };
-        pending = undefined;
+          : { done: false as const, value: pending.shift() as ChatStreamFrame };
         if (next.done === true) {
           throw new GatewayFailureError({
             kind: "upstream_stream_truncated",
@@ -121,6 +114,7 @@ export async function createAnthropicStreamResponse(input: {
         }
         const frame = next.value;
         if (input.scope.signal.aborted) {
+          await closeStream();
           writer.abort();
           return;
         }
@@ -143,6 +137,7 @@ export async function createAnthropicStreamResponse(input: {
             }
           }
           observeTerminal(input.onTerminal, { kind: "success", usage: observedUsage });
+          await closeStream();
           writer.close();
           return;
         } else {
@@ -150,6 +145,7 @@ export async function createAnthropicStreamResponse(input: {
             kind: "failure",
             error: upstreamStreamEventFailure(),
           });
+          await closeStream();
           writer.close();
           return;
         }
@@ -159,6 +155,7 @@ export async function createAnthropicStreamResponse(input: {
         kind: "failure",
         error: normalizeChatStreamFailure(error, input.scope.signal),
       });
+      await closeStream();
       writer.abort();
     } finally {
       await closeStream();

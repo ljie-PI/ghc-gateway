@@ -47,15 +47,27 @@ export async function cleanupOwnedStream(
   await createOwnedStreamCleanup(upstream, iterator, timeoutMs)();
 }
 
+export function createExchangeCancellation(
+  upstream: UpstreamByteStream,
+  timeoutMs = 1_000,
+): () => Promise<void> {
+  let cancellation: Promise<void> | undefined;
+  return async () => {
+    cancellation ??= boundedCleanup(upstream.cancel(), timeoutMs);
+    await cancellation;
+  };
+}
+
 export function createOwnedStreamCleanup(
   upstream: UpstreamByteStream,
   iterator?: AsyncIterator<unknown>,
   timeoutMs = 1_000,
+  cancelExchange = createExchangeCancellation(upstream, timeoutMs),
 ): () => Promise<void> {
   let cleanup: Promise<void> | undefined;
   return async () => {
     cleanup ??= (async () => {
-      await boundedCleanup(upstream.cancel(), timeoutMs);
+      await cancelExchange();
       if (iterator?.return !== undefined) {
         await boundedCleanup(iterator.return(), timeoutMs);
       }
@@ -66,13 +78,12 @@ export function createOwnedStreamCleanup(
 
 export async function* withByteIdleDeadlines(
   source: AsyncIterable<Uint8Array>,
-  upstream: UpstreamByteStream,
   signal: AbortSignal,
   firstByteMs: number,
   idleMs: number,
+  cancelExchange: () => Promise<void>,
 ): AsyncIterable<Uint8Array> {
   const iterator = source[Symbol.asyncIterator]();
-  const cleanup = createOwnedStreamCleanup(upstream, iterator);
   let seenBytes = false;
   try {
     for (;;) {
@@ -88,13 +99,11 @@ export async function* withByteIdleDeadlines(
       seenBytes = true;
       yield next.value;
     }
-  } catch (error: unknown) {
-    if (error instanceof GatewayFailureError && error.failure.kind === "upstream_timeout") {
-      void cleanup();
-    }
-    throw error;
   } finally {
-    void cleanup();
+    await cancelExchange();
+    if (iterator.return !== undefined) {
+      await boundedCleanup(iterator.return());
+    }
   }
 }
 

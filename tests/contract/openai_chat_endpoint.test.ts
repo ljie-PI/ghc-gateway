@@ -645,6 +645,30 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
+  it("does not let empty Chat chunks satisfy the first semantic deadline", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const backend = new CapturingCopilotBackend({
+      chatStream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: hangingStreamAfter("data: {\"choices\":[]}\n\n"),
+        cancel: async () => undefined,
+      },
+    });
+    const { gw, close } = await openAiGateway(backend, { runtime });
+    try {
+      const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
+      );
+    } finally {
+      await close();
+    }
+  });
+
   it("accepts an upstream SSE event at the inclusive event limit", async () => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.limits.sseEventBytes = 65_536;
@@ -693,7 +717,7 @@ describe("OpenAI Chat endpoint", () => {
       chatStream: {
         status: 200,
         headers: new Headers({ "content-type": "text/event-stream" }),
-        bytes: hangingStreamAfter("data: {\"choices\":[]}\n\n"),
+        bytes: hangingStreamAfter("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"),
         cancel: async () => undefined,
       },
     });
@@ -702,7 +726,7 @@ describe("OpenAI Chat endpoint", () => {
       const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true}"));
       const reader = response.body?.getReader();
       const first = await reader?.read();
-      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[]}\n\n");
+      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
       await expect(reader?.read()).rejects.toThrow(/stream error/u);
     } finally {
       await close();
@@ -785,7 +809,7 @@ describe("OpenAI Chat endpoint", () => {
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: cancelableBytes(() => {
           canceled = true;
-        }, encoder.encode("data: {\"choices\":[]}\n\n")),
+        }, encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")),
         cancel: async () => {
           canceled = true;
         },
@@ -802,7 +826,7 @@ describe("OpenAI Chat endpoint", () => {
       }));
       const reader = response.body?.getReader();
       const first = await reader?.read();
-      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[]}\n\n");
+      expect(decoder.decode(first?.value)).toBe("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
       controller.abort();
       const next = await reader?.read().catch(() => ({ done: true, value: undefined }));
       expect(next?.value === undefined ? "" : decoder.decode(next.value)).not.toContain("[DONE]");
@@ -841,7 +865,7 @@ describe("OpenAI Chat endpoint", () => {
     {
       name: "upstream error event",
       bytes: () => streamFromText([
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n",
         "event: error\ndata: {\"error\":{\"message\":\"private\"}}\n\n",
       ].join(""), 1024),
       runtime: defaultRuntimeConfigSnapshot(),
@@ -853,12 +877,12 @@ describe("OpenAI Chat endpoint", () => {
     },
     {
       name: "truncated EOF",
-      bytes: () => streamFromText("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n", 1024),
+      bytes: () => streamFromText("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n", 1024),
       runtime: defaultRuntimeConfigSnapshot(),
     },
     {
       name: "idle timeout",
-      bytes: () => hangingStreamAfter("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n"),
+      bytes: () => hangingStreamAfter("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n"),
       runtime: (() => {
         const runtime = defaultRuntimeConfigSnapshot();
         runtime.timeouts.streamIdleMs = 1;
@@ -881,7 +905,7 @@ describe("OpenAI Chat endpoint", () => {
       const reader = response.body?.getReader();
       const first = await reader?.read();
       const delivered = decoder.decode(first?.value);
-      expect(delivered).toContain("\"choices\":[]");
+      expect(delivered).toContain("\"content\":\"partial\"");
       await expect(reader?.read()).rejects.toThrow();
       expect(delivered).not.toContain("[DONE]");
       expect(usageUpdates).toHaveLength(1);
@@ -910,7 +934,7 @@ describe("OpenAI Chat endpoint", () => {
         headers: new Headers({ "content-type": "text/event-stream" }),
         bytes: cancelableBytes(
           () => undefined,
-          encoder.encode("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n"),
+          encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n"),
         ),
         cancel: async () => undefined,
       },
@@ -924,7 +948,7 @@ describe("OpenAI Chat endpoint", () => {
         signal: controller.signal,
       }));
       const reader = response.body?.getReader();
-      expect(decoder.decode((await reader?.read())?.value)).toContain("\"choices\":[]");
+      expect(decoder.decode((await reader?.read())?.value)).toContain("\"content\":\"partial\"");
       controller.abort();
       await reader?.read().catch(() => undefined);
       expect(usageUpdates).toHaveLength(1);
@@ -954,7 +978,7 @@ async function* hangingStreamAfter(text: string): AsyncIterable<Uint8Array> {
 }
 
 async function* failingBytes(error: Error): AsyncIterable<Uint8Array> {
-  yield encoder.encode("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9}}\n\n");
+  yield encoder.encode("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}],\"usage\":{\"prompt_tokens\":9}}\n\n");
   throw error;
 }
 

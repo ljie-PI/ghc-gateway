@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { GatewayFailureError } from "../../src/gateway/failures.js";
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
-import { cleanupOwnedStream } from "../../src/gateway/stream_execution.js";
+import {
+  cleanupOwnedStream,
+  createExchangeCancellation,
+  createOwnedStreamCleanup,
+  withByteIdleDeadlines,
+} from "../../src/gateway/stream_execution.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("RequestAttempt", () => {
@@ -151,5 +156,47 @@ describe("owned stream cleanup", () => {
     await cleanupOwnedStream(upstream, iterator, 10);
     expect(order).toEqual(["cancel", "return"]);
     expect(Date.now() - started).toBeLessThan(200);
+  });
+
+  it("shares one exchange cancellation across deadline and outer cleanup", async () => {
+    let cancels = 0;
+    let returns = 0;
+    const source: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+        let first = true;
+        return {
+          next: async () => {
+            if (first) {
+              first = false;
+              return { done: false, value: new Uint8Array([1]) };
+            }
+            await new Promise<void>(() => undefined);
+            return { done: true, value: undefined };
+          },
+          return: async () => {
+            returns += 1;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const upstream = {
+      status: 200,
+      headers: new Headers(),
+      bytes: source,
+      cancel: async () => {
+        cancels += 1;
+      },
+    };
+    const cancelExchange = createExchangeCancellation(upstream, 10);
+    const timed = withByteIdleDeadlines(source, new AbortController().signal, 10, 1, cancelExchange);
+    const iterator = timed[Symbol.asyncIterator]();
+    const cleanup = createOwnedStreamCleanup(upstream, iterator, 10, cancelExchange);
+    expect((await iterator.next()).done).toBe(false);
+    await expect(iterator.next()).rejects.toMatchObject({
+      failure: { kind: "upstream_timeout" },
+    });
+    await cleanup();
+    expect({ cancels, returns }).toEqual({ cancels: 1, returns: 1 });
   });
 });

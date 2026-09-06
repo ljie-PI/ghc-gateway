@@ -18,6 +18,12 @@ export function createStreamResponseWriter(init: {
   let outstandingPulls = 0;
   let lookahead: Uint8Array | undefined;
   let waitingProducer: (() => void) | undefined;
+  let cancellation: Promise<void> | undefined;
+
+  const cancelProducer = async (): Promise<void> => {
+    cancellation ??= Promise.resolve().then(() => init.onCancel?.());
+    await cancellation;
+  };
 
   const deliver = (chunk: Uint8Array): void => {
     committed = true;
@@ -49,7 +55,7 @@ export function createStreamResponseWriter(init: {
       closed = true;
       lookahead = undefined;
       wakeProducer();
-      await init.onCancel?.();
+      await cancelProducer();
     },
   });
 
@@ -106,7 +112,7 @@ export function createStreamResponseWriter(init: {
   };
 
   init.signal.addEventListener("abort", () => {
-    writer.abort();
+    void cancelProducer().finally(() => writer.abort());
   }, { once: true });
 
   return writer;
