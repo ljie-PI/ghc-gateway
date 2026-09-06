@@ -162,6 +162,7 @@ export type SemanticResponseItem =
   | {
     readonly type: "message";
     readonly key?: string | undefined;
+    readonly contentKeys?: readonly string[] | undefined;
     readonly content: readonly (SemanticText | SemanticRefusal)[];
   }
   | SemanticToolCallItem;

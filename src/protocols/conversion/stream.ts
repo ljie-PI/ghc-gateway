@@ -71,27 +71,27 @@ export async function* convertProtocolStream(
     }
     if (event.kind === "text_delta") {
       ledger.appendText(event.key, event.delta, event.orderKey);
-      yield* emitter.textDelta(event.orderKey ?? event.key, event.delta);
+      yield* emitter.textDelta(event.key, event.delta, event.orderKey);
       continue;
     }
     if (event.kind === "text_done") {
       const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
       if (suffix.length > 0) {
         ledger.appendText(event.key, suffix, event.orderKey);
-        yield* emitter.textDelta(event.orderKey ?? event.key, suffix);
+        yield* emitter.textDelta(event.key, suffix, event.orderKey);
       }
       continue;
     }
     if (event.kind === "refusal_delta") {
       ledger.appendRefusal(event.key, event.delta, event.orderKey);
-      yield* emitter.refusalDelta(event.orderKey ?? event.key, event.delta);
+      yield* emitter.refusalDelta(event.key, event.delta, event.orderKey);
       continue;
     }
     if (event.kind === "refusal_done") {
       const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
       if (suffix.length > 0) {
         ledger.appendRefusal(event.key, suffix, event.orderKey);
-        yield* emitter.refusalDelta(event.orderKey ?? event.key, suffix);
+        yield* emitter.refusalDelta(event.key, suffix, event.orderKey);
       }
       continue;
     }
@@ -137,8 +137,8 @@ export async function* convertProtocolStream(
 
 interface StreamEmitter {
   start(): Iterable<ConvertedStreamEmission>;
-  textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission>;
-  refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission>;
+  textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
+  refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
   toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission>;
   toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission>;
   toolDone(key: string, argumentsJson: string): Iterable<ConvertedStreamEmission>;
@@ -172,7 +172,7 @@ class ChatEmitter implements StreamEmitter {
 
   *start(): Iterable<ConvertedStreamEmission> {}
 
-  *textDelta(_key: string, delta: string): Iterable<ConvertedStreamEmission> {
+  *textDelta(_key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
       ["content", delta],
@@ -180,7 +180,7 @@ class ChatEmitter implements StreamEmitter {
     this.roleSent = true;
   }
 
-  *refusalDelta(_key: string, delta: string): Iterable<ConvertedStreamEmission> {
+  *refusalDelta(_key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
       ["refusal", delta],
@@ -298,7 +298,7 @@ class MessagesEmitter implements StreamEmitter {
     });
   }
 
-  *textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+  *textDelta(key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
     if (this.bufferAfterTool) {
       return;
     }
@@ -306,7 +306,7 @@ class MessagesEmitter implements StreamEmitter {
     this.recordStreamed(key, "text", delta);
   }
 
-  *refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+  *refusalDelta(key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
     if (this.bufferAfterTool) {
       return;
     }
@@ -376,10 +376,15 @@ class MessagesEmitter implements StreamEmitter {
   private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
       if (item.type === "message") {
-        for (const part of item.content) {
-          const streamed = item.key === undefined
+        for (let partIndex = 0; partIndex < item.content.length; partIndex += 1) {
+          const part = item.content[partIndex];
+          if (part === undefined) {
+            continue;
+          }
+          const contentKey = item.contentKeys?.[partIndex] ?? item.key;
+          const streamed = contentKey === undefined
             ? ""
-            : this.streamedContent.get(item.key)?.[part.type] ?? "";
+            : this.streamedContent.get(contentKey)?.[part.type] ?? "";
           if (!part.text.startsWith(streamed)) {
             invalid();
           }
@@ -491,8 +496,8 @@ class ResponsesEmitter implements StreamEmitter {
     yield this.responseEvent("response.in_progress", "in_progress", []);
   }
 
-  *textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    const message = this.ensureMessage(key);
+  *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
+    const message = this.ensureMessage(orderKey ?? key);
     if (!message.itemAdded) {
       message.itemAdded = true;
       yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));
@@ -511,8 +516,8 @@ class ResponsesEmitter implements StreamEmitter {
     ]));
   }
 
-  *refusalDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    const message = this.ensureMessage(key);
+  *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
+    const message = this.ensureMessage(orderKey ?? key);
     if (!message.itemAdded) {
       message.itemAdded = true;
       yield this.itemEvent("response.output_item.added", message.outputIndex, responseMessage(message, "in_progress", "", ""));

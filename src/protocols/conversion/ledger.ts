@@ -127,18 +127,23 @@ export class SemanticItemLedger {
         if (message === undefined) {
           invalid();
         }
-        const content = message.partKeys.flatMap((key) => {
+        const entries = message.partKeys.flatMap((key) => {
           const part = this.messageParts.get(key);
           if (part === undefined) {
             invalid();
           }
           return [
-            ...(part.text.length === 0 ? [] : [{ type: "text", text: part.text } as const]),
-            ...(part.refusal.length === 0 ? [] : [{ type: "refusal", text: part.refusal } as const]),
+            ...(part.text.length === 0 ? [] : [{ key, part: { type: "text", text: part.text } as const }]),
+            ...(part.refusal.length === 0 ? [] : [{ key, part: { type: "refusal", text: part.refusal } as const }]),
           ];
         });
-        if (content.length > 0) {
-          items.push({ type: "message", key: entry.key, content });
+        if (entries.length > 0) {
+          items.push({
+            type: "message",
+            key: entry.key,
+            contentKeys: entries.map((item) => item.key),
+            content: entries.map((item) => item.part),
+          });
         }
         continue;
       }

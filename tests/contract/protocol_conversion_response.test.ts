@@ -393,6 +393,14 @@ describe("shared conversion response codecs", () => {
     expect(text).toContain("one");
     expect(text).toContain("two");
     expect(text.match(/data: \[DONE\]/gu)).toHaveLength(1);
+    const messages = wireText(await collectStream(
+      "responses",
+      "messages",
+      chunks(encoder.encode(responseEvent(0, "response.completed", { response }))),
+    ));
+    expect(messages).toContain("\"text\": \"one\"");
+    expect(messages).toContain("\"text\": \"two\"");
+    expect(messages.match(/event: message_stop/gu)).toHaveLength(1);
   });
 
   it("preserves ordered text/refusal/text parts after a tool in Messages output", async () => {
