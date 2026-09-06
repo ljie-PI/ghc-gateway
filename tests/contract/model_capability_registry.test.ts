@@ -32,6 +32,27 @@ describe("model capability registry", () => {
         model("empty", { supported_endpoints: [] }),
         model("missing", { mode: "chat" }),
         model("malformed", { supported_endpoints: ["/responses", 42] }),
+        {
+          id: "production-shape",
+          name: "Production",
+          vendor: "test",
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses", "/chat/completions"],
+          capabilities: {
+            limits: {
+              max_prompt_tokens: 200_000,
+              max_output_tokens: 32_000,
+            },
+          },
+        },
+        {
+          id: "live-conflict",
+          name: "Conflict",
+          vendor: "test",
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          model_info: { supported_endpoints: ["/chat/completions"] },
+        },
       ],
     });
     const snapshot = await harness.registry.get(harness.account1, signal);
@@ -42,6 +63,16 @@ describe("model capability registry", () => {
     expect(capability(snapshot, "empty").protocols).toMatchObject({ value: [], source: "live", liveState: "value" });
     expect(capability(snapshot, "missing").protocols).toMatchObject({ value: null, source: "unknown", liveState: "missing" });
     expect(capability(snapshot, "malformed").protocols).toMatchObject({ value: null, source: "unknown", liveState: "malformed" });
+    expect(capability(snapshot, "production-shape")).toMatchObject({
+      protocols: { value: ["responses", "chat"], source: "live" },
+      maxInputTokens: { value: 200_000, source: "live" },
+      maxOutputTokens: { value: 32_000, source: "live" },
+    });
+    expect(capability(snapshot, "live-conflict").protocols).toMatchObject({
+      value: null,
+      source: "unknown",
+      liveState: "malformed",
+    });
   });
 
   it("applies field precedence without unioning conflicts or replacing explicit empty values", async () => {

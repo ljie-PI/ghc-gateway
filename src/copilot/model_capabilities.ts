@@ -74,22 +74,35 @@ export const UNKNOWN_DECLARATIONS: DeclaredModelCapabilities = Object.freeze({
 });
 
 export function parseLiveModelCapabilities(record: Readonly<Record<string, unknown>>): DeclaredModelCapabilities {
-  const containers = ["model_info", "capabilities"]
-    .filter((key) => Object.hasOwn(record, key))
-    .map((key) => record[key]);
-  if (containers.length === 0) {
-    return UNKNOWN_DECLARATIONS;
-  }
-  if (containers.some((value) => value === null || typeof value !== "object" || Array.isArray(value))) {
-    return malformedDeclarations();
-  }
-  const objects = containers as ReadonlyArray<Readonly<Record<string, unknown>>>;
   return Object.freeze({
-    protocols: parseAcross(objects, "supported_endpoints", parseEndpointProtocols),
-    maxInputTokens: parseAcross(objects, "max_input_tokens", parsePositiveInteger),
-    maxOutputTokens: parseAcross(objects, "max_output_tokens", parsePositiveInteger),
-    defaultOutputTokens: parseAcross(objects, "default_output_tokens", parsePositiveInteger),
-    chatOutputTokenField: parseAcross(objects, "chat_output_token_field", parseChatOutputTokenField),
+    protocols: parseLocations(record, [
+      ["supported_endpoints"],
+      ["model_info", "supported_endpoints"],
+      ["capabilities", "supported_endpoints"],
+    ], parseEndpointProtocols),
+    maxInputTokens: parseLocations(record, [
+      ["max_input_tokens"],
+      ["model_info", "max_input_tokens"],
+      ["capabilities", "max_input_tokens"],
+      ["capabilities", "limits", "max_prompt_tokens"],
+      ["capabilities", "limits", "max_context_window_tokens"],
+    ], parsePositiveInteger),
+    maxOutputTokens: parseLocations(record, [
+      ["max_output_tokens"],
+      ["model_info", "max_output_tokens"],
+      ["capabilities", "max_output_tokens"],
+      ["capabilities", "limits", "max_output_tokens"],
+    ], parsePositiveInteger),
+    defaultOutputTokens: parseLocations(record, [
+      ["default_output_tokens"],
+      ["model_info", "default_output_tokens"],
+      ["capabilities", "default_output_tokens"],
+    ], parsePositiveInteger),
+    chatOutputTokenField: parseLocations(record, [
+      ["chat_output_token_field"],
+      ["model_info", "chat_output_token_field"],
+      ["capabilities", "chat_output_token_field"],
+    ], parseChatOutputTokenField),
   });
 }
 
@@ -218,16 +231,38 @@ export function sameProtocols(
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function parseAcross<T>(
-  objects: ReadonlyArray<Readonly<Record<string, unknown>>>,
-  key: string,
+function parseLocations<T>(
+  record: Readonly<Record<string, unknown>>,
+  paths: readonly (readonly string[])[],
   parse: (value: unknown) => DeclaredField<T>,
 ): DeclaredField<T> {
-  const present = objects.filter((object) => Object.hasOwn(object, key));
-  if (present.length === 0) {
+  const values: unknown[] = [];
+  let malformedContainer = false;
+  for (const path of paths) {
+    let current: unknown = record;
+    for (let index = 0; index < path.length; index += 1) {
+      const key = path[index];
+      if (key === undefined || current === null || typeof current !== "object" || Array.isArray(current)) {
+        malformedContainer = true;
+        break;
+      }
+      const object = current as Readonly<Record<string, unknown>>;
+      if (!Object.hasOwn(object, key)) {
+        break;
+      }
+      current = object[key];
+      if (index === path.length - 1) {
+        values.push(current);
+      }
+    }
+  }
+  if (malformedContainer) {
+    return malformed();
+  }
+  if (values.length === 0) {
     return missing();
   }
-  const parsed = present.map((object) => parse(object[key]));
+  const parsed = values.map(parse);
   if (parsed.some((field) => field.state !== "value")) {
     return malformed();
   }
@@ -298,16 +333,6 @@ function differsFromLower<T>(
 ): boolean {
   return (live.state === "value" && !equals(overrideValue, live.value as T))
     || (live.state === "missing" && builtin.state === "value" && !equals(overrideValue, builtin.value as T));
-}
-
-function malformedDeclarations(): DeclaredModelCapabilities {
-  return Object.freeze({
-    protocols: malformed<readonly NativeModelProtocol[]>(),
-    maxInputTokens: malformed<number>(),
-    maxOutputTokens: malformed<number>(),
-    defaultOutputTokens: malformed<number>(),
-    chatOutputTokenField: malformed<ChatOutputTokenField>(),
-  });
 }
 
 function missing<T>(): DeclaredField<T> {
