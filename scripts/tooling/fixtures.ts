@@ -317,7 +317,7 @@ async function expectedModelCatalogFixture(entry: FixtureManifestEntry): Promise
     catalogGeneration: input.generation,
     fetchedAt: input.fetchedAt,
     models: [],
-    overrideRevisions: {},
+    capabilityRevision: 0,
   });
 }
 

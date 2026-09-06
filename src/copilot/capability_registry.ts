@@ -45,7 +45,7 @@ export interface CapabilityCatalogSnapshot {
   readonly catalogGeneration: number;
   readonly fetchedAt: string;
   readonly models: readonly EffectiveModelCapabilitySnapshot[];
-  readonly overrideRevisions: Readonly<Record<string, number>>;
+  readonly capabilityRevision: number;
 }
 
 export interface CapabilitySnapshotDependencies {
@@ -132,7 +132,7 @@ export class ModelCapabilityRegistry {
       catalogGeneration: catalog.generation,
       fetchedAt: catalog.fetchedAt,
       models,
-      overrideRevisions: this.overrides.revisions(account.accountId),
+      capabilityRevision: this.overrides.revision(account.accountId),
     });
   }
 
@@ -247,7 +247,7 @@ export function capabilitySnapshotFromCatalog(
     catalogGeneration: catalog.generation,
     fetchedAt: catalog.fetchedAt,
     models,
-    overrideRevisions: {},
+    capabilityRevision: 0,
   });
 }
 

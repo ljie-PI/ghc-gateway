@@ -26,28 +26,30 @@ export class SqliteModelCapabilityOverrides {
   ) {}
 
   get(accountId: string, modelId: string): StoredModelCapabilityOverride {
+    const revision = this.revision(accountId);
     const row = this.database.prepare(
       "SELECT account_id, model_id, revision, configuration_json FROM model_capability_overrides WHERE account_id = ? AND model_id = ?",
     ).get(accountId, modelId) as OverrideRow | undefined;
     return row === undefined
-      ? { accountId, modelId, revision: 0, value: null }
-      : rowToStored(row);
+      ? { accountId, modelId, revision, value: null }
+      : rowToStored(row, revision);
   }
 
   list(accountId: string): readonly StoredModelCapabilityOverride[] {
+    const revision = this.revision(accountId);
     return (this.database.prepare(
       `SELECT account_id, model_id, revision, configuration_json
        FROM model_capability_overrides
-       WHERE account_id = ? AND configuration_json IS NOT NULL
+       WHERE account_id = ?
        ORDER BY model_id`,
-    ).all(accountId) as OverrideRow[]).map(rowToStored);
+    ).all(accountId) as OverrideRow[]).map((row) => rowToStored(row, revision));
   }
 
-  revisions(accountId: string): Readonly<Record<string, number>> {
-    const rows = this.database.prepare(
-      "SELECT model_id, revision FROM model_capability_overrides WHERE account_id = ? ORDER BY model_id",
-    ).all(accountId) as Array<{ model_id: string; revision: number }>;
-    return Object.freeze(Object.fromEntries(rows.map((row) => [row.model_id, row.revision])));
+  revision(accountId: string): number {
+    const row = this.database.prepare(
+      "SELECT revision FROM model_capability_override_state WHERE account_id = ?",
+    ).get(accountId) as { revision: number } | undefined;
+    return row?.revision ?? 0;
   }
 
   set(
@@ -58,13 +60,14 @@ export class SqliteModelCapabilityOverrides {
   ): StoredModelCapabilityOverride {
     validateModelId(modelId);
     validateOverride(candidate);
-    const current = this.get(accountId, modelId);
-    if (current.revision !== expectedRevision) {
+    const currentRevision = this.revision(accountId);
+    if (currentRevision !== expectedRevision) {
       throw new ModelCapabilityOverrideError("revision_conflict");
     }
-    if (current.value === null) {
+    if (this.get(accountId, modelId).value === null) {
       this.enforceCapacity(accountId);
     }
+    const nextRevision = currentRevision + 1;
     const next = Object.freeze({
       enabled: candidate.enabled,
       ...(candidate.protocols === undefined ? {} : { protocols: Object.freeze([...candidate.protocols]) }),
@@ -75,61 +78,80 @@ export class SqliteModelCapabilityOverrides {
         chatOutputTokenField: candidate.chatOutputTokenField,
       }),
     });
-    this.database.prepare(
-      `INSERT INTO model_capability_overrides (
-         account_id, model_id, revision, configuration_json, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(account_id, model_id) DO UPDATE SET
-         revision = excluded.revision,
-         configuration_json = excluded.configuration_json,
-         updated_at_ms = excluded.updated_at_ms`,
-    ).run(accountId, modelId, current.revision + 1, JSON.stringify(next), this.nowMs());
+    const updatedAt = this.nowMs();
+    this.database.transaction(() => {
+      this.database.prepare(
+        `INSERT INTO model_capability_overrides (
+           account_id, model_id, revision, configuration_json, updated_at_ms
+         ) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, model_id) DO UPDATE SET
+           revision = excluded.revision,
+           configuration_json = excluded.configuration_json,
+           updated_at_ms = excluded.updated_at_ms`,
+      ).run(accountId, modelId, nextRevision, JSON.stringify(next), updatedAt);
+      this.writeRevision(accountId, nextRevision, updatedAt);
+    })();
     return this.get(accountId, modelId);
   }
 
   reset(accountId: string, modelId: string, expectedRevision: number): StoredModelCapabilityOverride {
     validateModelId(modelId);
-    const current = this.get(accountId, modelId);
-    if (current.revision !== expectedRevision) {
+    const currentRevision = this.revision(accountId);
+    if (currentRevision !== expectedRevision) {
       throw new ModelCapabilityOverrideError("revision_conflict");
     }
+    const current = this.get(accountId, modelId);
     if (current.value === null) {
       return current;
     }
-    this.database.prepare(
-      `UPDATE model_capability_overrides
-       SET revision = revision + 1, configuration_json = NULL, updated_at_ms = ?
-       WHERE account_id = ? AND model_id = ?`,
-    ).run(this.nowMs(), accountId, modelId);
+    const nextRevision = currentRevision + 1;
+    const updatedAt = this.nowMs();
+    this.database.transaction(() => {
+      this.database.prepare(
+        "DELETE FROM model_capability_overrides WHERE account_id = ? AND model_id = ?",
+      ).run(accountId, modelId);
+      this.writeRevision(accountId, nextRevision, updatedAt);
+    })();
     return this.get(accountId, modelId);
   }
 
   clearAccount(accountId: string): void {
-    this.database.prepare("DELETE FROM model_capability_overrides WHERE account_id = ?").run(accountId);
+    this.database.transaction(() => {
+      this.database.prepare("DELETE FROM model_capability_overrides WHERE account_id = ?").run(accountId);
+      this.database.prepare("DELETE FROM model_capability_override_state WHERE account_id = ?").run(accountId);
+    })();
   }
 
   private enforceCapacity(accountId: string): void {
     const perAccount = this.database.prepare(
-      "SELECT COUNT(*) AS count FROM model_capability_overrides WHERE account_id = ? AND configuration_json IS NOT NULL",
+      "SELECT COUNT(*) AS count FROM model_capability_overrides WHERE account_id = ?",
     ).get(accountId) as { count: number };
     const total = this.database.prepare(
-      "SELECT COUNT(*) AS count FROM model_capability_overrides WHERE configuration_json IS NOT NULL",
+      "SELECT COUNT(*) AS count FROM model_capability_overrides",
     ).get() as { count: number };
     if (perAccount.count >= MAX_MODEL_CAPABILITY_OVERRIDES_PER_ACCOUNT
       || total.count >= MAX_MODEL_CAPABILITY_OVERRIDES_TOTAL) {
       throw new ModelCapabilityOverrideError("capacity");
     }
   }
+
+  private writeRevision(accountId: string, revision: number, updatedAt: number): void {
+    this.database.prepare(
+      `INSERT INTO model_capability_override_state (account_id, revision, updated_at_ms)
+       VALUES (?, ?, ?)
+       ON CONFLICT(account_id) DO UPDATE SET
+         revision = excluded.revision,
+         updated_at_ms = excluded.updated_at_ms`,
+    ).run(accountId, revision, updatedAt);
+  }
 }
 
-function rowToStored(row: OverrideRow): StoredModelCapabilityOverride {
+function rowToStored(row: OverrideRow, revision: number): StoredModelCapabilityOverride {
   return Object.freeze({
     accountId: row.account_id,
     modelId: row.model_id,
-    revision: row.revision,
-    value: row.configuration_json === null
-      ? null
-      : Object.freeze(JSON.parse(row.configuration_json) as ModelCapabilityOverrideValue),
+    revision,
+    value: Object.freeze(JSON.parse(row.configuration_json) as ModelCapabilityOverrideValue),
   });
 }
 
@@ -174,5 +196,5 @@ interface OverrideRow {
   readonly account_id: string;
   readonly model_id: string;
   readonly revision: number;
-  readonly configuration_json: string | null;
+  readonly configuration_json: string;
 }

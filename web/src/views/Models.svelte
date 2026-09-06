@@ -160,7 +160,7 @@
       data = await client.setModelCapabilities(
         data.accountId,
         newModelId,
-        data.overrideRevisions[newModelId] ?? 0,
+        data.capabilityRevision,
         {
         enabled: true,
         protocols: [],

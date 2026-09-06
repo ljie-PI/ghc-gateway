@@ -105,7 +105,7 @@ export interface AdminModels {
   readonly credentialGeneration: number;
   readonly catalogGeneration: number;
   readonly fetchedAt: string;
-  readonly overrideRevisions: Readonly<Record<string, number>>;
+  readonly capabilityRevision: number;
   readonly preferredModel: AdminPreference | null;
   readonly items: readonly {
     readonly id: string;
@@ -206,7 +206,7 @@ export interface AdminCapabilityRegistry {
     readonly credentialGeneration: number;
     readonly catalogGeneration: number;
     readonly fetchedAt: string;
-    readonly overrideRevisions: Readonly<Record<string, number>>;
+    readonly capabilityRevision: number;
     readonly models: readonly {
       readonly modelId: string;
       readonly name: string;
@@ -599,7 +599,7 @@ export class AdminManagementApi {
       credentialGeneration: catalog.credentialGeneration,
       catalogGeneration: catalog.catalogGeneration,
       fetchedAt: catalog.fetchedAt,
-      overrideRevisions: catalog.overrideRevisions,
+      capabilityRevision: catalog.capabilityRevision,
       preferredModel: nullablePreference(this.dependencies.preferences.get(catalog.accountId)),
       items: catalog.models.map((model) => ({
         id: model.modelId,

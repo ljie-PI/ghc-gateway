@@ -197,10 +197,16 @@ describe("model capability registry", () => {
     }, 0)).toThrow(ModelCapabilityOverrideError);
 
     restarted.reset("github.com/1", "manual", 3);
+    let revision = restarted.revision("github.com/1");
     for (let index = 0; index < MAX_MODEL_CAPABILITY_OVERRIDES_PER_ACCOUNT; index += 1) {
-      restarted.set("github.com/1", `configured-${index}`, { enabled: true }, 0);
+      revision = restarted.set(
+        "github.com/1",
+        `configured-${index}`,
+        { enabled: true },
+        revision,
+      ).revision;
     }
-    expect(() => restarted.set("github.com/1", "overflow", { enabled: true }, 0))
+    expect(() => restarted.set("github.com/1", "overflow", { enabled: true }, revision))
       .toThrow(ModelCapabilityOverrideError);
   });
 
@@ -224,6 +230,22 @@ describe("model capability registry", () => {
     if (revision === undefined) throw new Error("missing account revision");
     await directory.remove(account.accountId, revision);
     expect(overrides.list(account.accountId)).toEqual([]);
+  });
+
+  it("keeps reset revision state bounded without retaining per-model tombstones", async () => {
+    const database = databaseWithCapabilities();
+    await createAccount(database, "1");
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    let revision = 0;
+    for (let index = 0; index < 300; index += 1) {
+      revision = overrides.set("github.com/1", `temporary-${index}`, { enabled: true }, revision).revision;
+      revision = overrides.reset("github.com/1", `temporary-${index}`, revision).revision;
+    }
+    expect(database.prepare("SELECT COUNT(*) AS count FROM model_capability_overrides").get())
+      .toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM model_capability_override_state").get())
+      .toEqual({ count: 1 });
+    expect(overrides.revision("github.com/1")).toBe(600);
   });
 
   it("uses explicit valid output budgets, configured defaults, known ceilings, and unknown fallback", () => {

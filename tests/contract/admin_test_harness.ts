@@ -35,6 +35,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     revision: number;
     value: ModelCapabilityOverrideValue | null;
   }>();
+  let capabilityRevision = 0;
   let preference: {
     readonly accountId: string;
     readonly revision: number;
@@ -140,14 +141,12 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
           credentialGeneration: bound.credentialGeneration,
           catalogGeneration: 7,
           fetchedAt: "2027-01-15T08:00:00.000Z",
-          overrideRevisions: Object.fromEntries(
-            [...capabilityOverrides].map(([modelId, stored]) => [modelId, stored.revision]),
-          ),
+          capabilityRevision,
           models: [
-            capabilityModel("gpt-test", capabilityOverrides.get("gpt-test")),
+            capabilityModel("gpt-test", capabilityOverrides.get("gpt-test"), capabilityRevision),
             ...[...capabilityOverrides.entries()]
               .filter(([modelId, stored]) => modelId !== "gpt-test" && stored.value !== null)
-              .map(([modelId, stored]) => capabilityModel(modelId, stored)),
+              .map(([modelId, stored]) => capabilityModel(modelId, stored, capabilityRevision)),
           ],
         };
       },
@@ -181,17 +180,17 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     },
     capabilityOverrides: {
       set: (_accountId, modelId, candidate, expectedRevision) => {
-        const current = capabilityOverrides.get(modelId) ?? { revision: 0, value: null };
-        if (current.revision !== expectedRevision) throw coded("revision_conflict");
+        if (capabilityRevision !== expectedRevision) throw coded("revision_conflict");
+        capabilityRevision += 1;
         capabilityOverrides.set(modelId, {
-          revision: current.revision + 1,
+          revision: capabilityRevision,
           value: structuredClone(candidate),
         });
       },
       reset: (_accountId, modelId, expectedRevision) => {
-        const current = capabilityOverrides.get(modelId) ?? { revision: 0, value: null };
-        if (current.revision !== expectedRevision) throw coded("revision_conflict");
-        capabilityOverrides.set(modelId, { revision: current.revision + 1, value: null });
+        if (capabilityRevision !== expectedRevision) throw coded("revision_conflict");
+        capabilityRevision += 1;
+        capabilityOverrides.set(modelId, { revision: capabilityRevision, value: null });
       },
     },
     runtimeConfig: {
@@ -225,6 +224,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
 function capabilityModel(
   modelId: string,
   stored?: { readonly revision: number; readonly value: ModelCapabilityOverrideValue | null },
+  capabilityRevision = 0,
 ) {
   const override = stored?.value ?? null;
   const discovered = modelId === "gpt-test";
@@ -256,7 +256,7 @@ function capabilityModel(
         liveState: "missing" as const,
       },
     },
-    revision: { overrideRevision: stored?.revision ?? 0, builtinRevision: discovered ? "test" : null },
+    revision: { overrideRevision: capabilityRevision, builtinRevision: discovered ? "test" : null },
     override,
   };
 }

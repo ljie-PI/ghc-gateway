@@ -51,7 +51,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
         credentialGeneration: 1,
         catalogGeneration: 1,
         fetchedAt: NOW,
-        overrideRevisions: {},
+        capabilityRevision: 0,
         preferredModel: { revision: 1, modelId: "gpt-alpha", validity: "valid" },
         items: [
           modelItem({
@@ -220,6 +220,7 @@ async function handle(route: Route, fixture: AdminFixture): Promise<void> {
       capabilities: NonNullable<AdminModels["items"][number]["override"]>;
     };
     const existing = fixture.state.models.items.find((item) => item.id === body.modelId);
+    const nextRevision = fixture.state.models.capabilityRevision + 1;
     const next = modelItem({
       id: body.modelId,
       name: existing?.name ?? body.modelId,
@@ -229,14 +230,11 @@ async function handle(route: Route, fixture: AdminFixture): Promise<void> {
     }, {
       discovered: existing?.discovered ?? false,
       override: body.capabilities,
-      overrideRevision: (existing?.overrideRevision ?? 0) + 1,
+      overrideRevision: nextRevision,
     });
     fixture.state.models = {
       ...fixture.state.models,
-      overrideRevisions: {
-        ...fixture.state.models.overrideRevisions,
-        [body.modelId]: next.overrideRevision,
-      },
+      capabilityRevision: nextRevision,
       items: existing === undefined
         ? [...fixture.state.models.items, next]
         : fixture.state.models.items.map((item) => item.id === body.modelId ? next : item),
@@ -246,12 +244,10 @@ async function handle(route: Route, fixture: AdminFixture): Promise<void> {
   if (path === "/models/capabilities" && request.method() === "DELETE") {
     const body = request.postDataJSON() as { modelId: string };
     const existing = fixture.state.models.items.find((item) => item.id === body.modelId);
+    const nextRevision = fixture.state.models.capabilityRevision + 1;
     fixture.state.models = {
       ...fixture.state.models,
-      overrideRevisions: {
-        ...fixture.state.models.overrideRevisions,
-        [body.modelId]: (existing?.overrideRevision ?? 0) + 1,
-      },
+      capabilityRevision: nextRevision,
       items: existing?.discovered === true
         ? fixture.state.models.items.map((item) => item.id === body.modelId
           ? modelItem({
@@ -260,7 +256,7 @@ async function handle(route: Route, fixture: AdminFixture): Promise<void> {
             vendor: item.vendor,
             maxInputTokens: item.maxInputTokens ?? 0,
             maxOutputTokens: item.maxOutputTokens ?? 0,
-          })
+          }, { overrideRevision: nextRevision })
           : item)
         : fixture.state.models.items.filter((item) => item.id !== body.modelId),
     };
