@@ -417,6 +417,63 @@ describe("shared conversion response codecs", () => {
     expect(text).toContain("response.completed");
   });
 
+  it("rejects conflicting final arguments that were queued behind an earlier tool index", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":1}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":2}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("holds later Responses text behind an earlier unfinished Messages tool block", async () => {
+    const response = {
+      id: "resp_order",
+      object: "response",
+      status: "completed",
+      output: [
+        { id: "fc_1", type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}", status: "completed" },
+        {
+          id: "msg_1",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "after", annotations: [] }],
+        },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { ...response.output[0], arguments: "", status: "in_progress" },
+      }),
+      responseEvent(1, "response.output_item.added", {
+        output_index: 1,
+        item: { ...response.output[1], content: [], status: "in_progress" },
+      }),
+      responseEvent(2, "response.output_text.delta", {
+        item_id: "msg_1", output_index: 1, content_index: 0, delta: "after",
+      }),
+      responseEvent(3, "response.function_call_arguments.delta", {
+        item_id: "fc_1", output_index: 0, delta: "{}",
+      }),
+      responseEvent(4, "response.function_call_arguments.done", {
+        item_id: "fc_1", output_index: 0, name: "lookup", arguments: "{}",
+      }),
+      responseEvent(5, "response.completed", { response }),
+    ].join("");
+    const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
+    expect(text.indexOf("\"id\": \"call_1\"")).toBeLessThan(text.indexOf("\"text\": \"after\""));
+  });
+
   it("rejects conflicting Responses tool identity snapshots", async () => {
     const source = [
       responseEvent(0, "response.output_item.added", {

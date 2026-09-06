@@ -252,7 +252,6 @@ async function* decodeChatStream(
             tool.argumentsSeen = true;
           }
           tool.argumentsSeen = true;
-          tool.pendingArguments = "";
           tools.set(index, tool);
           finalToolArguments.set(index, argumentsJson);
         }

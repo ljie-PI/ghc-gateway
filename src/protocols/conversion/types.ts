@@ -36,6 +36,7 @@ export interface SemanticMessageItem {
 
 export interface SemanticToolCallItem {
   readonly type: "tool_call";
+  readonly key?: string | undefined;
   readonly itemId?: string | undefined;
   readonly callId: string;
   readonly name: string;

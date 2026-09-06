@@ -130,6 +130,7 @@ export class SemanticItemLedger {
       }
       const item: SemanticToolCallItem = {
         type: "tool_call",
+        key: entry.key,
         ...(tool.itemId === undefined ? {} : { itemId: tool.itemId }),
         callId: tool.callId,
         name: tool.name,

@@ -260,14 +260,13 @@ class MessagesEmitter implements StreamEmitter {
   private nextIndex = 0;
   private activeText: { readonly key: string; readonly index: number } | undefined;
   private bufferedBytes = 0;
-  private readonly toolOrder: string[] = [];
-  private nextToolToEmit = 0;
+  private bufferAfterTool = false;
+  private readonly streamedMessageKeys = new Set<string>();
   private readonly tools = new Map<string, {
     readonly callId: string;
     readonly name: string;
     argumentsJson: string;
     done: boolean;
-    emitted: boolean;
   }>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
@@ -296,6 +295,9 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   *textDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    if (this.bufferAfterTool) {
+      return;
+    }
     if (this.activeText?.key !== key) {
       yield* this.closeActiveText();
       const index = this.nextIndex++;
@@ -306,6 +308,7 @@ class MessagesEmitter implements StreamEmitter {
         content_block: { type: "text", text: "" },
       });
     }
+    this.streamedMessageKeys.add(key);
     const index = this.activeText.index;
     yield this.event({
       type: "content_block_delta",
@@ -323,13 +326,13 @@ class MessagesEmitter implements StreamEmitter {
     if (this.tools.has(key)) {
       invalid();
     }
-    this.tools.set(key, { callId, name, argumentsJson: "", done: false, emitted: false });
-    this.toolOrder.push(key);
+    this.bufferAfterTool = true;
+    this.tools.set(key, { callId, name, argumentsJson: "", done: false });
   }
 
   toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
     const tool = this.tools.get(key);
-    if (tool === undefined || tool.emitted) {
+    if (tool === undefined || tool.done) {
       invalid();
     }
     this.bufferedBytes += new TextEncoder().encode(delta).byteLength;
@@ -343,25 +346,22 @@ class MessagesEmitter implements StreamEmitter {
   *toolDone(key: string, argumentsJson: string): Iterable<ConvertedStreamEmission> {
     yield* this.closeActiveText();
     const tool = this.tools.get(key);
-    if (tool === undefined || tool.emitted) {
+    if (tool === undefined || tool.done) {
       return;
     }
     if (argumentsJson !== tool.argumentsJson) {
       invalid();
     }
     tool.done = true;
-    yield* this.flushReadyTools();
   }
 
   *finish(
     terminal: Extract<SemanticStreamEvent, { readonly kind: "terminal" }>,
     usage: Readonly<SemanticUsage>,
+    items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
     yield* this.closeActiveText();
-    for (const tool of this.tools.values()) {
-      tool.done = true;
-    }
-    yield* this.flushReadyTools();
+    yield* this.emitBufferedItems(items);
     yield this.event({
       type: "message_delta",
       delta: {
@@ -380,29 +380,43 @@ class MessagesEmitter implements StreamEmitter {
     this.activeText = undefined;
   }
 
-  private *flushReadyTools(): Iterable<ConvertedStreamEmission> {
-    while (this.nextToolToEmit < this.toolOrder.length) {
-      const key = this.toolOrder[this.nextToolToEmit];
-      const tool = key === undefined ? undefined : this.tools.get(key);
-      if (tool === undefined || !tool.done) {
-        return;
-      }
-      this.nextToolToEmit += 1;
-      if (tool.emitted) {
+  private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
+    for (const item of items) {
+      if (item.type === "message") {
+        if (item.key !== undefined && this.streamedMessageKeys.has(item.key)) {
+          continue;
+        }
+        for (const part of item.content) {
+          const index = this.nextIndex++;
+          yield this.event({
+            type: "content_block_start",
+            index,
+            content_block: { type: "text", text: "" },
+          });
+          yield this.event({
+            type: "content_block_delta",
+            index,
+            delta: { type: "text_delta", text: part.text },
+          });
+          yield this.event({ type: "content_block_stop", index });
+        }
         continue;
       }
-      tool.emitted = true;
+      const tool = item.key === undefined ? undefined : this.tools.get(item.key);
+      if (tool === undefined) {
+        invalid();
+      }
       const index = this.nextIndex++;
       yield this.event({
         type: "content_block_start",
         index,
         content_block: { type: "tool_use", id: tool.callId, name: tool.name, input: {} },
       });
-      if (tool.argumentsJson.length > 0) {
+      if (item.argumentsJson.length > 0) {
         yield this.event({
           type: "content_block_delta",
           index,
-          delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
+          delta: { type: "input_json_delta", partial_json: item.argumentsJson },
         });
       }
       yield this.event({ type: "content_block_stop", index });
