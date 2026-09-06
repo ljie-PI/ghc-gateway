@@ -123,6 +123,26 @@ test("model-refresh-invalidates-preference", async ({ page }) => {
   await expect(page.getByText("claude-beta is now preferred.")).toBeVisible();
 });
 
+test("model-capability-override-lifecycle", async ({ page }) => {
+  const fixture = await openAdmin(page);
+  await page.getByRole("button", { name: "Models" }).click();
+  await page.getByLabel("Model ID").fill("manual-model");
+  await page.getByRole("button", { name: "Add configured model" }).click();
+  const card = page.getByRole("article").filter({ hasText: "manual-model" });
+  await expect(card.getByText(/Configured \/ unverified/)).toBeVisible();
+  await card.getByLabel("messages").check();
+  await card.getByLabel("Default output tokens").fill("2048");
+  await card.getByRole("button", { name: "Save capability override" }).click();
+  await expect(page.getByText("manual-model capability override saved.")).toBeVisible();
+  expect(fixture.requests.find((request) => request.url().endsWith("/models/capabilities")
+    && request.method() === "PUT")?.headers()["x-ghcg-csrf"]).toBe("csrf-memory-only");
+  await card.getByRole("button", { name: "Reset override" }).click();
+  await expect(page.getByRole("article").filter({ hasText: "manual-model" })).toHaveCount(0);
+  await page.getByLabel("Model ID").fill("manual-model");
+  await page.getByRole("button", { name: "Add configured model" }).click();
+  await expect(page.getByRole("article").filter({ hasText: "manual-model" })).toBeVisible();
+});
+
 test("config-revision-and-security-rejection", async ({ page }) => {
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Configuration" }).click();

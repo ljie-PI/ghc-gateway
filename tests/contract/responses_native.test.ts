@@ -143,7 +143,21 @@ describe("native Responses execution", () => {
       ...(request.model === undefined ? {} : { requestedModel: request.model }),
       upstreamModel: "resolved",
       source: "explicit",
-      routing: { mode: "responses" },
+      capability: {
+        accountId: "test", modelId: "resolved", name: "resolved", vendor: "test",
+        discovered: true, configured: false, verified: true, enabled: true, visible: true, override: null,
+        protocols: { value: ["responses"], source: "live", conflict: false, liveState: "value" },
+        maxInputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+        maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+        defaultOutputTokens: {
+          configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+          effective: 4096, source: "unknown_fallback",
+        },
+        profile: {
+          chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+        },
+        revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
+      },
     };
     const plan = planResponsesExecution(request, resolvedModel, {
       endpoint: "https://api.githubcopilot.com/",

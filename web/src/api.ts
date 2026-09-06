@@ -72,6 +72,19 @@ export class AdminClient {
   preferModel(accountId: string, modelId: string, expectedRevision: number): Promise<unknown> {
     return this.mutate("/models/preferred", "PUT", { accountId, modelId, expectedRevision });
   }
+  setModelCapabilities(
+    accountId: string,
+    modelId: string,
+    expectedRevision: number,
+    capabilities: NonNullable<AdminModels["items"][number]["override"]>,
+  ): Promise<AdminModels> {
+    return this.mutate("/models/capabilities", "PUT", {
+      accountId, modelId, expectedRevision, capabilities,
+    });
+  }
+  resetModelCapabilities(accountId: string, modelId: string, expectedRevision: number): Promise<AdminModels> {
+    return this.mutate("/models/capabilities", "DELETE", { accountId, modelId, expectedRevision });
+  }
   saveConfig(value: AdminRuntimeConfig): Promise<AdminRuntimeConfig> {
     return this.mutate("/config", "PUT", { expectedRevision: value.revision, config: value.config });
   }

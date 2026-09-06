@@ -114,8 +114,8 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   }
   const capi: CapiModelsResponse = {
     data: [
-      { id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true },
-      { id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true },
+      { id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+      { id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
     ],
   };
   const catalog = new CopilotModelCatalog({

@@ -1,10 +1,13 @@
 import type { ModelInfoLookup } from "./model_catalog.js";
+import { builtinCapabilitiesFromModelInfo, type BuiltinModelCapabilityLookup } from "./model_capabilities.js";
 
 export interface NormalizedModelInfo {
   readonly mode?: string;
   readonly maxInputTokens?: number;
   readonly maxOutputTokens?: number;
   readonly supportedEndpoints?: readonly string[];
+  readonly defaultOutputTokens?: number;
+  readonly chatOutputTokenField?: "max_tokens" | "max_completion_tokens";
 }
 
 type RawModelInfo = NonNullable<ReturnType<ModelInfoLookup["get"]>>;
@@ -19,8 +22,14 @@ export function normalizeModelInfo(value: RawModelInfo | null): NormalizedModelI
   const supportedEndpoints = Array.isArray(value.supported_endpoints)
     ? value.supported_endpoints.filter((item): item is string => typeof item === "string")
     : undefined;
+  const defaultOutputTokens = coerceTokenLimit(value.default_output_tokens);
+  const chatOutputTokenField = value.chat_output_token_field === "max_tokens"
+    || value.chat_output_token_field === "max_completion_tokens"
+    ? value.chat_output_token_field
+    : undefined;
   if (mode === undefined && maxInputTokens === undefined && maxOutputTokens === undefined
-    && supportedEndpoints === undefined) {
+    && supportedEndpoints === undefined && defaultOutputTokens === undefined
+    && chatOutputTokenField === undefined) {
     return null;
   }
   return {
@@ -28,6 +37,8 @@ export function normalizeModelInfo(value: RawModelInfo | null): NormalizedModelI
     ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
     ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
     ...(supportedEndpoints === undefined ? {} : { supportedEndpoints }),
+    ...(defaultOutputTokens === undefined ? {} : { defaultOutputTokens }),
+    ...(chatOutputTokenField === undefined ? {} : { chatOutputTokenField }),
   };
 }
 
@@ -85,6 +96,18 @@ export const productionModelInfoLookup: ModelInfoLookup = {
   },
 };
 
+export const BUILTIN_MODEL_CAPABILITIES_REVISION = "litellm-ae7e50f096a8722bad14d63b6a0d4634d59bf475";
+
+export const productionBuiltinModelCapabilities: BuiltinModelCapabilityLookup = {
+  get(modelId) {
+    return builtinCapabilitiesFromModelInfo(
+      productionModelInfoLookup,
+      modelId,
+      BUILTIN_MODEL_CAPABILITIES_REVISION,
+    );
+  },
+};
+
 function info(
   mode: string,
   maxInputTokens?: number,
@@ -96,5 +119,8 @@ function info(
     ...(maxInputTokens === undefined ? {} : { max_input_tokens: maxInputTokens }),
     ...(maxOutputTokens === undefined ? {} : { max_output_tokens: maxOutputTokens }),
     ...(supportedEndpoints === undefined ? {} : { supported_endpoints: supportedEndpoints }),
+    ...(supportedEndpoints?.some((endpoint) => endpoint === "/v1/chat/completions") === true
+      ? { chat_output_token_field: "max_tokens" as const }
+      : {}),
   };
 }

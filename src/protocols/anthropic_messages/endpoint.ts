@@ -1,6 +1,7 @@
-import { AccountDirectoryError, type AccountDirectory } from "../../accounts/account_directory.js";
+import { AccountDirectoryError, type AccountDirectory, type BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
 import type { CopilotBackend } from "../../copilot/backend.js";
+import { capabilitySnapshotFromCatalog, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
@@ -18,7 +19,8 @@ import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
+  readonly catalog?: CopilotModelCatalog;
   readonly preferences: AccountModelPreferences;
   readonly copilot: CopilotBackend;
   readonly createUuid?: () => string;
@@ -69,13 +71,20 @@ async function executeAnthropicMessages(
   }
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
-  const catalog = await loadCatalog(dependencies, account.accountId, scope.signal);
+  const catalog = await loadCatalog(dependencies, account, scope.signal);
   const resolved = resolveModel(catalog, requestedModel.value, dependencies.preferences.get(account.accountId));
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
+  if (resolved.capability.protocols.value?.includes("chat") !== true) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
   usage.setModel(resolved.upstreamModel);
-  const chatBody = convertAnthropicRequest(request.body, resolved.upstreamModel, requestedModel.value);
+  const chatBody = convertAnthropicRequest(
+    request.body,
+    resolved.upstreamModel,
+    resolved.capability.profile.chatOutputTokenField.value,
+  );
   const stream = chatBody.stream === true;
   const copilot = await dependencies.copilot.bind(account, scope.signal);
   const chatRequest: ChatRequest = {
@@ -252,15 +261,20 @@ async function bindAccount(
 
 async function loadCatalog(
   dependencies: AnthropicMessagesRouteDependencies,
-  accountId: string,
+  account: Readonly<BoundAccount>,
   signal: AbortSignal,
 ) {
   try {
-    const catalog = await dependencies.catalog.get(accountId, signal);
+    const catalog = dependencies.registry !== undefined
+      ? await dependencies.registry.get(account, signal)
+      : capabilitySnapshotFromCatalog(
+        account,
+        await requireCatalog(dependencies).get(account.accountId, signal, account.credentialGeneration),
+      );
     dependencies.preferences.markInvalidIfMissing(
-      accountId,
-      new Set(catalog.models.map((model) => model.id)),
-      catalog.generation,
+      account.accountId,
+      new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
+      catalog.catalogGeneration,
     );
     return catalog;
   } catch (error: unknown) {
@@ -268,6 +282,7 @@ async function loadCatalog(
       if (error.failureKind === "upstream_timeout") {
         throw new GatewayFailureError({ kind: "upstream_timeout", cause: error });
       }
+
       if (error.failureKind === "upstream_network") {
         throw new GatewayFailureError({ kind: "upstream_network", cause: error });
       }
@@ -282,6 +297,13 @@ async function loadCatalog(
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
+}
+
+function requireCatalog(dependencies: AnthropicMessagesRouteDependencies): CopilotModelCatalog {
+  if (dependencies.catalog === undefined) {
+    throw new Error("model capability registry is unavailable");
+  }
+  return dependencies.catalog;
 }
 
 function throwIfUpstreamHttp(response: { readonly status: number; readonly headers: Headers }): void {

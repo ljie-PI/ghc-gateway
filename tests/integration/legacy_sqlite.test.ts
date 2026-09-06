@@ -70,13 +70,20 @@ describe("legacy better-sqlite3 database compatibility", () => {
         Record<string, readonly Record<string, unknown>[]>;
       const database = openFixture(filename);
       try {
-        expect(MIGRATION_MANIFEST.map(({ version, name, checksum }) => ({ version, name, checksum })))
+        expect(MIGRATION_MANIFEST.filter(({ version }) => version <= 30)
+          .map(({ version, name, checksum }) => ({ version, name, checksum })))
           .toEqual(expected.schema_migrations?.map(({ version, name, checksum }) => ({ version, name, checksum })));
-        expect(MIGRATION_MANIFEST.map(({ version }) => version)).toEqual([1, 10, 20, 30]);
+        expect(MIGRATION_MANIFEST.map(({ version }) => version)).toEqual([1, 10, 20, 30, 40]);
         for (const [table, rows] of Object.entries(expected)) {
           expect(table).toMatch(/^[a-z_]+$/u);
-          expect(database.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all()).toStrictEqual(rows);
+          const actual = database.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all() as Array<Record<string, unknown>>;
+          expect(table === "schema_migrations"
+            ? actual.filter((row) => Number(row.version) <= 30)
+            : actual).toStrictEqual(rows);
         }
+        expect(database.prepare(
+          "SELECT COUNT(*) AS count FROM model_capability_overrides",
+        ).get()).toEqual({ count: 0 });
         expect(database.pragma("foreign_key_check")).toEqual([]);
         expect(database.pragma("integrity_check")).toEqual([{ integrity_check: "ok" }]);
       } finally {

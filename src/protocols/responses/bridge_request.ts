@@ -1,4 +1,6 @@
 import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
+import type { ChatOutputTokenField } from "../../copilot/model_capabilities.js";
+import { GatewayFailureError } from "../../gateway/failures.js";
 import {
   isWireJsonArray,
   isWireJsonObject,
@@ -30,6 +32,7 @@ export interface ResponsesBridgeRequestContext {
   readonly upstreamPath?: string;
   readonly promptCacheRouting?: "enabled" | "disabled" | "auto";
   readonly clientSessionId?: string;
+  readonly chatOutputTokenField?: ChatOutputTokenField | null;
 }
 
 export interface PreparedChatBridgeRequest {
@@ -62,6 +65,7 @@ export async function prepareChatBridgeRequest(
       ...options,
       resolvedModel: plan.resolvedModel.upstreamModel,
       toolContext,
+      chatOutputTokenField: plan.resolvedModel.capability.profile.chatOutputTokenField.value,
       ...(options.clientSessionId === undefined ? {} : { clientSessionId: options.clientSessionId }),
     }, explicitPromptCacheKey),
   };
@@ -77,7 +81,7 @@ export function convertResponsesRequest(
     ["model", context.resolvedModel],
     ["messages", array(messages)],
   ];
-  copyTopLevel(request.body, members);
+  copyTopLevel(request.body, members, context.chatOutputTokenField ?? null);
   applyReasoning(request.body, context.reasoningConfig, members);
   if (context.toolContext.chatTools.length > 0) {
     members.push(["tools", array(context.toolContext.chatTools)]);
@@ -143,11 +147,17 @@ const DIRECT_COPY_FIELDS = new Set([
   "user",
 ]);
 
-function copyTopLevel(source: WireJsonObject, members: Array<readonly [string, WireJson]>): void {
-  const model = stringMember(source, "model") ?? "";
+function copyTopLevel(
+  source: WireJsonObject,
+  members: Array<readonly [string, WireJson]>,
+  chatOutputTokenField: ChatOutputTokenField | null,
+): void {
   const maxOutputTokens = memberValues(source, "max_output_tokens")[0];
   if (maxOutputTokens !== undefined) {
-    members.push([/^o[0-9]/u.test(model) ? "max_completion_tokens" : "max_tokens", maxOutputTokens]);
+    if (chatOutputTokenField === null) {
+      throw new GatewayFailureError({ kind: "invalid_request" });
+    }
+    members.push([chatOutputTokenField, maxOutputTokens]);
   }
   for (const member of source.members) {
     if (member.key === "max_tokens" || member.key === "max_completion_tokens" || DIRECT_COPY_FIELDS.has(member.key)) {

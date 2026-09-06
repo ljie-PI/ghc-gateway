@@ -3,8 +3,6 @@ import type * as Undici from "undici";
 import type { Dispatcher } from "undici";
 import { copilotHeaders } from "./identity.js";
 import { capiModelsUrl, type CapiModelsResponse, type CopilotModelsSource } from "./model_catalog.js";
-import type { ModelInfoLookup } from "./model_catalog.js";
-import { normalizeModelInfo, type NormalizedModelInfo } from "./model_metadata.js";
 import { MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
 
 export type CapiFailureKind = "upstream_http" | "upstream_timeout" | "upstream_network" | "invalid_upstream_response";
@@ -58,41 +56,37 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
   private closed = false;
   private forceClosed = false;
   private closePromise: Promise<void> | undefined;
-  readonly modelMetadata = new Map<string, NormalizedModelInfo>();
 
   constructor(
-    private readonly resolve: (accountId: string, signal: AbortSignal) => Promise<{ token: string; endpoint: string }>,
+    private readonly resolve: (
+      accountId: string,
+      signal: AbortSignal,
+      credentialGeneration?: number,
+    ) => Promise<{ token: string; endpoint: string }>,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly limits: CapiTransportLimits = DEFAULT_CAPI_LIMITS,
     private readonly createDispatcher: (limits: CapiTransportLimits) => Dispatcher | Promise<Dispatcher> = defaultCapiDispatcher,
-    private readonly modelInfo?: ModelInfoLookup,
   ) {}
 
   static production(
-    resolve: (accountId: string, signal: AbortSignal) => Promise<{ token: string; endpoint: string }>,
-    modelInfo: ModelInfoLookup,
+    resolve: (
+      accountId: string,
+      signal: AbortSignal,
+      credentialGeneration?: number,
+    ) => Promise<{ token: string; endpoint: string }>,
   ): HttpCopilotModelsSource {
-    return new HttpCopilotModelsSource(resolve, fetch, DEFAULT_CAPI_LIMITS, defaultCapiDispatcher, modelInfo);
+    return new HttpCopilotModelsSource(resolve, fetch, DEFAULT_CAPI_LIMITS, defaultCapiDispatcher);
   }
 
-  get(modelId: string): ReturnType<ModelInfoLookup["get"]> {
-    const metadata = this.modelMetadata.get(modelId);
-    if (metadata === undefined) {
-      return null;
-    }
-    return {
-      ...(metadata.mode === undefined ? {} : { mode: metadata.mode }),
-      ...(metadata.maxInputTokens === undefined ? {} : { max_input_tokens: metadata.maxInputTokens }),
-      ...(metadata.maxOutputTokens === undefined ? {} : { max_output_tokens: metadata.maxOutputTokens }),
-      ...(metadata.supportedEndpoints === undefined ? {} : { supported_endpoints: metadata.supportedEndpoints }),
-    };
-  }
-
-  async fetch(accountId: string, signal: AbortSignal): Promise<CapiModelsResponse> {
+  async fetch(
+    accountId: string,
+    signal: AbortSignal,
+    credentialGeneration?: number,
+  ): Promise<CapiModelsResponse> {
     if (this.closed) {
       throw new DOMException("closed", "AbortError");
     }
-    const { token, endpoint } = await this.resolve(accountId, signal);
+    const { token, endpoint } = await this.resolve(accountId, signal, credentialGeneration);
     const deadlineMs = Date.now() + this.limits.totalTimeoutMs;
     const response = await getWithRedirects(
       this.fetchImpl,
@@ -114,7 +108,7 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
     }
     try {
       const bytes = await readLimitedBody(response.body, signal, deadlineMs, this.limits);
-      return this.composeModelInfo(JSON.parse(new TextDecoder().decode(bytes)) as unknown);
+      return JSON.parse(new TextDecoder().decode(bytes)) as CapiModelsResponse;
     } catch (error: unknown) {
       await response.cancel();
       if (signal.aborted) {
@@ -184,50 +178,6 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
     } finally {
       timeout.clear();
     }
-  }
-
-  private composeModelInfo(raw: unknown): CapiModelsResponse {
-    if (raw === null || typeof raw !== "object" || Array.isArray(raw) || !("data" in raw)
-      || !Array.isArray(raw.data)) {
-      return raw as CapiModelsResponse;
-    }
-    return {
-      data: raw.data.map((item) => {
-        if (item === null || typeof item !== "object" || Array.isArray(item)) {
-          return item;
-        }
-        const record = item as Record<string, unknown>;
-        const strictItem: Record<string, unknown> = {
-          id: record.id,
-          name: record.name,
-          vendor: record.vendor,
-          model_picker_enabled: record.model_picker_enabled,
-        };
-        if (typeof record.id !== "string" || this.modelInfo === undefined) {
-          return strictItem;
-        }
-        let metadata: NormalizedModelInfo | null = null;
-        try {
-          metadata = normalizeModelInfo(this.modelInfo.get(record.id));
-        } catch {
-          // getModelInfo failures are specified as missing metadata.
-        }
-        if (metadata === null) {
-          this.modelMetadata.delete(record.id);
-          return strictItem;
-        }
-        this.modelMetadata.set(record.id, metadata);
-        return {
-          ...strictItem,
-          model_info: {
-            ...(metadata.mode === undefined ? {} : { mode: metadata.mode }),
-            ...(metadata.supportedEndpoints === undefined
-              ? {}
-              : { supported_endpoints: metadata.supportedEndpoints }),
-          },
-        };
-      }),
-    };
   }
 
   private startDispatcher(): Promise<Dispatcher> {

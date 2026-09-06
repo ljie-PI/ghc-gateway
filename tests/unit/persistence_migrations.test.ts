@@ -13,6 +13,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import {
   applyMigrations,
   embedMigration,
@@ -183,6 +184,7 @@ describe("generate_migrations", () => {
       embedMigration(accountsMigration),
       embedMigration(telemetryMigration),
       embedMigration(responsesHistoryMigration),
+      embedMigration(modelCapabilitiesMigration),
     ]);
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-manifest-"));
     const manifestPath = path.join(dir, "generated_migrations.ts");

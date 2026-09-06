@@ -9,7 +9,9 @@ import { FileCredentialStore, type CredentialStore } from "./accounts/credential
 import { createCopilotEndpointDiscovery, refreshCopilotToken } from "./copilot/credential_provider.js";
 import { HttpCopilotModelsSource } from "./copilot/models_source.js";
 import { CopilotModelCatalog, type CopilotModelsSource } from "./copilot/model_catalog.js";
-import { productionModelInfoLookup, type NormalizedModelInfo } from "./copilot/model_metadata.js";
+import { productionBuiltinModelCapabilities } from "./copilot/model_metadata.js";
+import { ModelCapabilityRegistry } from "./copilot/capability_registry.js";
+import { SqliteModelCapabilityOverrides } from "./copilot/capability_overrides.js";
 import { HttpCopilotBackend } from "./copilot/transport.js";
 import type { CopilotBackend } from "./copilot/backend.js";
 import { getValidToken } from "./copilot/token_refresh.js";
@@ -57,6 +59,7 @@ export interface ApplicationContext {
   readonly credentials?: CredentialStore;
   readonly directory: AccountDirectory;
   readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
   readonly copilot: CopilotBackend;
   readonly history: ResponsesHistory;
   readonly telemetry?: TelemetryRecorder;
@@ -65,7 +68,6 @@ export interface ApplicationContext {
   readonly nowMs?: () => number;
   readonly createUuid?: () => string;
   readonly modelsSource?: CopilotModelsSource;
-  readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
   readonly runtime?: RuntimeConfigStore;
   close?(): Promise<void> | void;
   forceClose?(): Promise<void> | void;
@@ -113,13 +115,12 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
   return [
     ...createModelCatalogRoutes({
       directory: context.directory,
-      catalog: context.catalog,
+      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
       preferences,
-      ...(context.modelMetadata === undefined ? {} : { metadata: context.modelMetadata }),
     }),
     createOpenAiChatRoute({
       directory: context.directory,
-      catalog: context.catalog,
+      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
       preferences,
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
@@ -128,7 +129,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
-      catalog: context.catalog,
+      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
       preferences,
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
@@ -138,7 +139,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
     }),
     createResponsesRoute({
       directory: context.directory,
-      catalog: context.catalog,
+      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
       preferences,
       copilot: context.copilot,
       history: context.history,
@@ -161,16 +162,27 @@ export async function createProductionApplicationContext(
   });
   const runtime = new RuntimeConfigStore(database);
   const snapshot = runtime.seedIfEmpty(env);
-  const directory = new SqliteAccountDirectory(database, credentials, Date.now, snapshot.accounts.maxAuthenticated);
+  const overrides = new SqliteModelCapabilityOverrides(database);
+  const directory = new SqliteAccountDirectory(
+    database,
+    credentials,
+    Date.now,
+    snapshot.accounts.maxAuthenticated,
+    (accountId) => overrides.clearAccount(accountId),
+  );
   await directory.reconcile();
   const fetchDiscovery = createCopilotEndpointDiscovery(credentials);
-  const modelsSource = HttpCopilotModelsSource.production(async (accountId, signal) => {
+  const modelsSource = HttpCopilotModelsSource.production(async (accountId, signal, credentialGeneration) => {
     const account = await directory.bindAccount(accountId, signal);
+    if (credentialGeneration !== undefined && account.credentialGeneration !== credentialGeneration) {
+      throw new DOMException("stale credential generation", "AbortError");
+    }
     const token = await getValidToken(credentials, account, Date.now(), refreshCopilotToken, signal);
     const { endpoint } = await discoverEndpoint(account, fetchDiscovery, signal);
     return { token, endpoint };
-  }, productionModelInfoLookup);
+  });
   const catalog = new CopilotModelCatalog(modelsSource);
+  const registry = new ModelCapabilityRegistry(catalog, overrides, productionBuiltinModelCapabilities);
   const copilot = new HttpCopilotBackend({
     credentials,
     refreshCopilotToken,
@@ -202,19 +214,19 @@ export async function createProductionApplicationContext(
     credentials,
     directory,
     catalog,
+    registry,
     copilot,
     history,
     telemetry,
     telemetryRuntime,
     performanceObserver: telemetryRuntime.performance,
     modelsSource,
-    modelMetadata: modelsSource.modelMetadata,
     runtime,
     async close() {
       const errors: unknown[] = [];
       for (const close of [
         async () => copilot.close(),
-        async () => catalog.close(),
+        async () => registry.close(),
         async () => telemetryRuntime.close(),
         async () => closeDatabaseOnce(),
       ]) {
@@ -248,7 +260,9 @@ export async function composeProductionDaemonGateway(
     const runtime = application.runtime;
     const database = application.database;
     const telemetryRecorder = application.telemetry;
+    const registry = application.registry;
     if (runtime === undefined || database === undefined || telemetryRecorder === undefined
+      || registry === undefined
       || !(application.directory instanceof SqliteAccountDirectory)
       || !(application.history instanceof SqliteResponsesHistory)
       || !isResponsesHistoryAdmin(application.history)) {
@@ -284,7 +298,7 @@ export async function composeProductionDaemonGateway(
     const deviceFlows = new DeviceFlowService(application.directory, new HttpDeviceOAuthClient());
     const accountCaches = {
       invalidate(accountId: string): void {
-        application.catalog.invalidate(accountId);
+        registry.invalidate(accountId);
         invalidateEndpoint(accountId);
       },
     };
@@ -292,12 +306,10 @@ export async function composeProductionDaemonGateway(
     const admin = createAdminModule({
       accounts: application.directory,
       deviceFlows,
-      catalog: application.catalog,
+      registry,
       preferences: application.directory.preferences,
       preferredModels: new PreferredModelManager(application.directory.preferences),
-      modelMetadata: {
-        get: (modelId) => application.modelMetadata?.get(modelId) ?? null,
-      },
+      capabilityOverrides: registry.overrides,
       runtimeConfig: {
         read: () => ({ revision: runtime.readRevision(), config: runtime.readSnapshot() }),
         updateAndApply: updateRuntimeConfig,
@@ -324,7 +336,7 @@ export async function composeProductionDaemonGateway(
       runtimeConfig: runtime,
       updateRuntimeConfig,
       invalidateAccountCaches: (accountId) => accountCaches.invalidate(accountId),
-      ...(application.modelMetadata === undefined ? {} : { modelMetadata: application.modelMetadata }),
+      registry,
     });
     const control = createLocalControlModule({
       identity: composition.identity,

@@ -1,22 +1,23 @@
 import { describe, expect, it } from "vitest";
-import type { CatalogSnapshot } from "../../src/copilot/model_catalog.js";
+import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
+import { GatewayFailureError } from "../../src/gateway/failures.js";
 import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
 import { planResponsesExecution } from "../../src/protocols/responses/planner.js";
 import { isWireJsonObject, parseWireJson } from "../../src/serialization/wire_json.js";
-import { resolveModel } from "../../src/protocols/model_catalog/resolver.js";
+import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 describe("Responses planner", () => {
-  it("selects native or bridge from resolved routing metadata without model-name inference", () => {
-    expect(plan("native", { mode: "responses", supportedEndpoints: [] }).kind).toBe("native_responses");
-    expect(plan("chat", { mode: "chat", supportedEndpoints: ["/v1/responses"] }).kind).toBe("chat_bridge");
-    expect(plan("endpoint", { supportedEndpoints: ["/v1/responses"] }).kind).toBe("native_responses");
-    expect(plan("unknown", { mode: "other", supportedEndpoints: ["/v1/chat/completions"] }).kind).toBe("chat_bridge");
-    expect(plan("gpt-looks-native", {}).kind).toBe("chat_bridge");
+  it("prefers native Responses, otherwise uses declared Chat, and rejects unknown", () => {
+    expect(plan(["responses"]).kind).toBe("native_responses");
+    expect(plan(["chat", "responses"]).kind).toBe("native_responses");
+    expect(plan(["chat"]).kind).toBe("chat_bridge");
+    expect(() => plan(["messages"])).toThrow(GatewayFailureError);
+    expect(() => plan(null)).toThrow(GatewayFailureError);
   });
 
   it("freezes the original request, resolved model, stream flag, and normalized native URL", () => {
     const request = decode("{\"stream\":true,\"model\":\"native\",\"input\":\"hi\"}");
-    const resolved = resolvedFromCatalog("native", { mode: "responses" });
+    const resolved = resolvedModel(["responses"]);
     const plan = planResponsesExecution(request, resolved, {
       endpoint: "https://api.githubcopilot.com/",
       token: "secret",
@@ -30,26 +31,47 @@ describe("Responses planner", () => {
     });
   });
 
-  function plan(model: string, routing: CatalogSnapshot["models"][number]["routing"]) {
-    const request = decode(`{"model":"${model}"}`);
-    return planResponsesExecution(request, resolvedFromCatalog(model, routing), {
+  function plan(protocols: readonly ("chat" | "messages" | "responses")[] | null) {
+    return planResponsesExecution(decode("{\"model\":\"model\"}"), resolvedModel(protocols), {
       endpoint: "https://copilot.example.test",
       token: "secret",
     });
   }
 
-  function resolvedFromCatalog(model: string, routing: CatalogSnapshot["models"][number]["routing"]) {
-    const catalog: CatalogSnapshot = {
-      accountId: "github.com/1",
-      fetchedAt: "2026-01-01T00:00:00Z",
-      generation: 1,
-      models: [{ id: model, name: model, vendor: "github", modelPickerEnabled: true, ...(routing === undefined ? {} : { routing }) }],
+  function resolvedModel(
+    protocols: readonly ("chat" | "messages" | "responses")[] | null,
+  ): ResolvedModel {
+    return {
+      requestedModel: "model",
+      upstreamModel: "model",
+      source: "explicit",
+      capability: capability(protocols),
     };
-    const resolved = resolveModel(catalog, model, null);
-    if ("kind" in resolved) {
-      throw new Error("expected resolved model");
-    }
-    return resolved;
+  }
+
+  function capability(
+    protocols: readonly ("chat" | "messages" | "responses")[] | null,
+  ): EffectiveModelCapabilitySnapshot {
+    return {
+      accountId: "github.com/1", modelId: "model", name: "model", vendor: "github",
+      discovered: true, configured: false, verified: true, enabled: true, visible: true, override: null,
+      protocols: {
+        value: protocols,
+        source: protocols === null ? "unknown" : "live",
+        conflict: false,
+        liveState: protocols === null ? "missing" : "value",
+      },
+      maxInputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      defaultOutputTokens: {
+        configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+        effective: 4096, source: "unknown_fallback",
+      },
+      profile: {
+        chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+      },
+      revision: { credentialGeneration: 1, catalogGeneration: 1, overrideRevision: 0, builtinRevision: null },
+    };
   }
 
   function decode(json: string) {

@@ -1,4 +1,7 @@
-import type { CatalogSnapshot } from "../../copilot/model_catalog.js";
+import type {
+  CapabilityCatalogSnapshot,
+  EffectiveModelCapabilitySnapshot,
+} from "../../copilot/capability_registry.js";
 
 export type ModelResolutionSource = "explicit" | "preferred";
 
@@ -6,10 +9,7 @@ export interface ResolvedModel {
   readonly requestedModel?: string;
   readonly upstreamModel: string;
   readonly source: ModelResolutionSource;
-  readonly routing: {
-    readonly mode?: string;
-    readonly supportedEndpoints?: readonly string[];
-  };
+  readonly capability: EffectiveModelCapabilitySnapshot;
 }
 
 export type ModelResolveError =
@@ -17,11 +17,11 @@ export type ModelResolveError =
   | { readonly kind: "model_not_found" };
 
 export function resolveModel(
-  catalog: CatalogSnapshot,
+  catalog: CapabilityCatalogSnapshot,
   requested: string | undefined,
   preferred: { readonly modelId: string; readonly validity: "valid" | "invalid" } | null,
 ): ResolvedModel | ModelResolveError {
-  const ids = new Set(catalog.models.map((model) => model.id));
+  const ids = new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId));
   if (requested !== undefined) {
     if (requested.length === 0) {
       return { kind: "invalid_request" };
@@ -38,19 +38,19 @@ export function resolveModel(
 }
 
 function resolved(
-  catalog: CatalogSnapshot,
+  catalog: CapabilityCatalogSnapshot,
   requested: string | undefined,
   source: ModelResolutionSource,
   upstreamModel: string,
 ): ResolvedModel {
-  const model = catalog.models.find((item) => item.id === upstreamModel);
+  const model = catalog.models.find((item) => item.modelId === upstreamModel && item.visible);
+  if (model === undefined) {
+    throw new Error("resolved model capability is missing");
+  }
   return {
     ...(requested === undefined ? {} : { requestedModel: requested }),
     upstreamModel,
     source,
-    routing: {
-      ...(model?.routing?.mode === undefined ? {} : { mode: model.routing.mode }),
-      ...(model?.routing?.supportedEndpoints === undefined ? {} : { supportedEndpoints: model.routing.supportedEndpoints }),
-    },
+    capability: model,
   };
 }

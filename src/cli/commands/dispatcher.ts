@@ -3,7 +3,7 @@ import { AccountDirectoryError, type AccountSummary } from "../../accounts/accou
 import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_flow.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
-import type { NormalizedModelInfo } from "../../copilot/model_metadata.js";
+import { capabilitySnapshotFromCatalog, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { RuntimeConfigStore } from "../../config/runtime_config.js";
 import { isRuntimeConfigKey, readRuntimeConfigNumber, RUNTIME_CONFIG_RANGES, RuntimeConfigError, withRuntimeConfigNumber } from "../../config/runtime_config.js";
 import type { RuntimeConfigSnapshot } from "../../config/schema.js";
@@ -23,6 +23,7 @@ export interface CommandDispatcherDependencies {
   readonly directory: AccountDirectory;
   readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll">;
   readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
   readonly runtimeConfig: RuntimeConfigStore;
   readonly updateRuntimeConfig?: (
     candidate: RuntimeConfigSnapshot,
@@ -30,7 +31,6 @@ export interface CommandDispatcherDependencies {
     signal: AbortSignal,
   ) => Readonly<{ revision: number; config: RuntimeConfigSnapshot }>;
   readonly invalidateAccountCaches?: (accountId: string) => void;
-  readonly modelMetadata?: ReadonlyMap<string, NormalizedModelInfo>;
 }
 
 export class CommandDispatcher {
@@ -119,19 +119,24 @@ export class CommandDispatcher {
     case "models.list": {
       const input = args as ControlOperationMap["models.list"]["args"];
       const accountId = input.accountId ?? this.defaultAccount().accountId;
+      const account = await this.dependencies.directory.bindAccount(accountId, signal);
       const beforePreference = this.dependencies.directory.preferences.get(accountId);
-      const catalog = await this.dependencies.catalog.get(accountId, signal);
+      const catalog = this.dependencies.registry === undefined
+        ? capabilitySnapshotFromCatalog(
+          account,
+          await this.dependencies.catalog.get(accountId, signal, account.credentialGeneration),
+        )
+        : await this.dependencies.registry.get(account, signal);
       this.dependencies.directory.preferences.markInvalidIfMissing(
         accountId,
-        new Set(catalog.models.map((model) => model.id)),
-        catalog.generation,
+        new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
+        catalog.catalogGeneration,
         beforePreference?.revision ?? null,
       );
       return adminModelsFromCatalog(
         accountId,
         catalog,
         this.dependencies.directory.preferences.get(accountId),
-        this.dependencies.modelMetadata,
       ) as ControlOperationMap[Operation]["result"];
     }
     case "models.current": {
@@ -144,7 +149,13 @@ export class CommandDispatcher {
     case "models.set": {
       const input = args as ControlOperationMap["models.set"]["args"];
       const account = this.defaultAccount();
-      const catalog = await this.dependencies.catalog.get(account.accountId, signal);
+      const bound = await this.dependencies.directory.bindAccount(account.accountId, signal);
+      const catalog = this.dependencies.registry === undefined
+        ? capabilitySnapshotFromCatalog(
+          bound,
+          await this.dependencies.catalog.get(account.accountId, signal, bound.credentialGeneration),
+        )
+        : await this.dependencies.registry.get(bound, signal);
       const current = this.dependencies.directory.preferences.get(account.accountId);
       const manager = new PreferredModelManager(this.dependencies.directory.preferences);
       return manager.setPreferred(account.accountId, input.modelId, current?.revision ?? 0, catalog) as ControlOperationMap[Operation]["result"];

@@ -135,13 +135,13 @@ describe("Admin API", () => {
     const dependencies = adminDependencies();
     let releaseCatalog = (): void => undefined;
     let calls = 0;
-    const originalGet = dependencies.catalog.get;
-    dependencies.catalog.get = async (accountId, signal) => {
+    const originalGet = dependencies.registry.get;
+    dependencies.registry.get = async (account, signal) => {
       calls += 1;
       if (calls === 1) {
         await new Promise<void>((resolve) => { releaseCatalog = resolve; });
       }
-      return await originalGet(accountId, signal);
+      return await originalGet(account, signal);
     };
     const harness = await createHarness(dependencies);
     try {
@@ -151,6 +151,7 @@ describe("Admin API", () => {
       const preferred = mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
         accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
       });
+
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect(calls).toBe(1);
       releaseCatalog();
@@ -162,17 +163,100 @@ describe("Admin API", () => {
     }
   });
 
+  it("inspects, sets, disables, and resets capability overrides with revisions", async () => {
+    const harness = await createHarness();
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const initial = (await read(harness.gateway, "/admin/api/v1/models", session.cookie)).data as {
+        items: Array<Record<string, unknown>>;
+      };
+      expect(initial.items[0]).toMatchObject({
+        id: "gpt-test",
+        discovered: true,
+        configured: false,
+        protocols: ["chat", "responses"],
+        protocolsSource: "live",
+        defaultOutputTokens: { configured: null, effective: 8192, source: "known_ceiling" },
+        overrideRevision: 0,
+      });
+
+      const configured = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 0,
+        capabilities: {
+          enabled: true,
+          protocols: ["messages"],
+          defaultOutputTokens: 2048,
+        },
+      });
+      expect(configured.status).toBe(200);
+      expect((await configured.json()) as unknown).toMatchObject({
+        data: {
+          items: [{ id: "gpt-test" }, {
+            id: "manual-model",
+            discovered: false,
+            configured: true,
+            verified: false,
+            enabled: true,
+            protocols: ["messages"],
+            overrideRevision: 1,
+          }],
+        },
+      });
+
+      const conflict = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 0,
+        capabilities: { enabled: true, protocols: ["chat"] },
+      });
+      expect(conflict.status).toBe(409);
+
+      const invalid = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 1,
+        capabilities: { enabled: true, protocols: ["websocket"] },
+      });
+      expect(invalid.status).toBe(400);
+
+      const reset = await mutate(harness.gateway, "DELETE", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "manual-model",
+        expectedRevision: 1,
+      });
+      expect(reset.status).toBe(200);
+      expect(((await reset.json()) as { data: { items: Array<{ id: string }> } }).data.items)
+        .not.toContainEqual(expect.objectContaining({ id: "manual-model" }));
+
+      harness.dependencies.capabilityOverrides.set = () => { throw Object.assign(new Error(), { code: "capacity" }); };
+      const capacity = await mutate(harness.gateway, "PUT", "/admin/api/v1/models/capabilities", session, {
+        accountId: "github.com/42",
+        modelId: "overflow",
+        expectedRevision: 0,
+        capabilities: { enabled: true },
+      });
+      expect(capacity.status).toBe(503);
+      expect(await capacity.json()).toEqual({
+        error: { code: "capacity_exceeded", message: "capacity exceeded", requestId: "req_admin_api" },
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("keeps model mutations serialized when a queued request aborts", async () => {
     const dependencies = adminDependencies();
     let releaseCatalog = (): void => undefined;
     let calls = 0;
-    const originalGet = dependencies.catalog.get;
-    dependencies.catalog.get = async (accountId, signal) => {
+    const originalGet = dependencies.registry.get;
+    dependencies.registry.get = async (account, signal) => {
       calls += 1;
       if (calls === 1) {
         await new Promise<void>((resolve) => { releaseCatalog = resolve; });
       }
-      return await originalGet(accountId, signal);
+      return await originalGet(account, signal);
     };
     const harness = await createHarness(dependencies);
     try {

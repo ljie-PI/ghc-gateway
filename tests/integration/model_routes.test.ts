@@ -6,6 +6,10 @@ import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
+import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
+import { parseLiveModelCapabilities } from "../../src/copilot/model_capabilities.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway } from "../../src/gateway/create_gateway.js";
@@ -13,6 +17,7 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
+import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import { PreferredModelManager } from "../../src/protocols/model_catalog/preferred.js";
 import { createModelCatalogRoutes } from "../../src/protocols/model_catalog/routes.js";
 
@@ -43,7 +48,7 @@ describe("model routes errors and preferences", () => {
     try {
       const missing = await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       expect(missing.status).toBe(401);
-      await accounts.upsertAuthenticated({
+      const account = await accounts.upsertAuthenticated({
         host: "github.com",
         userId: "1",
         secret: { generation: 0, githubToken: "t" },
@@ -52,7 +57,7 @@ describe("model routes errors and preferences", () => {
       expect(ok.status).toBe(200);
       const snapshot = await catalog.get("github.com/1", new AbortController().signal);
       const manager = new PreferredModelManager(accounts.preferences);
-      manager.setPreferred("github.com/1", "visible", 0, snapshot);
+      manager.setPreferred("github.com/1", "visible", 0, capabilitySnapshotFromCatalog(account, snapshot));
       catalog.invalidate("github.com/1");
       const empty = new CopilotModelCatalog({
         async fetch() {
@@ -107,6 +112,77 @@ describe("model routes errors and preferences", () => {
       expect(invalid.headers.get("retry-after")).toBeNull();
     } finally {
       await gw.close();
+      closeDatabase(database);
+    }
+  });
+
+  it("lists explicitly enabled configured-only models without importing builtin names", async () => {
+    const database = openDatabase({
+      path: ":memory:",
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        embedMigration(modelCapabilitiesMigration),
+      ],
+      nowMs,
+    });
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const account = await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return { data: [{
+          id: "discovered",
+          name: "Discovered",
+          vendor: "test",
+          model_picker_enabled: true,
+          model_info: { supported_endpoints: ["/chat/completions"] },
+        }] };
+      },
+    });
+    const overrides = new SqliteModelCapabilityOverrides(database, nowMs);
+    overrides.set(account.accountId, "manual", {
+      enabled: true,
+      protocols: ["responses"],
+    }, 0);
+    const registry = new ModelCapabilityRegistry(catalog, overrides, {
+      get(modelId) {
+        return modelId === "builtin-only"
+          ? {
+            revision: "test",
+            capabilities: parseLiveModelCapabilities({
+              model_info: { supported_endpoints: ["/chat/completions"] },
+            }),
+          }
+          : null;
+      },
+    });
+    const gateway = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:/configured-models" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, createModelCatalogRoutes({
+      directory: accounts,
+      registry,
+      preferences: accounts.preferences,
+    }));
+    try {
+      const response = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      const body = await response.json() as { data: Array<{ id: string }> };
+      expect(body.data.map((item) => item.id)).toEqual(["discovered", "manual"]);
+
+      const snapshot = await registry.get(account, new AbortController().signal);
+      new PreferredModelManager(accounts.preferences).setPreferred(account.accountId, "manual", 0, snapshot);
+      overrides.set(account.accountId, "manual", {
+        enabled: false,
+        protocols: ["responses"],
+      }, 1);
+      await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
+      expect(accounts.preferences.get(account.accountId)?.validity).toBe("invalid");
+    } finally {
+      await gateway.close();
       closeDatabase(database);
     }
   });

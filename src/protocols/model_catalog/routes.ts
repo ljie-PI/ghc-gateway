@@ -2,20 +2,21 @@ import { AccountDirectoryError, type AccountDirectory } from "../../accounts/acc
 import { GatewayFailureError, type GatewayFailure } from "../../gateway/failures.js";
 import { CapiFetchError } from "../../copilot/models_source.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
+import type { ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
+import { capabilitySnapshotFromCatalog } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import type { FailurePresenter, RouteRegistration } from "../../gateway/hono_app.js";
 import {
   serializeAnthropicModels,
   serializeOpenAiModels,
   serializeOpenAiModelsError,
-  type ModelMetadata,
 } from "./wire.js";
 
 export interface ModelCatalogRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry?: ModelCapabilityRegistry;
+  readonly catalog?: CopilotModelCatalog;
   readonly preferences: AccountModelPreferences;
-  readonly metadata?: ReadonlyMap<string, ModelMetadata>;
 }
 
 const JSON_HEADERS = {
@@ -42,10 +43,9 @@ export function createModelCatalogRoutes(dependencies: ModelCatalogRouteDependen
       endpoint: async (request, scope) => {
         const catalog = await loadCatalog(dependencies, scope.signal);
         const anthropic = request.headers.has("anthropic-version");
-        const metadata = dependencies.metadata ?? new Map<string, ModelMetadata>();
         const body = anthropic
-          ? serializeAnthropicModels(catalog, metadata)
-          : serializeOpenAiModels(catalog, metadata);
+          ? serializeAnthropicModels(catalog)
+          : serializeOpenAiModels(catalog);
         return new Response(body, {
           headers: { ...JSON_HEADERS, "x-request-id": scope.requestId },
         });
@@ -68,15 +68,21 @@ async function loadCatalog(
     throw error;
   }
   try {
-    const catalog = await dependencies.catalog.get(account.accountId, signal);
-    const visible = new Set(catalog.models.map((model) => model.id));
-    dependencies.preferences.markInvalidIfMissing(account.accountId, visible, catalog.generation);
+    const catalog = dependencies.registry !== undefined
+      ? await dependencies.registry.get(account, signal)
+      : capabilitySnapshotFromCatalog(
+        account,
+        await requireCatalog(dependencies).get(account.accountId, signal, account.credentialGeneration),
+      );
+    const visible = new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId));
+    dependencies.preferences.markInvalidIfMissing(account.accountId, visible, catalog.catalogGeneration);
     return catalog;
   } catch (error: unknown) {
     if (error instanceof CapiFetchError) {
       if (error.failureKind === "upstream_timeout") {
         throw new GatewayFailureError({ kind: "upstream_timeout", cause: error });
       }
+
       if (error.failureKind === "upstream_network") {
         throw new GatewayFailureError({ kind: "upstream_network", cause: error });
       }
@@ -91,6 +97,13 @@ async function loadCatalog(
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
   }
+}
+
+function requireCatalog(dependencies: ModelCatalogRouteDependencies): CopilotModelCatalog {
+  if (dependencies.catalog === undefined) {
+    throw new Error("model capability registry is unavailable");
+  }
+  return dependencies.catalog;
 }
 
 function statusFor(kind: GatewayFailure["kind"], failure?: GatewayFailure): number {

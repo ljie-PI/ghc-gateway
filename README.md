@@ -83,6 +83,12 @@ ghcg models set <model-id>
 
 Preferred models are account-specific. If a catalog refresh removes a preferred model, it is marked invalid and must be explicitly reselected. The gateway never silently selects the first model.
 
+The Models Admin view shows account-scoped native HTTP capabilities for Chat, Messages, and Responses, including discovery/configuration state, source, conflicts, and revisions. It can set or reset bounded per-model overrides. An exact model ID absent from discovery may be explicitly enabled as configured/unverified; this does not prove account entitlement, and built-in model names are never exposed automatically.
+
+Unknown or malformed capability declarations remain unknown. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
+
+For conversions that require an output-token value, an explicit valid request value wins. Otherwise the model's configured default is used, followed by `min(8192, known output ceiling)` or `4096` when the ceiling is unknown. Invalid explicit request values are not replaced by a default.
+
 ## Admin UI
 
 ```bash

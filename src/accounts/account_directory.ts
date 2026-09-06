@@ -52,6 +52,7 @@ export class AccountDirectory {
     private readonly credentials: CredentialStore,
     private readonly nowMs: () => number = Date.now,
     maxAuthenticated = 8,
+    private readonly clearModelCapabilities: (accountId: string) => void = () => undefined,
   ) {
     this.maxAuthenticated = Math.min(Math.max(maxAuthenticated, 1), 32);
     this.preferences = new AccountModelPreferences(database, nowMs);
@@ -229,6 +230,7 @@ export class AccountDirectory {
           "UPDATE accounts SET credential_state = 'removing', revision = revision + 1, updated_at_ms = ? WHERE account_id = ?",
         ).run(this.nowMs(), accountId);
         this.database.prepare("DELETE FROM account_model_preferences WHERE account_id = ?").run(accountId);
+        this.clearModelCapabilities(accountId);
         this.database.prepare(
           "UPDATE gateway_preferences SET default_account_id = CASE WHEN default_account_id = ? THEN NULL ELSE default_account_id END, revision = revision + 1, updated_at_ms = ? WHERE singleton_id = 1",
         ).run(accountId, this.nowMs());

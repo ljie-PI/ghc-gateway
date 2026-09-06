@@ -1,4 +1,5 @@
 import { GatewayFailureError } from "../../gateway/failures.js";
+import type { ChatOutputTokenField } from "../../copilot/model_capabilities.js";
 import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
 import {
   isWireJsonArray,
@@ -28,7 +29,7 @@ export interface ChatRequestBody {
 export function convertAnthropicRequest(
   request: WireJsonObject,
   resolvedModel: string,
-  rawModel: string | undefined,
+  chatOutputTokenField: ChatOutputTokenField | null,
 ): ChatRequestBody {
   const messagesValue = firstMember(request, "messages");
   if (!isWireJsonArray(messagesValue)) {
@@ -36,9 +37,9 @@ export function convertAnthropicRequest(
   }
   const result: ChatRequestBody = {
     model: resolvedModel,
-    messages: convertMessages(request, messagesValue, rawModel ?? resolvedModel),
+    messages: convertMessages(request, messagesValue, resolvedModel),
   };
-  copyMaxTokens(request, result, rawModel);
+  copyMaxTokens(request, result, chatOutputTokenField);
   copyIfPresent(request, "temperature", result, "temperature");
   copyIfPresent(request, "top_p", result, "top_p");
   copyIfPresent(request, "stop_sequences", result, "stop");
@@ -54,7 +55,7 @@ export function convertAnthropicRequest(
   if (toolChoice !== undefined) {
     result.tool_choice = toolChoice;
   }
-  const reasoning = convertReasoning(request, rawModel ?? resolvedModel);
+  const reasoning = convertReasoning(request, resolvedModel);
   if (reasoning !== undefined) {
     result.reasoning_effort = reasoning;
   }
@@ -73,12 +74,19 @@ function copyIfPresent(
   }
 }
 
-function copyMaxTokens(source: WireJsonObject, target: ChatRequestBody, rawModel: string | undefined): void {
+function copyMaxTokens(
+  source: WireJsonObject,
+  target: ChatRequestBody,
+  chatOutputTokenField: ChatOutputTokenField | null,
+): void {
   const value = firstMember(source, "max_tokens");
   if (value === undefined) {
     return;
   }
-  if (rawModel !== undefined && /^o[0-9]/u.test(rawModel)) {
+  if (chatOutputTokenField === null) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  if (chatOutputTokenField === "max_completion_tokens") {
     target.max_completion_tokens = wireToJson(value);
     return;
   }

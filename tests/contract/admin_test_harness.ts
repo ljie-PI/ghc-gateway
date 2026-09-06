@@ -2,6 +2,8 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import type { AdminModuleDependencies } from "../../src/admin/routes.js";
 import type { AdminMonitorEvent, AdminTelemetry } from "../../src/telemetry/admin.js";
 import type { AdminModule, Gateway } from "../../src/gateway/create_gateway.js";
+import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
+import type { ModelCapabilityOverrideValue } from "../../src/copilot/model_capabilities.js";
 
 const ORIGIN = "http://127.0.0.1:31400";
 
@@ -29,6 +31,10 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
   };
   let defaultRevision = 2;
   let defaultAccountId: string | null = account.accountId;
+  const capabilityOverrides = new Map<string, {
+    revision: number;
+    value: ModelCapabilityOverrideValue | null;
+  }>();
   let preference: {
     readonly accountId: string;
     readonly revision: number;
@@ -100,6 +106,18 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         onRemoving?.();
         return { ...account, revision: 5, state: "removed" };
       },
+      bindAccount: async (accountId, signal) => {
+        signal?.throwIfAborted();
+        if (accountId !== account.accountId) throw coded("not_found");
+        return {
+          accountId,
+          environment: resolveGitHubEnvironment("github.com"),
+          userId: "42",
+          login: "octocat",
+          displayName: "Octocat",
+          credentialGeneration: 4,
+        };
+      },
     },
     deviceFlows: {
       async start(host, signal) {
@@ -113,13 +131,34 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         return { status: "pending" };
       },
     },
-    catalog: {
-      async get(accountId, signal) {
+    registry: {
+      async get(bound, signal) {
         signal.throwIfAborted();
-        calls.push(`catalog:${accountId}`);
-        return { accountId, generation: 7, fetchedAt: "2027-01-15T08:00:00.000Z", models: [{ id: "gpt-test", name: "GPT Test", vendor: "OpenAI" }] };
+        calls.push(`catalog:${bound.accountId}`);
+        return {
+          accountId: bound.accountId,
+          credentialGeneration: bound.credentialGeneration,
+          catalogGeneration: 7,
+          fetchedAt: "2027-01-15T08:00:00.000Z",
+          overrideRevisions: Object.fromEntries(
+            [...capabilityOverrides].map(([modelId, stored]) => [modelId, stored.revision]),
+          ),
+          models: [
+            capabilityModel("gpt-test", capabilityOverrides.get("gpt-test")),
+            ...[...capabilityOverrides.entries()]
+              .filter(([modelId, stored]) => modelId !== "gpt-test" && stored.value !== null)
+              .map(([modelId, stored]) => capabilityModel(modelId, stored)),
+          ],
+        };
       },
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
+      validateOverride: async (_account, _modelId, candidate) => {
+        if (candidate.defaultOutputTokens !== undefined
+          && candidate.maxOutputTokens !== undefined
+          && candidate.defaultOutputTokens > candidate.maxOutputTokens) {
+          throw coded("validation_failed");
+        }
+      },
     },
     preferences: {
       get: () => preference,
@@ -127,17 +166,33 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     preferredModels: {
       setPreferred: (accountId, modelId, expectedRevision, catalog) => {
         if (expectedRevision !== (preference?.revision ?? 0)) throw coded("revision_conflict");
-        if (!catalog.models.some((model) => model.id === modelId)) throw new Error("model not in catalog");
-        preference = { accountId, revision: expectedRevision + 1, modelId, validity: "valid", catalogGeneration: catalog.generation };
+        if (!catalog.models.some((model) => model.modelId === modelId && model.visible)) throw new Error("model not in catalog");
+        preference = { accountId, revision: expectedRevision + 1, modelId, validity: "valid", catalogGeneration: catalog.catalogGeneration };
         return preference;
       },
-      markInvalidIfMissing: () => {
+      markInvalidIfMissing: (_accountId, catalog) => {
         calls.push("preference-invalidated");
+        if (preference !== null
+          && !catalog.models.some((model) => model.modelId === preference?.modelId && model.visible)) {
+          preference = { ...preference, revision: preference.revision + 1, validity: "invalid" };
+        }
         return preference;
       },
     },
-    modelMetadata: {
-      get: (modelId) => modelId === "gpt-test" ? { maxInputTokens: 200_000, maxOutputTokens: 8_192 } : null,
+    capabilityOverrides: {
+      set: (_accountId, modelId, candidate, expectedRevision) => {
+        const current = capabilityOverrides.get(modelId) ?? { revision: 0, value: null };
+        if (current.revision !== expectedRevision) throw coded("revision_conflict");
+        capabilityOverrides.set(modelId, {
+          revision: current.revision + 1,
+          value: structuredClone(candidate),
+        });
+      },
+      reset: (_accountId, modelId, expectedRevision) => {
+        const current = capabilityOverrides.get(modelId) ?? { revision: 0, value: null };
+        if (current.revision !== expectedRevision) throw coded("revision_conflict");
+        capabilityOverrides.set(modelId, { revision: current.revision + 1, value: null });
+      },
     },
     runtimeConfig: {
       read: () => ({ revision: configRevision, config }),
@@ -164,6 +219,37 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       invalidate: (accountId) => calls.push(`invalidate-account:${accountId}`),
     },
     nowMs: () => now.value,
+  };
+}
+
+function capabilityModel(
+  modelId: string,
+  stored?: { readonly revision: number; readonly value: ModelCapabilityOverrideValue | null },
+) {
+  const override = stored?.value ?? null;
+  const discovered = modelId === "gpt-test";
+  const protocols = override?.protocols ?? (discovered ? ["chat", "responses"] as const : null);
+  return {
+    accountId: "github.com/42",
+    modelId,
+    name: discovered ? "GPT Test" : modelId,
+    vendor: discovered ? "OpenAI" : "configured",
+    discovered,
+    configured: override !== null,
+    verified: discovered,
+    enabled: override?.enabled ?? discovered,
+    visible: override?.enabled ?? discovered,
+    protocols: { value: protocols, source: override?.protocols === undefined ? "live" as const : "admin_override" as const, conflict: false, liveState: discovered ? "value" as const : "missing" as const },
+    maxInputTokens: { value: 200_000, source: "builtin" as const },
+    maxOutputTokens: { value: 8_192, source: "builtin" as const },
+    defaultOutputTokens: {
+      configuration: { value: null },
+      effective: 8_192,
+      source: "known_ceiling" as const,
+    },
+    profile: { chatOutputTokenField: { value: "max_tokens" as const, source: "builtin" as const } },
+    revision: { overrideRevision: stored?.revision ?? 0, builtinRevision: discovered ? "test" : null },
+    override,
   };
 }
 

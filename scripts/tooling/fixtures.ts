@@ -311,7 +311,14 @@ async function expectedModelCatalogFixture(entry: FixtureManifestEntry): Promise
     readonly fetchedAt: string;
     readonly generation: number;
   };
-  return serializeOpenAiModels({ ...input, models: [] }, new Map());
+  return serializeOpenAiModels({
+    accountId: input.accountId,
+    credentialGeneration: 0,
+    catalogGeneration: input.generation,
+    fetchedAt: input.fetchedAt,
+    models: [],
+    overrideRevisions: {},
+  });
 }
 
 async function expectedResponsesHistoryFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
@@ -458,7 +465,7 @@ function resolvedModel(upstreamModel: string): ResolvedModel {
   return {
     upstreamModel,
     source: "explicit",
-    routing: {},
+    capability: fixtureCapability(upstreamModel, ["chat"]),
   };
 }
 
@@ -466,7 +473,7 @@ async function expectedAnthropicFixture(entry: FixtureManifestEntry): Promise<st
   const inputPath = path.join(fixtureFamilyRoot(entry), entry.input);
   switch (entry.caseId) {
   case "anthropic.request.tools-media-reasoning":
-    return JSON.stringify(convertAnthropicRequest(await readWireObject(inputPath), "gpt-5", "gpt-5"));
+    return JSON.stringify(convertAnthropicRequest(await readWireObject(inputPath), "gpt-5", "max_tokens"));
   case "anthropic.nonstream.tools-usage":
     return JSON.stringify(convertAnthropicChatResponse({
       status: 200,
@@ -507,17 +514,12 @@ async function expectedResponsesNativeFixture(entry: FixtureManifestEntry): Prom
   case "responses-native.routing.matrix": {
     const matrix = JSON.parse(await readFile(inputPath, "utf8")) as Array<{
       readonly name: string;
-      readonly routing: ResolvedModel["routing"];
+      readonly protocols: readonly ("chat" | "messages" | "responses")[] | null;
     }>;
     const request = responsesRequestFromJson("{\"model\":\"requested\",\"input\":\"hi\"}");
     return JSON.stringify(matrix.map((item) => ({
       name: item.name,
-      plan: planResponsesExecution(request, {
-        requestedModel: "requested",
-        upstreamModel: "resolved",
-        source: "explicit",
-        routing: item.routing,
-      }, { endpoint: "https://api.githubcopilot.com/", token: "fixture" }).kind,
+      plan: planKind(request, item.protocols),
     })));
   }
   case "responses-native.request.preservation":
@@ -542,7 +544,7 @@ async function expectedResponsesBridgeRequestFixture(entry: FixtureManifestEntry
     const plan: ChatBridgePlan = {
       kind: "chat_bridge",
       originalRequest: request,
-      resolvedModel: responsesResolvedModel("gpt", { mode: "chat" }),
+      resolvedModel: responsesResolvedModel("gpt", ["chat"]),
     };
     const history: ResponsesHistory = {
       async enrich() {
@@ -561,6 +563,9 @@ async function expectedResponsesBridgeRequestFixture(entry: FixtureManifestEntry
     resolvedModel: request.model ?? "gpt",
     toolContext: buildRequestToolContext(request),
     reasoningConfig,
+    chatOutputTokenField: entry.caseId === "responses-bridge-request.reasoning-canonical"
+      ? "max_completion_tokens"
+      : "max_tokens",
     upstreamHost: "api.openai.com",
   })));
 }
@@ -709,8 +714,8 @@ async function createResponsesFixtureGateway(backend = new ScriptedCopilotBacken
   const catalog = new CopilotModelCatalog({
     async fetch() {
       return { data: [
-        { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { mode: "responses" } },
-        { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { mode: "chat" } },
+        { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] } },
+        { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
       ] };
     },
   });
@@ -739,7 +744,7 @@ async function createResponsesFixtureGateway(backend = new ScriptedCopilotBacken
 
 function nativeFixturePlan(body: WireJsonObject): NativeResponsesPlan {
   const request = decodeResponsesRequest(body);
-  const plan = planResponsesExecution(request, responsesResolvedModel("resolved", { mode: "responses" }), {
+  const plan = planResponsesExecution(request, responsesResolvedModel("resolved", ["responses"]), {
     endpoint: "https://api.githubcopilot.com/",
     token: "fixture",
   });
@@ -749,8 +754,61 @@ function nativeFixturePlan(body: WireJsonObject): NativeResponsesPlan {
   return plan;
 }
 
-function responsesResolvedModel(upstreamModel: string, routing: ResolvedModel["routing"]): ResolvedModel {
-  return { requestedModel: upstreamModel, upstreamModel, source: "explicit", routing };
+function responsesResolvedModel(
+  upstreamModel: string,
+  protocols: readonly ("chat" | "messages" | "responses")[] | null,
+): ResolvedModel {
+  return {
+    requestedModel: upstreamModel,
+    upstreamModel,
+    source: "explicit",
+    capability: fixtureCapability(upstreamModel, protocols),
+  };
+}
+
+function planKind(
+  request: ResponsesRequest,
+  protocols: readonly ("chat" | "messages" | "responses")[] | null,
+): string {
+  try {
+    return planResponsesExecution(
+      request,
+      responsesResolvedModel("resolved", protocols),
+      { endpoint: "https://api.githubcopilot.com/", token: "fixture" },
+    ).kind;
+  } catch {
+    return "invalid_request";
+  }
+}
+
+function fixtureCapability(
+  modelId: string,
+  protocols: readonly ("chat" | "messages" | "responses")[] | null,
+): ResolvedModel["capability"] {
+  return {
+    accountId: "fixture",
+    modelId,
+    name: modelId,
+    vendor: "fixture",
+    discovered: true,
+    configured: false,
+    verified: true,
+    enabled: true,
+    visible: true,
+    override: null,
+    protocols: { value: protocols, source: protocols === null ? "unknown" : "live", conflict: false, liveState: protocols === null ? "missing" : "value" },
+    maxInputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+    maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+    defaultOutputTokens: {
+      configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      effective: 4096,
+      source: "unknown_fallback",
+    },
+    profile: {
+      chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+    },
+    revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
+  };
 }
 
 function responsesRequestFromJson(source: string): ResponsesRequest {

@@ -51,10 +51,10 @@ export async function anthropicGateway(options: {
     async fetch() {
       return options.catalogFetch?.() ?? {
         data: [
-          { id: "gpt", name: "GPT", vendor: "github", model_picker_enabled: true },
-          { id: "o1", name: "O1", vendor: "github", model_picker_enabled: true },
-          { id: "gpt-5", name: "GPT 5", vendor: "github", model_picker_enabled: true },
-          { id: "deepseek-reasoner", name: "DeepSeek", vendor: "github", model_picker_enabled: true },
+          { id: "gpt", name: "GPT", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+          { id: "o1", name: "O1", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_completion_tokens" } },
+          { id: "gpt-5", name: "GPT 5", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+          { id: "deepseek-reasoner", name: "DeepSeek", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
         ],
       };
     },

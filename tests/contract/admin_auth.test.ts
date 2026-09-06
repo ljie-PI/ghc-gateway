@@ -102,6 +102,8 @@ describe("Admin authentication", () => {
         ["PUT", "/admin/api/v1/accounts/default", { accountId: "github.com/42", expectedRevision: 2 }],
         ["POST", "/admin/api/v1/models/refresh", { accountId: "github.com/42" }],
         ["PUT", "/admin/api/v1/models/preferred", { accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0 }],
+        ["PUT", "/admin/api/v1/models/capabilities", { accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0, capabilities: { enabled: true } }],
+        ["DELETE", "/admin/api/v1/models/capabilities", { accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0 }],
         ["PUT", "/admin/api/v1/config", { expectedRevision: 1, config: defaultRuntimeConfigSnapshot() }],
         ["DELETE", "/admin/api/v1/history", { expectedRevision: 0 }],
       ] as const;
