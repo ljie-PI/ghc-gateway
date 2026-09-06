@@ -128,8 +128,9 @@ export class BoundedInferencePoolRegistry {
     const completed = await bounded(closing, this.limits.shutdownGraceMs);
     if (!completed) {
       for (const entry of entries) {
-        void entry.forceClose();
+        void entry.forceClose().catch(() => undefined);
       }
+      this.draining.clear();
       return;
     }
     const results = await closing;
@@ -360,12 +361,9 @@ class InferencePoolEntry {
     this.dispatcher = undefined;
     if (dispatcher !== undefined && !this.forceClosed) {
       this.closingDispatcher = dispatcher;
-      try {
-        await dispatcher.close();
-      } finally {
-        if (this.closingDispatcher === dispatcher) {
-          this.closingDispatcher = undefined;
-        }
+      await dispatcher.close();
+      if (this.closingDispatcher === dispatcher) {
+        this.closingDispatcher = undefined;
       }
     }
   }

@@ -387,27 +387,46 @@ describe("Copilot transport lifecycle", () => {
 
   it("bounds timeout-profile and origin churn", async () => {
     const sockets = new Set<Socket>();
-    let peakSockets = 0;
+    let clientConnections = 0;
+    let peakClientConnections = 0;
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end("{}");
     });
     server.on("connection", (socket) => {
       sockets.add(socket);
-      peakSockets = Math.max(peakSockets, sockets.size);
       socket.on("close", () => sockets.delete(socket));
     });
     const origin = await listen(server);
-    const shared = await backendAt(origin);
+    const shared = await backendAt(origin, {
+      createDispatcher: (profile, limits) => {
+        const dispatcher = new Pool(profile.origin, {
+          connectTimeout: profile.connectTimeoutMs,
+          connections: limits.connectionsPerEntry,
+          pipelining: 1,
+          keepAliveTimeout: limits.idleTimeoutMs,
+          keepAliveMaxTimeout: limits.idleTimeoutMs,
+        });
+        dispatcher.on("connect", () => {
+          clientConnections += 1;
+          peakClientConnections = Math.max(peakClientConnections, clientConnections);
+        });
+        dispatcher.on("disconnect", () => {
+          clientConnections -= 1;
+        });
+        return dispatcher;
+      },
+    });
     try {
       for (let connectTimeoutMs = 1_000; connectTimeoutMs < 1_020; connectTimeoutMs += 1) {
         await shared.bound.completeChat(chatRequest({ connectTimeoutMs }));
         expect(shared.backend.inspect().pools.entries).toBeLessThanOrEqual(16);
       }
       expect(shared.backend.inspect().pools.entries).toBe(16);
-      expect(peakSockets).toBeLessThanOrEqual(16);
+      expect(peakClientConnections).toBeLessThanOrEqual(16);
     } finally {
       await shared.backend.close();
+      await waitUntil(() => clientConnections === 0);
       await closeServer(server, sockets);
     }
 
@@ -527,6 +546,89 @@ describe("Copilot transport lifecycle", () => {
       await bound.completeChat(chatRequest());
       await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
       await waitUntil(() => backend.inspect().pools.entries === 0);
+    } finally {
+      backend.forceClose();
+      await closeServer(server, sockets);
+    }
+  });
+
+  it("clears draining ownership when graceful backend shutdown force-closes a dispatcher", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    const origin = await listen(server);
+    let destroy: ReturnType<typeof vi.spyOn> | undefined;
+    const { backend, bound } = await backendAt(origin, {
+      poolLimits: {
+        maxEntries: 1,
+        connectionsPerEntry: 1,
+        maxWaitersPerEntry: 1,
+        idleTimeoutMs: 1_000,
+        maxAcquisitionMs: 100,
+        shutdownGraceMs: 5,
+      },
+      createDispatcher: (profile) => {
+        const dispatcher = new Pool(profile.origin, {
+          connectTimeout: profile.connectTimeoutMs,
+          connections: 1,
+        });
+        vi.spyOn(dispatcher, "close").mockImplementation(async () => await new Promise<void>(() => undefined));
+        destroy = vi.spyOn(dispatcher, "destroy");
+        return dispatcher;
+      },
+    });
+    try {
+      await bound.completeChat(chatRequest());
+      await backend.close();
+      expect(backend.inspect().pools).toMatchObject({
+        entries: 0,
+        draining: 0,
+        active: 0,
+        waiters: 0,
+      });
+      await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+    } finally {
+      backend.forceClose();
+      await closeServer(server, sockets);
+    }
+  });
+
+  it("retains a dispatcher rejected by graceful close until force-close destroys it", async () => {
+    const sockets = new Set<Socket>();
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    const origin = await listen(server);
+    let destroy: ReturnType<typeof vi.spyOn> | undefined;
+    const { backend, bound } = await backendAt(origin, {
+      createDispatcher: (profile) => {
+        const dispatcher = new Pool(profile.origin, {
+          connectTimeout: profile.connectTimeoutMs,
+          connections: 1,
+        });
+        vi.spyOn(dispatcher, "close").mockRejectedValue(new Error("dispatcher close failed"));
+        destroy = vi.spyOn(dispatcher, "destroy");
+        return dispatcher;
+      },
+    });
+    try {
+      await bound.completeChat(chatRequest());
+      await expect(backend.close()).rejects.toBeInstanceOf(AggregateError);
+      expect(destroy).not.toHaveBeenCalled();
+      backend.forceClose();
+      await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+      expect(backend.inspect().pools).toMatchObject({ entries: 0, draining: 0 });
     } finally {
       backend.forceClose();
       await closeServer(server, sockets);

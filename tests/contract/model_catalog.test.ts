@@ -612,6 +612,37 @@ describe("CAPI parse and cache", () => {
     await expect(fetchPending).rejects.toMatchObject({ name: "AbortError" });
     await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
   });
+
+  it("retains a model dispatcher rejected by graceful close until force-close destroys it", async () => {
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{\"data\":[]}");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected TCP server address");
+    }
+    const dispatcher = new Agent({ connections: 1, pipelining: 1 });
+    vi.spyOn(dispatcher, "close").mockRejectedValue(new Error("dispatcher close failed"));
+    const destroy = vi.spyOn(dispatcher, "destroy");
+    const source = new HttpCopilotModelsSource(
+      async () => ({ token: "token", endpoint: `http://127.0.0.1:${address.port}` }),
+      fetch,
+      { connectTimeoutMs: 100, totalTimeoutMs: 1_000, bodyLimitBytes: 32 },
+      () => dispatcher,
+    );
+    try {
+      await source.fetch("github.com/1", new AbortController().signal);
+      await expect(source.close()).rejects.toThrow("dispatcher close failed");
+      expect(destroy).not.toHaveBeenCalled();
+      source.forceClose();
+      await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+    } finally {
+      source.forceClose();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
 
 describe("model resolver", () => {

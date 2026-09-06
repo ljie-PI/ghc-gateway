@@ -142,12 +142,9 @@ export class HttpCopilotModelsSource implements CopilotModelsSource {
     this.dispatcher = undefined;
     if (dispatcher !== undefined && !this.forceClosed) {
       this.closingDispatcher = dispatcher;
-      try {
-        await dispatcher.close();
-      } finally {
-        if (this.closingDispatcher === dispatcher) {
-          this.closingDispatcher = undefined;
-        }
+      await dispatcher.close();
+      if (this.closingDispatcher === dispatcher) {
+        this.closingDispatcher = undefined;
       }
     }
   }
