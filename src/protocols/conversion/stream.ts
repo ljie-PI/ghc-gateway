@@ -604,9 +604,16 @@ class ResponsesEmitter implements StreamEmitter {
   ): Iterable<ConvertedStreamEmission> {
     const output = responseOutput(items, terminal.status, this.messages, this.tools);
     if (terminal.status === "completed") {
+      const checkpointedOutput = this.completedOutput();
+      const receiptOnly = items.every((item) => item.type === "tool_call")
+        && checkpointedOutput.length === output.length;
       yield {
         kind: "checkpoint",
-        intent: { responseId: this.responseId, output, state: "complete" },
+        intent: {
+          responseId: this.responseId,
+          output: receiptOnly ? [] : output,
+          state: receiptOnly ? "receipt_complete" : "complete",
+        },
       };
     }
     for (const item of items) {

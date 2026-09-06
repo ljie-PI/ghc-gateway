@@ -584,11 +584,11 @@ async function persistConvertedCheckpoint(
     "checkpoint",
     async () => await persistContinuation(
       async () => {
-        if (intent.state === "route_only") {
+        if (intent.state === "route_only" || intent.state === "receipt_complete") {
           await dependencies.history.recordReceipt({
             ...ownership,
             responseId: intent.responseId,
-            checkpointState: "route_only",
+            checkpointState: intent.state === "receipt_complete" ? "complete" : "route_only",
           }, scope.signal);
           return;
         }
