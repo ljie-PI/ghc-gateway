@@ -378,10 +378,20 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       && sameOwnership(existing, ownership)
     ) {
       const nowMs = this.nowMs();
+      let unavailableAfterCleanup = false;
+      let ownershipChanged = false;
       const transaction = this.database.transaction(() => {
         const receiptsExpired = this.expireReceipts(nowMs);
         const legacyExpired = this.expireLegacy(nowMs);
-        const receiptChanged = checkpointRank(checkpointState) > checkpointRank(existing.checkpoint_state);
+        const current = this.readReceipt(ownership.accountId, responseId);
+        unavailableAfterCleanup = current === undefined
+          || current.checkpoint_state === "expired"
+          || current.created_at_ms + this.ttlMs <= nowMs;
+        ownershipChanged = current !== undefined && !sameOwnership(current, ownership);
+        const receiptChanged = !unavailableAfterCleanup
+          && !ownershipChanged
+          && current !== undefined
+          && checkpointRank(checkpointState) > checkpointRank(current.checkpoint_state);
         if (receiptChanged) {
           this.statement(
             `UPDATE response_route_receipts
@@ -389,7 +399,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
              WHERE account_id = ? AND response_id = ?`,
           ).run(checkpointState, ownership.accountId, responseId);
         }
-        const checkpointChanged = calls.length > 0
+        const checkpointChanged = !unavailableAfterCleanup && !ownershipChanged && calls.length > 0
           ? this.upsertCheckpoint(ownership.accountId, responseId, calls)
           : false;
         const checkpointEvicted = receiptsExpired || legacyExpired || receiptChanged || checkpointChanged
@@ -410,6 +420,12 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         }
       });
       transaction();
+      if (ownershipChanged) {
+        throw new ResponsesContinuationError("ownership_conflict", "response id ownership conflict");
+      }
+      if (unavailableAfterCleanup) {
+        throw new ResponsesContinuationError("expired", "response continuation expired");
+      }
       throwIfAborted(signal);
       return;
     }

@@ -104,6 +104,50 @@ function restoredName(input: WireJson | undefined): string | undefined {
 }
 
 describe("Responses continuation history", () => {
+  it("does not resurrect a receipt that expires inside checkpoint cleanup", async () => {
+    const database = new Database(":memory:");
+    const base = 1_700_000_000_000;
+    let checkpointing = false;
+    let checkpointClockReads = 0;
+    const nowMs = (): number => {
+      if (!checkpointing) {
+        return base;
+      }
+      checkpointClockReads += 1;
+      return checkpointClockReads <= 2 ? base + 86_400_000 - 1 : base + 86_400_000;
+    };
+    applyMigrations(database, [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
+    ], () => base);
+    const store = new SqliteResponsesHistory(database, { nowMs, ttlDays: 1 });
+    try {
+      await store.recordReceipt({
+        ...ownership("github.com/1"),
+        responseId: "resp_expiring",
+        checkpointState: "route_only",
+      }, SIGNAL);
+      checkpointing = true;
+      await expect(store.recordCheckpoint(
+        callRecord("resp_expiring", "call_1", "lookup"),
+        ownership("github.com/1"),
+        "partial",
+        SIGNAL,
+      )).rejects.toMatchObject({ code: "expired" });
+      expect(database.prepare(
+        "SELECT checkpoint_state FROM response_route_receipts WHERE account_id = ? AND response_id = ?",
+      ).get("github.com/1", "resp_expiring")).toMatchObject({ checkpoint_state: "expired" });
+      expect(database.prepare(
+        "SELECT revision FROM responses_continuation_state WHERE singleton_id = 1",
+      ).get()).toMatchObject({ revision: 2 });
+      await expect(store.resolve("resp_expiring", "github.com/1", SIGNAL))
+        .resolves.toMatchObject({ kind: "expired" });
+    } finally {
+      database.close();
+    }
+  });
+
   it("isolates identical response and call IDs by bound account", async () => {
     const { database, store } = history();
     try {
