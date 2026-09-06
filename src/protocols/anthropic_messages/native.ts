@@ -1,0 +1,345 @@
+import { GatewayFailureError, failureFromSignal } from "../../gateway/failures.js";
+import type { RequestScope } from "../../gateway/request_scope.js";
+import { createStreamResponseWriter } from "../../gateway/stream_response.js";
+import {
+  createExchangeCancellation,
+  createOwnedStreamCleanup,
+  nextWithDeadline,
+  withByteIdleDeadlines,
+} from "../../gateway/stream_execution.js";
+import {
+  isWireJsonNumber,
+  isWireJsonObject,
+  memberValues,
+  parseWireJson,
+  serializeWireJson,
+  type WireJson,
+  type WireJsonObject,
+} from "../../serialization/wire_json.js";
+import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
+import type { SemanticUsage } from "../conversion/types.js";
+
+export function serializeNativeMessagesRequest(body: WireJsonObject, model: string): Uint8Array {
+  let replaced = false;
+  const members = body.members.map((member) => {
+    if (member.key !== "model") {
+      return member;
+    }
+    replaced = true;
+    return { key: member.key, value: model };
+  });
+  if (!replaced) {
+    members.push({ key: "model", value: model });
+  }
+  return serializeWireJson({ kind: "object", members });
+}
+
+export function validatedNativeMessagesBody(bytes: Uint8Array, maxBytes: number): Uint8Array {
+  try {
+    const parsed = parseWireJson(bytes, { maxBytes, maxDepth: 64 });
+    if (!isWireJsonObject(parsed)) {
+      invalid();
+    }
+    return bytes;
+  } catch (error: unknown) {
+    if (error instanceof GatewayFailureError) {
+      throw error;
+    }
+    throw new GatewayFailureError({
+      kind: "invalid_upstream_response",
+      source: "parser",
+      phase: "body",
+      cause: error,
+    });
+  }
+}
+
+export function nativeMessagesUsage(bytes: Uint8Array, maxBytes: number): SemanticUsage {
+  const parsed = parseWireJson(bytes, { maxBytes, maxDepth: 64 });
+  if (!isWireJsonObject(parsed)) {
+    invalid();
+  }
+  const usage = objectMember(parsed, "usage");
+  if (usage === undefined) {
+    return {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+    };
+  }
+  const read = integerMember(usage, "cache_read_input_tokens");
+  const write = integerMember(usage, "cache_creation_input_tokens");
+  return {
+    inputTokens: integerMember(usage, "input_tokens") + read + write,
+    outputTokens: integerMember(usage, "output_tokens"),
+    cacheReadTokens: read,
+    cacheWriteTokens: write,
+    reasoningTokens: 0,
+  };
+}
+
+export async function createNativeMessagesStreamResponse(input: {
+  readonly upstream: UpstreamByteStream;
+  readonly scope: Readonly<RequestScope>;
+  readonly onTerminal: (result: Readonly<
+    | { readonly kind: "success"; readonly usage: SemanticUsage }
+    | { readonly kind: "failure"; readonly error: unknown }
+  >) => void;
+}): Promise<Response> {
+  const cancelExchange = createExchangeCancellation(input.upstream);
+  const timed = withByteIdleDeadlines(
+    input.upstream.bytes,
+    input.scope.signal,
+    input.scope.config.timeouts.firstByteMs,
+    input.scope.config.timeouts.streamIdleMs,
+    cancelExchange,
+  );
+  const iterator = timed[Symbol.asyncIterator]();
+  const cleanupUpstream = createOwnedStreamCleanup(input.upstream, iterator, 1_000, cancelExchange);
+  const observer = new NativeMessagesObserver(input.scope.config.limits.sseEventBytes);
+  const prefetched: Uint8Array[] = [];
+  const startedAt = Date.now();
+  try {
+    while (!observer.hasSemantic) {
+      const remaining = Math.max(1, input.scope.config.timeouts.firstByteMs - (Date.now() - startedAt));
+      const next = await nextWithDeadline(
+        iterator,
+        remaining,
+        input.scope.signal,
+        { source: "parser", phase: "stream" },
+      );
+      if (next.done === true) {
+        throw truncated();
+      }
+      prefetched.push(next.value);
+      observer.consume(next.value);
+    }
+  } catch (error: unknown) {
+    await cleanupUpstream();
+    throw error;
+  }
+
+  const writer = createStreamResponseWriter({
+    signal: input.scope.signal,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      "request-id": input.scope.requestId,
+    },
+    onCancel: async () => await closeStream(),
+  });
+  let closed = false;
+  let cleanup: Promise<void> | undefined;
+  const closeStream = async (): Promise<void> => {
+    if (closed) {
+      await cleanup;
+      return;
+    }
+    closed = true;
+    input.scope.signal.removeEventListener("abort", onAbort);
+    cleanup = cleanupUpstream();
+    await cleanup;
+  };
+  const onAbort = (): void => {
+    observe(input.onTerminal, {
+      kind: "failure",
+      error: new GatewayFailureError(failureFromSignal(input.scope.signal, {
+        source: "parser",
+        phase: "stream",
+      })),
+    });
+    void closeStream();
+  };
+  void (async () => {
+    try {
+      for (const value of prefetched) {
+        if (!await writer.enqueue(value)) {
+          return;
+        }
+      }
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done === true) {
+          const usage = observer.finish();
+          observe(input.onTerminal, { kind: "success", usage });
+          await closeStream();
+          writer.close();
+          return;
+        }
+        observer.consume(next.value);
+        if (!await writer.enqueue(next.value)) {
+          return;
+        }
+      }
+    } catch (error: unknown) {
+      observe(input.onTerminal, { kind: "failure", error });
+      await closeStream();
+      writer.abort();
+    } finally {
+      await closeStream();
+    }
+  })();
+  input.scope.signal.addEventListener("abort", onAbort, { once: true });
+  return writer.response;
+}
+
+class NativeMessagesObserver {
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  private pending = "";
+  private terminal = false;
+  private semantic = false;
+  private usage: SemanticUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+  };
+
+  constructor(private readonly eventLimitBytes: number) {}
+
+  get hasSemantic(): boolean {
+    return this.semantic;
+  }
+
+  consume(bytes: Uint8Array): void {
+    this.pending += this.decoder.decode(bytes, { stream: true });
+    this.drain();
+  }
+
+  finish(): SemanticUsage {
+    this.pending += this.decoder.decode();
+    this.drain();
+    if (this.pending.trim().length > 0 || !this.terminal) {
+      throw truncated();
+    }
+    return this.usage;
+  }
+
+  private drain(): void {
+    for (;;) {
+      const normalized = this.pending.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
+      const boundary = normalized.indexOf("\n\n");
+      if (boundary === -1) {
+        if (new TextEncoder().encode(normalized).byteLength > this.eventLimitBytes) {
+          invalid();
+        }
+        this.pending = normalized;
+        return;
+      }
+      const raw = normalized.slice(0, boundary);
+      this.pending = normalized.slice(boundary + 2);
+      if (new TextEncoder().encode(`${raw}\n\n`).byteLength > this.eventLimitBytes) {
+        invalid();
+      }
+      this.observeRecord(raw);
+    }
+  }
+
+  private observeRecord(raw: string): void {
+    const data = raw.split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /u, ""))
+      .join("\n");
+    if (data.length === 0) {
+      return;
+    }
+    let payload: WireJson;
+    try {
+      const bytes = new TextEncoder().encode(data);
+      payload = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 });
+    } catch {
+      return;
+    }
+    if (!isWireJsonObject(payload)) {
+      return;
+    }
+    const type = stringMember(payload, "type");
+    if (type === "error") {
+      this.semantic = true;
+      throw new GatewayFailureError({
+        kind: "upstream_stream_error",
+        source: "parser",
+        phase: "stream",
+      });
+    }
+    if (type === "message_start") {
+      this.semantic = true;
+      this.mergeUsage(objectMember(objectMember(payload, "message"), "usage"));
+    } else if (type === "message_delta") {
+      this.semantic = true;
+      this.mergeUsage(objectMember(payload, "usage"));
+    } else if (type === "message_stop") {
+      this.semantic = true;
+      this.terminal = true;
+    } else if (type === "content_block_start" || type === "content_block_delta" || type === "content_block_stop") {
+      this.semantic = true;
+    }
+  }
+
+  private mergeUsage(value: WireJsonObject | undefined): void {
+    if (value === undefined) {
+      return;
+    }
+    const read = integerMember(value, "cache_read_input_tokens");
+    const write = integerMember(value, "cache_creation_input_tokens");
+    this.usage = {
+      inputTokens: integerMember(value, "input_tokens") + read + write || this.usage.inputTokens,
+      outputTokens: integerMember(value, "output_tokens") || this.usage.outputTokens,
+      cacheReadTokens: read || this.usage.cacheReadTokens,
+      cacheWriteTokens: write || this.usage.cacheWriteTokens,
+      reasoningTokens: 0,
+    };
+  }
+}
+
+function stringMember(object: WireJsonObject, key: string): string | undefined {
+  const value = memberValues(object, key)[0];
+  return typeof value === "string" ? value : undefined;
+}
+
+function objectMember(object: WireJsonObject | undefined, key: string): WireJsonObject | undefined {
+  if (object === undefined) {
+    return undefined;
+  }
+  const value = memberValues(object, key)[0];
+  return isWireJsonObject(value) ? value : undefined;
+}
+
+function integerMember(object: WireJsonObject, key: string): number {
+  const value = memberValues(object, key)[0];
+  if (!isWireJsonNumber(value)) {
+    return 0;
+  }
+  const parsed = Number(value.lexeme);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function observe(
+  observer: Parameters<typeof createNativeMessagesStreamResponse>[0]["onTerminal"],
+  value: Parameters<Parameters<typeof createNativeMessagesStreamResponse>[0]["onTerminal"]>[0],
+): void {
+  try {
+    observer(value);
+  } catch {
+    // Observability cannot alter native stream bytes.
+  }
+}
+
+function invalid(): never {
+  throw new GatewayFailureError({
+    kind: "invalid_upstream_response",
+    source: "parser",
+    phase: "stream",
+  });
+}
+
+function truncated(): GatewayFailureError {
+  return new GatewayFailureError({
+    kind: "upstream_stream_truncated",
+    source: "parser",
+    phase: "stream",
+  });
+}

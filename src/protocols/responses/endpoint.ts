@@ -1,12 +1,11 @@
 import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
-import { iterateChatFrames, type BoundCopilot, type CopilotBackend } from "../../copilot/backend.js";
+import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import {
   normalizeAccountBindingFailure,
   normalizeCatalogFailure,
-  normalizeChatFrames,
   normalizeCopilotBindingFailure,
   normalizeTransportFailure,
 } from "../../copilot/failures.js";
@@ -18,6 +17,7 @@ import {
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt, type AttemptUsage, type RequestAttempt } from "../../gateway/request_attempt.js";
+import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
   boundedCleanup,
@@ -26,14 +26,10 @@ import {
   nextWithDeadline,
   withByteIdleDeadlines,
 } from "../../gateway/stream_execution.js";
-import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
+import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
-import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
-import { convertChatResponseToResponses } from "./bridge_nonstream.js";
-import { prepareChatBridgeRequest } from "./bridge_request.js";
-import { convertChatStream, type ResponsesStreamEmission } from "./bridge_stream.js";
 import {
   continuationModel,
   continuationOwnership,
@@ -46,20 +42,27 @@ import {
   validateExternalContinuation,
 } from "./continuation.js";
 import { decodeResponsesRequest, ResponsesRequestDecodeError } from "./decoder.js";
+import { consumeResponsesPreviousResponseId } from "./dto.js";
 import {
   type ResponsesContinuationOwnership,
   type ResponsesHistory,
 } from "./history.js";
 import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
-import { planResponsesExecution, type ChatBridgePlan } from "./planner.js";
 import {
-  encodeResponsesSseEvent,
   RESPONSES_JSON_HEADERS,
   RESPONSES_STREAM_HEADERS,
 } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentResponsesFailure } from "./failure_presenter.js";
+import { planProtocolExecution } from "../conversion/planner.js";
+import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
+import { convertBufferedResponse } from "../conversion/buffered.js";
+import type {
+  ConversionCheckpointIntent,
+  ConvertedProtocolPlan,
+  SemanticUsage,
+} from "../conversion/types.js";
 
 export interface ResponsesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -133,26 +136,73 @@ async function executeResponses(
   usage.setResolvedModel(resolved.upstreamModel);
   const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
   validateContinuationTarget(continuationReceipt, bound.target.endpoint);
-  const plan = planResponsesExecution(decoded, resolved, bound.target, continuationReceipt);
-  validateExternalContinuation(decoded.previousResponseId, continuation, plan.kind);
-  usage.setProtocol(plan.kind === "native_responses" ? "openai_responses_native" : "openai_responses_bridge");
-  const ownership = continuationOwnership(account.accountId, resolved.upstreamModel, bound.target.endpoint, plan.kind);
-  if (plan.kind === "native_responses") {
+  const convertedContinuation = continuationReceipt !== undefined
+    && continuationReceipt.upstreamProtocol !== "responses";
+  let planningRequest = decoded;
+  if (convertedContinuation && continuationReceipt !== undefined) {
+    try {
+      planningRequest = consumeResponsesPreviousResponseId(
+        await dependencies.history.enrich(decoded, continuationReceipt, scope.signal),
+      );
+    } catch (error: unknown) {
+      if (scope.signal.aborted) {
+        throw new GatewayFailureError(failureFromSignal(scope.signal, {
+          source: "continuation",
+          phase: "resume",
+        }));
+      }
+      throw new GatewayFailureError({
+        kind: "continuation_unavailable",
+        source: "continuation",
+        phase: "resume",
+        cause: error,
+      });
+    }
+  }
+  const forcedTarget = continuationReceipt?.upstreamProtocol;
+  const plan = planProtocolExecution({
+    source: "responses",
+    body: planningRequest.body,
+    stream: decoded.stream,
+    capability: resolved.capability,
+    resolvedModel: resolved.upstreamModel,
+    ...(forcedTarget === undefined ? {} : { forcedTarget }),
+  });
+  validateExternalContinuation(
+    decoded.previousResponseId,
+    continuation,
+    plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
+  );
+  usage.setProtocol(plan.kind === "native" ? "openai_responses_native" : "openai_responses_bridge");
+  const ownership = continuationOwnership(
+    account.accountId,
+    resolved.upstreamModel,
+    bound.target.endpoint,
+    plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
+  );
+  if (plan.kind === "native") {
+    const nativePlan = {
+      kind: "native_responses" as const,
+      originalRequest: decoded,
+      resolvedModel: resolved,
+      upstreamUrl: `${bound.target.endpoint.replace(/\/+$/u, "")}/responses`,
+      stream: decoded.stream,
+    };
     return decoded.stream
       ? await nativeStreamResponse(
         dependencies.history,
         ownership,
         bound,
-        plan,
+        nativePlan,
         scope,
         usage,
         dependencies.performanceObserver,
       )
-      : await nativeNonstreamResponse(dependencies.history, ownership, bound, plan, scope, usage);
+      : await nativeNonstreamResponse(dependencies.history, ownership, bound, nativePlan, scope, usage);
   }
   return decoded.stream
-    ? await bridgeStreamResponse(dependencies, ownership, bound, plan, scope, usage)
-    : await bridgeNonstreamResponse(dependencies, ownership, bound, plan, scope, usage);
+    ? await convertedStreamResponse(dependencies, ownership, bound, plan, scope, usage)
+    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, scope, usage);
 }
 
 function decodeRequest(body: WireJsonObject) {
@@ -254,151 +304,105 @@ async function nativeStreamResponse(
   );
 }
 
-async function bridgeNonstreamResponse(
+async function convertedNonstreamResponse(
   dependencies: ResponsesRouteDependencies,
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
-  plan: ChatBridgePlan,
+  plan: Readonly<ConvertedProtocolPlan>,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
 ): Promise<Response> {
-  const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
-    reasoningConfig: null,
-    ...promptCacheContext(bound.target.endpoint),
-  }, scope.signal);
-  const request = chatRequest(prepared.body, plan.resolvedModel.upstreamModel, false, scope);
-  const upstream = await transportCall(() => bound.completeChat(request), request.signal);
+  const upstream = await completeConvertedOperation(bound, plan, scope);
   assertUpstreamSuccess(upstream);
-  const measured = measure(dependencies.performanceObserver, "buffered", () => {
-    const chat = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
-    const converted = convertChatResponseToResponses(chat, {
-      originalRequest: plan.originalRequest,
-      toolContext: prepared.toolContext,
-      customLlmProvider: "github_copilot",
-      modelId: plan.resolvedModel.upstreamModel,
+  const converted = measure(dependencies.performanceObserver, "buffered", () => convertBufferedResponse(
+    upstream.body,
+    {
+      source: plan.target,
+      target: "responses",
+      model: plan.requestModel,
+      maxBytes: scope.config.limits.nonstreamBodyBytes,
       createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
-    });
-    return { converted, bytes: Buffer.from(serializeWireJson(converted.response)) };
-  });
-  await persistContinuation(
-    async () => await dependencies.history.recordCheckpoint(
-      measured.converted.historyRecord,
+      nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+      degradations: plan.request.degradations,
+    },
+  ));
+  if (converted.checkpoint !== undefined) {
+    await persistConvertedCheckpoint(
+      dependencies,
       ownership,
-      memberValue(measured.converted.response, "status") === "completed" ? "complete" : "partial",
-      scope.signal,
-    ),
-    scope.signal,
-  );
-  usage.success(responsesUsage(measured.converted.response));
-  return new Response(measured.bytes, {
+      converted.checkpoint,
+      scope,
+    );
+  }
+  usage.success(attemptUsage(converted.observations.usage));
+  return new Response(Buffer.from(converted.bytes), {
+    status: upstream.status,
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
 }
 
-async function bridgeStreamResponse(
+async function convertedStreamResponse(
   dependencies: ResponsesRouteDependencies,
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
-  plan: ChatBridgePlan,
+  plan: Readonly<ConvertedProtocolPlan>,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
 ): Promise<Response> {
-  const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
-    reasoningConfig: null,
-    ...promptCacheContext(bound.target.endpoint),
-  }, scope.signal);
-  const request = chatRequest(prepared.body, plan.resolvedModel.upstreamModel, true, scope);
-  const upstream = await transportCall(() => bound.openChatStream(request), request.signal);
+  const upstream = await openConvertedOperation(bound, plan, scope);
   if (upstream.status < 200 || upstream.status >= 300) {
     await boundedCleanup(upstream.cancel());
   }
   assertUpstreamSuccess(upstream);
-  const cancelExchange = createExchangeCancellation(upstream);
-  const timedUpstream = {
-    ...upstream,
-    bytes: withByteIdleDeadlines(
-      upstream.bytes,
-      scope.signal,
-      scope.config.timeouts.firstByteMs,
-      scope.config.timeouts.streamIdleMs,
-      cancelExchange,
-    ),
-  };
-  const emissions = convertChatStream(normalizeChatFrames(iterateChatFrames(timedUpstream), scope.signal), {
-    originalRequest: plan.originalRequest,
-    toolContext: prepared.toolContext,
-    model: plan.resolvedModel.upstreamModel,
-    nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
-    uuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
-    customLlmProvider: "github_copilot",
-    modelId: plan.resolvedModel.upstreamModel,
-  });
-  return await streamEmissionsResponse(
-    emissions,
-    dependencies.history,
-    ownership,
+  return await createConvertedStreamResponse({
     upstream,
+    plan,
     scope,
-    usage,
-    dependencies.performanceObserver,
-    cancelExchange,
-  );
+    model: plan.requestModel,
+    createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+    nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+    headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
+    persistCheckpoint: async (intent) => await persistConvertedCheckpoint(
+      dependencies,
+      ownership,
+      intent,
+      scope,
+    ),
+    onTerminal: (result) => result.kind === "success"
+      ? usage.success(attemptUsage(result.usage))
+      : usage.failure(result.error),
+  });
 }
 
-async function streamEmissionsResponse(
-  emissions: AsyncIterable<ResponsesStreamEmission>,
-  history: ResponsesHistory,
+async function persistConvertedCheckpoint(
+  dependencies: ResponsesRouteDependencies,
   ownership: Readonly<ResponsesContinuationOwnership>,
-  upstream: UpstreamByteStream,
+  intent: Readonly<ConversionCheckpointIntent>,
   scope: Readonly<RequestScope>,
-  usage: RequestAttempt,
-  performanceObserver?: ProtocolPerformanceObserver,
-  cancelExchange?: () => Promise<void>,
-): Promise<Response> {
-  const bytes = (async function* (): AsyncIterable<Uint8Array> {
-    for await (const emission of emissions) {
-      if (scope.signal.aborted) {
-        return;
-      }
-      if (memberValue(emission.event, "type") === "response.created") {
-        const responseId = responseIdFromPayload(emission.event);
-        if (responseId !== undefined) {
-          await measureAsync(
-            performanceObserver,
-            "checkpoint",
-            async () => await persistContinuation(
-              async () => await history.recordReceipt({
-                ...ownership,
-                responseId,
-                checkpointState: "route_only",
-              }, scope.signal),
-              scope.signal,
-            ),
-          );
+): Promise<void> {
+  await measureAsync(
+    dependencies.performanceObserver,
+    "checkpoint",
+    async () => await persistContinuation(
+      async () => {
+        if (intent.state === "route_only") {
+          await dependencies.history.recordReceipt({
+            ...ownership,
+            responseId: intent.responseId,
+            checkpointState: "route_only",
+          }, scope.signal);
+          return;
         }
-      }
-      if (emission.kind === "checkpoint") {
-        await measureAsync(
-          performanceObserver,
-          "checkpoint",
-          async () => await persistContinuation(
-            async () => await history.recordCheckpoint(
-              emission.historyRecord,
-              ownership,
-              memberValue(emission.event, "type") === "response.completed" ? "complete" : "partial",
-              scope.signal,
-            ),
-            scope.signal,
-          ),
+        await dependencies.history.recordCheckpoint(
+          { responseId: intent.responseId, output: intent.output },
+          ownership,
+          intent.state,
+          scope.signal,
         );
-      }
-      if (usage.enabled) {
-        observeBridgeEvent(usage, emission.event);
-      }
-      yield measure(performanceObserver, "event", () => encodeResponsesSseEvent(emission.event));
-    }
-  })();
-  return await streamBytesResponse(bytes, upstream, scope, usage.failure, cancelExchange);
+      },
+      scope.signal,
+    ),
+  );
 }
 
 function measure<T>(
@@ -481,25 +485,6 @@ async function streamBytesResponse(
   return writer.response;
 }
 
-function chatRequest(
-  body: WireJsonObject,
-  model: string,
-  stream: boolean,
-  scope: Readonly<RequestScope>,
-): ChatRequest {
-  const bytes = serializeWireJson(body);
-  return {
-    model,
-    body: bytes,
-    stream,
-    hasVisionInput: new TextDecoder().decode(bytes).includes("\"image_url\""),
-    nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
-    connectTimeoutMs: scope.config.timeouts.connectMs,
-    firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
-    signal: scope.signal,
-  };
-}
-
 function nativeOptions(scope: Readonly<RequestScope>) {
   return {
     requestId: scope.requestId,
@@ -507,6 +492,14 @@ function nativeOptions(scope: Readonly<RequestScope>) {
     connectTimeoutMs: scope.config.timeouts.connectMs,
     firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
     signal: scope.signal,
+  };
+}
+
+function attemptUsage(value: Readonly<SemanticUsage>): AttemptUsage {
+  return {
+    inputTokens: value.inputTokens,
+    outputTokens: value.outputTokens,
+    cacheTokens: value.cacheReadTokens + value.cacheWriteTokens,
   };
 }
 
@@ -591,15 +584,6 @@ async function loadCatalog(
   }
 }
 
-function promptCacheContext(endpoint: string): { readonly upstreamHost?: string; readonly upstreamPath?: string; readonly promptCacheRouting: "auto" } {
-  try {
-    const url = new URL(endpoint);
-    return { upstreamHost: url.hostname, upstreamPath: url.pathname, promptCacheRouting: "auto" };
-  } catch (_error: unknown) {
-    return { promptCacheRouting: "auto" };
-  }
-}
-
 function retryAfterHeader(status: number, headers: Headers): string | undefined {
   if (status !== 429) {
     return undefined;
@@ -671,22 +655,6 @@ function createNativeStreamObservation(usage: RequestAttempt): { readonly observ
         });
       }
     },
-  };
-}
-
-function observeBridgeEvent(usage: RequestAttempt, event: WireJsonObject): void {
-  if (memberValue(event, "type") === "response.completed") {
-    usage.finish("success", chatUsage(objectMember(event, "response")));
-  }
-}
-
-function chatUsage(response: WireJsonObject | undefined): UsageTokens {
-  const usage = objectMember(response, "usage");
-  const details = objectMember(usage, "prompt_tokens_details");
-  return {
-    inputTokens: observedInteger(memberValue(usage, "prompt_tokens")) ?? 0,
-    outputTokens: observedInteger(memberValue(usage, "completion_tokens")) ?? 0,
-    cacheTokens: observedInteger(memberValue(details, "cached_tokens")) ?? 0,
   };
 }
 

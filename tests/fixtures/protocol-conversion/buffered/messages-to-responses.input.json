@@ -1,0 +1,1 @@
+{"kind":"buffered","source":"messages","target":"responses","payload":{"id":"msg_source","type":"message","role":"assistant","model":"source","content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"call_1","name":"lookup","input":{"q":"x"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":2,"cache_read_input_tokens":3}}}

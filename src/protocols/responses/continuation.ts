@@ -11,6 +11,7 @@ import {
 import { isGatewayManagedResponseId } from "./bridge_nonstream.js";
 import {
   RESPONSES_CHAT_CONVERSION_VERSION,
+  RESPONSES_MESSAGES_CONVERSION_VERSION,
   ResponsesContinuationError,
   type ResponsesContinuationOwnership,
   type ResponsesContinuationResolution,
@@ -18,7 +19,7 @@ import {
   type ResponsesRouteReceipt,
 } from "./history.js";
 
-type ResponsesPlanKind = "native_responses" | "chat_bridge";
+type ResponsesPlanKind = "native_responses" | "chat_bridge" | "messages_bridge";
 
 export async function resolveResponsesContinuation(
   history: ResponsesHistory,
@@ -117,14 +118,23 @@ export function continuationOwnership(
       upstreamProtocol: "responses",
       conversionVersion: null,
     }
-    : {
-      accountId,
-      modelId,
-      upstreamOrigin: trustedUpstreamOrigin(endpoint),
-      owner: "converted",
-      upstreamProtocol: "chat",
-      conversionVersion: RESPONSES_CHAT_CONVERSION_VERSION,
-    };
+    : planKind === "chat_bridge"
+      ? {
+        accountId,
+        modelId,
+        upstreamOrigin: trustedUpstreamOrigin(endpoint),
+        owner: "converted",
+        upstreamProtocol: "chat",
+        conversionVersion: RESPONSES_CHAT_CONVERSION_VERSION,
+      }
+      : {
+        accountId,
+        modelId,
+        upstreamOrigin: trustedUpstreamOrigin(endpoint),
+        owner: "converted",
+        upstreamProtocol: "messages",
+        conversionVersion: RESPONSES_MESSAGES_CONVERSION_VERSION,
+      };
 }
 
 export async function persistContinuation(

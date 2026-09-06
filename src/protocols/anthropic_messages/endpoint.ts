@@ -3,7 +3,10 @@ import type { AccountModelPreferences } from "../../accounts/model_preferences.j
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
-import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilities.js";
+import {
+  MESSAGES_VERSION,
+  type MessagesBetaFeature,
+} from "../../copilot/upstream_types.js";
 import {
   normalizeAccountBindingFailure,
   normalizeCatalogFailure,
@@ -18,16 +21,23 @@ import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_a
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt } from "../../gateway/request_attempt.js";
 import { boundedCleanup } from "../../gateway/stream_execution.js";
+import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
 import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
-import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
-import { convertChatResponse } from "./bridge.js";
-import { convertAnthropicRequest } from "./request.js";
-import { createAnthropicStreamResponse } from "./stream.js";
 import type { TelemetryRecorder } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentAnthropicFailure } from "./failure_presenter.js";
+import { planProtocolExecution } from "../conversion/planner.js";
+import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
+import { convertBufferedResponse } from "../conversion/buffered.js";
+import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
+import {
+  createNativeMessagesStreamResponse,
+  nativeMessagesUsage,
+  serializeNativeMessagesRequest,
+  validatedNativeMessagesBody,
+} from "./native.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -75,6 +85,7 @@ async function executeAnthropicMessages(
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   assertAnthropicVersion(request.headers);
+  const betaFeatures = readAnthropicBetaFeatures(request.headers);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
     usage.setRequestedModel(requestedModel.value);
@@ -88,77 +99,144 @@ async function executeAnthropicMessages(
     throw new GatewayFailureError({ kind: resolved.kind });
   }
   usage.setResolvedModel(resolved.upstreamModel);
-  if (resolved.capability.protocols.value?.includes("chat") !== true) {
+  const stream = readStream(request.body);
+  const plan = planProtocolExecution({
+    source: "messages",
+    body: request.body,
+    stream,
+    capability: resolved.capability,
+    resolvedModel: resolved.upstreamModel,
+  });
+  if (plan.kind === "converted" && betaFeatures.length > 0) {
     throw new GatewayFailureError({
       kind: "unsupported_semantics",
-      cause: new ModelCapabilityUnavailableError(),
+      source: "converter",
+      phase: "convert",
     });
   }
-  const chatBody = convertAnthropicRequest(
-    request.body,
-    resolved.upstreamModel,
-    resolved.capability.profile.chatOutputTokenField.value,
-    resolved.capability.defaultOutputTokens,
-  );
-  const stream = chatBody.stream === true;
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
-  const chatRequest: ChatRequest = {
-    model: resolved.upstreamModel,
-    body: new TextEncoder().encode(JSON.stringify(chatBody)),
-    stream,
-    hasVisionInput: hasVisionInput(chatBody.messages),
+  if (plan.kind === "native") {
+    return await executeNativeMessages(
+      copilot,
+      request.body,
+      resolved.upstreamModel,
+      stream,
+      betaFeatures,
+      scope,
+      usage,
+    );
+  }
+  return await executeConvertedMessages(dependencies, copilot, plan, scope, usage);
+}
+
+async function executeNativeMessages(
+  copilot: BoundCopilot,
+  body: WireJsonObject,
+  model: string,
+  stream: boolean,
+  betaFeatures: readonly MessagesBetaFeature[],
+  scope: Readonly<RequestScope>,
+  usage: ReturnType<typeof createRequestAttempt>,
+): Promise<Response> {
+  const bytes = serializeNativeMessagesRequest(body, model);
+  const upstreamRequest = {
+    body: bytes,
+    version: MESSAGES_VERSION,
+    betaFeatures,
     nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
     connectTimeoutMs: scope.config.timeouts.connectMs,
     firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
     signal: scope.signal,
-  };
-
+  } as const;
   if (!stream) {
-    const upstream = await completeChat(copilot, chatRequest);
+    const upstream = await completeMessages(copilot, upstreamRequest);
     throwIfUpstreamHttp(upstream);
-    if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
-      throw new GatewayFailureError({ kind: "invalid_upstream_response" });
-    }
-    return measureBuffered(dependencies, () => {
-      const body = convertBufferedChatResponse(upstream);
-      usage.success(anthropicUsageTokens(body));
-      return new Response(JSON.stringify(body), {
-        headers: { ...JSON_HEADERS, "request-id": scope.requestId },
-      });
+    const validated = validatedNativeMessagesBody(
+      upstream.body,
+      scope.config.limits.nonstreamBodyBytes,
+    );
+    usage.success(attemptUsage(nativeMessagesUsage(validated, scope.config.limits.nonstreamBodyBytes)));
+    return new Response(Buffer.from(validated), {
+      status: upstream.status,
+      headers: { ...JSON_HEADERS, "request-id": scope.requestId },
     });
   }
-
-  function convertBufferedChatResponse(upstream: Parameters<typeof convertChatResponse>[0]) {
-    try {
-      return convertChatResponse(upstream);
-    } catch (error: unknown) {
-      if (error instanceof GatewayFailureError) {
-        throw error;
-      }
-      throw new GatewayFailureError({
-        kind: "invalid_upstream_response",
-        source: "converter",
-        phase: "convert",
-        cause: error,
-      });
-    }
-  }
-
-  const upstream = await openChatStream(copilot, chatRequest);
+  const upstream = await openMessagesStream(copilot, upstreamRequest);
   if (upstream.status >= 400) {
     await boundedCleanup(upstream.cancel());
   }
   throwIfUpstreamHttp(upstream);
-  return await createAnthropicStreamResponse({
+  return await createNativeMessagesStreamResponse({
     upstream,
-    model: resolved.upstreamModel,
-    createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     scope,
-    ...(dependencies.performanceObserver === undefined ? {} : { performanceObserver: dependencies.performanceObserver }),
     onTerminal: (result) => result.kind === "success"
-      ? usage.success(result.usage)
+      ? usage.success(attemptUsage(result.usage))
       : usage.failure(result.error),
   });
+}
+
+async function executeConvertedMessages(
+  dependencies: AnthropicMessagesRouteDependencies,
+  copilot: BoundCopilot,
+  plan: Readonly<ConvertedProtocolPlan>,
+  scope: Readonly<RequestScope>,
+  usage: ReturnType<typeof createRequestAttempt>,
+): Promise<Response> {
+  if (!plan.stream) {
+    const upstream = await completeConvertedOperation(copilot, plan, scope);
+    throwIfUpstreamHttp(upstream);
+    const converted = measureBuffered(dependencies, () => convertBufferedResponse(upstream.body, {
+      source: plan.target,
+      target: "messages",
+      model: plan.requestModel,
+      maxBytes: scope.config.limits.nonstreamBodyBytes,
+      createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+      nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
+      degradations: plan.request.degradations,
+    }));
+    usage.success(attemptUsage(converted.observations.usage));
+    return new Response(Buffer.from(converted.bytes), {
+      status: upstream.status,
+      headers: { ...JSON_HEADERS, "request-id": scope.requestId },
+    });
+  }
+  const upstream = await openConvertedOperation(copilot, plan, scope);
+  if (upstream.status >= 400) {
+    await boundedCleanup(upstream.cancel());
+  }
+  throwIfUpstreamHttp(upstream);
+  return await createConvertedStreamResponse({
+    upstream,
+    plan,
+    scope,
+    model: plan.requestModel,
+    createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+    nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      "request-id": scope.requestId,
+    },
+    onTerminal: (result) => result.kind === "success"
+      ? usage.success(attemptUsage(result.usage))
+      : usage.failure(result.error),
+  });
+}
+
+function readStream(body: WireJsonObject): boolean {
+  const values = memberValues(body, "stream");
+  if (values.length > 1 || (values[0] !== undefined && typeof values[0] !== "boolean")) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  return values[0] === true;
+}
+
+function attemptUsage(value: Readonly<SemanticUsage>) {
+  return {
+    inputTokens: Math.max(0, value.inputTokens - value.cacheReadTokens - value.cacheWriteTokens),
+    outputTokens: value.outputTokens,
+    cacheTokens: value.cacheReadTokens + value.cacheWriteTokens,
+  };
 }
 
 function measureBuffered<T>(dependencies: AnthropicMessagesRouteDependencies, work: () => T): T {
@@ -172,6 +250,30 @@ function assertAnthropicVersion(headers: Headers): void {
   if (value === null || value.includes(",") || value.trim() !== "2023-06-01") {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+}
+
+function readAnthropicBetaFeatures(headers: Headers): readonly MessagesBetaFeature[] {
+  const values = headers.get("anthropic-beta");
+  if (values === null || values.trim().length === 0) {
+    return [];
+  }
+  const supported = new Set<MessagesBetaFeature>([
+    "prompt-caching-2024-07-31",
+    "interleaved-thinking-2025-05-14",
+    "context-1m-2025-08-07",
+  ]);
+  const features: MessagesBetaFeature[] = [];
+  for (const raw of values.split(",")) {
+    const value = raw.trim();
+    if (!supported.has(value as MessagesBetaFeature)) {
+      throw new GatewayFailureError({ kind: "invalid_request" });
+    }
+    const feature = value as MessagesBetaFeature;
+    if (!features.includes(feature)) {
+      features.push(feature);
+    }
+  }
+  return features;
 }
 
 function readRequestedModel(body: WireJsonObject): { readonly value: string | undefined } {
@@ -232,30 +334,30 @@ async function bindCopilot(
   }
 }
 
-async function completeChat(
+async function completeMessages(
   copilot: BoundCopilot,
-  request: Readonly<ChatRequest>,
+  request: Parameters<BoundCopilot["completeMessages"]>[0],
 ) {
   try {
-    return await copilot.completeChat(request);
+    return await copilot.completeMessages(request);
   } catch (error: unknown) {
     throw normalizeTransportFailure(error, request.signal, { source: "transport", phase: "headers" });
   }
 }
 
-async function openChatStream(
+async function openMessagesStream(
   copilot: BoundCopilot,
-  request: Readonly<ChatRequest>,
+  request: Parameters<BoundCopilot["openMessagesStream"]>[0],
 ) {
   try {
-    return await copilot.openChatStream(request);
+    return await copilot.openMessagesStream(request);
   } catch (error: unknown) {
     throw normalizeTransportFailure(error, request.signal, { source: "transport", phase: "headers" });
   }
 }
 
 function throwIfUpstreamHttp(response: { readonly status: number; readonly headers: Headers }): void {
-  if (response.status < 400) {
+  if (response.status >= 200 && response.status < 300) {
     return;
   }
   const retryAfter = retryAfterHeader(response.status, response.headers);
@@ -271,34 +373,4 @@ function retryAfterHeader(status: number, headers: Headers): string | undefined 
     return undefined;
   }
   return safeRetryAfter(headers.get("retry-after") ?? undefined);
-}
-
-function hasVisionInput(messages: unknown[]): boolean {
-  return JSON.stringify(messages).includes("\"image_url\"");
-}
-
-interface UsageTokens {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheTokens: number;
-}
-
-function anthropicUsageTokens(response: unknown): UsageTokens {
-  const root = asObject(response);
-  const usage = asObject(root?.usage);
-  return {
-    inputTokens: safeInteger(usage?.input_tokens),
-    outputTokens: safeInteger(usage?.output_tokens),
-    cacheTokens: safeInteger(usage?.cache_read_input_tokens) + safeInteger(usage?.cache_creation_input_tokens),
-  };
-}
-
-function asObject(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function safeInteger(value: unknown): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }

@@ -126,6 +126,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
       ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
+      ...(context.createUuid === undefined ? {} : { createUuid: context.createUuid }),
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,

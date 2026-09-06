@@ -15,7 +15,10 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
-import type { NativeResponsesUpstreamRequest } from "../../src/copilot/upstream_types.js";
+import type {
+  MessagesUpstreamRequest,
+  NativeResponsesUpstreamRequest,
+} from "../../src/copilot/upstream_types.js";
 import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
 import { bootstrapGateway } from "../../src/main.js";
@@ -24,6 +27,7 @@ export const SDK_TEST_GUARD = "GHC_GATEWAY_SDK_TESTS";
 export const CHAT_MODEL = "chat-sdk";
 export const REASONING_MODEL = "gpt-5";
 export const NATIVE_RESPONSES_MODEL = "responses-sdk";
+export const MESSAGES_MODEL = "messages-sdk";
 export const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 export const PNG_DATA_URL = `data:image/png;base64,${PNG_BASE64}`;
 
@@ -44,8 +48,9 @@ export interface OfflineSdkHarness {
   readonly fetch: typeof globalThis.fetch;
   readonly chatRequests: ChatRequest[];
   readonly responsesRequests: NativeResponsesUpstreamRequest[];
+  readonly messagesRequests: MessagesUpstreamRequest[];
   readonly backendKinds: readonly string[];
-  readonly cancelled: Readonly<{ chat: number; responses: number }>;
+  readonly cancelled: Readonly<{ chat: number; messages: number; responses: number }>;
   close(): Promise<void>;
 }
 
@@ -83,6 +88,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
           { id: CHAT_MODEL, name: "SDK Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
           { id: REASONING_MODEL, name: "SDK Reasoning", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
           { id: NATIVE_RESPONSES_MODEL, name: "SDK Responses", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/responses"], max_input_tokens: 128_000, max_output_tokens: 16_384 } },
+          { id: MESSAGES_MODEL, name: "SDK Messages", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/messages"], max_input_tokens: 128_000, max_output_tokens: 16_384, default_output_tokens: 4_096 } },
         ],
       };
     },
@@ -95,7 +101,8 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
   );
   const chatRequests: ChatRequest[] = [];
   const responsesRequests: NativeResponsesUpstreamRequest[] = [];
-  const cancellation = { chat: 0, responses: 0 };
+  const messagesRequests: MessagesUpstreamRequest[] = [];
+  const cancellation = { chat: 0, messages: 0, responses: 0 };
   const backend = new ScriptedCopilotBackend({
     chat(request) {
       chatRequests.push(request);
@@ -124,6 +131,20 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       return isCancellationRequest(request.body)
         ? cancellableResponsesStream(request.signal, cancellation)
         : scriptedResponsesStream(request.body);
+    },
+    messages(request) {
+      messagesRequests.push(request);
+      return {
+        status: 200,
+        headers: new Headers({ "x-scripted-remote": "messages" }),
+        body: jsonBytes(scriptedMessagesObject(request.body)),
+      };
+    },
+    messagesStream(request) {
+      messagesRequests.push(request);
+      return isCancellationRequest(request.body)
+        ? cancellableMessagesStream(request.signal, cancellation)
+        : scriptedMessagesStream(request.body);
     },
   });
   let databaseClosed = false;
@@ -165,6 +186,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
     fetch: loopbackOnlyFetch(baseUrl),
     chatRequests,
     responsesRequests,
+    messagesRequests,
     get backendKinds() {
       return backend.captured.map((entry) => entry.kind);
     },
@@ -176,12 +198,14 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
   };
 }
 
-export function decodeCapturedBody(request: ChatRequest | NativeResponsesUpstreamRequest): unknown {
+export function decodeCapturedBody(
+  request: ChatRequest | NativeResponsesUpstreamRequest | MessagesUpstreamRequest,
+): unknown {
   return JSON.parse(new TextDecoder().decode(request.body)) as unknown;
 }
 
 export async function waitFor(check: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
     if (check()) {
       return;
     }
@@ -413,6 +437,54 @@ function scriptedResponsesStream(body: Uint8Array): Uint8Array[] {
   })];
 }
 
+function scriptedMessagesObject(_body: Uint8Array): Record<string, unknown> {
+  return {
+    id: "msg_sdk",
+    type: "message",
+    role: "assistant",
+    model: MESSAGES_MODEL,
+    content: [{ type: "text", text: "pong" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+}
+
+function scriptedMessagesStream(_body: Uint8Array): Uint8Array[] {
+  return [
+    messagesSse("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_sdk_stream",
+        type: "message",
+        role: "assistant",
+        content: [],
+        model: MESSAGES_MODEL,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }),
+    messagesSse("content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    }),
+    messagesSse("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "pong" },
+    }),
+    messagesSse("content_block_stop", { type: "content_block_stop", index: 0 }),
+    messagesSse("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    }),
+    messagesSse("message_stop", { type: "message_stop" }),
+  ];
+}
+
 async function* cancellableChatStream(
   signal: AbortSignal,
   cancellation: { chat: number },
@@ -437,6 +509,30 @@ async function* cancellableResponsesStream(
     await untilAborted(signal);
   } finally {
     cancellation.responses += 1;
+  }
+}
+
+async function* cancellableMessagesStream(
+  signal: AbortSignal,
+  cancellation: { messages: number },
+): AsyncIterable<Uint8Array> {
+  try {
+    yield messagesSse("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_waiting",
+        type: "message",
+        role: "assistant",
+        content: [],
+        model: MESSAGES_MODEL,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    });
+    await untilAborted(signal);
+  } finally {
+    cancellation.messages += 1;
   }
 }
 
@@ -495,5 +591,9 @@ function chatSse(value: unknown): Uint8Array {
 }
 
 function responsesSse(event: string, value: unknown): Uint8Array {
+  return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
+}
+
+function messagesSse(event: string, value: unknown): Uint8Array {
   return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
 }

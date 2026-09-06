@@ -4,6 +4,8 @@ import {
   CHAT_MODEL,
   decodeCapturedBody,
   getWeather,
+  MESSAGES_MODEL,
+  NATIVE_RESPONSES_MODEL,
   type OfflineSdkHarness,
   PNG_BASE64,
   REASONING_MODEL,
@@ -52,6 +54,7 @@ describe("official Anthropic SDK", () => {
       max_tokens: 8,
       messages: [{ role: "user", content: "sdk-anthropic-nonstream" }],
     });
+
     expect(message.type).toBe("message");
     expect(message.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
 
@@ -61,6 +64,7 @@ describe("official Anthropic SDK", () => {
       messages: [{ role: "user", content: "sdk-anthropic-stream" }],
       stream: true,
     });
+
     const eventTypes = [];
     for await (const event of stream) {
       eventTypes.push(event.type);
@@ -78,6 +82,38 @@ describe("official Anthropic SDK", () => {
       max_tokens: 8,
       stream: true,
       stream_options: { include_usage: true },
+    });
+  });
+
+  it("uses native Messages and converts Messages directly to Responses", async () => {
+    const messagesIndex = harness.messagesRequests.length;
+    const responsesIndex = harness.responsesRequests.length;
+    const native = await client.messages.create({
+      model: MESSAGES_MODEL,
+      max_tokens: 8,
+      messages: [{ role: "user", content: "messages-native" }],
+    });
+    const converted = await client.messages.create({
+      model: NATIVE_RESPONSES_MODEL,
+      max_tokens: 8,
+      messages: [{ role: "user", content: "messages-to-responses" }],
+    });
+
+    expect(native.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
+    expect(converted.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
+    expect(decodeCapturedBody(harness.messagesRequests[messagesIndex]!)).toMatchObject({
+      model: MESSAGES_MODEL,
+      max_tokens: 8,
+      messages: [{ role: "user", content: "messages-native" }],
+    });
+    expect(decodeCapturedBody(harness.responsesRequests[responsesIndex]!)).toMatchObject({
+      model: NATIVE_RESPONSES_MODEL,
+      max_output_tokens: 8,
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "messages-to-responses" }],
+      }],
     });
   });
 
@@ -293,9 +329,9 @@ describe("official Anthropic SDK", () => {
       output_config: { effort: "xhigh" },
     });
 
-    expect(effort.content).toContainEqual(expect.objectContaining({ type: "thinking", thinking: "reason-xhigh" }));
-    expect(budget.content).toContainEqual(expect.objectContaining({ type: "thinking", thinking: "reason-medium" }));
-    expect(extraHigh.content).toContainEqual(expect.objectContaining({ type: "thinking", thinking: "reason-xhigh" }));
+    expect(effort.content).toContainEqual(expect.objectContaining({ type: "text", text: "Reasoned answer." }));
+    expect(budget.content).toContainEqual(expect.objectContaining({ type: "text", text: "Reasoned answer." }));
+    expect(extraHigh.content).toContainEqual(expect.objectContaining({ type: "text", text: "Reasoned answer." }));
     expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
       model: REASONING_MODEL,
       messages: [{ role: "user", content: "Reason with maximum effort." }],

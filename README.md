@@ -127,6 +127,37 @@ All routes use the same loopback listener. Inference routes do not require a sep
 No unversioned, compact, trailing-slash, or legacy route aliases are registered.
 The retired Ollama-compatible routes `/api/chat`, `/api/tags`, and `/api/version` are not registered.
 
+### Protocol Routing And Conversion
+
+Routing uses the bound account's immutable model-capability snapshot. A matching native HTTP
+protocol is selected first and preserves protocol extensions. Otherwise the gateway evaluates
+conversion compatibility without making an inference call, then uses these fixed priorities:
+
+- Chat: Responses, then Messages
+- Messages: Chat, then Responses
+- Responses: Chat, then Messages
+
+One request captures one plan and performs exactly one typed upstream operation. The gateway does
+not probe interfaces, infer routing from model names, retry through another protocol, or recurse
+through another local endpoint.
+
+Converted requests use strict direction-specific validation. Unknown protocol keys, duplicate
+keys, invalid types or ranges, `n` values other than `1`, unbound tool results, invalid complete
+tool arguments, and constraints that the target cannot preserve are rejected before inference.
+Message order, images, function names and arguments, call IDs, result binding, structured output,
+forced tool choice, and `parallel_tool_calls: false` are preserved when the route is eligible.
+File, audio, and server-hosted tools require an explicit adapter and are otherwise rejected.
+
+Optional reasoning effort or budget can be coarsened, and nonportable reasoning presentation or
+opaque state can be omitted on converted routes. These finite, content-free degradations do not
+change success accounting, add warning text, or trigger a retry. Native routes do not apply
+conversion-only degradation.
+
+Responses continuations stay on their recorded account, model, origin, and upstream protocol.
+For Responses-to-Messages conversion, `previous_response_id` is consumed locally and is never sent
+to the Messages operation. The bounded Responses History can restore completed tool checkpoints;
+it is not a full transcript or reasoning-state store.
+
 ## Configuration
 
 Global options:

@@ -190,7 +190,7 @@ describe("Responses endpoint", () => {
         return {
           status: 200,
           headers: new Headers(),
-          body: text("{\"id\":\"chatcmpl_next\",\"model\":\"dual\",\"choices\":[]}"),
+          body: text("{\"id\":\"chatcmpl_next\",\"model\":\"dual\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"),
         };
       },
     });

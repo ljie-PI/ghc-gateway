@@ -11,7 +11,7 @@ describe("fixture family closure", () => {
     const entries = await verifyFixtureManifests();
     const count = (family: string): number => entries.filter((entry) => entry.family === family).length;
 
-    expect(entries).toHaveLength(50);
+    expect(entries).toHaveLength(53);
     for (const entry of entries) {
       expect(entry).not.toHaveProperty("source");
       expect(entry).not.toHaveProperty("owner");
@@ -22,6 +22,7 @@ describe("fixture family closure", () => {
     expect(count("responses-bridge-nonstream")).toBe(2);
     expect(count("responses-bridge-stream")).toBe(2);
     expect(count("responses-endpoint")).toBe(3);
+    expect(count("protocol-conversion")).toBe(3);
     expect(entries.some((entry) => entry.caseId.startsWith("gateway-http-host."))).toBe(true);
     expect(entries.some((entry) => entry.caseId.startsWith("gateway-http."))).toBe(false);
   });

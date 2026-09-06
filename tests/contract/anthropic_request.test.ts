@@ -195,7 +195,7 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("converts system, media, tool history, schema cleanup, tool choice, and reasoning rules", async () => {
+  it("rejects unknown fields and lossy legacy schema/media behavior before inference", async () => {
     const captured: ChatRequest[] = [];
     const backend = new ScriptedCopilotBackend({
       chatStream(request) {
@@ -261,56 +261,8 @@ describe("Anthropic request route", () => {
         output_config: { effort: "max", format: { type: "json_schema" } },
       }));
 
-      expect(response.status).toBe(200);
-      expect(captured).toHaveLength(1);
-      const body = decodeChatBody(captured[0] as ChatRequest);
-      expect(body).toEqual({
-        model: "gpt-5",
-        messages: [
-          { role: "system", content: "bill me elsewhere\nsecond" },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "look" },
-              { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
-            ],
-          },
-          {
-            role: "assistant",
-            content: null,
-            tool_calls: [{
-              id: "call_1",
-              type: "function",
-              function: { name: "lookup", arguments: "{\"a\":[true,null],\"z\":1}" },
-            }],
-          },
-          { role: "tool", tool_call_id: "call_1", content: "{\"a\":1,\"b\":2}" },
-          { role: "user", content: "continue" },
-        ],
-        max_tokens: 64,
-        temperature: 0.2,
-        top_p: 0.9,
-        stop: ["END"],
-        stream: true,
-        stream_options: { include_usage: true },
-        tools: [{
-          type: "function",
-          function: {
-            name: "lookup",
-            description: "Lookup",
-            parameters: {
-              type: "object",
-              properties: {
-                url: { type: "string" },
-                nested: { type: "object", properties: {}, items: { type: "object", properties: { link: { type: "string" } } } },
-                untouched: { type: "object", properties: {}, oneOf: [{ type: "string", format: "uri" }] },
-              },
-            },
-          },
-        }],
-        tool_choice: { type: "function", function: { name: "lookup" } },
-        reasoning_effort: "xhigh",
-      });
+      expect(response.status).toBe(400);
+      expect(captured).toEqual([]);
     } finally {
       await close();
     }
@@ -336,7 +288,7 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("keeps parallel tool_result messages adjacent and moves media into the following user message", async () => {
+  it("rejects orphan parallel tool results instead of converting them to user text", async () => {
     const captured: ChatRequest[] = [];
     const backend = new ScriptedCopilotBackend({
       chat(request) {
@@ -372,23 +324,8 @@ describe("Anthropic request route", () => {
         }],
       }));
 
-      expect(response.status).toBe(200);
-      expect(decodeChatBody(captured[0] as ChatRequest).messages).toEqual([
-        {
-          role: "tool",
-          tool_call_id: "call_1",
-          content: "[\"[cc-switch: tool result media moved to the following user message]\"]",
-        },
-        { role: "tool", tool_call_id: "call_2", content: "plain" },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "[cc-switch: media output of tool call call_1]" },
-            { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
-          ],
-        },
-        { role: "user", content: "after tools" },
-      ]);
+      expect(response.status).toBe(400);
+      expect(captured).toEqual([]);
     } finally {
       await close();
     }
