@@ -511,6 +511,9 @@ async function handle(
       ...fixture.state.history,
       revision: fixture.state.history.revision + 1,
       count: 0,
+      receiptCount: 0,
+      legacyCount: 0,
+      untrackedContinuationBlocked: false,
       oldestAt: null,
       newestAt: null,
     };

@@ -25,12 +25,12 @@
   }
 
   async function clear(): Promise<void> {
-    if (!data || !confirm("Clear all retained Responses bridge history?")) return;
+    if (!data || !confirm("Clear Responses tool checkpoints, route receipts, legacy rows, and continuation policy state?")) return;
     clearing = true;
     failure = "";
     try {
       data = await client.clearHistory(data.revision);
-      message = "Responses history cleared.";
+      message = "Responses history and route ownership state cleared.";
     } catch (error: unknown) {
       failure = errorMessage(error);
       if (error instanceof ApiError && error.status === 409) await load(true);
@@ -73,7 +73,13 @@
     </div>
     <div class="history-copy">
       <p class="eyebrow">RETAINED CHECKPOINTS</p>
-      <h2>{data.count === 0 ? "History is empty" : "History is within bounds"}</h2>
+      <h2>
+        {data.count > 0
+          ? "Responses state is within bounds"
+          : data.receiptCount > 0 || data.legacyCount > 0 || data.untrackedContinuationBlocked
+            ? "No tool checkpoints retained"
+            : "Responses state is empty"}
+      </h2>
       <p>
         Tool checkpoints stay separate from content-free route receipts. Native Responses create
         receipts but never enter the tool-history count. Oldest checkpoint:

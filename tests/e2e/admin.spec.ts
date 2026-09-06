@@ -416,8 +416,8 @@ test("responses-history-inspect-and-clear", async ({ page }) => {
   await expect(page.getByText("12 / 512", { exact: true })).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Clear history" }).click();
-  await expect(page.getByRole("heading", { name: "History is empty" })).toBeVisible();
-  await expect(page.getByText("Responses history cleared.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Responses state is empty" })).toBeVisible();
+  await expect(page.getByText("Responses history and route ownership state cleared.")).toBeVisible();
 });
 
 test("events-and-degraded-recovery", async ({ page }) => {
