@@ -13,8 +13,7 @@ interface ToolState {
 
 interface MessageState {
   readonly key: string;
-  text: string;
-  refusal: string;
+  readonly partKeys: string[];
 }
 
 interface MessagePartState {
@@ -39,13 +38,13 @@ export class SemanticItemLedger {
 
   appendText(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
-    this.message(orderKey).text += delta;
+    this.message(orderKey);
     this.messagePart(key, orderKey).text += delta;
   }
 
   appendRefusal(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
-    this.message(orderKey).refusal += delta;
+    this.message(orderKey);
     this.messagePart(key, orderKey).refusal += delta;
   }
 
@@ -128,10 +127,16 @@ export class SemanticItemLedger {
         if (message === undefined) {
           invalid();
         }
-        const content = [
-          ...(message.text.length === 0 ? [] : [{ type: "text", text: message.text } as const]),
-          ...(message.refusal.length === 0 ? [] : [{ type: "refusal", text: message.refusal } as const]),
-        ];
+        const content = message.partKeys.flatMap((key) => {
+          const part = this.messageParts.get(key);
+          if (part === undefined) {
+            invalid();
+          }
+          return [
+            ...(part.text.length === 0 ? [] : [{ type: "text", text: part.text } as const]),
+            ...(part.refusal.length === 0 ? [] : [{ type: "refusal", text: part.refusal } as const]),
+          ];
+        });
         if (content.length > 0) {
           items.push({ type: "message", key: entry.key, content });
         }
@@ -177,7 +182,7 @@ export class SemanticItemLedger {
     let message = this.messages.get(key);
     if (message === undefined) {
       this.reserve(key);
-      message = { key, text: "", refusal: "" };
+      message = { key, partKeys: [] };
       this.messages.set(key, message);
       this.order.push({ kind: "message", key });
     }
@@ -192,6 +197,7 @@ export class SemanticItemLedger {
       }
       part = { groupKey, text: "", refusal: "" };
       this.messageParts.set(key, part);
+      this.message(groupKey).partKeys.push(key);
     } else if (part.groupKey !== groupKey) {
       invalid();
     }

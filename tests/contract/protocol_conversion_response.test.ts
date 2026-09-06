@@ -395,6 +395,40 @@ describe("shared conversion response codecs", () => {
     expect(text.match(/data: \[DONE\]/gu)).toHaveLength(1);
   });
 
+  it("preserves ordered text/refusal/text parts after a tool in Messages output", async () => {
+    const response = {
+      id: "resp_parts_after_tool",
+      object: "response",
+      status: "completed",
+      output: [
+        { id: "fc_1", type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}", status: "completed" },
+        {
+          id: "msg_parts",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "A", annotations: [] },
+            { type: "refusal", refusal: "B" },
+            { type: "output_text", text: "C", annotations: [] },
+          ],
+        },
+      ],
+      usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+    };
+    const text = wireText(await collectStream(
+      "responses",
+      "messages",
+      chunks(encoder.encode(responseEvent(0, "response.completed", { response }))),
+    ));
+    const a = text.indexOf("\"text\": \"A\"");
+    const b = text.indexOf("\"text\": \"B\"");
+    const c = text.indexOf("\"text\": \"C\"");
+    expect(a).toBeGreaterThan(-1);
+    expect(a).toBeLessThan(b);
+    expect(b).toBeLessThan(c);
+  });
+
   it("keeps token-limited partial tool arguments incomplete instead of validating fabricated JSON", async () => {
     const source = [
       "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":\"length\"}]}\n\n",
