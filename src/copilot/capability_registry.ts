@@ -93,12 +93,14 @@ export class ModelCapabilityRegistry {
   ) {}
 
   async get(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<CapabilityCatalogSnapshot> {
+    const configured = this.overrides.list(account.accountId);
+    const capabilityRevision = this.overrides.revision(account.accountId);
     const catalog = await this.catalog.get(account.accountId, signal, account.credentialGeneration);
     return this.compose(
       account,
       catalog,
-      this.overrides.list(account.accountId),
-      this.overrides.revision(account.accountId),
+      configured,
+      capabilityRevision,
     );
   }
 
@@ -113,7 +115,11 @@ export class ModelCapabilityRegistry {
     if (currentRevision !== expectedRevision) {
       throw new ModelCapabilityOverrideError("revision_conflict");
     }
+    const configuredBefore = this.overrides.list(account.accountId);
     const catalog = await this.catalog.get(account.accountId, signal, account.credentialGeneration);
+    if (this.overrides.revision(account.accountId) !== currentRevision) {
+      throw new ModelCapabilityOverrideError("revision_conflict");
+    }
     if (candidate?.defaultOutputTokens !== undefined) {
       const model = catalog.models.find((item) => item.id === modelId);
       const live = model?.capabilities ?? UNKNOWN_DECLARATIONS;
@@ -127,7 +133,7 @@ export class ModelCapabilityRegistry {
         throw new ModelCapabilityOverrideError("validation_failed");
       }
     }
-    const configured = this.overrides.list(account.accountId)
+    const configured = configuredBefore
       .filter((stored) => stored.modelId !== modelId);
     const current = this.overrides.get(account.accountId, modelId);
     const changesState = candidate !== null || current.value !== null;

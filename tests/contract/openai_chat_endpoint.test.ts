@@ -206,6 +206,28 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
+  it("attributes preferred-model capability failures to the resolved model", async () => {
+    const usageUpdates: unknown[] = [];
+    const backend = new CapturingCopilotBackend({});
+    const harness = await openAiGateway(backend, {
+      preferred: "valid",
+      usageUpdates,
+      capiFetch: async () => ({
+        data: [{ id: "gpt", name: "GPT", vendor: "test", model_picker_enabled: true }],
+      }),
+    });
+    try {
+      const response = await harness.gw.fetch(jsonRequest("{\"messages\":[]}"));
+      expect(response.status).toBe(422);
+      expect(usageUpdates).toMatchObject([{
+        resolvedModel: "gpt",
+        outcome: "client_error",
+      }]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("registers only the exact route", async () => {
     const backend = new CapturingCopilotBackend({
       chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },

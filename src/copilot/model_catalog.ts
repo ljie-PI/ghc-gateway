@@ -48,6 +48,9 @@ interface InflightEntry {
   readonly generation: number;
   readonly credentialGeneration: number;
   readonly promise: Promise<CatalogSnapshot>;
+  readonly controller: AbortController;
+  waiters: number;
+  settled: boolean;
 }
 
 export class CopilotModelCatalog {
@@ -84,19 +87,40 @@ export class CopilotModelCatalog {
     if (pending !== undefined
       && pending.generation === generation
       && pending.credentialGeneration === credentialGeneration) {
-      return await waitForCatalog(pending.promise, signal);
+      return await this.waitForInflight(pending, signal);
     }
     const controller = new AbortController();
     const promise = this.fetchCatalog(accountId, generation, credentialGeneration, controller.signal);
-    this.inflight.set(accountId, { generation, credentialGeneration, promise });
+    const entry: InflightEntry = {
+      generation,
+      credentialGeneration,
+      promise,
+      controller,
+      waiters: 0,
+      settled: false,
+    };
+    this.inflight.set(accountId, entry);
     this.activeControllers.add(controller);
     void promise.finally(() => {
+      entry.settled = true;
       this.activeControllers.delete(controller);
       if (this.inflight.get(accountId)?.promise === promise) {
         this.inflight.delete(accountId);
       }
     }).catch(() => undefined);
-    return await waitForCatalog(promise, signal);
+    return await this.waitForInflight(entry, signal);
+  }
+
+  private async waitForInflight(entry: InflightEntry, signal: AbortSignal): Promise<CatalogSnapshot> {
+    entry.waiters += 1;
+    try {
+      return await waitForCatalog(entry.promise, signal);
+    } finally {
+      entry.waiters -= 1;
+      if (entry.waiters === 0 && !entry.settled) {
+        entry.controller.abort();
+      }
+    }
   }
 
   private async fetchCatalog(

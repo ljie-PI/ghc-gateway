@@ -399,6 +399,36 @@ describe("model capability registry", () => {
     expect(harness.registry.isCurrent(initial)).toBe(false);
     expect(harness.registry.isCurrent(preview)).toBe(true);
   });
+
+  it("captures override configuration before awaiting catalog discovery", async () => {
+    const database = databaseWithCapabilities();
+    const account = await createAccount(database, "1");
+    let release = (): void => undefined;
+    let started = (): void => undefined;
+    const startedPromise = new Promise<void>((resolve) => { started = resolve; });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        started();
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { data: [model("changing", { supported_endpoints: ["/responses"] })] };
+      },
+    });
+    const overrides = new SqliteModelCapabilityOverrides(database);
+    const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+    const pending = registry.get(account, signal);
+    await startedPromise;
+    overrides.set(account.accountId, "changing", {
+      enabled: true,
+      protocols: ["chat"],
+    }, 0);
+    release();
+    const captured = await pending;
+    expect(captured.capabilityRevision).toBe(0);
+    expect(capability(captured, "changing").protocols.value).toEqual(["responses"]);
+    const subsequent = await registry.get(account, signal);
+    expect(subsequent.capabilityRevision).toBe(1);
+    expect(capability(subsequent, "changing").protocols.value).toEqual(["chat"]);
+  });
 });
 
 async function createHarness(

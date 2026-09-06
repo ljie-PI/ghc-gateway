@@ -87,13 +87,13 @@ async function executeAnthropicMessages(
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
+  usage.setResolvedModel(resolved.upstreamModel);
   if (resolved.capability.protocols.value?.includes("chat") !== true) {
     throw new GatewayFailureError({
       kind: "unsupported_semantics",
       cause: new ModelCapabilityUnavailableError(),
     });
   }
-  usage.setResolvedModel(resolved.upstreamModel);
   const chatBody = convertAnthropicRequest(
     request.body,
     resolved.upstreamModel,

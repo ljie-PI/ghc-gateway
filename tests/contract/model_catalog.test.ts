@@ -134,6 +134,33 @@ describe("CAPI parse and cache", () => {
     expect(fetches).toBe(2);
   });
 
+  it("cancels displaced catalog fetches after their last waiter aborts", async () => {
+    let fetches = 0;
+    let aborts = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch(_accountId, signal) {
+        fetches += 1;
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        });
+        return { data: [] };
+      },
+    });
+    for (let index = 0; index < 20; index += 1) {
+      const controller = new AbortController();
+      const pending = catalog.get("github.com/1", controller.signal);
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      catalog.invalidate("github.com/1");
+    }
+    await vi.waitFor(() => expect(aborts).toBe(20));
+    expect(fetches).toBe(20);
+    await catalog.close();
+  });
+
   it("does not let an older credential generation replace a newer cache entry", async () => {
     const releases = new Map<number, () => void>();
     let fetches = 0;

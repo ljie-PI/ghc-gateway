@@ -102,13 +102,13 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         : null;
       const catalog = await loadCatalog(dependencies, account, scope.signal);
       const resolved = resolveOpenAiChatModel(decoded, catalog, preference);
+      usage.setResolvedModel(resolved.upstreamModel);
       if (resolved.capability.protocols.value?.includes("chat") !== true) {
         throw new GatewayFailureError({
           kind: "unsupported_semantics",
           cause: new ModelCapabilityUnavailableError(),
         });
       }
-      usage.setResolvedModel(resolved.upstreamModel);
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
 
