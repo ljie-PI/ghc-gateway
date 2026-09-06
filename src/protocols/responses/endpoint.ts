@@ -854,6 +854,7 @@ function validateExtendedResponsesRequest(
   };
   prepareConvertedRequest("responses", "chat", sanitized, model, capability);
   rejectExtendedInstructionReordering(memberValue(body, "input"));
+  rejectUnsafeExtendedHistory(memberValue(body, "input"));
 }
 
 function validateExtendedToolChoice(value: WireJson | undefined, keys: ReadonlySet<string>): void {
@@ -1138,6 +1139,104 @@ function rejectExtendedInstructionReordering(input: WireJson | undefined): void 
       ordinarySeen = true;
     }
   }
+}
+
+function rejectUnsafeExtendedHistory(input: WireJson | undefined): void {
+  if (!isWireJsonArray(input)) {
+    return;
+  }
+  const extendedCalls = new Set<string>();
+  const discoveredNames = new Set<string>();
+  for (const item of input.items) {
+    if (!isWireJsonObject(item) || memberValue(item, "type") !== "tool_search_output") {
+      continue;
+    }
+    const tools = memberValue(item, "tools");
+    if (!isWireJsonArray(tools)) {
+      continue;
+    }
+    for (const tool of tools.items) {
+      if (isWireJsonObject(tool) && memberValue(tool, "type") === "function") {
+        const shape = memberValue(tool, "function");
+        const functionObject = isWireJsonObject(shape) ? shape : tool;
+        const name = memberValue(functionObject, "name");
+        if (typeof name === "string") {
+          discoveredNames.add(name);
+        }
+      }
+    }
+  }
+  for (const item of input.items) {
+    if (!isWireJsonObject(item)) {
+      continue;
+    }
+    const type = memberValue(item, "type");
+    const callId = memberValue(item, "call_id");
+    if (
+      (type === "custom_tool_call" || type === "tool_search_call")
+      && typeof callId === "string"
+    ) {
+      extendedCalls.add(callId);
+      continue;
+    }
+    if (
+      type === "function_call"
+      && memberValue(item, "namespace") !== undefined
+      && typeof callId === "string"
+    ) {
+      extendedCalls.add(callId);
+      continue;
+    }
+    if (type === "function_call") {
+      const name = memberValue(item, "name");
+      if (typeof callId === "string" && typeof name === "string" && discoveredNames.has(name)) {
+        extendedCalls.add(callId);
+        continue;
+      }
+      throw new GatewayFailureError({
+        kind: "unsupported_semantics",
+        source: "converter",
+        phase: "convert",
+      });
+    }
+    if (
+      type === "custom_tool_call_output"
+      || type === "tool_search_output"
+      || type === "function_call_output"
+    ) {
+      if (
+        typeof callId !== "string"
+        || !extendedCalls.has(callId)
+        || containsExtendedToolMedia(memberValue(item, "output"))
+      ) {
+        throw new GatewayFailureError({
+          kind: "unsupported_semantics",
+          source: "converter",
+          phase: "convert",
+        });
+      }
+    }
+  }
+}
+
+function containsExtendedToolMedia(value: WireJson | undefined, depth = 0): boolean {
+  if (value === undefined || depth > 32) {
+    return false;
+  }
+  if (typeof value === "string") {
+    return value.trim().startsWith("data:image/");
+  }
+  if (isWireJsonArray(value)) {
+    return value.items.some((item) => containsExtendedToolMedia(item, depth + 1));
+  }
+  if (!isWireJsonObject(value)) {
+    return false;
+  }
+  const type = memberValue(value, "type");
+  if (type === "image" || type === "input_image" || type === "image_url") {
+    return true;
+  }
+  return value.members.some((member) => containsExtendedToolMedia(member.value, depth + 1));
 }
 
 function attemptUsage(value: Readonly<SemanticUsage>): AttemptUsage {

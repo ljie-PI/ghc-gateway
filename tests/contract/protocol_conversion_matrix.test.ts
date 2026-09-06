@@ -314,7 +314,7 @@ describe("protocol conversion matrix", () => {
     }
   });
 
-  it("preserves long custom tool-result text when moving adjacent media", async () => {
+  it("rejects extended tool-result media instead of dropping long adjacent text", async () => {
     const harness = await matrixGateway();
     try {
       const longText = "x".repeat(9000);
@@ -333,11 +333,9 @@ describe("protocol conversion matrix", () => {
         ],
         tools: [{ type: "custom", name: "render", format: { type: "text" } }],
       }));
-      expect(response.status).toBe(200);
-      const forwarded = decoder.decode(harness.chatBodies[0]);
-      expect(forwarded).toContain(longText);
-      expect(forwarded).toContain("image_url");
-      expect(forwarded).not.toContain("[cc-switch: omitted");
+      expect(response.status).toBe(422);
+      await response.text();
+      expect(harness.backend.captured).toEqual([]);
     } finally {
       await harness.close();
     }
