@@ -12,14 +12,20 @@ import {
 } from "../../copilot/failures.js";
 import {
   failureFromSignal,
-  failureFromUnknown,
-  failureOutcome,
   GatewayFailureError,
   safeRetryAfter,
 } from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
+import { createRequestAttempt, type AttemptUsage, type RequestAttempt } from "../../gateway/request_attempt.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
+import {
+  boundedCleanup,
+  createExchangeCancellation,
+  createOwnedStreamCleanup,
+  nextWithDeadline,
+  withByteIdleDeadlines,
+} from "../../gateway/stream_execution.js";
 import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { ChatRequest } from "../chat_completions/types.js";
@@ -37,7 +43,7 @@ import {
   RESPONSES_JSON_HEADERS,
   RESPONSES_STREAM_HEADERS,
 } from "./wire.js";
-import type { TelemetryProtocol, TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
+import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentResponsesFailure } from "./failure_presenter.js";
 
@@ -56,19 +62,21 @@ export interface ResponsesRouteDependencies {
 }
 
 export function createResponsesRoute(dependencies: ResponsesRouteDependencies): RouteRegistration {
-  const attempts = new Map<string, UsageAttempt>();
   return {
     method: "POST",
     path: "/v1/responses",
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentResponsesFailure,
-    observeFailure: (failure, requestId) => {
-      const usage = attempts.get(requestId) ?? createUsageAttempt(dependencies, new AbortController().signal);
-      usage.failure(new GatewayFailureError(failure));
-      attempts.delete(requestId);
-    },
-    endpoint: (request, scope) => executeResponses(dependencies, request, scope, attempts),
+    createAttempt: (requestId, config) => createRequestAttempt({
+      requestId,
+      config,
+      protocol: "openai_responses_unknown",
+      abortedErrorCount: 1,
+      ...(dependencies.usageRecorder === undefined ? {} : { recorder: dependencies.usageRecorder }),
+      ...(dependencies.nowMs === undefined ? {} : { nowMs: dependencies.nowMs }),
+    }),
+    endpoint: (request, scope) => executeResponses(dependencies, request, scope),
   };
 }
 
@@ -76,18 +84,14 @@ async function executeResponses(
   dependencies: ResponsesRouteDependencies,
   request: Readonly<DecodedHttpRequest>,
   scope: Readonly<RequestScope>,
-  attempts: Map<string, UsageAttempt>,
 ): Promise<Response> {
-  const usage = createUsageAttempt(dependencies, scope.signal, () => attempts.delete(scope.requestId));
-  if (dependencies.usageRecorder !== undefined) {
-    attempts.set(scope.requestId, usage);
-  }
+  const usage = scope.attempt;
   if (request.body === undefined) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   const decoded = decodeRequest(request.body);
   if (decoded.model !== undefined) {
-    usage.setModel(decoded.model);
+    usage.setRequestedModel(decoded.model);
   }
   const account = await bindAccount(dependencies.directory, scope.signal);
   usage.setAccount(account.accountId);
@@ -97,7 +101,7 @@ async function executeResponses(
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
-  usage.setModel(resolved.upstreamModel);
+  usage.setResolvedModel(resolved.upstreamModel);
   const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
   const plan = planResponsesExecution(decoded, resolved, bound.target);
   usage.setProtocol(plan.kind === "native_responses" ? "openai_responses_native" : "openai_responses_bridge");
@@ -126,7 +130,7 @@ async function nativeNonstreamResponse(
   bound: BoundCopilot,
   plan: Parameters<typeof completeNativeResponses>[1],
   scope: Readonly<RequestScope>,
-  usage: UsageAttempt,
+  usage: RequestAttempt,
 ): Promise<Response> {
   const upstream = await transportCall(
     () => completeNativeResponses(bound, plan, nativeOptions(scope)),
@@ -147,7 +151,7 @@ async function nativeStreamResponse(
   bound: BoundCopilot,
   plan: Parameters<typeof openNativeResponsesStream>[1],
   scope: Readonly<RequestScope>,
-  usage: UsageAttempt,
+  usage: RequestAttempt,
   performanceObserver?: ProtocolPerformanceObserver,
 ): Promise<Response> {
   const upstream = await transportCall(
@@ -155,16 +159,24 @@ async function nativeStreamResponse(
     scope.signal,
   );
   if (upstream.status < 200 || upstream.status >= 300) {
-    await upstream.cancel();
+    await boundedCleanup(upstream.cancel());
   }
   assertUpstreamSuccess(upstream);
-  const bytes = withStreamTimeouts(upstream.bytes, upstream, scope);
+  const cancelExchange = createExchangeCancellation(upstream);
+  const bytes = withByteIdleDeadlines(
+    upstream.bytes,
+    scope.signal,
+    scope.config.timeouts.firstByteMs,
+    scope.config.timeouts.streamIdleMs,
+    cancelExchange,
+  );
   const observed = usage.enabled ? createNativeStreamObservation(usage) : undefined;
   return await streamBytesResponse(
     normalizeNativeResponsesStream(bytes, scope.config.limits.sseEventBytes, observed?.observe, performanceObserver),
     upstream,
     scope,
     usage.failure,
+    cancelExchange,
   );
 }
 
@@ -173,7 +185,7 @@ async function bridgeNonstreamResponse(
   bound: BoundCopilot,
   plan: ChatBridgePlan,
   scope: Readonly<RequestScope>,
-  usage: UsageAttempt,
+  usage: RequestAttempt,
 ): Promise<Response> {
   const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
     reasoningConfig: null,
@@ -194,7 +206,7 @@ async function bridgeNonstreamResponse(
     return { converted, bytes: Buffer.from(serializeWireJson(converted.response)) };
   });
   await dependencies.history.record(measured.converted.historyRecord, scope.signal);
-  usage.finish("success", responsesUsage(measured.converted.response));
+  usage.success(responsesUsage(measured.converted.response));
   return new Response(measured.bytes, {
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
@@ -205,7 +217,7 @@ async function bridgeStreamResponse(
   bound: BoundCopilot,
   plan: ChatBridgePlan,
   scope: Readonly<RequestScope>,
-  usage: UsageAttempt,
+  usage: RequestAttempt,
 ): Promise<Response> {
   const prepared = await prepareChatBridgeRequest(plan, dependencies.history, {
     reasoningConfig: null,
@@ -214,10 +226,20 @@ async function bridgeStreamResponse(
   const request = chatRequest(prepared.body, plan.resolvedModel.upstreamModel, true, scope);
   const upstream = await transportCall(() => bound.openChatStream(request), request.signal);
   if (upstream.status < 200 || upstream.status >= 300) {
-    await upstream.cancel();
+    await boundedCleanup(upstream.cancel());
   }
   assertUpstreamSuccess(upstream);
-  const timedUpstream = { ...upstream, bytes: withStreamTimeouts(upstream.bytes, upstream, scope) };
+  const cancelExchange = createExchangeCancellation(upstream);
+  const timedUpstream = {
+    ...upstream,
+    bytes: withByteIdleDeadlines(
+      upstream.bytes,
+      scope.signal,
+      scope.config.timeouts.firstByteMs,
+      scope.config.timeouts.streamIdleMs,
+      cancelExchange,
+    ),
+  };
   const emissions = convertChatStream(normalizeChatFrames(iterateChatFrames(timedUpstream), scope.signal), {
     originalRequest: plan.originalRequest,
     toolContext: prepared.toolContext,
@@ -234,74 +256,8 @@ async function bridgeStreamResponse(
     scope,
     usage,
     dependencies.performanceObserver,
+    cancelExchange,
   );
-}
-
-async function* withStreamTimeouts(
-  source: AsyncIterable<Uint8Array>,
-  upstream: UpstreamByteStream,
-  scope: Readonly<RequestScope>,
-): AsyncIterable<Uint8Array> {
-  const iterator = source[Symbol.asyncIterator]();
-  let seenBytes = false;
-  try {
-    for (;;) {
-      const timeoutMs = seenBytes ? scope.config.timeouts.streamIdleMs : scope.config.timeouts.firstByteMs;
-      const next = await nextWithTimeout(iterator, timeoutMs, scope.signal, upstream);
-      if (next.done === true) {
-        return;
-      }
-      seenBytes = true;
-      yield next.value;
-    }
-  } finally {
-    await iterator.return?.().catch(() => undefined);
-  }
-}
-
-async function nextWithTimeout(
-  iterator: AsyncIterator<Uint8Array>,
-  timeoutMs: number,
-  signal: AbortSignal,
-  upstream: UpstreamByteStream,
-): Promise<IteratorResult<Uint8Array>> {
-  if (signal.aborted) {
-    throw new GatewayFailureError(failureFromSignal(signal, {
-      source: "parser",
-      phase: "stream",
-    }));
-  }
-  let timedOut = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      reject(new GatewayFailureError({ kind: "upstream_timeout" }));
-    }, timeoutMs);
-  });
-  const abort = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(new GatewayFailureError(failureFromSignal(signal, {
-      source: "parser",
-      phase: "stream",
-    })));
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  try {
-    return await Promise.race([iterator.next(), timeout, abort]);
-  } catch (error: unknown) {
-    if (timedOut) {
-      await upstream.cancel();
-    }
-    throw error;
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-    if (onAbort !== undefined) {
-      signal.removeEventListener("abort", onAbort);
-    }
-  }
 }
 
 async function streamEmissionsResponse(
@@ -309,33 +265,29 @@ async function streamEmissionsResponse(
   history: ResponsesHistory,
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
-  usage: UsageAttempt,
+  usage: RequestAttempt,
   performanceObserver?: ProtocolPerformanceObserver,
+  cancelExchange?: () => Promise<void>,
 ): Promise<Response> {
   const bytes = (async function* (): AsyncIterable<Uint8Array> {
-    try {
-      for await (const emission of emissions) {
-        if (scope.signal.aborted) {
-          await upstream.cancel();
-          return;
-        }
-        if (emission.kind === "checkpoint") {
-          await measureAsync(
-            performanceObserver,
-            "checkpoint",
-            async () => await history.record(emission.historyRecord, scope.signal),
-          );
-        }
-        if (usage.enabled) {
-          observeBridgeEvent(usage, emission.event);
-        }
-        yield measure(performanceObserver, "event", () => encodeResponsesSseEvent(emission.event));
+    for await (const emission of emissions) {
+      if (scope.signal.aborted) {
+        return;
       }
-    } finally {
-      await upstream.cancel();
+      if (emission.kind === "checkpoint") {
+        await measureAsync(
+          performanceObserver,
+          "checkpoint",
+          async () => await history.record(emission.historyRecord, scope.signal),
+        );
+      }
+      if (usage.enabled) {
+        observeBridgeEvent(usage, emission.event);
+      }
+      yield measure(performanceObserver, "event", () => encodeResponsesSseEvent(emission.event));
     }
   })();
-  return await streamBytesResponse(bytes, upstream, scope, usage.failure);
+  return await streamBytesResponse(bytes, upstream, scope, usage.failure, cancelExchange);
 }
 
 function measure<T>(
@@ -359,30 +311,39 @@ async function streamBytesResponse(
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
   onFailure: (error: unknown) => void,
+  cancelExchange = createExchangeCancellation(upstream),
 ): Promise<Response> {
   const iterator = bytes[Symbol.asyncIterator]();
+  const cleanup = createOwnedStreamCleanup(upstream, iterator, 1_000, cancelExchange);
   let first: IteratorResult<Uint8Array>;
   try {
-    first = await iterator.next();
+    first = await nextWithDeadline(
+      iterator,
+      scope.config.timeouts.firstByteMs,
+      scope.signal,
+      { source: "parser", phase: "stream" },
+    );
   } catch (error: unknown) {
     onFailure(error);
-    await upstream.cancel();
+    await cleanup();
     throw error;
   }
   const writer = createStreamResponseWriter({
     signal: scope.signal,
     headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
+    onCancel: cleanup,
   });
-  scope.signal.addEventListener("abort", () => {
+  const onAbort = (): void => {
     onFailure(new GatewayFailureError(failureFromSignal(scope.signal, {
       source: "parser",
       phase: "stream",
     })));
-  }, { once: true });
+  };
+  scope.signal.addEventListener("abort", onAbort, { once: true });
   void (async () => {
     try {
       if (first.done !== true && !await writer.enqueue(first.value)) {
-        await upstream.cancel();
+        await cleanup();
         return;
       }
       for (;;) {
@@ -391,16 +352,19 @@ async function streamBytesResponse(
           break;
         }
         if (!await writer.enqueue(next.value)) {
-          await upstream.cancel();
+          await cleanup();
           return;
         }
       }
+      await cleanup();
       writer.close();
     } catch (error: unknown) {
       onFailure(error);
+      await cleanup();
       writer.abort();
     } finally {
-      await iterator.return?.().catch(() => undefined);
+      scope.signal.removeEventListener("abort", onAbort);
+      await cleanup();
     }
   })();
   return writer.response;
@@ -532,85 +496,7 @@ function retryAfterHeader(status: number, headers: Headers): string | undefined 
   return safeRetryAfter(headers.get("retry-after") ?? undefined);
 }
 
-interface UsageTokens {
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly cacheTokens: number;
-}
-
-interface UsageAttempt {
-  readonly enabled: boolean;
-  setAccount(accountId: string): void;
-  setModel(model: string): void;
-  setProtocol(protocol: TelemetryProtocol): void;
-  finish(outcome: UsageUpdate["outcome"], tokens: UsageTokens): void;
-  failure(error: unknown): void;
-}
-
-const ZERO_USAGE: UsageTokens = { inputTokens: 0, outputTokens: 0, cacheTokens: 0 };
-const NOOP_USAGE_ATTEMPT: UsageAttempt = {
-  enabled: false,
-  setAccount: (_accountId) => undefined,
-  setModel: (_model) => undefined,
-  setProtocol: (_protocol) => undefined,
-  finish: (_outcome, _tokens) => undefined,
-  failure: (_error) => undefined,
-};
-
-function createUsageAttempt(
-  dependencies: ResponsesRouteDependencies,
-  signal: AbortSignal,
-  onFinished?: () => void,
-): UsageAttempt {
-  if (dependencies.usageRecorder === undefined) {
-    return NOOP_USAGE_ATTEMPT;
-  }
-  const nowMs = dependencies.nowMs ?? Date.now;
-  const startedAtMs = nowMs();
-  let accountId = "unbound";
-  let model = "unresolved";
-  let protocol: TelemetryProtocol = "openai_responses_bridge";
-  let recorded = false;
-  const finish = (outcome: UsageUpdate["outcome"], tokens: UsageTokens): void => {
-    if (recorded) {
-      return;
-    }
-    recorded = true;
-    signal.removeEventListener("abort", onAbort);
-    onFinished?.();
-    const occurredAtMs = nowMs();
-    try {
-      dependencies.usageRecorder?.recordUsage({
-        occurredAtMs,
-        accountId,
-        protocol,
-        resolvedModel: model,
-        outcome,
-        requestCount: 1,
-        errorCount: outcome === "success" ? 0 : 1,
-        ...tokens,
-        latencyMs: Math.max(0, occurredAtMs - startedAtMs),
-      });
-    } catch (_error: unknown) {
-      // Telemetry is noncritical and cannot affect protocol behavior.
-    }
-  };
-  const failure = (error: unknown): void => finish(usageOutcome(error, signal), ZERO_USAGE);
-  const onAbort = (): void => {
-    if (abortOutcome(signal) === "aborted") {
-      finish("aborted", ZERO_USAGE);
-    }
-  };
-  signal.addEventListener("abort", onAbort, { once: true });
-  return {
-    enabled: true,
-    setAccount: (value) => { accountId = value; },
-    setModel: (value) => { model = value; },
-    setProtocol: (value) => { protocol = value; },
-    finish,
-    failure,
-  };
-}
+type UsageTokens = AttemptUsage;
 
 function responsesUsage(payload: WireJsonObject): UsageTokens {
   const observed = responsesUsageObservation(payload);
@@ -649,7 +535,7 @@ function nativeOutcome(payload: WireJsonObject): UsageUpdate["outcome"] {
     : "success";
 }
 
-function createNativeStreamObservation(usage: UsageAttempt): { readonly observe: (event: Readonly<WireJsonObject>) => void } {
+function createNativeStreamObservation(usage: RequestAttempt): { readonly observe: (event: Readonly<WireJsonObject>) => void } {
   let observation: UsageObservation = {};
   return {
     observe(event) {
@@ -677,7 +563,7 @@ function createNativeStreamObservation(usage: UsageAttempt): { readonly observe:
   };
 }
 
-function observeBridgeEvent(usage: UsageAttempt, event: WireJsonObject): void {
+function observeBridgeEvent(usage: RequestAttempt, event: WireJsonObject): void {
   if (memberValue(event, "type") === "response.completed") {
     usage.finish("success", chatUsage(objectMember(event, "response")));
   }
@@ -712,15 +598,4 @@ function observedInteger(value: WireJson | undefined): number | undefined {
   }
   const parsed = Number.parseInt(value.lexeme, 10);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
-function usageOutcome(error: unknown, signal: AbortSignal): UsageUpdate["outcome"] {
-  if (signal.aborted) {
-    return abortOutcome(signal);
-  }
-  return failureOutcome(failureFromUnknown(error, { source: "gateway", phase: "internal" }));
-}
-
-function abortOutcome(signal: AbortSignal): UsageUpdate["outcome"] {
-  return failureOutcome(failureFromSignal(signal, { source: "gateway", phase: "deadline" }));
 }

@@ -1,6 +1,7 @@
 import { ChatSseError } from "../../copilot/chat_sse.js";
 import type { BoundCopilot } from "../../copilot/backend.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import { boundedCleanup } from "../../gateway/stream_execution.js";
 import {
   isWireJsonArray,
   isWireJsonNumber,
@@ -71,7 +72,7 @@ export async function openNativeResponsesStream(
 ): Promise<UpstreamByteStream> {
   const upstream = await bound.openResponsesStream(nativeResponsesUpstreamRequest(plan, options));
   if (upstream.status >= 200 && upstream.status < 300 && !isEventStream(upstream.headers)) {
-    await upstream.cancel();
+    await boundedCleanup(upstream.cancel());
     throw new GatewayFailureError({ kind: "invalid_upstream_response" });
   }
   return upstream;

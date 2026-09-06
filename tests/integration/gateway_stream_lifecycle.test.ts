@@ -6,6 +6,8 @@ import { createStreamResponseWriter } from "../../src/gateway/stream_response.js
 import { armTimeout } from "../../src/gateway/timeouts.js";
 import { defaultDelay } from "../../src/gateway/admission.js";
 import type { RouteRegistration } from "../../src/gateway/hono_app.js";
+import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
+import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("stream writer", () => {
   it("is pull-based, commits on first body byte, and writes nothing after abort", async () => {
@@ -110,9 +112,79 @@ describe("stream route lifecycle", () => {
     expect(endpointStarted).toBe(true);
     await gw.close();
     const closed = await pending;
-    expect(closed.body).toBeNull();
+    expect(await closed.text()).toBe("");
     const after = await gw.fetch(new Request("http://127.0.0.1:31400/healthz"));
     expect(after.status).toBe(503);
+  });
+
+  it("does not admit or execute a request whose client signal is already aborted", async () => {
+    const usage: UsageUpdate[] = [];
+    let executed = false;
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/pre-aborted",
+      admission: "inference",
+      body: "none",
+      presentFailure: () => new Response("{}"),
+      createAttempt: (requestId, config) => createRequestAttempt({
+        requestId,
+        config,
+        protocol: "openai_chat",
+        recorder: { recordUsage: (update) => usage.push(update) },
+        abortedErrorCount: 0,
+      }),
+      endpoint: async () => {
+        executed = true;
+        return new Response("{}");
+      },
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [route]);
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/pre-aborted", {
+        method: "POST",
+        signal: controller.signal,
+      }));
+      expect(await response.text()).toBe("");
+      expect(executed).toBe(false);
+      expect(usage).toMatchObject([{ outcome: "aborted", errorCount: 0 }]);
+    } finally {
+      await gw.close();
+    }
+  });
+
+  it("waits for response cancellation cleanup before application close hooks", async () => {
+    let cleanupComplete = false;
+    let closeSawCleanup = false;
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/cleanup-barrier",
+      admission: "inference",
+      body: "none",
+      presentFailure: () => new Response("{}"),
+      endpoint: async () => new Response(new ReadableStream<Uint8Array>({
+        async cancel(): Promise<void> {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          cleanupComplete = true;
+        },
+      })),
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [route], {
+      onClose: () => {
+        closeSawCleanup = cleanupComplete;
+      },
+    });
+    const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/cleanup-barrier", { method: "POST" }));
+    expect(response.body).not.toBeNull();
+    await gw.close();
+    expect(closeSawCleanup).toBe(true);
   });
 
   it("holds the inference slot until the stream body ends", async () => {

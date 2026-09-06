@@ -9,6 +9,7 @@ export const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type TelemetryProtocol =
   | "openai_chat"
+  | "openai_responses_unknown"
   | "openai_responses_native"
   | "openai_responses_bridge"
   | "anthropic"

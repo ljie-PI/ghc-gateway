@@ -5,6 +5,8 @@ import type { AdmissionController } from "./admission.js";
 import { readWireJsonObjectBody } from "./body_reader.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "./failures.js";
 import { createRequestScope, type RequestScope } from "./request_scope.js";
+import { createRequestAttempt, type RequestAttempt } from "./request_attempt.js";
+import { boundedCleanup } from "./stream_execution.js";
 import { abortWithTimeout, armTimeout, type TimeoutScheduler } from "./timeouts.js";
 import type { WireJsonObject } from "../serialization/wire_json.js";
 import type {
@@ -40,8 +42,15 @@ export interface RouteRegistration {
   readonly admission: "none" | "inference";
   readonly body: "none" | "wire-json-object";
   readonly presentFailure: FailurePresenter;
-  readonly observeFailure?: (failure: Readonly<GatewayFailure>, requestId: string) => void;
+  readonly createAttempt?: (
+    requestId: string,
+    config: Readonly<RuntimeConfigSnapshot>,
+  ) => RequestAttempt;
   readonly endpoint: ProtocolEndpoint;
+}
+
+export interface InflightRequest {
+  abortForShutdown(): Promise<void>;
 }
 
 export interface HonoAppDependencies {
@@ -51,7 +60,7 @@ export interface HonoAppDependencies {
   readonly createRequestId: () => string;
   readonly isReady: () => boolean;
   readonly isClosed: () => boolean;
-  readonly inflight: Set<AbortController>;
+  readonly inflight: Set<InflightRequest>;
   readonly mountedInflight: Set<AbortController>;
   readonly listenerOrigin: LoopbackOrigin;
   readonly admin?: AdminModule;
@@ -66,6 +75,7 @@ const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
 } as const;
+const RESPONSE_BODY_CLEANUP_MS = 2_500;
 
 export function createHonoApp(
   routes: readonly RouteRegistration[],
@@ -140,91 +150,163 @@ async function handleRoute(
   }
   const requestId = dependencies.createRequestId();
   const snapshot = structuredClone(dependencies.readRuntimeConfig());
-  const controller = new AbortController();
-  dependencies.inflight.add(controller);
-  const onAbort = (): void => controller.abort();
-  request.signal.addEventListener("abort", onAbort, { once: true });
+  const attempt = route.createAttempt?.(requestId, snapshot) ?? createRequestAttempt({
+    requestId,
+    config: snapshot,
+    protocol: "openai_chat",
+    abortedErrorCount: 0,
+  });
+  const workController = new AbortController();
+  const deliveryController = new AbortController();
+  let resolveSettled: () => void = () => undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  const abortDelivery = (failure: GatewayFailure): void => {
+    const error = new GatewayFailureError(failure);
+    attempt.failure(error);
+    if (!deliveryController.signal.aborted) {
+      deliveryController.abort(error);
+    }
+    if (!workController.signal.aborted) {
+      workController.abort(error);
+    }
+  };
+  const inflight: InflightRequest = {
+    abortForShutdown: async () => {
+      abortDelivery({
+        kind: "aborted",
+        source: "gateway",
+        phase: "internal",
+      });
+      await settled;
+    },
+  };
+  dependencies.inflight.add(inflight);
+  const onAbort = (): void => abortDelivery({
+    kind: "aborted",
+    source: "request",
+    phase: "body",
+  });
+  if (request.signal.aborted) {
+    onAbort();
+  } else {
+    request.signal.addEventListener("abort", onAbort, { once: true });
+  }
 
-  const scope = createRequestScope(requestId, controller.signal, snapshot);
+  const scope = createRequestScope(
+    requestId,
+    workController.signal,
+    deliveryController.signal,
+    snapshot,
+    attempt,
+  );
   let release: (() => void) | undefined;
   let disarmTotal: (() => void) | undefined;
   let holdUntilBody = false;
 
+  let cleaned = false;
   const cleanup = (): void => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
     disarmTotal?.();
     release?.();
-    dependencies.inflight.delete(controller);
+    dependencies.inflight.delete(inflight);
     request.signal.removeEventListener("abort", onAbort);
+    resolveSettled();
   };
 
   try {
     if (route.admission === "inference") {
-      release = await dependencies.admission.acquire(snapshot, controller.signal);
-      disarmTotal = armTimeout(snapshot.timeouts.totalMs, controller.signal, dependencies.scheduler, () => {
-        abortWithTimeout(controller);
+      release = await dependencies.admission.acquire(snapshot, workController.signal);
+      disarmTotal = armTimeout(snapshot.timeouts.totalMs, workController.signal, dependencies.scheduler, () => {
+        abortWithTimeout(workController);
+        attempt.failure(workController.signal.reason);
       });
     }
 
     const url = new URL(request.url);
     let decoded: DecodedHttpRequest = { url, headers: request.headers };
     if (route.body === "wire-json-object") {
-      const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes, controller.signal);
+      const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes, workController.signal);
       decoded = { url, headers: request.headers, body };
     }
 
-    if (controller.signal.aborted) {
-      const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
+    if (workController.signal.aborted) {
+      const timeoutFailure = upstreamTimeoutFromSignal(workController.signal);
       if (timeoutFailure !== undefined && !request.signal.aborted) {
-        observeRouteFailure(route, timeoutFailure, requestId);
-        return route.presentFailure(timeoutFailure, requestId, request);
+        attempt.failure(new GatewayFailureError(timeoutFailure));
+        const response = route.presentFailure(timeoutFailure, requestId, request);
+        holdUntilBody = response.body !== null;
+        attempt.markPrepared();
+        attempt.markHandedOff();
+        return holdUntilBody
+          ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, cleanup)
+          : response;
       }
       return new Response(null);
     }
 
     const response = await route.endpoint(decoded, scope);
-    if (controller.signal.aborted) {
-      const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
+    if (workController.signal.aborted) {
+      const timeoutFailure = upstreamTimeoutFromSignal(workController.signal);
       if (timeoutFailure !== undefined && !request.signal.aborted) {
-        observeRouteFailure(route, timeoutFailure, requestId);
-        return route.presentFailure(timeoutFailure, requestId, request);
+        attempt.failure(new GatewayFailureError(timeoutFailure));
+        const timeoutResponse = route.presentFailure(timeoutFailure, requestId, request);
+        holdUntilBody = timeoutResponse.body !== null;
+        attempt.markPrepared();
+        attempt.markHandedOff();
+        return holdUntilBody
+          ? attachLifecycle(timeoutResponse, deliveryController.signal, onAbort, attempt, cleanup)
+          : timeoutResponse;
       }
       return new Response(null);
     }
     holdUntilBody = true;
+    attempt.markPrepared();
+    attempt.markHandedOff();
     const stream = dependencies.activity !== undefined && isStreamingResponse(response);
     if (stream) {
       dependencies.streamStarted?.();
     }
-    return attachLifecycle(response, controller, cleanup, stream ? dependencies.streamFinished : undefined);
+    return attachLifecycle(
+      response,
+      deliveryController.signal,
+      () => abortDelivery({ kind: "aborted", source: "request", phase: "stream" }),
+      attempt,
+      cleanup,
+      stream ? dependencies.streamFinished : undefined,
+    );
   } catch (error: unknown) {
     const failure = failureFromUnknown(error);
-    const timeoutFailure = upstreamTimeoutFromSignal(controller.signal);
+    const timeoutFailure = upstreamTimeoutFromSignal(workController.signal);
     if (timeoutFailure !== undefined && !request.signal.aborted) {
-      observeRouteFailure(route, timeoutFailure, requestId);
-      return route.presentFailure(timeoutFailure, requestId, request);
+      attempt.failure(new GatewayFailureError(timeoutFailure));
+      const response = route.presentFailure(timeoutFailure, requestId, request);
+      holdUntilBody = response.body !== null;
+      attempt.markPrepared();
+      attempt.markHandedOff();
+      return holdUntilBody
+        ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, cleanup)
+        : response;
     }
-    if (request.signal.aborted || (failure.kind === "aborted" && controller.signal.aborted)) {
+    attempt.failure(new GatewayFailureError(failure));
+    if (request.signal.aborted || (failure.kind === "aborted" && workController.signal.aborted)) {
       return new Response(null);
     }
-    holdUntilBody = true;
-    observeRouteFailure(route, failure, requestId);
-    return attachLifecycle(route.presentFailure(failure, requestId, request), controller, cleanup);
+    const response = route.presentFailure(failure, requestId, request);
+    holdUntilBody = response.body !== null;
+    attempt.markPrepared();
+    attempt.markHandedOff();
+    return holdUntilBody
+      ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, cleanup)
+      : response;
   } finally {
     if (!holdUntilBody) {
       cleanup();
     }
-  }
-}
-
-function observeRouteFailure(
-  route: Readonly<RouteRegistration>,
-  failure: Readonly<GatewayFailure>,
-  requestId: string,
-): void {
-  try {
-    route.observeFailure?.(failure, requestId);
-  } catch (_error: unknown) {
-    // Observability cannot alter public failure bytes.
   }
 }
 
@@ -238,7 +320,9 @@ function upstreamTimeoutFromSignal(signal: AbortSignal): GatewayFailure | undefi
 
 function attachLifecycle(
   response: Response,
-  controller: AbortController,
+  deliverySignal: AbortSignal,
+  abortDelivery: () => void,
+  attempt: RequestAttempt,
   cleanup: () => void,
   onFinished?: () => void,
 ): Response {
@@ -259,10 +343,15 @@ function attachLifecycle(
   };
 
   const reader = body.getReader();
+  let cancellation: Promise<void> | undefined;
+  const cancelBody = async (): Promise<void> => {
+    cancellation ??= boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS);
+    await cancellation;
+  };
   const stream = new ReadableStream<Uint8Array>({
     async pull(streamController): Promise<void> {
-      if (controller.signal.aborted) {
-        await reader.cancel().catch(() => undefined);
+      if (deliverySignal.aborted) {
+        await cancelBody();
         once();
         streamController.close();
         return;
@@ -270,11 +359,13 @@ function attachLifecycle(
       try {
         const next = await reader.read();
         if (next.done) {
+          await cancellation;
           once();
           streamController.close();
           return;
         }
         if (next.value !== undefined) {
+          attempt.markCommitted();
           streamController.enqueue(next.value);
         }
       } catch (error: unknown) {
@@ -283,17 +374,14 @@ function attachLifecycle(
       }
     },
     async cancel(): Promise<void> {
-      if (!controller.signal.aborted) {
-        controller.abort();
-      }
-      await reader.cancel().catch(() => undefined);
+      abortDelivery();
+      await cancelBody();
       once();
     },
   });
 
-  controller.signal.addEventListener("abort", () => {
-    void reader.cancel().catch(() => undefined);
-    once();
+  deliverySignal.addEventListener("abort", () => {
+    void cancelBody().finally(once);
   }, { once: true });
 
   return new Response(stream, {
@@ -336,7 +424,23 @@ async function handleMountedRequest(
       return new Response(null);
     }
     holdUntilBody = response.body !== null;
-    return holdUntilBody ? attachLifecycle(response, controller, cleanup) : response;
+    return holdUntilBody
+      ? attachLifecycle(
+        response,
+        controller.signal,
+        () => {
+          if (!controller.signal.aborted) {
+            controller.abort();
+          }
+        },
+        createRequestAttempt({
+          requestId: "req_mounted",
+          protocol: "openai_chat",
+          abortedErrorCount: 0,
+        }),
+        cleanup,
+      )
+      : response;
   } catch (error: unknown) {
     if (controller.signal.aborted) {
       return new Response(null);

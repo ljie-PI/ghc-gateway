@@ -10,6 +10,7 @@ export function createStreamResponseWriter(init: {
   readonly status?: number;
   readonly headers?: HeadersInit;
   readonly signal: AbortSignal;
+  readonly onCancel?: () => Promise<void> | void;
 }): StreamResponseWriter {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   let committed = false;
@@ -17,6 +18,12 @@ export function createStreamResponseWriter(init: {
   let outstandingPulls = 0;
   let lookahead: Uint8Array | undefined;
   let waitingProducer: (() => void) | undefined;
+  let cancellation: Promise<void> | undefined;
+
+  const cancelProducer = async (): Promise<void> => {
+    cancellation ??= Promise.resolve().then(() => init.onCancel?.());
+    await cancellation;
+  };
 
   const deliver = (chunk: Uint8Array): void => {
     committed = true;
@@ -44,10 +51,11 @@ export function createStreamResponseWriter(init: {
       outstandingPulls += 1;
       wakeProducer();
     },
-    cancel(): void {
+    async cancel(): Promise<void> {
       closed = true;
       lookahead = undefined;
       wakeProducer();
+      await cancelProducer();
     },
   });
 
@@ -104,7 +112,7 @@ export function createStreamResponseWriter(init: {
   };
 
   init.signal.addEventListener("abort", () => {
-    writer.abort();
+    void cancelProducer().finally(() => writer.abort());
   }, { once: true });
 
   return writer;

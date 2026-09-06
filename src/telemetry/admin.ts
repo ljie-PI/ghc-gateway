@@ -6,6 +6,7 @@ import { sanitizeOperationalEventMetadata } from "./sanitize.js";
 
 const PROTOCOLS: ReadonlySet<string> = new Set([
   "openai_chat",
+  "openai_responses_unknown",
   "openai_responses_native",
   "openai_responses_bridge",
   "anthropic",

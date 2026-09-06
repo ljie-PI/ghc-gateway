@@ -8,6 +8,7 @@ export const RESERVED_MIGRATION_FILES: ReadonlyMap<number, string> = new Map([
   [1, "001_runtime_config.ts"],
   [10, "010_accounts.ts"],
   [20, "020_telemetry.ts"],
+  [21, "021_responses_unknown_protocol.ts"],
   [30, "030_responses_history.ts"],
   [40, "040_model_capabilities.ts"],
 ]);

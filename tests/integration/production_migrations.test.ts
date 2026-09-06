@@ -7,7 +7,7 @@ import { createProductionApplicationContext } from "../../src/main.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { MIGRATION_MANIFEST } from "../../src/persistence/generated_migrations.js";
 
-const EXPECTED_VERSIONS = [1, 10, 20, 30, 40];
+const EXPECTED_VERSIONS = [1, 10, 20, 21, 30, 40];
 
 async function createStartup(): Promise<StartupConfig> {
   return {

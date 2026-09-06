@@ -71,7 +71,7 @@ const RuntimeConfigUpdateSchema = Type.Object({
   config: RuntimeConfigSchema,
 }, { additionalProperties: false });
 
-const PROTOCOLS = new Set(["openai_chat", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]);
+const PROTOCOLS = new Set(["openai_chat", "openai_responses_unknown", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]);
 const OUTCOMES = new Set(["success", "client_error", "authentication_error", "overloaded", "upstream_error", "timeout", "aborted", "internal_error"]);
 const EVENT_KINDS = new Set([
   "gateway_started", "gateway_stopped", "request_failed", "account_authenticated", "account_removed",
