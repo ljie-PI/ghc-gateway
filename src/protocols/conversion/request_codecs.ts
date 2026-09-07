@@ -1573,6 +1573,9 @@ function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObj
   if (output.length === 0) {
     unsupported("REQ-TARGET-M-EMPTY");
   }
+  if (oneMember(output[0] as WireJsonObject, "role", "REQ-INTERNAL") !== "user") {
+    unsupported("REQ-TARGET-M-LEADING-USER");
+  }
   return output;
 }
 

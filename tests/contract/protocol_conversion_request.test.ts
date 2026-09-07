@@ -170,6 +170,7 @@ describe("shared conversion request codecs", () => {
       const converted = prepareConvertedRequest("messages", target, body({
         model: "source",
         messages: [
+          { role: "user", content: "Use the tool." },
           {
             role: "assistant",
             content: [{
@@ -191,6 +192,7 @@ describe("shared conversion request codecs", () => {
       const request = decoded(converted.bytes);
       if (target === "chat") {
         expect(request.messages).toEqual([
+          { role: "user", content: "Use the tool." },
           {
             role: "assistant",
             content: null,
@@ -205,6 +207,11 @@ describe("shared conversion request codecs", () => {
         return;
       }
       expect(request.input).toEqual([
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Use the tool." }],
+        },
         {
           type: "function_call",
           call_id: "call_1",
@@ -226,6 +233,7 @@ describe("shared conversion request codecs", () => {
       expect(() => prepareConvertedRequest("messages", target, body({
         model: "source",
         messages: [
+          { role: "user", content: "Use the tool." },
           {
             role: "assistant",
             content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }],
@@ -455,6 +463,7 @@ describe("shared conversion request codecs", () => {
       const converted = prepareConvertedRequest("chat", target, body({
         model: "source",
         messages: [
+          { role: "user", content: "Use the tool." },
           {
             role: "assistant",
             content: null,
@@ -550,6 +559,7 @@ describe("shared conversion request codecs", () => {
       expect(() => prepareConvertedRequest("chat", target, body({
         model: "source",
         messages: [
+          { role: "user", content: "Use the tool." },
           {
             role: "assistant",
             content: null,
@@ -792,6 +802,33 @@ describe("shared conversion request codecs", () => {
     }), "target", capability(["messages"]))).toThrow();
   });
 
+  it("rejects assistant-first Chat and Responses histories before Messages inference", () => {
+    expect(() => prepareConvertedRequest("chat", "messages", body({
+      model: "source",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_1",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          }],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "ok" },
+      ],
+    }), "target", capability(["messages"]))).toThrow();
+
+    expect(() => prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      instructions: "system context is not a user turn",
+      input: [
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
+    }), "target", capability(["messages"]))).toThrow();
+  });
+
   it.each(["chat", "messages"] as const)(
     "rejects a new tool round before every prior parallel call has a result for %s",
     (target) => {
@@ -915,6 +952,11 @@ describe("shared conversion request codecs", () => {
     const converted = decoded(prepareConvertedRequest("responses", "messages", body({
       model: "source",
       input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Use the tool." }],
+        },
         { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
         {
           type: "function_call_output",
@@ -929,6 +971,10 @@ describe("shared conversion request codecs", () => {
       ],
     }), "target", capability(["messages"])).bytes);
     expect(converted.messages).toMatchObject([
+      {
+        role: "user",
+        content: [{ type: "text", text: "Use the tool." }],
+      },
       {
         role: "assistant",
         content: [{ type: "tool_use", id: "call_1" }],
@@ -954,6 +1000,11 @@ describe("shared conversion request codecs", () => {
     expect(() => prepareConvertedRequest("responses", "messages", body({
       model: "source",
       input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Use the tool." }],
+        },
         { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
         {
           type: "function_call_output",
@@ -975,6 +1026,11 @@ describe("shared conversion request codecs", () => {
     const converted = decoded(prepareConvertedRequest("responses", "messages", body({
       model: "source",
       input: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Use the tool." }],
+        },
         { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
         {
           type: "function_call_output",
@@ -984,6 +1040,7 @@ describe("shared conversion request codecs", () => {
       ],
     }), "target", capability(["messages"])).bytes);
     expect(converted.messages).toMatchObject([
+      { role: "user", content: [{ type: "text", text: "Use the tool." }] },
       { role: "assistant", content: [{ type: "tool_use", id: "call_1" }] },
       {
         role: "user",
