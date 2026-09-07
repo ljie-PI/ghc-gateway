@@ -1301,7 +1301,9 @@ function sameToolArguments(left: string, right: string): boolean {
 
 function equalWireJson(left: WireJson, right: WireJson): boolean {
   if (isWireJsonNumber(left) || isWireJsonNumber(right)) {
-    return isWireJsonNumber(left) && isWireJsonNumber(right) && left.lexeme === right.lexeme;
+    return isWireJsonNumber(left)
+      && isWireJsonNumber(right)
+      && normalizeJsonNumber(left.lexeme) === normalizeJsonNumber(right.lexeme);
   }
   if (isWireJsonArray(left) || isWireJsonArray(right)) {
     return isWireJsonArray(left)
@@ -1319,12 +1321,31 @@ function equalWireJson(left: WireJson, right: WireJson): boolean {
     ) {
       return false;
     }
+    const rightByKey = new Map(right.members.map((member) => [member.key, member.value]));
     return left.members.every((member) => {
-      const matches = right.members.filter((candidate) => candidate.key === member.key);
-      return matches.length === 1 && equalWireJson(member.value, matches[0]!.value);
+      const match = rightByKey.get(member.key);
+      return match !== undefined && equalWireJson(member.value, match);
     });
   }
   return left === right;
+}
+
+function normalizeJsonNumber(value: string): string {
+  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/u.exec(value);
+  if (match?.[2] === undefined) {
+    return value;
+  }
+  const fraction = match[3] ?? "";
+  let digits = `${match[2]}${fraction}`.replace(/^0+/u, "");
+  if (digits.length === 0) {
+    return "0";
+  }
+  let exponent = BigInt(match[4] ?? "0") - BigInt(fraction.length);
+  while (digits.endsWith("0")) {
+    digits = digits.slice(0, -1);
+    exponent += 1n;
+  }
+  return `${match[1] ?? ""}${digits}e${exponent}`;
 }
 
 function* finalResponseEvents(

@@ -1090,6 +1090,54 @@ describe("shared conversion response codecs", () => {
     expect(text).toContain("response.completed");
   });
 
+  it("reconciles wide reordered tool inputs with equivalent numeric spellings", async () => {
+    const entries = Array.from({ length: 1_000 }, (_, index) => [`key_${index}`, index + 1] as const);
+    const initial = Object.fromEntries(entries);
+    const streamed = `{${[...entries].reverse().map(([key, value]) => (
+      `${JSON.stringify(key)}:${value}.0`
+    )).join(",")}}`;
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_tool_wide",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "call_wide",
+          name: "lookup",
+          input: initial,
+        },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: streamed },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const text = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
+    expect(text).toContain("call_wide");
+    expect(text).toContain("response.completed");
+  });
+
   it("rejects conflicting final arguments that were queued behind an earlier tool index", async () => {
     const source = [
       "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":1}\"}}]},\"finish_reason\":null}]}\n\n",
