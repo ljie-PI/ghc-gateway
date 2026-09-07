@@ -4,7 +4,7 @@ import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 import { anthropicGateway, anthropicRequest } from "./anthropic_harness.js";
 
 describe("Anthropic non-stream response", () => {
-  it("maps all choices, thinking blocks, repaired tools, stop reason, usage aliases, and request ID", async () => {
+  it("rejects multiple choices and invalid complete tool arguments without repair", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const backend = new ScriptedCopilotBackend({
       chat: {
@@ -54,44 +54,22 @@ describe("Anthropic non-stream response", () => {
     const { gw, close } = await anthropicGateway({ backend, usageUpdates });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: false }));
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(502);
       expect(response.headers.get("request-id")).toBe("req_test_1");
-      expect(JSON.parse(await response.text())).toEqual({
-        id: "chatcmpl_42",
-        type: "message",
-        role: "assistant",
-        model: "gpt",
-        content: [
-          { type: "thinking", thinking: "fallback thought", signature: null },
-          { type: "text", text: "answer" },
-          {
-            type: "tool_use",
-            id: "call_bad",
-            name: "lookup",
-            input: { city: "Zürich" },
-            provider_specific_fields: { signature: "signed" },
-          },
-          { type: "redacted_thinking", data: "" },
-          { type: "thinking", thinking: "second thought", signature: "sig2" },
-          { type: "text", text: "" },
-        ],
-        stop_reason: "tool_use",
-        stop_sequence: null,
-        usage: {
-          input_tokens: 22,
-          output_tokens: 7,
-          cache_read_input_tokens: 5,
-          cache_creation_input_tokens: 3,
-          server_tool_use: { web_search_requests: 2 },
+      expect(JSON.parse(await response.text())).toMatchObject({
+        type: "error",
+        error: {
+          type: "api_error",
+          message: "invalid upstream response",
         },
       });
       expect(usageUpdates).toMatchObject([{
         protocol: "anthropic",
-        outcome: "success",
+        outcome: "upstream_error",
         resolvedModel: "gpt",
-        inputTokens: 22,
-        outputTokens: 7,
-        cacheTokens: 8,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheTokens: 0,
       }]);
     } finally {
       await close();

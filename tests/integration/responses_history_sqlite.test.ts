@@ -3,6 +3,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
+import type { SqliteDatabase, SqliteStatement } from "../../src/persistence/sqlite.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
@@ -71,6 +72,7 @@ function openHistory(
   db: string,
   nowMs: () => number,
   options: { readonly ttlDays?: number; readonly maxResponses?: number; readonly maxReceipts?: number } = {},
+  statementObserver?: (sql: string) => void,
 ): {
   readonly database: ReturnType<typeof openDatabase>;
   readonly store: SqliteResponsesHistory;
@@ -87,8 +89,41 @@ function openHistory(
   });
   return {
     database,
-    store: new SqliteResponsesHistory(database, { nowMs, ...options }),
+    store: new SqliteResponsesHistory(observeStatements(database, statementObserver), { nowMs, ...options }),
   };
+}
+
+function observeStatements(
+  database: SqliteDatabase,
+  observer: ((sql: string) => void) | undefined,
+): SqliteDatabase {
+  if (observer === undefined) {
+    return database;
+  }
+  return new Proxy(database, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (sql: string): SqliteStatement => {
+          const statement = target.prepare(sql);
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty) {
+              if (statementProperty === "all") {
+                const all = statementTarget.all.bind(statementTarget);
+                return (...parameters: Parameters<SqliteStatement["all"]>): unknown[] => {
+                  observer(sql);
+                  return all(...parameters);
+                };
+              }
+              const value: unknown = Reflect.get(statementTarget, statementProperty, statementTarget);
+              return typeof value === "function" ? value.bind(statementTarget) : value;
+            },
+          });
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 describe("Responses history SQLite", () => {
@@ -368,6 +403,85 @@ describe("Responses history SQLite", () => {
         count: 0,
         receiptCount: 0,
       });
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("reuses route-receipt cleanup proof through partial and complete checkpoint commits", async () => {
+    const file = await dbPath("checkpoint-cleanup-proof");
+    let housekeepingScans = 0;
+    const opened = openHistory(file, () => 1_700_000_000_000, {}, (sql) => {
+      if (sql.includes("created_at_ms + ? <= ?")) {
+        housekeepingScans += 1;
+      }
+    });
+    try {
+      await opened.store.recordReceipt({
+        ...ownership("github.com/1"),
+        responseId: "resp_checkpoint",
+        checkpointState: "route_only",
+      }, SIGNAL);
+      housekeepingScans = 0;
+
+      await opened.store.recordCheckpoint(
+        record("resp_checkpoint", "call_checkpoint"),
+        ownership("github.com/1"),
+        "partial",
+        SIGNAL,
+      );
+      await opened.store.recordCheckpoint(
+        record("resp_checkpoint", "call_checkpoint"),
+        ownership("github.com/1"),
+        "complete",
+        SIGNAL,
+      );
+
+      expect(housekeepingScans).toBe(0);
+      await expect(opened.store.resolve("resp_checkpoint", "github.com/1", SIGNAL))
+        .resolves.toMatchObject({ kind: "owned", receipt: { checkpointState: "complete" } });
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("runs expiry cleanup when an older receipt reaches the retained proof boundary", async () => {
+    const file = await dbPath("checkpoint-cleanup-expiry");
+    let current = 1_700_000_000_000;
+    const opened = openHistory(file, () => current);
+    try {
+      await opened.store.recordReceipt({
+        ...nativeOwnership("github.com/1"),
+        responseId: "resp_older",
+        checkpointState: "complete",
+      }, SIGNAL);
+      current += DAY_MS;
+      await opened.store.recordReceipt({
+        ...ownership("github.com/1"),
+        responseId: "resp_checkpoint",
+        checkpointState: "route_only",
+      }, SIGNAL);
+      await opened.store.recordCheckpoint(
+        record("resp_checkpoint", "call_checkpoint"),
+        ownership("github.com/1"),
+        "partial",
+        SIGNAL,
+      );
+
+      current += 6 * DAY_MS + 1;
+      await opened.store.recordCheckpoint(
+        record("resp_checkpoint", "call_checkpoint"),
+        ownership("github.com/1"),
+        "complete",
+        SIGNAL,
+      );
+
+      await expect(opened.store.resolve("resp_older", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "expired" });
+      await expect(opened.store.resolve("resp_checkpoint", "github.com/1", SIGNAL))
+        .resolves.toMatchObject({ kind: "owned", receipt: { checkpointState: "complete" } });
     } finally {
       closeDatabase(opened.database);
       await rm(path.dirname(file), { recursive: true, force: true });

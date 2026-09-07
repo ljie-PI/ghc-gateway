@@ -17,6 +17,7 @@ export type PerformanceMeasurement = "buffered" | "event" | "checkpoint";
 export interface ProtocolPerformanceObserver {
   measure<T>(measurement: PerformanceMeasurement, work: () => T): T;
   measureAsync<T>(measurement: PerformanceMeasurement, work: () => Promise<T>): Promise<T>;
+  observe?(measurement: PerformanceMeasurement, elapsedMs: number): void;
 }
 
 export interface TelemetryRuntimeTimers {
@@ -75,6 +76,7 @@ export class TelemetryRuntime {
     this.performance = {
       measure: (measurement, work) => this.measure(measurement, work),
       measureAsync: async (measurement, work) => await this.measureAsync(measurement, work),
+      observe: (measurement, elapsedMs) => this.observe(measurement, elapsedMs),
     };
 
     this.updateRecorderObserver();

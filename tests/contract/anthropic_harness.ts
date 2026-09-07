@@ -53,7 +53,7 @@ export async function anthropicGateway(options: {
         data: [
           { id: "gpt", name: "GPT", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
           { id: "o1", name: "O1", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_completion_tokens" } },
-          { id: "gpt-5", name: "GPT 5", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+          { id: "gpt-5", name: "GPT 5", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], supported_parameters: ["reasoning_effort"], supported_reasoning_efforts: ["xhigh"], chat_output_token_field: "max_tokens" } },
           { id: "deepseek-reasoner", name: "DeepSeek", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
         ],
       };

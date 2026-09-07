@@ -2,6 +2,7 @@ import type { ModelInfoLookup } from "./model_catalog.js";
 
 export type NativeModelProtocol = "chat" | "messages" | "responses";
 export type ChatOutputTokenField = "max_tokens" | "max_completion_tokens";
+export type SupportedReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type CapabilityFieldState = "missing" | "value" | "malformed";
 export type CapabilitySource = "admin_override" | "live" | "builtin" | "unknown";
 
@@ -33,6 +34,8 @@ export interface DeclaredModelCapabilities {
   readonly maxOutputTokens: DeclaredField<number>;
   readonly defaultOutputTokens: DeclaredField<number>;
   readonly chatOutputTokenField: DeclaredField<ChatOutputTokenField>;
+  readonly supportedParameters: DeclaredField<readonly string[]>;
+  readonly reasoningEfforts: DeclaredField<readonly SupportedReasoningEffort[]>;
 }
 
 export interface EffectiveCapabilityField<T> {
@@ -51,6 +54,8 @@ export interface EffectiveOutputDefault {
 
 export interface ModelCapabilityProfile {
   readonly chatOutputTokenField: EffectiveCapabilityField<ChatOutputTokenField>;
+  readonly supportedParameters: EffectiveCapabilityField<readonly string[]>;
+  readonly reasoningEfforts: EffectiveCapabilityField<readonly SupportedReasoningEffort[]>;
 }
 
 export interface ModelCapabilityOverrideValue {
@@ -77,6 +82,8 @@ export const UNKNOWN_DECLARATIONS: DeclaredModelCapabilities = Object.freeze({
   maxOutputTokens: missing<number>(),
   defaultOutputTokens: missing<number>(),
   chatOutputTokenField: missing<ChatOutputTokenField>(),
+  supportedParameters: missing<readonly string[]>(),
+  reasoningEfforts: missing<readonly SupportedReasoningEffort[]>(),
 });
 
 export function parseLiveModelCapabilities(record: Readonly<Record<string, unknown>>): DeclaredModelCapabilities {
@@ -109,6 +116,16 @@ export function parseLiveModelCapabilities(record: Readonly<Record<string, unkno
       ["model_info", "chat_output_token_field"],
       ["capabilities", "chat_output_token_field"],
     ], parseChatOutputTokenField),
+    supportedParameters: parseLocations(record, [
+      ["supported_parameters"],
+      ["model_info", "supported_parameters"],
+      ["capabilities", "supported_parameters"],
+    ], parseSupportedParameters),
+    reasoningEfforts: parseLocations(record, [
+      ["supported_reasoning_efforts"],
+      ["model_info", "supported_reasoning_efforts"],
+      ["capabilities", "supported_reasoning_efforts"],
+    ], parseReasoningEfforts),
   });
 }
 
@@ -151,6 +168,8 @@ export function builtinCapabilitiesFromModelInfo(
       chatOutputTokenField: Object.hasOwn(record, "chat_output_token_field")
         ? parseChatOutputTokenField(record.chat_output_token_field)
         : missing<ChatOutputTokenField>(),
+      supportedParameters: missing<readonly string[]>(),
+      reasoningEfforts: missing<readonly SupportedReasoningEffort[]>(),
     }),
   };
 }
@@ -331,6 +350,21 @@ function parseChatOutputTokenField(input: unknown): DeclaredField<ChatOutputToke
   return input === "max_tokens" || input === "max_completion_tokens"
     ? value(input)
     : malformed();
+}
+
+function parseSupportedParameters(input: unknown): DeclaredField<readonly string[]> {
+  if (!Array.isArray(input) || input.some((value) => typeof value !== "string" || value.length === 0)) {
+    return malformed();
+  }
+  return value([...new Set(input)].sort());
+}
+
+function parseReasoningEfforts(input: unknown): DeclaredField<readonly SupportedReasoningEffort[]> {
+  const allowed = new Set<SupportedReasoningEffort>(["none", "minimal", "low", "medium", "high", "xhigh"]);
+  if (!Array.isArray(input) || input.some((value) => typeof value !== "string" || !allowed.has(value as SupportedReasoningEffort))) {
+    return malformed();
+  }
+  return value([...new Set(input as SupportedReasoningEffort[])].sort());
 }
 
 function differsFromLower<T>(

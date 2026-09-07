@@ -4,6 +4,7 @@ import {
   CHAT_MODEL,
   decodeCapturedBody,
   getWeather,
+  MESSAGES_MODEL,
   NATIVE_RESPONSES_MODEL,
   PNG_DATA_URL,
   REASONING_MODEL,
@@ -72,6 +73,7 @@ describe("official OpenAI Responses SDK", () => {
       input: "sdk-bridge-stream",
       stream: true,
     });
+
     const eventTypes = [];
     for await (const event of stream) {
       eventTypes.push(event.type);
@@ -79,6 +81,24 @@ describe("official OpenAI Responses SDK", () => {
     expect(eventTypes).toContain("response.completed");
     expect(harness.backendKinds).toContain("chat");
     expect(harness.backendKinds).toContain("chat-stream");
+  });
+
+  it("converts an official Responses request directly to Messages", async () => {
+    const requestIndex = harness.messagesRequests.length;
+    const response = await client.responses.create({
+      model: MESSAGES_MODEL,
+      input: "responses-to-messages",
+    });
+
+    expect(response.output_text).toBe("pong");
+    expect(decodeCapturedBody(harness.messagesRequests[requestIndex]!)).toMatchObject({
+      model: MESSAGES_MODEL,
+      max_tokens: 4096,
+      messages: [{
+        role: "user",
+        content: [{ type: "text", text: "responses-to-messages" }],
+      }],
+    });
   });
 
   it("converts instructions and ordinary multi-turn input through Chat-bridge Responses", async () => {
@@ -139,7 +159,6 @@ describe("official OpenAI Responses SDK", () => {
             type: "function",
             function: { name: "get_weather", arguments: "{\"city\":\"Tokyo\"}" },
           }],
-          reasoning_content: "tool call",
         },
         { role: "tool", tool_call_id: "call_weather", content: JSON.stringify(weather) },
       ],
@@ -171,7 +190,7 @@ describe("official OpenAI Responses SDK", () => {
         role: "user",
         content: [
           { type: "text", text: "Use the image to choose a city." },
-          { type: "image_url", image_url: { url: PNG_DATA_URL } },
+          { type: "image_url", image_url: { url: PNG_DATA_URL, detail: "auto" } },
         ],
       }],
       tools: [{
@@ -206,7 +225,7 @@ describe("official OpenAI Responses SDK", () => {
         role: "user",
         content: [
           { type: "text", text: "Describe this image." },
-          { type: "image_url", image_url: { url: PNG_DATA_URL } },
+          { type: "image_url", image_url: { url: PNG_DATA_URL, detail: "auto" } },
         ],
       }],
     });

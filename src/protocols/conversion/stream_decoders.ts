@@ -1,0 +1,1847 @@
+import { parseChatSse } from "../../copilot/chat_sse.js";
+import { upstreamStreamEventFailure } from "../../copilot/failures.js";
+import { GatewayFailureError } from "../../gateway/failures.js";
+import {
+  duplicateMemberNames,
+  isWireJsonArray,
+  isWireJsonNumber,
+  isWireJsonObject,
+  memberValues,
+  parseWireJson,
+  serializeWireJson,
+  type WireJson,
+  type WireJsonObject,
+} from "../../serialization/wire_json.js";
+import type {
+  InferenceProtocol,
+  SemanticResponse,
+  SemanticStreamEvent,
+  SemanticUsage,
+} from "./types.js";
+import { decodeSseRecords } from "./sse.js";
+import { mergeMessagesUsage } from "./usage.js";
+
+export function decodeProtocolStream(
+  source: InferenceProtocol,
+  bytes: AsyncIterable<Uint8Array>,
+  eventLimitBytes: number,
+  accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
+): AsyncIterable<SemanticStreamEvent> {
+  if (source === "chat") {
+    return decodeChatStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
+  }
+  if (source === "messages") {
+    return decodeMessagesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
+  }
+  return decodeResponsesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
+}
+
+async function* decodeChatStream(
+  bytes: AsyncIterable<Uint8Array>,
+  eventLimitBytes: number,
+  accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
+): AsyncIterable<SemanticStreamEvent> {
+  const budget = new DecoderBudget(accumulatorBytes);
+  const tools = new Map<number, {
+    id: string;
+    name: string;
+    pendingArguments: string;
+    argumentsSeen: boolean;
+    started: boolean;
+    done: boolean;
+  }>();
+  let nextToolToStart = 0;
+  let pendingFinish: SemanticResponse["finishReason"] | undefined;
+  let observedUsage = emptyUsage();
+  let chatText = "";
+  let chatRefusal = "";
+  let toolObserved = false;
+  const pendingPostTool: SemanticStreamEvent[] = [];
+  const startReadyTools = function* (): Iterable<SemanticStreamEvent> {
+    for (;;) {
+      const tool = tools.get(nextToolToStart);
+      if (
+        tool === undefined
+        || tool.started
+        || !tool.argumentsSeen
+        || tool.id.length === 0
+        || tool.name.length === 0
+      ) {
+        return;
+      }
+      const index = nextToolToStart;
+      nextToolToStart += 1;
+      tool.started = true;
+      yield {
+        kind: "tool_start",
+        key: `chat:${index}`,
+        callId: tool.id,
+        name: tool.name,
+      };
+      if (tool.pendingArguments.length > 0) {
+        const pending = tool.pendingArguments;
+        tool.pendingArguments = "";
+        yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
+      }
+    }
+  };
+  const startIdentifiedTools = function* (): Iterable<SemanticStreamEvent> {
+    for (const [index, tool] of [...tools.entries()].sort(([left], [right]) => left - right)) {
+      if (tool.started) {
+        continue;
+      }
+      if (tool.id.length === 0 || tool.name.length === 0) {
+        invalid();
+      }
+      tool.started = true;
+      yield {
+        kind: "tool_start",
+        key: `chat:${index}`,
+        callId: tool.id,
+        name: tool.name,
+      };
+      if (tool.pendingArguments.length > 0) {
+        yield {
+          kind: "tool_arguments_delta",
+          key: `chat:${index}`,
+          delta: tool.pendingArguments,
+        };
+        tool.pendingArguments = "";
+      }
+    }
+  };
+  for await (const frame of parseChatSse(bytes, eventLimitBytes, measureEvent)) {
+    if (frame.kind === "error") {
+      throw upstreamStreamEventFailure();
+    }
+    if (frame.kind === "done") {
+      if (pendingFinish === undefined) {
+        invalid();
+      }
+      if (pendingFinish === "length" || pendingFinish === "content_filter") {
+        yield* startIdentifiedTools();
+      }
+      for (const [index, tool] of tools) {
+        if (pendingFinish === "length" || pendingFinish === "content_filter") {
+          continue;
+        }
+        if (!tool.started) {
+          invalid();
+        }
+        if (tool.done) {
+          continue;
+        }
+        tool.done = true;
+        yield {
+          kind: "tool_done",
+          key: `chat:${index}`,
+          completed: true,
+        };
+      }
+      for (const event of pendingPostTool.splice(0)) {
+        yield event;
+      }
+      const terminalFinish = chatRefusal.length > 0 && pendingFinish === "stop"
+        ? "refusal"
+        : pendingFinish;
+      yield {
+        kind: "terminal",
+        status: terminalFinish === "length" || terminalFinish === "content_filter" || terminalFinish === "refusal"
+          ? "incomplete"
+          : "completed",
+        finishReason: terminalFinish,
+      };
+      return;
+    }
+    const payload = frame.chunk.payload;
+    if (!isWireJsonObject(payload)) {
+      continue;
+    }
+    const usage = nullableObjectMember(payload, "usage");
+    if (usage !== undefined) {
+      observedUsage = chatUsage(usage, observedUsage);
+      yield { kind: "usage", usage: observedUsage };
+    }
+    const choices = arrayMember(payload, "choices");
+    if (choices === undefined || choices.items.length === 0) {
+      continue;
+    }
+    if (choices.items.length !== 1 || !isWireJsonObject(choices.items[0])) {
+      invalid();
+    }
+    const choice = choices.items[0];
+    const choiceIndexValue = singleMember(choice, "index");
+    if (
+      choiceIndexValue !== undefined
+      && (!isWireJsonNumber(choiceIndexValue) || choiceIndexValue.lexeme !== "0")
+    ) {
+      invalid();
+    }
+    const delta = objectMember(choice, "delta");
+    if (delta !== undefined) {
+      const audio = singleMember(delta, "audio");
+      if (audio !== undefined && audio !== null) {
+        invalid();
+      }
+      const reasoning = stringMember(delta, "reasoning_content");
+      const thinkingBlocks = arrayMember(delta, "thinking_blocks");
+      if (
+        (reasoning !== undefined && reasoning.length > 0)
+        || thinkingBlocks?.items.some((item) => (
+          isWireJsonObject(item) && hasSubstantiveReasoning(item)
+        )) === true
+      ) {
+        yield { kind: "semantic_progress" };
+      }
+      const contentValue = singleMember(delta, "content");
+      if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
+        invalid();
+      }
+      const content = typeof contentValue === "string" ? contentValue : undefined;
+      if (content !== undefined && content.length > 0) {
+        budget.reserve(content);
+        chatText += content;
+        const event = { kind: "text_delta", key: toolObserved ? "chat:message:1" : "chat:message:0", delta: content } as const;
+        if (toolObserved) {
+          pendingPostTool.push(event);
+        } else {
+          yield event;
+        }
+      }
+      const refusalValue = singleMember(delta, "refusal");
+      if (refusalValue !== undefined && refusalValue !== null && typeof refusalValue !== "string") {
+        invalid();
+      }
+      const refusal = typeof refusalValue === "string" ? refusalValue : undefined;
+      if (refusal !== undefined && refusal.length > 0) {
+        budget.reserve(refusal);
+        chatRefusal += refusal;
+        const event = { kind: "refusal_delta", key: toolObserved ? "chat:message:1" : "chat:message:0", delta: refusal } as const;
+        if (toolObserved) {
+          pendingPostTool.push(event);
+        } else {
+          yield event;
+        }
+      }
+      const callsValue = singleMember(delta, "tool_calls");
+      if (callsValue !== undefined && callsValue !== null && !isWireJsonArray(callsValue)) {
+        invalid();
+      }
+      const calls = isWireJsonArray(callsValue) ? callsValue : undefined;
+      if (calls !== undefined) {
+        for (let position = 0; position < calls.items.length; position += 1) {
+          const value = calls.items[position];
+          if (!isWireJsonObject(value)) {
+            invalid();
+          }
+          const toolIndexValue = singleMember(value, "index");
+          if (
+            toolIndexValue !== undefined
+            && (!isWireJsonNumber(toolIndexValue) || !/^(?:0|[1-9]\d*)$/u.test(toolIndexValue.lexeme))
+          ) {
+            invalid();
+          }
+          const index = integerMember(value, "index") ?? position;
+          if (index === undefined || index < 0) {
+            invalid();
+          }
+          const existing = tools.get(index);
+          if (existing === undefined) {
+            budget.reserveEntry();
+          }
+          const tool = existing ?? {
+            id: "",
+            name: "",
+            pendingArguments: "",
+            argumentsSeen: false,
+            started: false,
+            done: false,
+          };
+          const toolType = singleMember(value, "type");
+          if (toolType !== undefined && toolType !== "function") {
+            invalid();
+          }
+          const idValue = singleMember(value, "id");
+          if (idValue !== undefined && typeof idValue !== "string") {
+            invalid();
+          }
+          const id = typeof idValue === "string" ? idValue : undefined;
+          if (id !== undefined) {
+            if (tool.id.length > 0 && tool.id !== id) {
+              invalid();
+            }
+            budget.reserve(id);
+            tool.id = id;
+          }
+          const functionValue = singleMember(value, "function");
+          if (functionValue !== undefined && !isWireJsonObject(functionValue)) {
+            invalid();
+          }
+          const fn = isWireJsonObject(functionValue) ? functionValue : undefined;
+          const nameValue = fn === undefined ? undefined : singleMember(fn, "name");
+          if (nameValue !== undefined && typeof nameValue !== "string") {
+            invalid();
+          }
+          const nameDelta = typeof nameValue === "string" ? nameValue : undefined;
+          if (nameDelta !== undefined) {
+            if (tool.started) {
+              if (nameDelta.length > 0 && nameDelta !== tool.name) {
+                invalid();
+              }
+            } else if (nameDelta === tool.name) {
+              // Repeated complete metadata is idempotent.
+            } else if (nameDelta.startsWith(tool.name)) {
+              budget.reserve(nameDelta.slice(tool.name.length));
+              tool.name = nameDelta;
+            } else {
+              budget.reserve(nameDelta);
+              tool.name += nameDelta;
+            }
+          }
+          const argumentsValue = fn === undefined ? undefined : singleMember(fn, "arguments");
+          if (argumentsValue !== undefined && typeof argumentsValue !== "string") {
+            invalid();
+          }
+          const argumentsDelta = typeof argumentsValue === "string" ? argumentsValue : undefined;
+          if (argumentsDelta !== undefined && argumentsDelta.length > 0) {
+            budget.reserve(argumentsDelta);
+            tool.pendingArguments += argumentsDelta;
+            tool.argumentsSeen = true;
+          }
+          tools.set(index, tool);
+          if (tool.started && argumentsDelta !== undefined && tool.pendingArguments.length > 0) {
+            const pending = tool.pendingArguments;
+            tool.pendingArguments = "";
+            yield { kind: "tool_arguments_delta", key: `chat:${index}`, delta: pending };
+          }
+        }
+        yield* startReadyTools();
+        if (calls.items.length > 0) {
+          toolObserved = true;
+        }
+      }
+    }
+    const finalMessage = objectMember(choice, "message");
+    if (finalMessage !== undefined) {
+      const audio = singleMember(finalMessage, "audio");
+      if (audio !== undefined && audio !== null) {
+        invalid();
+      }
+      const contentValue = singleMember(finalMessage, "content");
+      if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
+        invalid();
+      }
+      if ((contentValue === undefined || contentValue === null) && chatText.length > 0) {
+        invalid();
+      }
+      if (typeof contentValue === "string") {
+        if (!contentValue.startsWith(chatText)) {
+          invalid();
+        }
+        const suffix = contentValue.slice(chatText.length);
+        if (suffix.length > 0) {
+          budget.reserve(suffix);
+          chatText = contentValue;
+          const event = {
+            kind: "text_delta",
+            key: toolObserved ? "chat:message:1" : "chat:message:0",
+            delta: suffix,
+          } as const;
+          if (toolObserved) {
+            pendingPostTool.push(event);
+          } else {
+            yield event;
+          }
+        }
+      }
+      const refusalValue = singleMember(finalMessage, "refusal");
+      if (refusalValue !== undefined && refusalValue !== null && typeof refusalValue !== "string") {
+        invalid();
+      }
+      if ((refusalValue === undefined || refusalValue === null) && chatRefusal.length > 0) {
+        invalid();
+      }
+      if (typeof refusalValue === "string") {
+        if (!refusalValue.startsWith(chatRefusal)) {
+          invalid();
+        }
+        const suffix = refusalValue.slice(chatRefusal.length);
+        if (suffix.length > 0) {
+          budget.reserve(suffix);
+          chatRefusal = refusalValue;
+          const event = {
+            kind: "refusal_delta",
+            key: toolObserved ? "chat:message:1" : "chat:message:0",
+            delta: suffix,
+          } as const;
+          if (toolObserved) {
+            pendingPostTool.push(event);
+          } else {
+            yield event;
+          }
+        }
+      }
+      const calls = arrayMember(finalMessage, "tool_calls");
+      if (calls !== undefined) {
+        const finalToolArguments = new Map<number, string>();
+        for (let position = 0; position < calls.items.length; position += 1) {
+          const value = calls.items[position];
+          if (!isWireJsonObject(value)) {
+            invalid();
+          }
+          if (singleMember(value, "type") !== "function") {
+            invalid();
+          }
+          const index = integerMember(value, "index") ?? position;
+          const fn = objectMember(value, "function");
+          const id = stringMember(value, "id");
+          const name = stringMember(fn, "name");
+          const argumentsJson = stringMember(fn, "arguments");
+          if (
+            index < 0
+            || finalToolArguments.has(index)
+            || id === undefined
+            || id.length === 0
+            || name === undefined
+            || name.length === 0
+            || argumentsJson === undefined
+          ) {
+            invalid();
+          }
+          let tool = tools.get(index);
+          if (tool === undefined) {
+            budget.reserveEntry();
+            budget.reserve(id);
+            budget.reserve(name);
+            tool = {
+              id,
+              name,
+              pendingArguments: "",
+              argumentsSeen: true,
+              started: false,
+              done: false,
+            };
+            tools.set(index, tool);
+          } else {
+            if (tool.id.length === 0) {
+              budget.reserve(id);
+              tool.id = id;
+            } else if (tool.id !== id) {
+              invalid();
+            }
+            if (tool.name.length === 0) {
+              budget.reserve(name);
+              tool.name = name;
+            } else if (tool.name !== name) {
+              if (tool.started || !name.startsWith(tool.name)) {
+                invalid();
+              }
+              budget.reserve(name.slice(tool.name.length));
+              tool.name = name;
+            }
+          }
+          if (!tool.started) {
+            tool.argumentsSeen = true;
+          }
+          tool.argumentsSeen = true;
+          tools.set(index, tool);
+          finalToolArguments.set(index, argumentsJson);
+        }
+        for (const index of tools.keys()) {
+          if (!finalToolArguments.has(index)) {
+            invalid();
+          }
+        }
+        yield* startReadyTools();
+        for (const [index, argumentsJson] of [...finalToolArguments.entries()].sort(([left], [right]) => left - right)) {
+          const tool = tools.get(index);
+          if (tool === undefined || !tool.started) {
+            invalid();
+          }
+          tool.done = true;
+          yield { kind: "tool_done", key: `chat:${index}`, argumentsJson };
+        }
+      } else if (tools.size > 0) {
+        invalid();
+      }
+    }
+    const finish = singleMember(choice, "finish_reason");
+    if (finish !== undefined && finish !== null) {
+      const observedFinish = chatFinish(finish);
+      if (pendingFinish !== undefined && pendingFinish !== observedFinish) {
+        invalid();
+      }
+      pendingFinish = observedFinish;
+      if (pendingFinish === "tool_calls" && tools.size === 0) {
+        invalid();
+      }
+      if (pendingFinish === "length" || pendingFinish === "content_filter") {
+        yield* startIdentifiedTools();
+      } else {
+        yield* startReadyTools();
+      }
+      for (const event of pendingPostTool.splice(0)) {
+        yield event;
+      }
+    }
+  }
+  invalidTruncated();
+}
+
+async function* decodeMessagesStream(
+  bytes: AsyncIterable<Uint8Array>,
+  eventLimitBytes: number,
+  accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
+): AsyncIterable<SemanticStreamEvent> {
+  const budget = new DecoderBudget(accumulatorBytes);
+  const blocks = new Map<number, MessageBlockState>();
+  let pendingFinish: SemanticResponse["finishReason"] | undefined;
+  let observedUsage = emptyUsage();
+  for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
+    if (record.data === "[DONE]") {
+      invalid();
+    }
+    const payload = measuredDecode(measureEvent, () => parseEventObject(record.data, eventLimitBytes));
+    const type = stringMember(payload, "type");
+    if (type === undefined || (record.eventName !== undefined && record.eventName !== type)) {
+      invalid();
+    }
+    if (type === "error") {
+      throw new GatewayFailureError({
+        kind: "upstream_stream_error",
+        source: "parser",
+        phase: "stream",
+      });
+    }
+    if (type === "message_start") {
+      const message = objectMember(payload, "message");
+      const usage = objectMember(message, "usage");
+      if (usage !== undefined) {
+        observedUsage = messagesUsage(usage, observedUsage);
+        yield { kind: "usage", usage: observedUsage };
+      }
+      continue;
+    }
+    if (type === "content_block_start") {
+      const index = integerMember(payload, "index");
+      const block = objectMember(payload, "content_block");
+      if (index === undefined || block === undefined || blocks.has(index)) {
+        invalid();
+      }
+      budget.reserveEntry();
+      const blockType = stringMember(block, "type");
+      if (blockType === "text") {
+        const text = singleMember(block, "text");
+        if (typeof text !== "string") {
+          invalid();
+        }
+        blocks.set(index, { kind: "text", closed: false, sawContent: text.length > 0 });
+        if (text.length > 0) {
+          yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
+        }
+      } else if (blockType === "refusal") {
+        const refusalValue = singleMember(block, "refusal") ?? singleMember(block, "text");
+        if (typeof refusalValue !== "string") {
+          invalid();
+        }
+        const refusal = refusalValue;
+        blocks.set(index, { kind: "refusal", closed: false, sawContent: refusal.length > 0 });
+        if (refusal.length > 0) {
+          yield { kind: "refusal_delta", key: `messages:${index}:refusal`, delta: refusal };
+        }
+      } else if (blockType === "tool_use") {
+        const callId = stringMember(block, "id");
+        const name = stringMember(block, "name");
+        if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0) {
+          invalid();
+        }
+        const key = `messages:${index}`;
+        const input = objectMember(block, "input");
+        const initialArguments = input === undefined
+          ? undefined
+          : new TextDecoder().decode(serializeWireJson(input));
+        if (initialArguments !== undefined) {
+          budget.reserve(initialArguments);
+        }
+        blocks.set(index, {
+          kind: "tool",
+          key,
+          closed: false,
+          initialArguments,
+          bufferedArguments: "",
+          sawArgumentsDelta: false,
+        });
+        budget.reserve(callId);
+        budget.reserve(name);
+        yield { kind: "tool_start", key, callId, name };
+      } else if (blockType === "thinking" || blockType === "redacted_thinking") {
+        blocks.set(index, { kind: "ignored", closed: false });
+        if (hasSubstantiveReasoning(block)) {
+          yield { kind: "semantic_progress" };
+        }
+      } else {
+        invalid();
+      }
+      continue;
+    }
+    if (type === "content_block_delta") {
+      const index = integerMember(payload, "index");
+      const delta = objectMember(payload, "delta");
+      const block = index === undefined ? undefined : blocks.get(index);
+      if (block === undefined || delta === undefined) {
+        invalid();
+      }
+      if (block.closed) {
+        invalid();
+      }
+      const deltaType = stringMember(delta, "type");
+      if (block.kind === "text" && deltaType === "text_delta") {
+        const text = singleMember(delta, "text");
+        if (typeof text !== "string") {
+          invalid();
+        }
+        block.sawContent ||= text.length > 0;
+        yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
+      } else if (block.kind === "refusal" && (deltaType === "refusal_delta" || deltaType === "text_delta")) {
+        const refusalValue = deltaType === "refusal_delta"
+          ? singleMember(delta, "refusal")
+          : singleMember(delta, "text");
+        if (typeof refusalValue !== "string") {
+          invalid();
+        }
+        const refusal = refusalValue;
+        block.sawContent ||= refusal.length > 0;
+        yield {
+          kind: "refusal_delta",
+          key: `messages:${index}:refusal`,
+          delta: refusal,
+        };
+      } else if (block.kind === "tool" && deltaType === "input_json_delta" && block.key !== undefined) {
+        const partialJson = singleMember(delta, "partial_json");
+        if (typeof partialJson !== "string") {
+          invalid();
+        }
+        if (partialJson.length === 0) {
+          continue;
+        }
+        if (block.initialArguments !== undefined && block.initialArguments !== "{}") {
+          budget.reserve(partialJson);
+          block.bufferedArguments += partialJson;
+          block.sawArgumentsDelta = true;
+          continue;
+        }
+        if (!block.sawArgumentsDelta && block.initialArguments === "{}") {
+          budget.release(block.initialArguments);
+          block.initialArguments = undefined;
+        }
+        block.sawArgumentsDelta = true;
+        yield {
+          kind: "tool_arguments_delta",
+          key: block.key,
+          delta: partialJson,
+        };
+      } else if (block.kind !== "ignored") {
+        invalid();
+      } else if (hasSubstantiveReasoning(delta)) {
+        yield { kind: "semantic_progress" };
+      }
+      continue;
+    }
+    if (type === "content_block_stop") {
+      const index = integerMember(payload, "index");
+      const block = index === undefined ? undefined : blocks.get(index);
+      if (block === undefined) {
+        invalid();
+      }
+      if (block.closed) {
+        invalid();
+      }
+      block.closed = true;
+      if (block.kind === "tool" && block.key !== undefined) {
+        if (
+          block.sawArgumentsDelta
+          && block.initialArguments !== undefined
+          && block.initialArguments !== "{}"
+        ) {
+          if (!measuredDecode(
+            measureEvent,
+            () => sameToolArguments(block.initialArguments as string, block.bufferedArguments),
+          )) {
+            invalid();
+          }
+          budget.release(block.bufferedArguments);
+          block.bufferedArguments = "";
+          yield {
+            kind: "tool_arguments_delta",
+            key: block.key,
+            delta: block.initialArguments,
+          };
+          budget.release(block.initialArguments);
+          block.initialArguments = undefined;
+        } else if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
+          yield {
+            kind: "tool_arguments_delta",
+            key: block.key,
+            delta: block.initialArguments,
+          };
+          budget.release(block.initialArguments);
+          block.initialArguments = undefined;
+        }
+      } else if (block.kind === "text") {
+        if (!block.sawContent) {
+          yield { kind: "text_done", key: `messages:${index}:text`, text: "" };
+        }
+        yield {
+          kind: "content_done",
+          key: `messages:${index}:text`,
+          orderKey: `messages:${index}:text`,
+          contentIndex: 0,
+        };
+      } else if (block.kind === "refusal") {
+        if (!block.sawContent) {
+          yield { kind: "refusal_done", key: `messages:${index}:refusal`, refusal: "" };
+        }
+        yield {
+          kind: "content_done",
+          key: `messages:${index}:refusal`,
+          orderKey: `messages:${index}:refusal`,
+          contentIndex: 0,
+        };
+      }
+      continue;
+    }
+    if (type === "message_delta") {
+      const delta = objectMember(payload, "delta");
+      const stopReason = stringMember(delta, "stop_reason");
+      if (stopReason !== undefined) {
+        const observedFinish = messagesFinish(stopReason);
+        if (pendingFinish !== undefined && pendingFinish !== observedFinish) {
+          invalid();
+        }
+        pendingFinish = observedFinish;
+      }
+      const usage = objectMember(payload, "usage");
+      if (usage !== undefined) {
+        observedUsage = messagesUsage(usage, observedUsage);
+        yield { kind: "usage", usage: observedUsage };
+      }
+      continue;
+    }
+    if (type === "message_stop") {
+      if (pendingFinish === undefined) {
+        invalid();
+      }
+      if ([...blocks.values()].some((block) => !block.closed)) {
+        invalid();
+      }
+      const completed = pendingFinish !== "length"
+        && pendingFinish !== "content_filter"
+        && pendingFinish !== "refusal";
+      for (const block of blocks.values()) {
+        if (block.kind === "tool") {
+          yield { kind: "tool_done", key: block.key, completed };
+        }
+      }
+      yield {
+        kind: "terminal",
+        status: pendingFinish === "length" || pendingFinish === "content_filter" || pendingFinish === "refusal"
+          ? "incomplete"
+          : "completed",
+        finishReason: pendingFinish,
+      };
+      return;
+    }
+    if (type === "ping") {
+      continue;
+    }
+    invalid();
+  }
+  invalidTruncated();
+}
+
+async function* decodeResponsesStream(
+  bytes: AsyncIterable<Uint8Array>,
+  eventLimitBytes: number,
+  accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
+): AsyncIterable<SemanticStreamEvent> {
+  const budget = new DecoderBudget(accumulatorBytes);
+  const toolsByIndex = new Map<number, ResponseToolIdentity>();
+  const observedOutputIndexes = new Set<number>();
+  const observedOutputTypes = new Map<number, string>();
+  const observedOutputStatuses = new Map<number, string>();
+  const observedContent = new Map<string, "output_text" | "refusal">();
+  let lastSequence = -1;
+  for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
+    if (record.data === "[DONE]") {
+      invalid();
+    }
+    const payload = measuredDecode(measureEvent, () => parseEventObject(record.data, eventLimitBytes));
+    const type = stringMember(payload, "type");
+    if (type === undefined || (record.eventName !== undefined && record.eventName !== type)) {
+      invalid();
+    }
+    const sequence = integerMember(payload, "sequence_number");
+    if (sequence !== undefined) {
+      if (sequence <= lastSequence) {
+        invalid();
+      }
+      lastSequence = sequence;
+    }
+    if (type === "response.output_item.added") {
+      const outputIndex = integerMember(payload, "output_index");
+      const item = objectMember(payload, "item");
+      if (outputIndex === undefined || item === undefined) {
+        invalid();
+      }
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const itemType = stringMember(item, "type");
+      if (
+        itemType !== "message"
+        && itemType !== "function_call"
+        && itemType !== "reasoning"
+      ) {
+        invalid();
+      }
+      observedOutputTypes.set(outputIndex, itemType);
+      if (itemType === "message") {
+        observeFinalItemContent(item, outputIndex, observedContent, budget);
+        yield { kind: "message_start", key: `responses:${outputIndex}:message` };
+        yield* messageContentEvents(item, outputIndex, false);
+      }
+      if (itemType === "function_call") {
+        const key = `responses:${outputIndex}`;
+        const callId = stringMember(item, "call_id");
+        const name = stringMember(item, "name");
+        if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0) {
+          invalid();
+        }
+        const identity = {
+          key,
+          itemId: stringMember(item, "id"),
+          callId,
+          name,
+        };
+        toolsByIndex.set(outputIndex, identity);
+        budget.reserve(callId);
+        budget.reserve(name);
+        if (identity.itemId !== undefined) {
+          budget.reserve(identity.itemId);
+        }
+        yield {
+          kind: "tool_start",
+          key,
+          itemId: identity.itemId,
+          callId,
+          name,
+        };
+        const argumentsJson = singleMember(item, "arguments");
+        if (typeof argumentsJson !== "string") {
+          invalid();
+        }
+        if (argumentsJson.length > 0) {
+          yield { kind: "tool_arguments_delta", key, delta: argumentsJson };
+        }
+      }
+      if (itemType === "reasoning" && hasSubstantiveReasoning(item)) {
+        yield { kind: "semantic_progress" };
+      }
+      continue;
+    }
+    if (type === "response.output_text.delta") {
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
+      const delta = singleMember(payload, "delta");
+      if (typeof delta !== "string") {
+        invalid();
+      }
+      yield {
+        kind: "text_delta",
+        key: responseContentKey(payload, "text"),
+        orderKey: responseStreamMessageKey(payload),
+        delta,
+      };
+      continue;
+    }
+    if (type === "response.output_text.done") {
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
+      const text = singleMember(payload, "text");
+      if (typeof text !== "string") {
+        invalid();
+      }
+      yield {
+        kind: "text_done",
+        key: responseContentKey(payload, "text"),
+        orderKey: responseStreamMessageKey(payload),
+        text,
+      };
+      yield {
+        kind: "content_done",
+        key: responseContentKey(payload, "text"),
+        orderKey: responseStreamMessageKey(payload),
+        contentIndex: requiredContentIndex(payload),
+      };
+      continue;
+    }
+    if (type === "response.refusal.delta") {
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
+      const delta = singleMember(payload, "delta");
+      if (typeof delta !== "string") {
+        invalid();
+      }
+      yield {
+        kind: "refusal_delta",
+        key: responseContentKey(payload, "refusal"),
+        orderKey: responseStreamMessageKey(payload),
+        delta,
+      };
+      continue;
+    }
+    if (type === "response.refusal.done") {
+      const outputIndex = requiredOutputIndex(payload);
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
+      const refusal = singleMember(payload, "refusal");
+      if (typeof refusal !== "string") {
+        invalid();
+      }
+      yield {
+        kind: "refusal_done",
+        key: responseContentKey(payload, "refusal"),
+        orderKey: responseStreamMessageKey(payload),
+        refusal,
+      };
+      yield {
+        kind: "content_done",
+        key: responseContentKey(payload, "refusal"),
+        orderKey: responseStreamMessageKey(payload),
+        contentIndex: requiredContentIndex(payload),
+      };
+      continue;
+    }
+    if (type === "response.function_call_arguments.delta") {
+      const outputIndex = requiredOutputIndex(payload);
+      const identity = toolsByIndex.get(outputIndex);
+      if (identity === undefined) {
+        invalid();
+      }
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const delta = singleMember(payload, "delta");
+      if (typeof delta !== "string") {
+        invalid();
+      }
+      yield { kind: "tool_arguments_delta", key: identity.key, delta };
+      continue;
+    }
+    if (type === "response.function_call_arguments.done") {
+      const outputIndex = requiredOutputIndex(payload);
+      const identity = toolsByIndex.get(outputIndex);
+      if (identity === undefined) {
+        invalid();
+      }
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const argumentsJson = singleMember(payload, "arguments");
+      const name = singleMember(payload, "name");
+      if (typeof argumentsJson !== "string" || typeof name !== "string" || name !== identity.name) {
+        invalid();
+      }
+      yield { kind: "tool_done", key: identity.key, argumentsJson };
+      continue;
+    }
+    if (type === "response.output_item.done") {
+      const outputIndex = integerMember(payload, "output_index");
+      const item = objectMember(payload, "item");
+      if (outputIndex === undefined || item === undefined) {
+        invalid();
+      }
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const itemType = stringMember(item, "type");
+      if (itemType === undefined) {
+        invalid();
+      }
+      const observedType = observedOutputTypes.get(outputIndex);
+      if (observedType !== undefined && observedType !== itemType) {
+        invalid();
+      }
+      observedOutputTypes.set(outputIndex, itemType);
+      const itemStatus = stringMember(item, "status");
+      if (
+        ((itemType === "message" || itemType === "function_call") && itemStatus === undefined)
+        || (itemStatus !== undefined
+          && itemStatus !== "completed"
+          && itemStatus !== "incomplete"
+          && itemStatus !== "in_progress")
+      ) {
+        invalid();
+      }
+      const observedStatus = observedOutputStatuses.get(outputIndex);
+      if (observedStatus !== undefined && observedStatus !== itemStatus) {
+        invalid();
+      }
+      if (itemStatus !== undefined) {
+        observedOutputStatuses.set(outputIndex, itemStatus);
+      }
+      observeFinalItemContent(item, outputIndex, observedContent, budget);
+      if (itemType === "reasoning" && hasSubstantiveReasoning(item)) {
+        yield { kind: "semantic_progress" };
+      }
+      yield* finalItemEvents(item, outputIndex, toolsByIndex);
+      yield { kind: "item_done", outputIndex, itemType };
+      continue;
+    }
+    if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
+      const response = objectMember(payload, "response");
+      if (response === undefined) {
+        invalid();
+      }
+      validateTerminalResponse(
+        type,
+        response,
+        observedOutputIndexes,
+        observedOutputTypes,
+        observedOutputStatuses,
+        observedContent,
+      );
+      if (type === "response.failed") {
+        throw new GatewayFailureError({
+          kind: "upstream_stream_error",
+          source: "parser",
+          phase: "stream",
+        });
+      }
+
+      yield* finalResponseEvents(response, toolsByIndex);
+      const usage = objectMember(response, "usage");
+      if (usage !== undefined) {
+        yield { kind: "usage", usage: responsesUsage(usage) };
+      }
+      const incompleteReason = type === "response.incomplete"
+        ? stringMember(objectMember(response, "incomplete_details"), "reason")
+        : undefined;
+      yield {
+        kind: "terminal",
+        status: type === "response.incomplete" ? "incomplete" : "completed",
+        finishReason: type === "response.incomplete"
+          ? incompleteReason === "content_filter" ? "content_filter" : "length"
+          : responseHasRefusal(response)
+            ? "refusal"
+            : toolsByIndex.size > 0 ? "tool_calls" : "stop",
+      };
+      return;
+    }
+
+    if (type === "response.content_part.added" || type === "response.content_part.done") {
+      const outputIndex = requiredOutputIndex(payload);
+      const contentIndex = integerMember(payload, "content_index");
+      const part = objectMember(payload, "part");
+      if (contentIndex === undefined || contentIndex < 0 || part === undefined) {
+        invalid();
+      }
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const partType = stringMember(part, "type");
+      if (partType === "output_text") {
+        const text = stringMember(part, "text");
+        if (text === undefined) {
+          invalid();
+        }
+        const key = `responses:${outputIndex}:${contentIndex}:text`;
+        observeContent(observedContent, budget, key, "output_text");
+        yield {
+          kind: "text_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          text,
+        };
+      } else if (partType === "refusal") {
+        const refusal = stringMember(part, "refusal");
+        if (refusal === undefined) {
+          invalid();
+        }
+        const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+        observeContent(observedContent, budget, key, "refusal");
+        yield {
+          kind: "refusal_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          refusal,
+        };
+      } else {
+        invalid();
+      }
+      if (type === "response.content_part.done") {
+        yield {
+          kind: "content_done",
+          key: partType === "output_text"
+            ? `responses:${outputIndex}:${contentIndex}:text`
+            : `responses:${outputIndex}:${contentIndex}:refusal`,
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
+        };
+      }
+      continue;
+    }
+    if (
+      type === "response.created"
+      || type === "response.in_progress"
+    ) {
+      continue;
+    }
+    if (type.startsWith("response.reasoning_")) {
+      if (hasSubstantiveReasoning(payload)) {
+        yield { kind: "semantic_progress" };
+      }
+      continue;
+    }
+    if (type === "error") {
+      throw new GatewayFailureError({
+        kind: "upstream_stream_error",
+        source: "parser",
+        phase: "stream",
+      });
+    }
+    invalid();
+  }
+  invalidTruncated();
+}
+
+function validateTerminalResponse(
+  eventType: string,
+  response: WireJsonObject,
+  observedOutputIndexes: ReadonlySet<number>,
+  observedOutputTypes: ReadonlyMap<number, string>,
+  observedOutputStatuses: ReadonlyMap<number, string>,
+  observedContent: ReadonlyMap<string, "output_text" | "refusal">,
+): void {
+  const expectedStatus = eventType === "response.completed"
+    ? "completed"
+    : eventType === "response.incomplete"
+      ? "incomplete"
+      : "failed";
+  if (stringMember(response, "status") !== expectedStatus) {
+    invalid();
+  }
+  const output = arrayMember(response, "output");
+  if (output === undefined) {
+    invalid();
+  }
+  for (const item of output.items) {
+    if (!isWireJsonObject(item)) {
+      continue;
+    }
+    const itemType = stringMember(item, "type");
+    if (itemType !== "function_call" && itemType !== "message") {
+      continue;
+    }
+    const itemStatus = stringMember(item, "status");
+    if (
+      itemStatus === undefined
+      || (itemStatus !== "completed" && itemStatus !== "incomplete" && itemStatus !== "in_progress")
+      || (expectedStatus === "completed" && itemStatus !== "completed")
+    ) {
+      invalid();
+    }
+  }
+  for (const index of observedOutputIndexes) {
+    const item = output.items[index];
+    if (index < 0 || index >= output.items.length || !isWireJsonObject(item)) {
+      invalid();
+    }
+    const observedType = observedOutputTypes.get(index);
+    if (observedType !== undefined && stringMember(item, "type") !== observedType) {
+      invalid();
+    }
+    const observedStatus = observedOutputStatuses.get(index);
+    const finalStatus = stringMember(item, "status");
+    if (observedStatus !== undefined && finalStatus !== undefined && finalStatus !== observedStatus) {
+      invalid();
+    }
+  }
+  for (const [key, expectedType] of observedContent) {
+    const match = /^responses:(\d+):(\d+):(text|refusal)$/u.exec(key);
+    if (match?.[1] === undefined || match[2] === undefined) {
+      invalid();
+    }
+    const outputIndex = Number.parseInt(match[1], 10);
+    const contentIndex = Number.parseInt(match[2], 10);
+    const item = output.items[outputIndex];
+    const content = isWireJsonObject(item) ? arrayMember(item, "content") : undefined;
+    const part = content?.items[contentIndex];
+    if (!isWireJsonObject(part) || stringMember(part, "type") !== expectedType) {
+      invalid();
+    }
+  }
+}
+
+function observeOutputIndex(
+  indexes: Set<number>,
+  budget: DecoderBudget,
+  outputIndex: number,
+): void {
+  if (!indexes.has(outputIndex)) {
+    budget.reserveEntry();
+    indexes.add(outputIndex);
+  }
+}
+
+function observeContent(
+  content: Map<string, "output_text" | "refusal">,
+  budget: DecoderBudget,
+  key: string,
+  type: "output_text" | "refusal",
+): void {
+  const existing = content.get(key);
+  if (existing !== undefined) {
+    if (existing !== type) {
+      invalid();
+    }
+    return;
+  }
+  budget.reserveEntry();
+  content.set(key, type);
+}
+
+function observeFinalItemContent(
+  item: WireJsonObject,
+  outputIndex: number,
+  observedContent: Map<string, "output_text" | "refusal">,
+  budget: DecoderBudget,
+): void {
+  if (stringMember(item, "type") !== "message") {
+    return;
+  }
+  const content = arrayMember(item, "content");
+  if (content === undefined) {
+    invalid();
+  }
+  for (let contentIndex = 0; contentIndex < content.items.length; contentIndex += 1) {
+    const part = content.items[contentIndex];
+    if (!isWireJsonObject(part)) {
+      invalid();
+    }
+    const type = stringMember(part, "type");
+    if (type !== "output_text" && type !== "refusal") {
+      invalid();
+    }
+    observeContent(
+      observedContent,
+      budget,
+      `responses:${outputIndex}:${contentIndex}:${type === "output_text" ? "text" : "refusal"}`,
+      type,
+    );
+  }
+}
+
+function requiredOutputIndex(object: WireJsonObject): number {
+  const value = integerMember(object, "output_index");
+  if (value === undefined || value < 0) {
+    invalid();
+  }
+  return value;
+}
+
+function requiredContentIndex(object: WireJsonObject): number {
+  const value = integerMember(object, "content_index");
+  if (value === undefined || value < 0) {
+    invalid();
+  }
+  return value;
+}
+
+function responseHasRefusal(response: WireJsonObject): boolean {
+  const output = arrayMember(response, "output");
+  return output?.items.some((item) => {
+    if (!isWireJsonObject(item) || stringMember(item, "type") !== "message") {
+      return false;
+    }
+    return arrayMember(item, "content")?.items.some((part) => (
+      isWireJsonObject(part) && stringMember(part, "type") === "refusal"
+    )) === true;
+  }) === true;
+}
+
+function hasSubstantiveReasoning(item: WireJsonObject): boolean {
+  return [
+    "reasoning_text",
+    "thinking",
+    "signature",
+    "data",
+    "delta",
+    "text",
+    "part",
+    "content",
+    "summary",
+    "encrypted_content",
+  ].some((key) => (
+    memberValues(item, key).some((value) => hasNonemptyString(value))
+  ));
+}
+
+function hasNonemptyString(value: WireJson): boolean {
+  if (typeof value === "string") {
+    return value.length > 0;
+  }
+  if (isWireJsonArray(value)) {
+    return value.items.some((item) => hasNonemptyString(item));
+  }
+  if (isWireJsonObject(value)) {
+    return value.members.some((member) => (
+      member.key !== "type"
+      && member.key !== "id"
+      && member.key !== "status"
+      && hasNonemptyString(member.value)
+    ));
+  }
+  return false;
+}
+
+function sameToolArguments(left: string, right: string): boolean {
+  try {
+    const leftBytes = new TextEncoder().encode(left);
+    const rightBytes = new TextEncoder().encode(right);
+    const leftValue = parseWireJson(leftBytes, { maxBytes: Math.max(1, leftBytes.byteLength), maxDepth: 32 });
+    const rightValue = parseWireJson(rightBytes, { maxBytes: Math.max(1, rightBytes.byteLength), maxDepth: 32 });
+    return isWireJsonObject(leftValue)
+      && isWireJsonObject(rightValue)
+      && equalWireJson(leftValue, rightValue);
+  } catch {
+    return false;
+  }
+}
+
+function equalWireJson(left: WireJson, right: WireJson): boolean {
+  if (isWireJsonNumber(left) || isWireJsonNumber(right)) {
+    return isWireJsonNumber(left)
+      && isWireJsonNumber(right)
+      && normalizeJsonNumber(left.lexeme) === normalizeJsonNumber(right.lexeme);
+  }
+  if (isWireJsonArray(left) || isWireJsonArray(right)) {
+    return isWireJsonArray(left)
+      && isWireJsonArray(right)
+      && left.items.length === right.items.length
+      && left.items.every((item, index) => equalWireJson(item, right.items[index] as WireJson));
+  }
+  if (isWireJsonObject(left) || isWireJsonObject(right)) {
+    if (
+      !isWireJsonObject(left)
+      || !isWireJsonObject(right)
+      || left.members.length !== right.members.length
+      || duplicateMemberNames(left).length > 0
+      || duplicateMemberNames(right).length > 0
+    ) {
+      return false;
+    }
+    const rightByKey = new Map(right.members.map((member) => [member.key, member.value]));
+    return left.members.every((member) => {
+      const match = rightByKey.get(member.key);
+      return match !== undefined && equalWireJson(member.value, match);
+    });
+  }
+  return left === right;
+}
+
+function normalizeJsonNumber(value: string): string {
+  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/u.exec(value);
+  if (match?.[2] === undefined) {
+    return value;
+  }
+  const fraction = match[3] ?? "";
+  let digits = `${match[2]}${fraction}`.replace(/^0+/u, "");
+  if (digits.length === 0) {
+    return "0";
+  }
+  let exponentAdjustment = -fraction.length;
+  let trailingZeros = 0;
+  for (let index = digits.length - 1; index >= 0 && digits[index] === "0"; index -= 1) {
+    trailingZeros += 1;
+  }
+  if (trailingZeros > 0) {
+    digits = digits.slice(0, -trailingZeros);
+    exponentAdjustment += trailingZeros;
+  }
+  return `${match[1] ?? ""}${digits}e${adjustSignedDecimal(match[4] ?? "0", exponentAdjustment)}`;
+}
+
+function adjustSignedDecimal(value: string, adjustment: number): string {
+  const left = signedDecimal(value);
+  const right = signedDecimal(String(adjustment));
+  if (left.negative === right.negative) {
+    return signedMagnitude(left.negative, addMagnitude(left.digits, right.digits));
+  }
+  const comparison = compareMagnitude(left.digits, right.digits);
+  if (comparison === 0) {
+    return "0";
+  }
+  return comparison > 0
+    ? signedMagnitude(left.negative, subtractMagnitude(left.digits, right.digits))
+    : signedMagnitude(right.negative, subtractMagnitude(right.digits, left.digits));
+}
+
+function signedDecimal(value: string): { readonly negative: boolean; readonly digits: string } {
+  const negative = value.startsWith("-");
+  const unsigned = value.startsWith("-") || value.startsWith("+") ? value.slice(1) : value;
+  const digits = unsigned.replace(/^0+/u, "") || "0";
+  return { negative: negative && digits !== "0", digits };
+}
+
+function signedMagnitude(negative: boolean, digits: string): string {
+  return negative && digits !== "0" ? `-${digits}` : digits;
+}
+
+function compareMagnitude(left: string, right: string): number {
+  return left.length === right.length
+    ? left === right ? 0 : left > right ? 1 : -1
+    : left.length > right.length ? 1 : -1;
+}
+
+function addMagnitude(left: string, right: string): string {
+  const output: string[] = [];
+  let carry = 0;
+  for (let offset = 0; offset < Math.max(left.length, right.length) || carry > 0; offset += 1) {
+    const leftDigit = offset < left.length ? left.charCodeAt(left.length - 1 - offset) - 48 : 0;
+    const rightDigit = offset < right.length ? right.charCodeAt(right.length - 1 - offset) - 48 : 0;
+    const total = leftDigit + rightDigit + carry;
+    output.push(String(total % 10));
+    carry = Math.floor(total / 10);
+  }
+  return output.reverse().join("");
+}
+
+function subtractMagnitude(left: string, right: string): string {
+  const output: string[] = [];
+  let borrow = 0;
+  for (let offset = 0; offset < left.length; offset += 1) {
+    let digit = left.charCodeAt(left.length - 1 - offset) - 48 - borrow;
+    const rightDigit = offset < right.length ? right.charCodeAt(right.length - 1 - offset) - 48 : 0;
+    if (digit < rightDigit) {
+      digit += 10;
+      borrow = 1;
+    } else {
+      borrow = 0;
+    }
+    output.push(String(digit - rightDigit));
+  }
+  return output.reverse().join("").replace(/^0+/u, "") || "0";
+}
+
+function* finalResponseEvents(
+  response: WireJsonObject,
+  toolsByIndex: Map<number, ResponseToolIdentity>,
+): Iterable<SemanticStreamEvent> {
+  const output = arrayMember(response, "output");
+  if (output === undefined) {
+    invalid();
+  }
+  for (let index = 0; index < output.items.length; index += 1) {
+    const item = output.items[index];
+    if (!isWireJsonObject(item)) {
+      invalid();
+    }
+    yield* finalItemEvents(item, index, toolsByIndex);
+  }
+}
+
+function* finalItemEvents(
+  item: WireJsonObject,
+  outputIndex: number,
+  toolsByIndex: Map<number, ResponseToolIdentity>,
+): Iterable<SemanticStreamEvent> {
+  const type = stringMember(item, "type");
+  if (type === "message") {
+    yield* messageContentEvents(item, outputIndex, true);
+    return;
+  }
+  if (type === "function_call") {
+    const finalItemId = requiredStreamString(item, "id");
+    const finalCallId = requiredStreamString(item, "call_id");
+    const finalName = requiredStreamString(item, "name");
+    const finalArguments = requiredStreamString(item, "arguments", true);
+    const status = requiredStreamString(item, "status");
+    if (status !== "completed" && status !== "incomplete" && status !== "in_progress") {
+      invalid();
+    }
+    let identity = toolsByIndex.get(outputIndex);
+    if (identity === undefined) {
+      identity = {
+        key: `responses:${outputIndex}`,
+        itemId: finalItemId,
+        callId: finalCallId,
+        name: finalName,
+      };
+      toolsByIndex.set(outputIndex, identity);
+      yield {
+        kind: "tool_start",
+        key: identity.key,
+        itemId: identity.itemId,
+        callId: finalCallId,
+        name: finalName,
+      };
+    } else {
+      if (
+        finalCallId !== identity.callId
+        || finalName !== identity.name
+        || (identity.itemId !== undefined && finalItemId !== identity.itemId)
+      ) {
+        invalid();
+      }
+    }
+    yield {
+      kind: "tool_done",
+      key: identity.key,
+      argumentsJson: finalArguments,
+      completed: status === "completed",
+    };
+    return;
+  }
+
+  if (type === "reasoning") {
+    return;
+  }
+  invalid();
+}
+
+function* messageContentEvents(
+  item: WireJsonObject,
+  outputIndex: number,
+  complete: boolean,
+): Iterable<SemanticStreamEvent> {
+  const content = arrayMember(item, "content");
+  if (content === undefined) {
+    invalid();
+  }
+  for (let contentIndex = 0; contentIndex < content.items.length; contentIndex += 1) {
+    const part = content.items[contentIndex];
+    if (!isWireJsonObject(part)) {
+      invalid();
+    }
+    const partType = stringMember(part, "type");
+    if (partType === "output_text") {
+      const text = stringMember(part, "text");
+      if (text === undefined) {
+        invalid();
+      }
+      const key = `responses:${outputIndex}:${contentIndex}:text`;
+      yield {
+        kind: "text_done",
+        key,
+        orderKey: `responses:${outputIndex}:message`,
+        text,
+      };
+      if (complete) {
+        yield {
+          kind: "content_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
+        };
+      }
+    } else if (partType === "refusal") {
+      const refusal = stringMember(part, "refusal");
+      if (refusal === undefined) {
+        invalid();
+      }
+      const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+      yield {
+        kind: "refusal_done",
+        key,
+        orderKey: `responses:${outputIndex}:message`,
+        refusal,
+      };
+      if (complete) {
+        yield {
+          kind: "content_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
+        };
+      }
+    } else {
+      invalid();
+    }
+  }
+}
+
+interface ResponseToolIdentity {
+  readonly key: string;
+  readonly itemId?: string | undefined;
+  readonly callId: string;
+  readonly name: string;
+}
+
+type MessageBlockState =
+  | { readonly kind: "text" | "refusal"; closed: boolean; sawContent: boolean }
+  | { readonly kind: "ignored"; closed: boolean }
+  | {
+    readonly kind: "tool";
+    readonly key: string;
+    initialArguments?: string | undefined;
+    bufferedArguments: string;
+    sawArgumentsDelta: boolean;
+    closed: boolean;
+  };
+
+function parseEventObject(data: string, eventLimitBytes: number): WireJsonObject {
+  try {
+    const bytes = new TextEncoder().encode(data);
+    const parsed = parseWireJson(bytes, { maxBytes: Math.min(eventLimitBytes, Math.max(1, bytes.byteLength)), maxDepth: 64 });
+    if (!isWireJsonObject(parsed)) {
+      invalid();
+    }
+    return parsed;
+  } catch (error: unknown) {
+    if (error instanceof GatewayFailureError) {
+      throw error;
+    }
+    throw new GatewayFailureError({
+      kind: "invalid_upstream_response",
+      source: "parser",
+      phase: "stream",
+      cause: error,
+    });
+  }
+}
+
+function measuredDecode<T>(
+  measureEvent: (<Result>(work: () => Result) => Result) | undefined,
+  work: () => T,
+): T {
+  return measureEvent === undefined ? work() : measureEvent(work);
+}
+
+function requiredStreamString(object: WireJsonObject, key: string, allowEmpty = false): string {
+  const values = memberValues(object, key);
+  if (
+    values.length !== 1
+    || typeof values[0] !== "string"
+    || (!allowEmpty && values[0].length === 0)
+  ) {
+    invalid();
+  }
+  return values[0];
+}
+
+function chatFinish(value: WireJson): SemanticResponse["finishReason"] {
+  if (value === "stop" || value === "tool_calls" || value === "length" || value === "content_filter") {
+    return value;
+  }
+  invalid();
+}
+
+function messagesFinish(value: string): SemanticResponse["finishReason"] {
+  if (value === "end_turn" || value === "stop_sequence") {
+    return "stop";
+  }
+  if (value === "tool_use") {
+    return "tool_calls";
+  }
+  if (value === "max_tokens" || value === "model_context_window_exceeded") {
+    return "length";
+  }
+  if (value === "refusal") {
+    return "refusal";
+  }
+  invalid();
+}
+
+function chatUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
+  const promptDetails = objectMember(value, "prompt_tokens_details");
+  const completionDetails = objectMember(value, "completion_tokens_details");
+  return {
+    inputTokens: optionalNonnegativeIntegerMember(value, "prompt_tokens") ?? current.inputTokens,
+    outputTokens: optionalNonnegativeIntegerMember(value, "completion_tokens") ?? current.outputTokens,
+    cacheReadTokens: optionalNonnegativeIntegerMember(promptDetails, "cached_tokens")
+      ?? optionalNonnegativeIntegerMember(value, "cache_read_input_tokens")
+      ?? current.cacheReadTokens,
+    cacheWriteTokens: optionalNonnegativeIntegerMember(promptDetails, "cache_write_tokens")
+      ?? optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens")
+      ?? current.cacheWriteTokens,
+    reasoningTokens: optionalNonnegativeIntegerMember(completionDetails, "reasoning_tokens")
+      ?? current.reasoningTokens,
+  };
+}
+
+function messagesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
+  return mergeMessagesUsage(current, {
+    inputTokens: optionalNonnegativeIntegerMember(value, "input_tokens"),
+    outputTokens: optionalNonnegativeIntegerMember(value, "output_tokens"),
+    cacheReadTokens: optionalNonnegativeIntegerMember(value, "cache_read_input_tokens"),
+    cacheWriteTokens: optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens"),
+  });
+}
+
+function responsesUsage(value: WireJsonObject): SemanticUsage {
+  const inputDetails = objectMember(value, "input_tokens_details");
+  const outputDetails = objectMember(value, "output_tokens_details");
+  return {
+    inputTokens: nonnegativeIntegerMember(value, "input_tokens"),
+    outputTokens: nonnegativeIntegerMember(value, "output_tokens"),
+    cacheReadTokens: nonnegativeIntegerMember(inputDetails, "cached_tokens"),
+    cacheWriteTokens: nonnegativeIntegerMember(inputDetails, "cache_write_tokens"),
+    reasoningTokens: nonnegativeIntegerMember(outputDetails, "reasoning_tokens"),
+  };
+}
+
+function responseContentKey(object: WireJsonObject, kind: "text" | "refusal"): string {
+  const outputIndex = integerMember(object, "output_index");
+  const contentIndex = integerMember(object, "content_index");
+  if (outputIndex === undefined || contentIndex === undefined) {
+    invalid();
+  }
+  return `responses:${outputIndex}:${contentIndex}:${kind}`;
+}
+
+function responseStreamMessageKey(object: WireJsonObject): string {
+  return `responses:${requiredOutputIndex(object)}:message`;
+}
+
+function singleMember(object: WireJsonObject, key: string): WireJson | undefined {
+  const values = memberValues(object, key);
+  if (values.length > 1) {
+    invalid();
+  }
+  return values[0];
+}
+
+function stringMember(object: WireJsonObject | undefined, key: string): string | undefined {
+  if (object === undefined) {
+    return undefined;
+  }
+  const value = singleMember(object, key);
+  return typeof value === "string" ? value : undefined;
+}
+
+function objectMember(object: WireJsonObject | undefined, key: string): WireJsonObject | undefined {
+  if (object === undefined) {
+    return undefined;
+  }
+  const value = singleMember(object, key);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isWireJsonObject(value)) {
+    invalid();
+  }
+  return value;
+}
+
+function nullableObjectMember(object: WireJsonObject, key: string): WireJsonObject | undefined {
+  const value = singleMember(object, key);
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!isWireJsonObject(value)) {
+    invalid();
+  }
+  return value;
+}
+
+function arrayMember(object: WireJsonObject, key: string) {
+  const value = singleMember(object, key);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isWireJsonArray(value)) {
+    invalid();
+  }
+  return value;
+}
+
+function integerMember(object: WireJsonObject, key: string): number | undefined {
+  const value = singleMember(object, key);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isWireJsonNumber(value)) {
+    invalid();
+  }
+  const parsed = Number(value.lexeme);
+  if (!Number.isSafeInteger(parsed)) {
+    invalid();
+  }
+  return parsed;
+}
+
+function nonnegativeIntegerMember(object: WireJsonObject | undefined, key: string): number {
+  return optionalNonnegativeIntegerMember(object, key) ?? 0;
+}
+
+function optionalNonnegativeIntegerMember(
+  object: WireJsonObject | undefined,
+  key: string,
+): number | undefined {
+  if (object === undefined) {
+    return undefined;
+  }
+  const value = singleMember(object, key);
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isWireJsonNumber(value)) {
+    invalid();
+  }
+  const parsed = Number(value.lexeme);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    invalid();
+  }
+  return parsed;
+}
+
+function emptyUsage(): SemanticUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+  };
+}
+
+class DecoderBudget {
+  private readonly encoder = new TextEncoder();
+  private used = 0;
+
+  constructor(private readonly maxBytes: number) {}
+
+  reserve(value: string): void {
+    this.used += this.encoder.encode(value).byteLength;
+    this.assertBounded();
+  }
+
+  reserveEntry(): void {
+    this.used += 64;
+    this.assertBounded();
+  }
+
+  release(value: string): void {
+    this.used = Math.max(0, this.used - this.encoder.encode(value).byteLength);
+  }
+
+  private assertBounded(): void {
+    if (this.used > this.maxBytes) {
+      invalid();
+    }
+  }
+}
+
+function invalid(): never {
+  throw new GatewayFailureError({
+    kind: "invalid_upstream_response",
+    source: "parser",
+    phase: "stream",
+  });
+}
+
+function invalidTruncated(): never {
+  throw new GatewayFailureError({
+    kind: "upstream_stream_truncated",
+    source: "parser",
+    phase: "stream",
+  });
+}

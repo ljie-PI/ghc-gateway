@@ -1,4 +1,4 @@
-import type { SqliteDatabase } from "../../persistence/sqlite.js";
+import type { SqliteDatabase, SqliteStatement } from "../../persistence/sqlite.js";
 import {
   isWireJsonArray,
   isWireJsonObject,
@@ -20,6 +20,8 @@ const DEFAULT_TTL_DAYS = 7;
 const DEFAULT_MAX_RESPONSES = 512;
 const DEFAULT_MAX_RECEIPTS = 2_048;
 const DAY_MS = 86_400_000;
+const JSON_ENCODER = new TextEncoder();
+const JSON_DECODER = new TextDecoder();
 export const RESPONSES_CHAT_CONVERSION_VERSION = "responses-chat-v1";
 export const RESPONSES_MESSAGES_CONVERSION_VERSION = "responses-messages-v1";
 
@@ -196,6 +198,8 @@ interface StateRow {
 }
 
 export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistoryAdmin {
+  private readonly statements = new Map<string, SqliteStatement>();
+  private readonly recentReceiptCleanup = new Map<string, number>();
   private readonly nowMs: () => number;
   private ttlMs: number;
   private readonly maxResponses: number;
@@ -343,6 +347,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   ): Promise<void> {
     throwIfAborted(signal);
     this.mutateIfChanged(() => this.upsertReceipt(receipt));
+    this.rememberReceiptCleanup(receipt.accountId, receipt.responseId);
     throwIfAborted(signal);
   }
 
@@ -366,8 +371,96 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       && existing.created_at_ms + this.ttlMs > this.nowMs()
       && sameOwnership(existing, ownership)
       && checkpointRank(checkpointState) <= checkpointRank(existing.checkpoint_state)
-      && (calls.length === 0 || callsEqual(this.readCalls(ownership.accountId, responseId), calls))
+      && (calls.length === 0 || callRowsEqual(this.readCallRows(ownership.accountId, responseId), calls))
     ) {
+      return;
+    }
+    if (
+      existing !== undefined
+      && existing.checkpoint_state !== "expired"
+      && existing.created_at_ms + this.ttlMs > this.nowMs()
+      && sameOwnership(existing, ownership)
+    ) {
+      const nowMs = this.nowMs();
+      const cleanupKey = receiptCleanupKey(ownership.accountId, responseId);
+      const cleanupValidUntil = this.recentReceiptCleanup.get(cleanupKey);
+      const canSkipExpiry = cleanupValidUntil !== undefined && nowMs < cleanupValidUntil;
+      if (!canSkipExpiry || checkpointState === "complete") {
+        this.recentReceiptCleanup.delete(cleanupKey);
+      }
+      if (
+        canSkipExpiry
+        && checkpointState === "complete"
+        && existing.checkpoint_state === "partial"
+        && (calls.length === 0 || callRowsEqual(this.readCallRows(ownership.accountId, responseId), calls))
+      ) {
+        // The durable calls and Admin-visible counts are unchanged; only promote the receipt atomically.
+        this.statement(
+          `UPDATE response_route_receipts
+           SET checkpoint_state = 'complete'
+           WHERE account_id = ? AND response_id = ? AND checkpoint_state = 'partial'`,
+        ).run(ownership.accountId, responseId);
+        throwIfAborted(signal);
+        return;
+      }
+      let unavailableAfterCleanup = false;
+      let ownershipChanged = false;
+      const transaction = this.database.transaction(() => {
+        let revisionBumped = false;
+        const receiptsExpired = canSkipExpiry ? false : this.expireReceipts(nowMs);
+        const legacyExpired = canSkipExpiry ? false : this.expireLegacy(nowMs);
+        const current = canSkipExpiry ? existing : this.readReceipt(ownership.accountId, responseId);
+        unavailableAfterCleanup = current === undefined
+          || current.checkpoint_state === "expired"
+          || current.created_at_ms + this.ttlMs <= nowMs;
+        ownershipChanged = current !== undefined && !sameOwnership(current, ownership);
+        const receiptChanged = !unavailableAfterCleanup
+          && !ownershipChanged
+          && current !== undefined
+          && current.checkpoint_state !== "expired"
+          && checkpointRank(checkpointState) > checkpointRank(current.checkpoint_state);
+        if (receiptChanged) {
+          this.statement(
+            `UPDATE response_route_receipts
+             SET checkpoint_state = ?
+             WHERE account_id = ? AND response_id = ?`,
+          ).run(checkpointState, ownership.accountId, responseId);
+        }
+        const checkpointChanged = !unavailableAfterCleanup && !ownershipChanged && calls.length > 0
+          ? canSkipExpiry && existing.checkpoint_state === "route_only"
+            ? (revisionBumped = this.insertFirstCheckpoint(
+              ownership.accountId,
+              responseId,
+              calls,
+              nowMs,
+            ))
+            : this.upsertCheckpoint(ownership.accountId, responseId, calls)
+          : false;
+        const checkpointEvicted = receiptsExpired || legacyExpired || receiptChanged || checkpointChanged
+          ? this.evictCheckpointOverflow()
+          : false;
+        const receiptEvicted = receiptsExpired || legacyExpired
+          ? this.evictReceiptOverflow()
+          : false;
+        if (!revisionBumped && (
+          receiptsExpired
+          || legacyExpired
+          || receiptChanged
+          || checkpointChanged
+          || checkpointEvicted
+          || receiptEvicted
+        )) {
+          this.bumpRevision(nowMs);
+        }
+      });
+      transaction();
+      if (ownershipChanged) {
+        throw new ResponsesContinuationError("ownership_conflict", "response id ownership conflict");
+      }
+      if (unavailableAfterCleanup) {
+        throw new ResponsesContinuationError("expired", "response continuation expired");
+      }
+      throwIfAborted(signal);
       return;
     }
     this.mutateIfChanged(() => {
@@ -382,6 +475,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
 
   setTtlDays(ttlDays: number): void {
     this.ttlMs = ttlDays * DAY_MS;
+    this.recentReceiptCleanup.clear();
   }
 
   inspect(): ResponsesHistoryInspection {
@@ -421,6 +515,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   clear(expectedRevision: number): ResponsesHistoryInspection {
+    this.recentReceiptCleanup.clear();
     const clear = this.database.transaction(() => {
       const state = this.readState();
       if (state.revision !== expectedRevision) {
@@ -444,6 +539,11 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   clearAccount(accountId: string): void {
+    for (const key of this.recentReceiptCleanup.keys()) {
+      if (key.startsWith(`${accountId}\u0000`)) {
+        this.recentReceiptCleanup.delete(key);
+      }
+    }
     const account = requireNonEmpty(accountId, "accountId");
     this.mutateIfChanged(() => {
       const result = this.database.prepare(
@@ -476,7 +576,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private expireReceipts(nowMs: number): boolean {
-    const expired = this.database.prepare(
+    const expired = this.statement(
       `SELECT account_id, response_id
        FROM response_route_receipts
        WHERE checkpoint_state <> 'expired' AND created_at_ms + ? <= ?`,
@@ -499,8 +599,35 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     return true;
   }
 
+  private insertFirstCheckpoint(
+    accountId: string,
+    responseId: string,
+    calls: readonly StoredCall[],
+    nowMs: number,
+  ): true {
+    const inserted = this.statement(
+      `INSERT INTO response_scoped_checkpoints
+       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
+       SELECT ?, ?, next_checkpoint_seq, ?, ?
+       FROM responses_continuation_state
+       WHERE singleton_id = 1`,
+    ).run(accountId, responseId, nowMs, nowMs + this.ttlMs);
+    if (inserted.changes !== 1) {
+      throw new Error("Responses history state is unavailable");
+    }
+    this.insertCalls(accountId, responseId, calls);
+    this.statement(
+      `UPDATE responses_continuation_state
+       SET next_checkpoint_seq = next_checkpoint_seq + 1,
+           revision = revision + 1,
+           updated_at_ms = ?
+       WHERE singleton_id = 1`,
+    ).run(nowMs);
+    return true;
+  }
+
   private expireLegacy(nowMs: number): boolean {
-    const expired = this.database.prepare(
+    const expired = this.statement(
       "SELECT response_id FROM responses WHERE created_at_ms + ? <= ?",
     ).all(this.ttlMs, nowMs) as Array<{ response_id: string }>;
     if (expired.length === 0) {
@@ -517,7 +644,12 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private evictCheckpointOverflow(): boolean {
-    let overflow = this.responseCount() + this.legacyCount() - this.maxResponses;
+    let overflow = (this.statement(
+      `SELECT
+         (SELECT COUNT(*) FROM response_scoped_checkpoints)
+         + (SELECT COUNT(*) FROM responses)
+         - ? AS overflow`,
+    ).get(this.maxResponses) as { overflow: number }).overflow;
     if (overflow <= 0) {
       return false;
     }
@@ -639,31 +771,50 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     responseId: string,
     calls: readonly StoredCall[],
   ): boolean {
-    const existingCalls = this.readCalls(accountId, responseId);
-    if (existingCalls.length > 0 && callsEqual(existingCalls, calls)) {
+    const existingCalls = this.readCallRows(accountId, responseId);
+    if (existingCalls.length > 0 && callRowsEqual(existingCalls, calls)) {
       return false;
     }
-    const existing = this.database.prepare(
+    const existing = this.statement(
       `SELECT 1 FROM response_scoped_checkpoints
        WHERE account_id = ? AND response_id = ?`,
     ).get(accountId, responseId);
     if (existing === undefined) {
-      const state = this.readState();
-      const nowMs = this.nowMs();
-      this.database.prepare(
-        `INSERT INTO response_scoped_checkpoints
-         (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).run(accountId, responseId, state.next_checkpoint_seq, nowMs, nowMs + this.ttlMs);
-      this.database.prepare(
-        "UPDATE responses_continuation_state SET next_checkpoint_seq = ? WHERE singleton_id = 1",
-      ).run(state.next_checkpoint_seq + 1);
+      return this.insertCheckpoint(accountId, responseId, calls);
     } else {
-      this.database.prepare(
+      this.statement(
         "DELETE FROM response_scoped_calls WHERE account_id = ? AND response_id = ?",
       ).run(accountId, responseId);
     }
-    const insertCall = this.database.prepare(
+    this.insertCalls(accountId, responseId, calls);
+    return true;
+  }
+
+  private insertCheckpoint(
+    accountId: string,
+    responseId: string,
+    calls: readonly StoredCall[],
+  ): boolean {
+    const state = this.readState();
+    const nowMs = this.nowMs();
+    this.statement(
+      `INSERT INTO response_scoped_checkpoints
+       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(accountId, responseId, state.next_checkpoint_seq, nowMs, nowMs + this.ttlMs);
+    this.statement(
+      "UPDATE responses_continuation_state SET next_checkpoint_seq = ? WHERE singleton_id = 1",
+    ).run(state.next_checkpoint_seq + 1);
+    this.insertCalls(accountId, responseId, calls);
+    return true;
+  }
+
+  private insertCalls(
+    accountId: string,
+    responseId: string,
+    calls: readonly StoredCall[],
+  ): void {
+    const insertCall = this.statement(
       `INSERT INTO response_scoped_calls
        (account_id, response_id, ordinal, call_id, kind, item_json)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -671,11 +822,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     for (const call of calls) {
       insertCall.run(accountId, responseId, call.ordinal, call.callId, call.kind, call.itemJson);
     }
-    return true;
   }
 
   private readReceipt(accountId: string, responseId: string): ReceiptRow | undefined {
-    return this.database.prepare(
+    return this.statement(
       `SELECT account_id, response_id, model_id, upstream_origin, owner, upstream_protocol,
               conversion_version, checkpoint_state, created_at_ms, expires_at_ms
        FROM response_route_receipts
@@ -696,14 +846,8 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private readCalls(accountId: string, responseId: string): readonly StoredCall[] {
-    const rows = this.database.prepare(
-      `SELECT response_id, ordinal, call_id, kind, item_json
-       FROM response_scoped_calls
-       WHERE account_id = ? AND response_id = ?
-       ORDER BY ordinal ASC`,
-    ).all(accountId, responseId) as CallRow[];
-    return rows.map((row) => {
-      const itemBytes = new TextEncoder().encode(row.item_json);
+    return this.readCallRows(accountId, responseId).map((row) => {
+      const itemBytes = JSON_ENCODER.encode(row.item_json);
       const item = parseWireJson(itemBytes, {
         maxBytes: Math.max(itemBytes.byteLength, 1),
         maxDepth: 64,
@@ -722,20 +866,29 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     });
   }
 
+  private readCallRows(accountId: string, responseId: string): readonly CallRow[] {
+    return this.statement(
+      `SELECT response_id, ordinal, call_id, kind, item_json
+       FROM response_scoped_calls
+       WHERE account_id = ? AND response_id = ?
+       ORDER BY ordinal ASC`,
+    ).all(accountId, responseId) as CallRow[];
+  }
+
   private responseCount(): number {
-    return (this.database.prepare(
+    return (this.statement(
       "SELECT COUNT(*) AS count FROM response_scoped_checkpoints",
     ).get() as { count: number }).count;
   }
 
   private receiptCount(): number {
-    return (this.database.prepare(
+    return (this.statement(
       "SELECT COUNT(*) AS count FROM response_route_receipts",
     ).get() as { count: number }).count;
   }
 
   private legacyCount(): number {
-    return (this.database.prepare(
+    return (this.statement(
       "SELECT COUNT(*) AS count FROM responses",
     ).get() as { count: number }).count;
   }
@@ -747,26 +900,62 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private markUncertain(nowMs: number): void {
-    this.database.prepare(
+    this.statement(
       `INSERT OR IGNORE INTO response_receipt_uncertainty
        (singleton_id, uncertain_since_ms) VALUES (1, ?)`,
     ).run(nowMs);
   }
 
   private readState(): StateRow {
-    return this.database.prepare(
+    return this.statement(
       `SELECT revision, next_receipt_seq, next_checkpoint_seq
        FROM responses_continuation_state WHERE singleton_id = 1`,
     ).get() as StateRow;
   }
 
   private bumpRevision(nowMs: number): void {
-    this.database.prepare(
+    this.statement(
       `UPDATE responses_continuation_state
        SET revision = revision + 1, updated_at_ms = ?
        WHERE singleton_id = 1`,
     ).run(nowMs);
   }
+
+  private statement(sql: string): SqliteStatement {
+    let statement = this.statements.get(sql);
+    if (statement === undefined) {
+      statement = this.database.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
+  }
+
+  private rememberReceiptCleanup(accountId: string, responseId: string): void {
+    const row = this.statement(
+      `SELECT MIN(expires_at_ms) AS expires_at_ms
+       FROM (
+         SELECT created_at_ms + ? AS expires_at_ms
+         FROM response_route_receipts
+         WHERE checkpoint_state <> 'expired'
+         UNION ALL
+         SELECT created_at_ms + ? AS expires_at_ms
+         FROM responses
+       )`,
+    ).get(this.ttlMs, this.ttlMs) as { expires_at_ms: number | null };
+    const key = receiptCleanupKey(accountId, responseId);
+    this.recentReceiptCleanup.set(key, row.expires_at_ms ?? Number.POSITIVE_INFINITY);
+    while (this.recentReceiptCleanup.size > this.maxReceipts) {
+      const oldest = this.recentReceiptCleanup.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      this.recentReceiptCleanup.delete(oldest);
+    }
+  }
+}
+
+function receiptCleanupKey(accountId: string, responseId: string): string {
+  return `${accountId}\u0000${responseId}`;
 }
 
 function extractRecordableCalls(responseId: string, output: readonly WireJson[] | WireJson): readonly StoredCall[] {
@@ -784,9 +973,9 @@ function extractRecordableCalls(responseId: string, output: readonly WireJson[] 
       responseId,
       ordinal: calls.length,
       callId,
-      kind: memberValues(item, "type")[0] as ResponsesCallKind,
+      kind: firstMemberValue(item, "type") as ResponsesCallKind,
       item: itemObject,
-      itemJson: new TextDecoder().decode(serializeWireJson(itemObject)),
+      itemJson: JSON_DECODER.decode(serializeWireJson(itemObject)),
     });
   }
   return calls;
@@ -800,7 +989,7 @@ function outputItems(output: readonly WireJson[] | WireJson): readonly WireJson[
     return output.items;
   }
   if (isWireJsonObject(output)) {
-    const nested = memberValues(output, "output")[0];
+    const nested = firstMemberValue(output, "output");
     return isWireJsonArray(nested) ? nested.items : [output];
   }
   return [];
@@ -820,7 +1009,7 @@ function isCallItem(item: WireJson): item is WireJsonObject {
   if (!isWireJsonObject(item)) {
     return false;
   }
-  const type = memberValues(item, "type")[0];
+  const type = firstMemberValue(item, "type");
   return typeof type === "string" && (RESPONSE_CALL_KINDS as readonly string[]).includes(type);
 }
 
@@ -828,13 +1017,22 @@ function isOutputItem(item: WireJson): item is WireJsonObject {
   if (!isWireJsonObject(item)) {
     return false;
   }
-  const type = memberValues(item, "type")[0];
+  const type = firstMemberValue(item, "type");
   return typeof type === "string" && (RESPONSE_CALL_OUTPUT_KINDS as readonly string[]).includes(type);
 }
 
 function callIdFromItem(item: WireJsonObject): string | undefined {
-  return trimmedString(memberValues(item, "call_id")[0])
-    ?? trimmedString(memberValues(item, "id")[0]);
+  return trimmedString(firstMemberValue(item, "call_id"))
+    ?? trimmedString(firstMemberValue(item, "id"));
+}
+
+function firstMemberValue(item: WireJsonObject, key: string): WireJson | undefined {
+  for (const member of item.members) {
+    if (member.key === key) {
+      return member.value;
+    }
+  }
+  return undefined;
 }
 
 function trimmedString(value: WireJson | undefined): string | undefined {
@@ -892,13 +1090,14 @@ function responseFromCalls(responseId: string, calls: readonly StoredCall[]): St
   return { responseId, calls, byCallId };
 }
 
-function callsEqual(left: readonly StoredCall[], right: readonly StoredCall[]): boolean {
+function callRowsEqual(left: readonly CallRow[], right: readonly StoredCall[]): boolean {
   return left.length === right.length && left.every((call, index) => {
     const other = right[index];
     return other !== undefined
-      && call.callId === other.callId
+      && call.ordinal === other.ordinal
+      && call.call_id === other.callId
       && call.kind === other.kind
-      && call.itemJson === other.itemJson;
+      && call.item_json === other.itemJson;
   });
 }
 

@@ -1,0 +1,23 @@
+[
+  {
+    "caseId": "protocol-conversion.request-chat-to-messages",
+    "family": "protocol-conversion",
+    "input": "request/chat-to-messages.input.json",
+    "expected": "request/chat-to-messages.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
+    "caseId": "protocol-conversion.buffered-messages-to-responses",
+    "family": "protocol-conversion",
+    "input": "buffered/messages-to-responses.input.json",
+    "expected": "buffered/messages-to-responses.expected.json",
+    "encoder": "shared conversion buffered response codecs"
+  },
+  {
+    "caseId": "protocol-conversion.stream-messages-to-responses",
+    "family": "protocol-conversion",
+    "input": "stream/messages-to-responses.input.json",
+    "expected": "stream/messages-to-responses.expected.txt",
+    "encoder": "shared conversion stream codecs and ledger"
+  }
+]

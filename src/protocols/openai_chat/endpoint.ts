@@ -3,7 +3,6 @@ import type { AccountModelPreferences, ModelPreference } from "../../accounts/mo
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
-import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilities.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
 import {
   normalizeAccountBindingFailure,
@@ -21,6 +20,7 @@ import {
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt, type RequestAttempt } from "../../gateway/request_attempt.js";
+import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
 import {
   boundedCleanup,
   createExchangeCancellation,
@@ -44,6 +44,10 @@ import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk } from "./wire.js";
 import { presentOpenAiChatFailure } from "./failure_presenter.js";
+import { planProtocolExecution } from "../conversion/planner.js";
+import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
+import { convertBufferedResponse } from "../conversion/buffered.js";
+import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
 
 export interface OpenAiChatRouteDependencies {
   readonly directory: AccountDirectory;
@@ -54,6 +58,7 @@ export interface OpenAiChatRouteDependencies {
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
   readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly nowMs?: () => number;
+  readonly createUuid?: () => string;
 }
 
 interface DecodedOpenAiChatRequest {
@@ -103,13 +108,17 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       const catalog = await loadCatalog(dependencies, account, scope.signal);
       const resolved = resolveOpenAiChatModel(decoded, catalog, preference);
       usage.setResolvedModel(resolved.upstreamModel);
-      if (resolved.capability.protocols.value?.includes("chat") !== true) {
-        throw new GatewayFailureError({
-          kind: "unsupported_semantics",
-          cause: new ModelCapabilityUnavailableError(),
-        });
-      }
+      const plan = planProtocolExecution({
+        source: "chat",
+        body: decoded.body,
+        stream: decoded.stream,
+        capability: resolved.capability,
+        resolvedModel: resolved.upstreamModel,
+      });
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
+      if (plan.kind === "converted") {
+        return await executeConvertedChat(dependencies, copilot, plan, scope, usage);
+      }
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
 
       if (!prepared.stream) {
@@ -127,6 +136,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
           throw new GatewayFailureError({ kind: "invalid_upstream_response" });
         }
+
         return measure(dependencies.performanceObserver, "buffered", () => {
           const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
           usage.success(usageNumbers(usageObservationFromPayload(payload)));
@@ -204,6 +214,71 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         usage,
       });
     },
+  };
+}
+
+async function executeConvertedChat(
+  dependencies: OpenAiChatRouteDependencies,
+  copilot: BoundCopilot,
+  plan: Readonly<ConvertedProtocolPlan>,
+  scope: Readonly<RequestScope>,
+  usage: RequestAttempt,
+): Promise<Response> {
+  if (!plan.stream) {
+    const upstream = await completeConvertedOperation(copilot, plan, scope);
+    assertUpstreamSuccess(upstream.status, upstream.headers);
+    const converted = measure(dependencies.performanceObserver, "buffered", () => convertBufferedResponse(
+      upstream.body,
+      {
+        source: plan.target,
+        target: "chat",
+        model: plan.requestModel,
+        maxBytes: scope.config.limits.nonstreamBodyBytes,
+        createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+        nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
+        degradations: plan.request.degradations,
+      },
+    ));
+    usage.success(attemptUsage(converted.observations.usage));
+    return new Response(Buffer.from(converted.bytes), {
+      status: upstream.status,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+        "x-request-id": scope.requestId,
+      },
+    });
+  }
+
+  const upstream = await openConvertedOperation(copilot, plan, scope);
+  if (upstream.status < 200 || upstream.status >= 300) {
+    await boundedCleanup(upstream.cancel());
+  }
+  assertUpstreamSuccess(upstream.status, upstream.headers);
+  return await createConvertedStreamResponse({
+    upstream,
+    plan,
+    scope,
+    model: plan.requestModel,
+    createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+    nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
+    performanceObserver: dependencies.performanceObserver,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-store",
+      "x-request-id": scope.requestId,
+    },
+    onTerminal: (result) => result.kind === "success"
+      ? usage.success(attemptUsage(result.usage))
+      : usage.failure(result.error),
+  });
+}
+
+function attemptUsage(value: Readonly<SemanticUsage>) {
+  return {
+    inputTokens: value.inputTokens,
+    outputTokens: value.outputTokens,
+    cacheTokens: value.cacheReadTokens + value.cacheWriteTokens,
   };
 }
 

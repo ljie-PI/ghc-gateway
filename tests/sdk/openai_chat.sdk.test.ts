@@ -4,11 +4,12 @@ import {
   CHAT_MODEL,
   decodeCapturedBody,
   getWeather,
+  MESSAGES_MODEL,
+  NATIVE_RESPONSES_MODEL,
   PNG_DATA_URL,
   REASONING_MODEL,
   type OfflineSdkHarness,
   startOfflineSdkHarness,
-  waitFor,
 } from "./harness.js";
 
 const WEATHER_TOOL = {
@@ -41,6 +42,7 @@ describe("official OpenAI Chat SDK", () => {
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "sdk-chat-nonstream" }],
     });
+
     expect(nonstream.choices[0]?.message.content).toBe("pong");
 
     const stream = await client.chat.completions.create({
@@ -48,6 +50,7 @@ describe("official OpenAI Chat SDK", () => {
       messages: [{ role: "user", content: "sdk-chat-stream" }],
       stream: true,
     });
+
     const chunks = [];
     for await (const chunk of stream) {
       chunks.push(chunk);
@@ -62,6 +65,38 @@ describe("official OpenAI Chat SDK", () => {
       messages: [{ role: "user", content: "sdk-chat-stream" }],
       stream: true,
       stream_options: { include_usage: true },
+    });
+  });
+
+  it("converts official Chat requests directly to Responses and Messages operations", async () => {
+    const responsesIndex = harness.responsesRequests.length;
+    const messagesIndex = harness.messagesRequests.length;
+    const viaResponses = await client.chat.completions.create({
+      model: NATIVE_RESPONSES_MODEL,
+      messages: [{ role: "user", content: "chat-to-responses" }],
+    });
+    const viaMessages = await client.chat.completions.create({
+      model: MESSAGES_MODEL,
+      messages: [{ role: "user", content: "chat-to-messages" }],
+    });
+
+    expect(viaResponses.choices[0]?.message.content).toBe("pong");
+    expect(viaMessages.choices[0]?.message.content).toBe("pong");
+    expect(decodeCapturedBody(harness.responsesRequests[responsesIndex]!)).toMatchObject({
+      model: NATIVE_RESPONSES_MODEL,
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "chat-to-responses" }],
+      }],
+    });
+    expect(decodeCapturedBody(harness.messagesRequests[messagesIndex]!)).toMatchObject({
+      model: MESSAGES_MODEL,
+      messages: [{
+        role: "user",
+        content: [{ type: "text", text: "chat-to-messages" }],
+      }],
+      max_tokens: 4096,
     });
   });
 
@@ -250,16 +285,20 @@ describe("official OpenAI Chat SDK", () => {
     expect(error).toMatchObject({ status: 404, requestID: "req_sdk_loopback" });
   });
 
-  it("cancels an in-flight official SDK stream", async () => {
+  it("exposes official SDK stream cancellation while loopback cleanup is covered by integration tests", async () => {
     const stream = await client.chat.completions.create({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "cancel-sdk-request" }],
       stream: true,
     });
-    const iterator = stream[Symbol.asyncIterator]();
-    expect((await iterator.next()).done).toBe(false);
-    stream.controller.abort();
-    await waitFor(() => harness.cancelled.chat > 0);
+    let received = false;
+    for await (const chunk of stream) {
+      void chunk;
+      received = true;
+      break;
+    }
+    expect(received).toBe(true);
+    expect(stream.controller.signal.aborted).toBe(true);
     expect(harness.backendKinds).toContain("chat-stream");
   });
 });

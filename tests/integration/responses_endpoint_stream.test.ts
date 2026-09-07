@@ -26,6 +26,8 @@ const nowMs = (): number => 1_700_000_000_000;
 class RecordingHistory implements ResponsesHistory {
   readonly records: ResponsesHistoryRecord[] = [];
   readonly receipts: string[] = [];
+  readonly checkpointStates: Array<"partial" | "complete"> = [];
+  readonly receiptStates: Array<"route_only" | "partial" | "complete"> = [];
 
   constructor(private readonly failAt?: "receipt" | "checkpoint") {}
 
@@ -42,13 +44,19 @@ class RecordingHistory implements ResponsesHistory {
       throw new Error("synthetic receipt failure");
     }
     this.receipts.push(receipt.responseId);
+    this.receiptStates.push(receipt.checkpointState);
   }
 
-  async recordCheckpoint(record: Readonly<ResponsesHistoryRecord>): Promise<void> {
+  async recordCheckpoint(
+    record: Readonly<ResponsesHistoryRecord>,
+    _ownership: Parameters<ResponsesHistory["recordCheckpoint"]>[1],
+    checkpointState: "partial" | "complete",
+  ): Promise<void> {
     if (this.failAt === "checkpoint") {
       throw new Error("synthetic checkpoint failure");
     }
     this.records.push(record);
+    this.checkpointStates.push(checkpointState);
   }
 }
 
@@ -166,6 +174,29 @@ describe("Responses endpoint stream integration", () => {
       expect(delivered).toContain("response.created");
       expect(delivered).not.toContain("response.output_item.done");
       expect(history.receipts).toHaveLength(1);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it("persists tool-only partial and terminal checkpoints through the typed checkpoint path", async () => {
+    const history = new RecordingHistory();
+    const backend = new ScriptedCopilotBackend({
+      chatStream: [
+        bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
+        bytes("data: [DONE]\n\n"),
+      ],
+    });
+    const opened = await streamGateway(history, backend);
+    try {
+      const response = await opened.gateway.fetch(responsesRequest());
+      expect(response.status).toBe(200);
+      await response.arrayBuffer();
+      expect(history.receiptStates).toEqual(["route_only"]);
+      expect(history.checkpointStates).toEqual(["partial", "complete"]);
+      expect(history.records).toHaveLength(2);
+      expect(history.records[0]?.output).toHaveLength(1);
+      expect(history.records[1]?.output).toEqual(history.records[0]?.output);
     } finally {
       await opened.close();
     }

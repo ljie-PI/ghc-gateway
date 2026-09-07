@@ -16,6 +16,7 @@ export class ChatSseError extends Error {
 export async function* parseChatSse(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes = DEFAULT_EVENT_LIMIT,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
 ): AsyncGenerator<ChatStreamFrame> {
   let lineBytes: number[] = [];
   let pendingCr = false;
@@ -27,7 +28,9 @@ export async function* parseChatSse(
   const finishLine = function* (): Generator<ChatStreamFrame> {
     if (lineBytes.length === 0) {
       lineMayStartWithBom = false;
-      const frame = parseEvent(eventLines);
+      const frame = measureEvent === undefined
+        ? parseEvent(eventLines)
+        : measureEvent(() => parseEvent(eventLines));
       eventLines = [];
       eventBytes = 0;
       if (frame !== undefined) {

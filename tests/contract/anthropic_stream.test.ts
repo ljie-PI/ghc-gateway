@@ -7,7 +7,7 @@ import { anthropicGateway, anthropicRequest, sse } from "./anthropic_harness.js"
 const decoder = new TextDecoder();
 
 describe("Anthropic stream lifecycle", () => {
-  it("emits signed thinking blocks with Python-compatible SSE text", async () => {
+  it("omits nonportable thinking signatures without changing successful terminal semantics", async () => {
     const backend = new ScriptedCopilotBackend({
       chatStream: [
         sse({
@@ -25,9 +25,6 @@ describe("Anthropic stream lifecycle", () => {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
       expect(await response.text()).toBe([
         "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-000000000001\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"gpt\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}}}\n\n",
-        "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"thinking\", \"thinking\": \"signed plan\", \"signature\": \"sigT\"}}\n\n",
-        "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"signature_delta\", \"signature\": \"sigT\"}}\n\n",
-        "event: content_block_stop\ndata: {\"type\": \"content_block_stop\", \"index\": 0}\n\n",
         "event: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\"}, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0}}\n\n",
         "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n",
       ].join(""));
@@ -36,7 +33,7 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 
-  it("uses only the last tool-bearing choice while preserving text from all choices", async () => {
+  it("rejects multi-choice streams instead of dropping one choice", async () => {
     const backend = new ScriptedCopilotBackend({
       chatStream: [
         sse({
@@ -63,15 +60,10 @@ describe("Anthropic stream lifecycle", () => {
     const { gw, close } = await anthropicGateway({ backend });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
+      expect(response.status).toBe(502);
       const text = await response.text();
-      expect(text).toContain("\"text\": \"A\"");
-      expect(text).toContain("\"text\": \"B\"");
-      expect(text).toContain("\"id\": \"call_second\"");
-      expect(text).toContain("\"name\": \"second\"");
-      expect(text).toContain("\"partial_json\": \"{\\\"y\\\":2}\"");
-      expect(text).not.toContain("call_first");
-      expect(text).not.toContain("\"name\": \"first\"");
-      expect(text).not.toContain("\"partial_json\": \"{\\\"x\\\":1}\"");
+      expect(text).toContain("invalid upstream response");
+      expect(text).not.toContain("event: message_stop");
     } finally {
       await close();
     }
@@ -102,21 +94,14 @@ describe("Anthropic stream lifecycle", () => {
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
       expect(response.headers.get("request-id")).toBe("req_test_1");
-      expect(await response.text()).toBe([
-        "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-0000000000aa\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"gpt\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}}}\n\n",
-        "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"thinking\", \"thinking\": \"\", \"signature\": \"\"}}\n\n",
-        "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"thinking_delta\", \"thinking\": \"plan\"}}\n\n",
-        "event: content_block_stop\ndata: {\"type\": \"content_block_stop\", \"index\": 0}\n\n",
-        "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 1, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
-        "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 1, \"delta\": {\"type\": \"text_delta\", \"text\": \"h\\u00e9\"}}\n\n",
-        "event: content_block_stop\ndata: {\"type\": \"content_block_stop\", \"index\": 1}\n\n",
-        "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 2, \"content_block\": {\"type\": \"tool_use\", \"id\": \"call_1\", \"name\": \"lookup\", \"input\": {}, \"provider_specific_fields\": {\"signature\": \"sigA\"}}}\n\n",
-        "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 2, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"{\\\"a\\\":\"}}\n\n",
-        "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 2, \"delta\": {\"type\": \"input_json_delta\", \"partial_json\": \"1}\"}}\n\n",
-        "event: content_block_stop\ndata: {\"type\": \"content_block_stop\", \"index\": 2}\n\n",
-        "event: message_delta\ndata: {\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"tool_use\"}, \"usage\": {\"input_tokens\": 8, \"output_tokens\": 4, \"cache_read_input_tokens\": 2}}\n\n",
-        "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n",
-      ].join(""));
+      const text = await response.text();
+      expect(text).toContain("\"text\": \"h\\u00e9\"");
+      expect(text).toContain("\"id\": \"call.1__thought__sigA\"");
+      expect(text).toContain("\"partial_json\": \"{\\\"a\\\":1}\"");
+      expect(text).not.toContain("thinking_delta");
+      expect(text).not.toContain("signature_delta");
+      expect(text.match(/event: message_stop/gu)).toHaveLength(1);
+      expect(text).toContain("\"cache_read_input_tokens\": 2");
       expect(usageUpdates).toMatchObject([{
         protocol: "anthropic",
         outcome: "success",

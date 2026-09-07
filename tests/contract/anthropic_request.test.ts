@@ -8,6 +8,59 @@ import type { ChatRequest } from "../../src/protocols/chat_completions/types.js"
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("Anthropic request route", () => {
+  it("degrades prompt-caching beta hints on converted requests instead of rejecting them", async () => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{
+          name: "lookup",
+          input_schema: { type: "object" },
+          cache_control: { type: "ephemeral" },
+        }],
+      }, {
+        "anthropic-beta": "prompt-caching-2024-07-31",
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(capturedRequests).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
+  it("degrades interleaved-thinking beta on a complete converted tool round", async () => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "plan", signature: "opaque" },
+              { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }],
+          },
+        ],
+      }, {
+        "anthropic-beta": "interleaved-thinking-2025-05-14",
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(capturedRequests).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
   it("observes pre-endpoint body failures once without coupling accounting to the presenter", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const { gw, close } = await anthropicGateway({ usageUpdates });
@@ -195,7 +248,7 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("converts system, media, tool history, schema cleanup, tool choice, and reasoning rules", async () => {
+  it("rejects unknown fields and lossy legacy schema/media behavior before inference", async () => {
     const captured: ChatRequest[] = [];
     const backend = new ScriptedCopilotBackend({
       chatStream(request) {
@@ -261,56 +314,8 @@ describe("Anthropic request route", () => {
         output_config: { effort: "max", format: { type: "json_schema" } },
       }));
 
-      expect(response.status).toBe(200);
-      expect(captured).toHaveLength(1);
-      const body = decodeChatBody(captured[0] as ChatRequest);
-      expect(body).toEqual({
-        model: "gpt-5",
-        messages: [
-          { role: "system", content: "bill me elsewhere\nsecond" },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "look" },
-              { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
-            ],
-          },
-          {
-            role: "assistant",
-            content: null,
-            tool_calls: [{
-              id: "call_1",
-              type: "function",
-              function: { name: "lookup", arguments: "{\"a\":[true,null],\"z\":1}" },
-            }],
-          },
-          { role: "tool", tool_call_id: "call_1", content: "{\"a\":1,\"b\":2}" },
-          { role: "user", content: "continue" },
-        ],
-        max_tokens: 64,
-        temperature: 0.2,
-        top_p: 0.9,
-        stop: ["END"],
-        stream: true,
-        stream_options: { include_usage: true },
-        tools: [{
-          type: "function",
-          function: {
-            name: "lookup",
-            description: "Lookup",
-            parameters: {
-              type: "object",
-              properties: {
-                url: { type: "string" },
-                nested: { type: "object", properties: {}, items: { type: "object", properties: { link: { type: "string" } } } },
-                untouched: { type: "object", properties: {}, oneOf: [{ type: "string", format: "uri" }] },
-              },
-            },
-          },
-        }],
-        tool_choice: { type: "function", function: { name: "lookup" } },
-        reasoning_effort: "xhigh",
-      });
+      expect(response.status).toBe(400);
+      expect(captured).toEqual([]);
     } finally {
       await close();
     }
@@ -336,7 +341,7 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("keeps parallel tool_result messages adjacent and moves media into the following user message", async () => {
+  it("rejects orphan parallel tool results instead of converting them to user text", async () => {
     const captured: ChatRequest[] = [];
     const backend = new ScriptedCopilotBackend({
       chat(request) {
@@ -372,23 +377,8 @@ describe("Anthropic request route", () => {
         }],
       }));
 
-      expect(response.status).toBe(200);
-      expect(decodeChatBody(captured[0] as ChatRequest).messages).toEqual([
-        {
-          role: "tool",
-          tool_call_id: "call_1",
-          content: "[\"[cc-switch: tool result media moved to the following user message]\"]",
-        },
-        { role: "tool", tool_call_id: "call_2", content: "plain" },
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "[cc-switch: media output of tool call call_1]" },
-            { type: "image_url", image_url: { url: "data:image/png;base64,abc" } },
-          ],
-        },
-        { role: "user", content: "after tools" },
-      ]);
+      expect(response.status).toBe(400);
+      expect(captured).toEqual([]);
     } finally {
       await close();
     }

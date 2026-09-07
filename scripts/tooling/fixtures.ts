@@ -11,6 +11,7 @@ import { assertNode24 } from "./node_version.js";
 import { outboundHeaders, ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { parseChatSse } from "../../src/copilot/chat_sse.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -43,6 +44,10 @@ import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, WireJ
 import type { UpstreamByteStream } from "../../src/copilot/upstream_types.js";
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
+import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
+import { convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
+import { convertProtocolStream } from "../../src/protocols/conversion/stream.js";
+import type { InferenceProtocol } from "../../src/protocols/conversion/types.js";
 
 export interface FixtureManifestEntry {
   readonly caseId: string;
@@ -69,6 +74,7 @@ const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, F
   ["responses-bridge-nonstream", expectedResponsesBridgeNonstreamFixture],
   ["responses-bridge-stream", expectedResponsesBridgeStreamFixture],
   ["responses-endpoint", expectedResponsesEndpointFixture],
+  ["protocol-conversion", expectedProtocolConversionFixture],
 ]);
 
 async function findManifests(root: string): Promise<string[]> {
@@ -663,6 +669,140 @@ async function expectedResponsesBridgeStreamFixture(entry: FixtureManifestEntry)
   return output;
 }
 
+async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
+  const input = JSON.parse(
+    await readFile(path.join(fixtureFamilyRoot(entry), entry.input), "utf8"),
+  ) as {
+    readonly kind: "request" | "buffered" | "stream";
+    readonly source: InferenceProtocol;
+    readonly target: InferenceProtocol;
+    readonly payload: unknown;
+  };
+  if (input.kind === "request") {
+    const request = wireObjectFromUnknown(input.payload);
+    return new TextDecoder().decode(prepareConvertedRequest(
+      input.source,
+      input.target,
+      request,
+      "fixture-target",
+      fixtureConversionCapability(input.target),
+    ).bytes);
+  }
+  if (input.kind === "buffered") {
+    return new TextDecoder().decode(convertBufferedResponse(
+      new TextEncoder().encode(JSON.stringify(input.payload)),
+      {
+        source: input.source,
+        target: input.target,
+        model: "fixture-target",
+        maxBytes: 1_048_576,
+        createUuid: () => "00000000-0000-4000-8000-000000000104",
+        nowUnixSeconds: () => 1_700_000_000,
+      },
+    ).bytes);
+  }
+  const records = Array.isArray(input.payload) ? input.payload : [];
+  const upstream = records.map((record) => {
+    if (record === "[DONE]") {
+      return "data: [DONE]\n\n";
+    }
+    if (record === null || typeof record !== "object" || Array.isArray(record)) {
+      throw new Error("protocol conversion stream fixture records must be objects");
+    }
+    const value = record as Record<string, unknown>;
+    const type = typeof value.type === "string" ? value.type : undefined;
+    return `${type === undefined ? "" : `event: ${type}\n`}data: ${JSON.stringify(value)}\n\n`;
+  }).join("");
+  let output = "";
+  for await (const emission of convertProtocolStream(bytesOf(upstream), {
+    source: input.source,
+    target: input.target,
+    model: "fixture-target",
+    eventLimitBytes: 1_048_576,
+    accumulatorBytes: 1_048_576,
+    createUuid: () => "00000000-0000-4000-8000-000000000104",
+    nowUnixSeconds: () => 1_700_000_000,
+  })) {
+    if (emission.kind === "wire") {
+      output += new TextDecoder().decode(emission.bytes);
+    }
+  }
+  return output;
+}
+
+function wireObjectFromUnknown(value: unknown): WireJsonObject {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 64 });
+  if (!isWireJsonObject(parsed)) {
+    throw new Error("protocol conversion fixture request must be an object");
+  }
+  return parsed;
+}
+
+function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveModelCapabilitySnapshot {
+  return {
+    accountId: "github.com/fixture",
+    modelId: "fixture-target",
+    name: "fixture-target",
+    vendor: "fixture",
+    discovered: true,
+    configured: false,
+    verified: true,
+    enabled: true,
+    visible: true,
+    override: null,
+    protocols: { value: [protocol], source: "live", conflict: false, liveState: "value" },
+    maxInputTokens: { value: 128_000, source: "live", conflict: false, liveState: "value" },
+    maxOutputTokens: { value: 16_384, source: "live", conflict: false, liveState: "value" },
+    defaultOutputTokens: {
+      configuration: { value: 4_096, source: "live", conflict: false, liveState: "value" },
+      effective: 4_096,
+      source: "live",
+      valid: true,
+    },
+    profile: {
+      chatOutputTokenField: {
+        value: "max_tokens",
+        source: "live",
+        conflict: false,
+        liveState: "value",
+      },
+      supportedParameters: {
+        value: [
+          "temperature",
+          "top_p",
+          "response_format",
+          "text.format",
+          "output_config.format",
+          "reasoning_effort",
+          "reasoning",
+          "reasoning.effort",
+          "output_config.effort",
+        ],
+        source: "live",
+        conflict: false,
+        liveState: "value",
+      },
+      reasoningEfforts: {
+        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        source: "live",
+        conflict: false,
+        liveState: "value",
+      },
+    },
+    revision: {
+      credentialGeneration: 0,
+      catalogGeneration: 1,
+      overrideRevision: 0,
+      builtinRevision: null,
+    },
+  };
+}
+
+async function* bytesOf(value: string): AsyncIterable<Uint8Array> {
+  yield new TextEncoder().encode(value);
+}
+
 async function expectedResponsesEndpointFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
   const inputPath = path.join(fixtureFamilyRoot(entry), entry.input);
   await readFile(inputPath);
@@ -690,7 +830,7 @@ async function expectedResponsesEndpointFixture(entry: FixtureManifestEntry): Pr
       const bridge = await fixture.gateway.fetch(responsesHttpRequest({
         model: "chat",
         input: "hi",
-        tools: [{ type: "function", name: "lookup", parameters: {} }],
+        tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
       }));
       return JSON.stringify({
         native: { status: native.status, body: await native.text() },
@@ -733,7 +873,7 @@ async function createResponsesFixtureGateway(backend = new ScriptedCopilotBacken
   chat: {
     status: 200,
     headers: new Headers(),
-    body: new TextEncoder().encode("{\"id\":\"chatcmpl_bridge\",\"created\":1700000000,\"model\":\"chat\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"done\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}"),
+    body: new TextEncoder().encode("{\"id\":\"chatcmpl_bridge\",\"created\":1700000000,\"model\":\"chat\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"done\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}"),
   },
 })): Promise<{
   readonly gateway: Awaited<ReturnType<typeof createGateway>>;
@@ -853,6 +993,28 @@ function fixtureCapability(
     },
     profile: {
       chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+      supportedParameters: {
+        value: [
+          "temperature",
+          "top_p",
+          "response_format",
+          "text.format",
+          "output_config.format",
+          "reasoning_effort",
+          "reasoning",
+          "reasoning.effort",
+          "output_config.effort",
+        ],
+        source: "builtin",
+        conflict: false,
+        liveState: "missing",
+      },
+      reasoningEfforts: {
+        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        source: "builtin",
+        conflict: false,
+        liveState: "missing",
+      },
     },
     revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
   };

@@ -227,6 +227,18 @@ export class ModelCapabilityRegistry {
       live.chatOutputTokenField,
       fallback.chatOutputTokenField,
     );
+    const supportedParameters = effectiveField(
+      undefined,
+      live.supportedParameters,
+      fallback.supportedParameters,
+      sameStrings,
+    );
+    const reasoningEfforts = effectiveField(
+      undefined,
+      live.reasoningEfforts,
+      fallback.reasoningEfforts,
+      sameStrings,
+    );
     const defaultOutputTokens = effectiveField(
       override?.defaultOutputTokens,
       live.defaultOutputTokens,
@@ -253,7 +265,7 @@ export class ModelCapabilityRegistry {
         defaultOutputTokens,
         maxOutputTokens.value,
       ),
-      profile: { chatOutputTokenField },
+      profile: { chatOutputTokenField, supportedParameters, reasoningEfforts },
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
@@ -282,6 +294,18 @@ export function capabilitySnapshotFromCatalog(
       model.capabilities.chatOutputTokenField,
       UNKNOWN_DECLARATIONS.chatOutputTokenField,
     );
+    const supportedParameters = effectiveField(
+      undefined,
+      model.capabilities.supportedParameters,
+      UNKNOWN_DECLARATIONS.supportedParameters,
+      sameStrings,
+    );
+    const reasoningEfforts = effectiveField(
+      undefined,
+      model.capabilities.reasoningEfforts,
+      UNKNOWN_DECLARATIONS.reasoningEfforts,
+      sameStrings,
+    );
     return deepFreeze({
       accountId: account.accountId,
       modelId: model.id,
@@ -297,7 +321,7 @@ export function capabilitySnapshotFromCatalog(
       maxInputTokens,
       maxOutputTokens,
       defaultOutputTokens: resolveDefaultOutputTokens(defaultConfiguration, maxOutputTokens.value),
-      profile: { chatOutputTokenField },
+      profile: { chatOutputTokenField, supportedParameters, reasoningEfforts },
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
@@ -321,9 +345,14 @@ function deepFreeze<T>(value: T): T {
     if (!Object.isFrozen(value)) {
       Object.freeze(value);
     }
+
     for (const nested of Object.values(value as Record<string, unknown>)) {
       deepFreeze(nested);
     }
   }
   return value;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

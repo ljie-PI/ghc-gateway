@@ -147,7 +147,11 @@ describe("Responses endpoint", () => {
               finish_reason: "tool_calls",
               message: {
                 content: "done",
-                tool_calls: [{ id: "call_1", function: { name: "lookup", arguments: "{\"q\":\"x\"}" } }],
+                tool_calls: [{
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "lookup", arguments: "{\"q\":\"x\"}" },
+                }],
               },
             }],
             usage: { prompt_tokens: 9, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 3 } },
@@ -160,7 +164,7 @@ describe("Responses endpoint", () => {
       const response = await gw.fetch(responsesRequest({
         model: "chat",
         input: "hi",
-        tools: [{ type: "function", name: "lookup", parameters: {} }],
+        tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
       }));
       expect(response.status).toBe(200);
       const body = JSON.parse(await response.text()) as { id: string; output: Array<{ type: string; call_id?: string }> };
@@ -190,7 +194,7 @@ describe("Responses endpoint", () => {
         return {
           status: 200,
           headers: new Headers(),
-          body: text("{\"id\":\"chatcmpl_next\",\"model\":\"dual\",\"choices\":[]}"),
+          body: text("{\"id\":\"chatcmpl_next\",\"model\":\"dual\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"),
         };
       },
     });
