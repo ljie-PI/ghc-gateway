@@ -64,95 +64,93 @@ export async function* convertProtocolStream(
     if (!started) {
       started = true;
       yield { kind: "first_semantic" };
-      yield* measuredEvent(context, () => [...emitter.start()]);
+      yield* measuredEmissions(context, () => emitter.start());
     }
     if (event.kind === "message_start") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         ledger.startMessage(event.key);
-        return [...emitter.messageStart(event.key)];
+        return emitter.messageStart(event.key);
       });
       continue;
     }
     if (event.kind === "text_delta") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         ledger.appendText(event.key, event.delta, event.orderKey);
-        return [...emitter.textDelta(event.key, event.delta, event.orderKey)];
+        return emitter.textDelta(event.key, event.delta, event.orderKey);
       });
       continue;
     }
     if (event.kind === "text_done") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         const first = ledger.observeText(event.key, event.orderKey);
         const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
         if (suffix.length > 0) {
           ledger.appendText(event.key, suffix, event.orderKey);
-          return [...emitter.textDelta(event.key, suffix, event.orderKey)];
+          return emitter.textDelta(event.key, suffix, event.orderKey);
         }
-        return first ? [...emitter.textDelta(event.key, "", event.orderKey)] : [];
+        return first ? emitter.textDelta(event.key, "", event.orderKey) : [];
       });
       continue;
     }
     if (event.kind === "refusal_delta") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         ledger.appendRefusal(event.key, event.delta, event.orderKey);
-        return [...emitter.refusalDelta(event.key, event.delta, event.orderKey)];
+        return emitter.refusalDelta(event.key, event.delta, event.orderKey);
       });
       continue;
     }
     if (event.kind === "refusal_done") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         const first = ledger.observeRefusal(event.key, event.orderKey);
         const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
         if (suffix.length > 0) {
           ledger.appendRefusal(event.key, suffix, event.orderKey);
-          return [...emitter.refusalDelta(event.key, suffix, event.orderKey)];
+          return emitter.refusalDelta(event.key, suffix, event.orderKey);
         }
-        return first ? [...emitter.refusalDelta(event.key, "", event.orderKey)] : [];
+        return first ? emitter.refusalDelta(event.key, "", event.orderKey) : [];
       });
       continue;
     }
     if (event.kind === "content_done") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         ledger.finishContent(event.key);
-        return [...emitter.contentDone(event.orderKey, event.contentIndex)];
+        return emitter.contentDone(event.orderKey, event.contentIndex);
       });
       continue;
     }
     if (event.kind === "item_done") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         if (event.itemType === "message") {
           ledger.finishMessage(`responses:${event.outputIndex}:message`);
         }
-        return [...emitter.itemDone(event.outputIndex)];
+        return emitter.itemDone(event.outputIndex);
       });
       continue;
     }
     if (event.kind === "tool_start") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         ledger.startTool(event);
-        return [...emitter.toolStart(event.key, event.callId, event.name, event.itemId)];
+        return emitter.toolStart(event.key, event.callId, event.name, event.itemId);
       });
       continue;
     }
     if (event.kind === "tool_arguments_delta") {
-      yield* measuredEvent(context, () => {
+      yield* measuredEmissions(context, () => {
         ledger.appendToolArguments(event.key, event.delta);
-        return [...emitter.toolArgumentsDelta(event.key, event.delta)];
+        return emitter.toolArgumentsDelta(event.key, event.delta);
       });
       continue;
     }
     if (event.kind === "tool_done") {
-      yield* measuredEvent(context, () => {
-        const emissions: ConvertedStreamEmission[] = [];
+      yield* measuredEmissions(context, () => (function* (): Iterable<ConvertedStreamEmission> {
         const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
         if (suffix.length > 0) {
-          emissions.push(...emitter.toolArgumentsDelta(event.key, suffix));
+          yield* emitter.toolArgumentsDelta(event.key, suffix);
         }
         if (context.target === "messages" && event.completed !== false) {
-          emissions.push(...emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson));
+          yield* emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson);
         }
-        return emissions;
-      });
+      })());
       continue;
     }
     if (event.kind === "terminal") {
@@ -160,27 +158,33 @@ export async function* convertProtocolStream(
         invalid();
       }
       terminal = true;
-      yield* measuredEvent(context, () => {
-        const emissions: ConvertedStreamEmission[] = [];
+      yield* measuredEmissions(context, () => (function* (): Iterable<ConvertedStreamEmission> {
         if (event.status === "completed") {
           ledger.finishOpenTools();
           for (const key of ledger.toolKeys()) {
-            emissions.push(...emitter.toolDone(key, ledger.tool(key).argumentsJson));
+            yield* emitter.toolDone(key, ledger.tool(key).argumentsJson);
           }
         }
         const items = ledger.items(event.status);
-        emissions.push(...emitter.finish(event, usage, items));
-        return emissions;
-      });
+        yield* emitter.finish(event, usage, items);
+      })());
       yield { kind: "terminal", terminal: event.status };
       return;
     }
 
-    function measuredEvent(
+    function* measuredEmissions(
       context: Readonly<StreamConversionContext>,
-      work: () => readonly ConvertedStreamEmission[],
-    ): readonly ConvertedStreamEmission[] {
-      return context.measureEvent === undefined ? work() : context.measureEvent(work);
+      work: () => Iterable<ConvertedStreamEmission>,
+    ): Iterable<ConvertedStreamEmission> {
+      const measure = context.measureEvent;
+      const iterator = measure === undefined
+        ? work()[Symbol.iterator]()
+        : measure(() => work()[Symbol.iterator]());
+      let next = measure === undefined ? iterator.next() : measure(() => iterator.next());
+      while (!next.done) {
+        yield next.value;
+        next = measure === undefined ? iterator.next() : measure(() => iterator.next());
+      }
     }
   }
   invalid();
