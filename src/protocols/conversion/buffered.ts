@@ -134,6 +134,9 @@ function decodeChatToolCall(value: WireJson, complete: boolean): SemanticToolCal
   if (!isWireJsonObject(value)) {
     upstreamInvalid();
   }
+  if (stringMember(value, "type") !== "function") {
+    upstreamInvalid();
+  }
   const fn = objectMember(value, "function");
   if (fn === undefined) {
     upstreamInvalid();

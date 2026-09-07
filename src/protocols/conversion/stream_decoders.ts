@@ -139,6 +139,9 @@ async function* decodeChatStream(
           completed: true,
         };
       }
+      for (const event of pendingPostTool.splice(0)) {
+        yield event;
+      }
       yield {
         kind: "terminal",
         status: pendingFinish === "length" || pendingFinish === "content_filter" || pendingFinish === "refusal"
@@ -371,6 +374,9 @@ async function* decodeChatStream(
           if (!isWireJsonObject(value)) {
             invalid();
           }
+          if (singleMember(value, "type") !== "function") {
+            invalid();
+          }
           const index = integerMember(value, "index") ?? position;
           const fn = objectMember(value, "function");
           const id = stringMember(value, "id");
@@ -583,10 +589,14 @@ async function* decodeMessagesStream(
           block.initialArguments = undefined;
         }
         block.sawArgumentsDelta = true;
+        const partialJson = singleMember(delta, "partial_json");
+        if (typeof partialJson !== "string") {
+          invalid();
+        }
         yield {
           kind: "tool_arguments_delta",
           key: block.key,
-          delta: stringMember(delta, "partial_json") ?? "",
+          delta: partialJson,
         };
       } else if (block.kind !== "ignored") {
         invalid();
@@ -642,7 +652,11 @@ async function* decodeMessagesStream(
       const delta = objectMember(payload, "delta");
       const stopReason = stringMember(delta, "stop_reason");
       if (stopReason !== undefined) {
-        pendingFinish = messagesFinish(stopReason);
+        const observedFinish = messagesFinish(stopReason);
+        if (pendingFinish !== undefined && pendingFinish !== observedFinish) {
+          invalid();
+        }
+        pendingFinish = observedFinish;
       }
       const usage = objectMember(payload, "usage");
       if (usage !== undefined) {

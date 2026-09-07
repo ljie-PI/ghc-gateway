@@ -851,7 +851,7 @@ async function createResponsesFixtureGateway(backend = new ScriptedCopilotBacken
   chat: {
     status: 200,
     headers: new Headers(),
-    body: new TextEncoder().encode("{\"id\":\"chatcmpl_bridge\",\"created\":1700000000,\"model\":\"chat\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"done\",\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}"),
+    body: new TextEncoder().encode("{\"id\":\"chatcmpl_bridge\",\"created\":1700000000,\"model\":\"chat\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"done\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}"),
   },
 })): Promise<{
   readonly gateway: Awaited<ReturnType<typeof createGateway>>;

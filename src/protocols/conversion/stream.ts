@@ -64,14 +64,6 @@ export async function* convertProtocolStream(
         yield { kind: "usage", usage };
         continue;
       }
-      if (!started) {
-        started = true;
-        yield { kind: "first_semantic" };
-        yield* measuredEvent(context, () => emitter.start());
-      }
-      if (event.kind === "semantic_progress") {
-        continue;
-      }
       if (event.kind === "message_start") {
         yield* measuredEvent(context, () => {
           ledger.startMessage(event.key);
@@ -79,10 +71,20 @@ export async function* convertProtocolStream(
         });
         continue;
       }
+      if (!started && startsSemanticOutput(event)) {
+        started = true;
+        yield { kind: "first_semantic" };
+        yield* measuredEvent(context, () => emitter.start());
+      }
+      if (event.kind === "semantic_progress") {
+        continue;
+      }
       if (event.kind === "text_delta") {
         yield* measuredEvent(context, () => {
           ledger.appendText(event.key, event.delta, event.orderKey);
-          return emitter.textDelta(event.key, event.delta, event.orderKey);
+          return started
+            ? emitter.textDelta(event.key, event.delta, event.orderKey)
+            : emitter.reserveMessage(event.orderKey ?? event.key);
         });
         continue;
       }
@@ -92,16 +94,23 @@ export async function* convertProtocolStream(
           const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
           if (suffix.length > 0) {
             ledger.appendText(event.key, suffix, event.orderKey);
-            return emitter.textDelta(event.key, suffix, event.orderKey);
+            return started ? emitter.textDelta(event.key, suffix, event.orderKey) : [];
           }
-          return first ? emitter.textDelta(event.key, "", event.orderKey) : [];
+          if (!first) {
+            return [];
+          }
+          return started
+            ? emitter.textDelta(event.key, "", event.orderKey)
+            : emitter.reserveMessage(event.orderKey ?? event.key);
         });
         continue;
       }
       if (event.kind === "refusal_delta") {
         yield* measuredEvent(context, () => {
           ledger.appendRefusal(event.key, event.delta, event.orderKey);
-          return emitter.refusalDelta(event.key, event.delta, event.orderKey);
+          return started
+            ? emitter.refusalDelta(event.key, event.delta, event.orderKey)
+            : emitter.reserveMessage(event.orderKey ?? event.key);
         });
         continue;
       }
@@ -111,9 +120,14 @@ export async function* convertProtocolStream(
           const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
           if (suffix.length > 0) {
             ledger.appendRefusal(event.key, suffix, event.orderKey);
-            return emitter.refusalDelta(event.key, suffix, event.orderKey);
+            return started ? emitter.refusalDelta(event.key, suffix, event.orderKey) : [];
           }
-          return first ? emitter.refusalDelta(event.key, "", event.orderKey) : [];
+          if (!first) {
+            return [];
+          }
+          return started
+            ? emitter.refusalDelta(event.key, "", event.orderKey)
+            : emitter.reserveMessage(event.orderKey ?? event.key);
         });
         continue;
       }
@@ -182,6 +196,25 @@ export async function* convertProtocolStream(
   invalid();
 }
 
+function startsSemanticOutput(event: SemanticStreamEvent): boolean {
+  if (event.kind === "semantic_progress" || event.kind === "tool_start" || event.kind === "tool_done") {
+    return true;
+  }
+  if (event.kind === "text_delta" || event.kind === "tool_arguments_delta") {
+    return event.delta.length > 0;
+  }
+  if (event.kind === "text_done") {
+    return event.text.length > 0;
+  }
+  if (event.kind === "refusal_delta") {
+    return event.delta.length > 0;
+  }
+  if (event.kind === "refusal_done") {
+    return event.refusal.length > 0;
+  }
+  return event.kind === "terminal";
+}
+
 function measuredEvent(
   context: Readonly<StreamConversionContext>,
   work: () => Iterable<ConvertedStreamEmission>,
@@ -196,6 +229,7 @@ function measuredWork<T>(context: Readonly<StreamConversionContext>, work: () =>
 interface StreamEmitter {
   start(): Iterable<ConvertedStreamEmission>;
   messageStart(key: string): Iterable<ConvertedStreamEmission>;
+  reserveMessage(key: string): Iterable<ConvertedStreamEmission>;
   contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission>;
   itemDone(outputIndex: number): Iterable<ConvertedStreamEmission>;
   textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
@@ -254,6 +288,8 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
+
+  *reserveMessage(_key: string): Iterable<ConvertedStreamEmission> {}
 
   *contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
     this.responseFrontier.markContentDone(orderKey, contentIndex);
@@ -564,6 +600,11 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   messageStart(key: string): Iterable<ConvertedStreamEmission> {
+    this.firstMessageKey ??= key;
+    return [];
+  }
+
+  reserveMessage(key: string): Iterable<ConvertedStreamEmission> {
     this.firstMessageKey ??= key;
     return [];
   }
@@ -907,6 +948,11 @@ class ResponsesEmitter implements StreamEmitter {
 
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
+  reserveMessage(key: string): Iterable<ConvertedStreamEmission> {
+    this.ensureMessage(key);
+    return [];
+  }
+
   *contentDone(_orderKey: string, _contentIndex: number): Iterable<ConvertedStreamEmission> {}
 
   *itemDone(_outputIndex: number): Iterable<ConvertedStreamEmission> {}
@@ -1017,6 +1063,30 @@ class ResponsesEmitter implements StreamEmitter {
     usage: Readonly<SemanticUsage>,
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
+    for (const item of items) {
+      if (item.type !== "message" || item.key === undefined) {
+        continue;
+      }
+      const message = this.ensureMessage(item.key);
+      if (message.itemAdded) {
+        continue;
+      }
+      message.itemAdded = true;
+      yield this.itemEvent(
+        "response.output_item.added",
+        message.outputIndex,
+        responseMessage(message, "in_progress", "", ""),
+      );
+      for (const part of item.content) {
+        if (part.type === "text" && message.textIndex === undefined) {
+          message.textIndex = message.nextContentIndex++;
+          yield this.contentEvent("response.content_part.added", message, message.textIndex, outputText(""));
+        } else if (part.type === "refusal" && message.refusalIndex === undefined) {
+          message.refusalIndex = message.nextContentIndex++;
+          yield this.contentEvent("response.content_part.added", message, message.refusalIndex, refusal(""));
+        }
+      }
+    }
     const output = responseOutput(items, terminal.status, this.messages, this.tools);
     if (terminal.status === "completed") {
       const checkpointedOutput = this.completedOutput();

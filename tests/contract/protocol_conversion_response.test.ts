@@ -358,6 +358,129 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it.each(["messages", "responses"] as const)(
+    "preserves post-tool content from a later Chat final snapshot for %s",
+    async (target) => {
+      const source = [
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"final answer\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join("");
+      const text = wireText(await collectStream("chat", target, chunks(encoder.encode(source))));
+      expect(text).toContain("final answer");
+    },
+  );
+
+  it("rejects conflicting Messages stop reasons instead of erasing truncation", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_finish_conflict",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "max_tokens" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("messages", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("rejects malformed Messages partial_json deltas after valid arguments", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_bad_partial",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{}" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: { changed: true } },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("messages", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("rejects malformed final and buffered Chat tool discriminators", async () => {
+    const stream = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"custom\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(stream)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+    expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "chatcmpl_bad_type",
+      object: "chat.completion",
+      choices: [{
+        index: 0,
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_1",
+            type: "custom",
+            function: { name: "lookup", arguments: "{}" },
+          }],
+        },
+      }],
+    })), context("chat", "responses"))).toThrow();
+  });
+
   it("keeps Messages tool blocks in source order when completion arrives out of order", async () => {
     const response = {
       id: "resp_tools",
@@ -2868,6 +2991,82 @@ describe("shared conversion response codecs", () => {
       onTerminal: () => undefined,
     });
     expect(await response.text()).toContain("\"content\":\"ok\"");
+  });
+
+  it("does not let an empty Responses message announcement satisfy the first-semantic deadline", async () => {
+    async function* emptyThenAnswer(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "msg_empty_announcement",
+          type: "message",
+          status: "in_progress",
+          role: "assistant",
+          content: [],
+        },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      yield encoder.encode(responseEvent(1, "response.completed", {
+        response: {
+          id: "resp_late_after_empty",
+          object: "response",
+          status: "completed",
+          output: [{
+            id: "msg_empty_announcement",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "late", annotations: [] }],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }));
+    }
+    const config = defaultRuntimeConfigSnapshot();
+    const signal = new AbortController().signal;
+    await expect(createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: emptyThenAnswer(),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "chat",
+        target: "responses",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: [],
+        },
+      },
+      scope: {
+        requestId: "req_empty_announcement",
+        signal,
+        deliverySignal: signal,
+        config: {
+          ...config,
+          timeouts: { ...config.timeouts, firstByteMs: 30 },
+        },
+        attempt: createRequestAttempt({
+          requestId: "req_empty_announcement",
+          protocol: "openai_chat",
+          abortedErrorCount: 1,
+        }),
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      onTerminal: () => undefined,
+    })).rejects.toMatchObject({ failure: { kind: "upstream_timeout" } });
   });
 
   it("rejects unsupported Responses item types before retaining their metadata", async () => {
