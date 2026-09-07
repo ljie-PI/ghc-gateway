@@ -185,7 +185,7 @@ export interface ConversionObservations {
 export interface ConversionCheckpointIntent {
   readonly responseId: string;
   readonly output: readonly WireJson[];
-  readonly state: "route_only" | "partial" | "complete" | "receipt_complete";
+  readonly state: "route_only" | "partial" | "complete";
 }
 
 export interface ConvertedBufferedResponse {

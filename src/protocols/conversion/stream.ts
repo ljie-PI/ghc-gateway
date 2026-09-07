@@ -612,7 +612,7 @@ class ResponsesEmitter implements StreamEmitter {
         intent: {
           responseId: this.responseId,
           output: receiptOnly ? [] : output,
-          state: receiptOnly ? "receipt_complete" : "complete",
+          state: "complete",
         },
       };
     }
