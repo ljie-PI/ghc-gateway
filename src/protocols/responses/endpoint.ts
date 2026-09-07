@@ -572,6 +572,7 @@ async function convertedStreamResponse(
     model: plan.requestModel,
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+    performanceObserver: dependencies.performanceObserver,
     headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
     persistCheckpoint: async (intent) => await persistConvertedCheckpoint(
       dependencies,

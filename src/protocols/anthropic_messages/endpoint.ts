@@ -235,6 +235,7 @@ async function executeConvertedMessages(
     model: plan.requestModel,
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
+    performanceObserver: dependencies.performanceObserver,
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",

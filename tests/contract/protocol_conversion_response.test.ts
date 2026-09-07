@@ -2662,6 +2662,67 @@ describe("shared conversion response codecs", () => {
     })).rejects.toMatchObject({ failure: { kind: "upstream_timeout" } });
   });
 
+  it("measures converted stream event work without wrapping upstream waits", async () => {
+    let eventMeasurements = 0;
+    const signal = new AbortController().signal;
+    const response = await createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: chunks(encoder.encode([
+          "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+          "data: [DONE]\n\n",
+        ].join(""))),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "messages",
+        target: "chat",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: [],
+        },
+      },
+      scope: {
+        requestId: "req_measure",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_measure",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      performanceObserver: {
+        measure(measurement, work) {
+          if (measurement === "event") {
+            eventMeasurements += 1;
+          }
+          return work();
+        },
+        async measureAsync(_measurement, work) {
+          return await work();
+        },
+      },
+      onTerminal: () => undefined,
+    });
+    await response.text();
+    expect(eventMeasurements).toBeGreaterThan(0);
+  });
+
   it("finishes a native Messages stream at message_stop without waiting for upstream EOF", async () => {
     let cancelled = false;
     async function* openAfterTerminal(): AsyncIterable<Uint8Array> {

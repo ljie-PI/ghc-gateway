@@ -25,6 +25,7 @@ export interface StreamConversionContext {
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
   readonly degradations?: readonly ConversionDegradationRule[];
+  readonly measureEvent?: (<T>(work: () => T) => T) | undefined;
 }
 
 const ZERO_USAGE: SemanticUsage = {
@@ -63,75 +64,95 @@ export async function* convertProtocolStream(
     if (!started) {
       started = true;
       yield { kind: "first_semantic" };
-      yield* emitter.start();
+      yield* measuredEvent(context, () => [...emitter.start()]);
     }
     if (event.kind === "message_start") {
-      ledger.startMessage(event.key);
-      yield* emitter.messageStart(event.key);
+      yield* measuredEvent(context, () => {
+        ledger.startMessage(event.key);
+        return [...emitter.messageStart(event.key)];
+      });
       continue;
     }
     if (event.kind === "text_delta") {
-      ledger.appendText(event.key, event.delta, event.orderKey);
-      yield* emitter.textDelta(event.key, event.delta, event.orderKey);
+      yield* measuredEvent(context, () => {
+        ledger.appendText(event.key, event.delta, event.orderKey);
+        return [...emitter.textDelta(event.key, event.delta, event.orderKey)];
+      });
       continue;
     }
     if (event.kind === "text_done") {
-      const first = ledger.observeText(event.key, event.orderKey);
-      const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
-      if (suffix.length > 0) {
-        ledger.appendText(event.key, suffix, event.orderKey);
-        yield* emitter.textDelta(event.key, suffix, event.orderKey);
-      } else if (first) {
-        yield* emitter.textDelta(event.key, "", event.orderKey);
-      }
+      yield* measuredEvent(context, () => {
+        const first = ledger.observeText(event.key, event.orderKey);
+        const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
+        if (suffix.length > 0) {
+          ledger.appendText(event.key, suffix, event.orderKey);
+          return [...emitter.textDelta(event.key, suffix, event.orderKey)];
+        }
+        return first ? [...emitter.textDelta(event.key, "", event.orderKey)] : [];
+      });
       continue;
     }
     if (event.kind === "refusal_delta") {
-      ledger.appendRefusal(event.key, event.delta, event.orderKey);
-      yield* emitter.refusalDelta(event.key, event.delta, event.orderKey);
+      yield* measuredEvent(context, () => {
+        ledger.appendRefusal(event.key, event.delta, event.orderKey);
+        return [...emitter.refusalDelta(event.key, event.delta, event.orderKey)];
+      });
       continue;
     }
     if (event.kind === "refusal_done") {
-      const first = ledger.observeRefusal(event.key, event.orderKey);
-      const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
-      if (suffix.length > 0) {
-        ledger.appendRefusal(event.key, suffix, event.orderKey);
-        yield* emitter.refusalDelta(event.key, suffix, event.orderKey);
-      } else if (first) {
-        yield* emitter.refusalDelta(event.key, "", event.orderKey);
-      }
+      yield* measuredEvent(context, () => {
+        const first = ledger.observeRefusal(event.key, event.orderKey);
+        const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
+        if (suffix.length > 0) {
+          ledger.appendRefusal(event.key, suffix, event.orderKey);
+          return [...emitter.refusalDelta(event.key, suffix, event.orderKey)];
+        }
+        return first ? [...emitter.refusalDelta(event.key, "", event.orderKey)] : [];
+      });
       continue;
     }
     if (event.kind === "content_done") {
-      ledger.finishContent(event.key);
-      yield* emitter.contentDone(event.orderKey, event.contentIndex);
+      yield* measuredEvent(context, () => {
+        ledger.finishContent(event.key);
+        return [...emitter.contentDone(event.orderKey, event.contentIndex)];
+      });
       continue;
     }
     if (event.kind === "item_done") {
-      if (event.itemType === "message") {
-        ledger.finishMessage(`responses:${event.outputIndex}:message`);
-      }
-      yield* emitter.itemDone(event.outputIndex);
+      yield* measuredEvent(context, () => {
+        if (event.itemType === "message") {
+          ledger.finishMessage(`responses:${event.outputIndex}:message`);
+        }
+        return [...emitter.itemDone(event.outputIndex)];
+      });
       continue;
     }
     if (event.kind === "tool_start") {
-      ledger.startTool(event);
-      yield* emitter.toolStart(event.key, event.callId, event.name, event.itemId);
+      yield* measuredEvent(context, () => {
+        ledger.startTool(event);
+        return [...emitter.toolStart(event.key, event.callId, event.name, event.itemId)];
+      });
       continue;
     }
     if (event.kind === "tool_arguments_delta") {
-      ledger.appendToolArguments(event.key, event.delta);
-      yield* emitter.toolArgumentsDelta(event.key, event.delta);
+      yield* measuredEvent(context, () => {
+        ledger.appendToolArguments(event.key, event.delta);
+        return [...emitter.toolArgumentsDelta(event.key, event.delta)];
+      });
       continue;
     }
     if (event.kind === "tool_done") {
-      const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
-      if (suffix.length > 0) {
-        yield* emitter.toolArgumentsDelta(event.key, suffix);
-      }
-      if (context.target === "messages" && event.completed !== false) {
-        yield* emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson);
-      }
+      yield* measuredEvent(context, () => {
+        const emissions: ConvertedStreamEmission[] = [];
+        const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
+        if (suffix.length > 0) {
+          emissions.push(...emitter.toolArgumentsDelta(event.key, suffix));
+        }
+        if (context.target === "messages" && event.completed !== false) {
+          emissions.push(...emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson));
+        }
+        return emissions;
+      });
       continue;
     }
     if (event.kind === "terminal") {
@@ -139,16 +160,27 @@ export async function* convertProtocolStream(
         invalid();
       }
       terminal = true;
-      if (event.status === "completed") {
-        ledger.finishOpenTools();
-        for (const key of ledger.toolKeys()) {
-          yield* emitter.toolDone(key, ledger.tool(key).argumentsJson);
+      yield* measuredEvent(context, () => {
+        const emissions: ConvertedStreamEmission[] = [];
+        if (event.status === "completed") {
+          ledger.finishOpenTools();
+          for (const key of ledger.toolKeys()) {
+            emissions.push(...emitter.toolDone(key, ledger.tool(key).argumentsJson));
+          }
         }
-      }
-      const items = ledger.items(event.status);
-      yield* emitter.finish(event, usage, items);
+        const items = ledger.items(event.status);
+        emissions.push(...emitter.finish(event, usage, items));
+        return emissions;
+      });
       yield { kind: "terminal", terminal: event.status };
       return;
+    }
+
+    function measuredEvent(
+      context: Readonly<StreamConversionContext>,
+      work: () => readonly ConvertedStreamEmission[],
+    ): readonly ConvertedStreamEmission[] {
+      return context.measureEvent === undefined ? work() : context.measureEvent(work);
     }
   }
   invalid();

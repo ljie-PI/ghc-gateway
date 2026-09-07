@@ -15,6 +15,7 @@ import type {
   ConvertedProtocolPlan,
   SemanticUsage,
 } from "../protocols/conversion/types.js";
+import type { ProtocolPerformanceObserver } from "../telemetry/runtime.js";
 
 export async function createConvertedStreamResponse(input: {
   readonly upstream: UpstreamByteStream;
@@ -24,6 +25,7 @@ export async function createConvertedStreamResponse(input: {
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
   readonly headers: HeadersInit;
+  readonly performanceObserver?: ProtocolPerformanceObserver | undefined;
   readonly persistCheckpoint?: (intent: Readonly<ConversionCheckpointIntent>) => Promise<void>;
   readonly onTerminal: (result: Readonly<
     | { readonly kind: "success"; readonly usage: SemanticUsage }
@@ -31,6 +33,7 @@ export async function createConvertedStreamResponse(input: {
   >) => void;
 }): Promise<Response> {
   const cancelExchange = createExchangeCancellation(input.upstream);
+  const performanceObserver = input.performanceObserver;
   const emissions = convertProtocolStream(
     withByteIdleDeadlines(
       input.upstream.bytes,
@@ -48,6 +51,9 @@ export async function createConvertedStreamResponse(input: {
       createUuid: input.createUuid,
       nowUnixSeconds: input.nowUnixSeconds,
       degradations: input.plan.request.degradations,
+      measureEvent: performanceObserver === undefined
+        ? undefined
+        : (work) => performanceObserver.measure("event", work),
     },
   );
   const iterator = emissions[Symbol.asyncIterator]();

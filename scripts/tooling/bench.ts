@@ -674,7 +674,7 @@ function responsesCheckpointRequest(): Request {
       model: "chat",
       input: "benchmark",
       stream: true,
-      tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
     }),
   });
 }
