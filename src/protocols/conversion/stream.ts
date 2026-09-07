@@ -129,7 +129,7 @@ export async function* convertProtocolStream(
       if (suffix.length > 0) {
         yield* emitter.toolArgumentsDelta(event.key, suffix);
       }
-      if (context.target === "messages") {
+      if (context.target === "messages" && event.completed !== false) {
         yield* emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson);
       }
       continue;
@@ -691,7 +691,7 @@ class MessagesEmitter implements StreamEmitter {
       if (item.key !== undefined && this.emittedResponseTools.has(item.key)) {
         continue;
       }
-      yield* this.emitTool(item.key ?? `tool:${this.nextIndex}`, tool);
+      yield* this.emitTool(item.key ?? `tool:${this.nextIndex}`, tool, true);
     }
   }
 
@@ -775,7 +775,7 @@ class MessagesEmitter implements StreamEmitter {
     streamIndex?: number | undefined;
     readonly done: boolean;
     closed: boolean;
-  }): Iterable<ConvertedStreamEmission> {
+  }, close = false): Iterable<ConvertedStreamEmission> {
     if (tool.streamIndex !== undefined) {
       return;
     }
@@ -795,7 +795,7 @@ class MessagesEmitter implements StreamEmitter {
         delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
       });
     }
-    if (tool.done && !tool.closed) {
+    if ((tool.done || close) && !tool.closed) {
       tool.closed = true;
       yield this.event({ type: "content_block_stop", index });
     }

@@ -316,6 +316,9 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
       ) {
         upstreamInvalid();
       }
+      if (status === "completed" && itemStatus !== undefined && itemStatus !== "completed") {
+        upstreamInvalid();
+      }
       if (itemStatus === "completed" || (itemStatus === undefined && status === "completed")) {
         validateCompleteArguments(argumentsJson);
       }

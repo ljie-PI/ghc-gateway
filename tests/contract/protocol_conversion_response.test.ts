@@ -1336,6 +1336,23 @@ describe("shared conversion response codecs", () => {
     })), context("responses", "chat"))).toThrow();
   });
 
+  it("rejects incomplete tool items inside a completed buffered Responses result", () => {
+    expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "resp_buffered_contradiction",
+      object: "response",
+      status: "completed",
+      output: [{
+        id: "fc_incomplete",
+        type: "function_call",
+        call_id: "call_incomplete",
+        name: "lookup",
+        arguments: "{\"q\":",
+        status: "incomplete",
+      }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    })), context("responses", "chat"))).toThrow();
+  });
+
   it("closes an incomplete Chat tool block before the Messages terminal", async () => {
     const source = [
       "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_partial\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":\"length\"}]}\n\n",
@@ -1347,6 +1364,64 @@ describe("shared conversion response codecs", () => {
     expect(stop).toBeGreaterThanOrEqual(0);
     expect(terminal).toBeGreaterThan(stop);
     expect(text).toContain("\"stop_reason\": \"max_tokens\"");
+  });
+
+  it("closes each incomplete Chat tool before starting the next Messages block", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"first\",\"arguments\":\"{\\\"a\\\":\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"second\",\"arguments\":\"{\\\"b\\\":\"}}]},\"finish_reason\":\"length\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const text = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    const startFirst = text.indexOf("\"name\": \"first\"");
+    const stopFirst = text.indexOf("event: content_block_stop", startFirst);
+    const startSecond = text.indexOf("\"name\": \"second\"");
+    const stopSecond = text.indexOf("event: content_block_stop", startSecond);
+    expect(startFirst).toBeGreaterThanOrEqual(0);
+    expect(stopFirst).toBeGreaterThan(startFirst);
+    expect(startSecond).toBeGreaterThan(stopFirst);
+    expect(stopSecond).toBeGreaterThan(startSecond);
+  });
+
+  it("preserves token-limited Messages tool arguments as an incomplete Responses result", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_partial_tool",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_partial", name: "lookup", input: {} },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{\"q\":" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "max_tokens" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const emissions = await collectStream("messages", "responses", chunks(encoder.encode(source)));
+    const text = wireText(emissions);
+    expect(text).toContain("response.incomplete");
+    expect(text).not.toContain("response.output_item.done");
+    expect(emissions.filter((emission) => emission.kind === "checkpoint")).toMatchObject([
+      { intent: { state: "route_only" } },
+    ]);
   });
 
   it.each(["chat", "messages"] as const)(

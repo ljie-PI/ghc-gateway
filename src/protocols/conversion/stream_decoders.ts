@@ -519,7 +519,6 @@ async function* decodeMessagesStream(
           budget.release(block.initialArguments);
           block.initialArguments = undefined;
         }
-        yield { kind: "tool_done", key: block.key, completed: true };
       } else if (block.kind === "text") {
         if (!block.sawContent) {
           yield { kind: "text_done", key: `messages:${index}:text`, text: "" };
@@ -562,6 +561,14 @@ async function* decodeMessagesStream(
       }
       if ([...blocks.values()].some((block) => !block.closed)) {
         invalid();
+      }
+      const completed = pendingFinish !== "length"
+        && pendingFinish !== "content_filter"
+        && pendingFinish !== "refusal";
+      for (const block of blocks.values()) {
+        if (block.kind === "tool") {
+          yield { kind: "tool_done", key: block.key, completed };
+        }
       }
       yield {
         kind: "terminal",
