@@ -628,6 +628,7 @@ async function* decodeResponsesStream(
   const toolsByIndex = new Map<number, ResponseToolIdentity>();
   const observedOutputIndexes = new Set<number>();
   const observedOutputTypes = new Map<number, string>();
+  const observedOutputStatuses = new Map<number, string>();
   const observedContent = new Map<string, "output_text" | "refusal">();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
@@ -790,6 +791,18 @@ async function* decodeResponsesStream(
         invalid();
       }
       observedOutputTypes.set(outputIndex, itemType);
+      const itemStatus = stringMember(item, "status");
+      if (
+        itemStatus === undefined
+        || (itemStatus !== "completed" && itemStatus !== "incomplete" && itemStatus !== "in_progress")
+      ) {
+        invalid();
+      }
+      const observedStatus = observedOutputStatuses.get(outputIndex);
+      if (observedStatus !== undefined && observedStatus !== itemStatus) {
+        invalid();
+      }
+      observedOutputStatuses.set(outputIndex, itemStatus);
       observeFinalItemContent(item, outputIndex, observedContent, budget);
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
       yield { kind: "item_done", outputIndex, itemType };
@@ -805,6 +818,7 @@ async function* decodeResponsesStream(
         response,
         observedOutputIndexes,
         observedOutputTypes,
+        observedOutputStatuses,
         observedContent,
       );
       if (type === "response.failed") {
@@ -909,6 +923,7 @@ function validateTerminalResponse(
   response: WireJsonObject,
   observedOutputIndexes: ReadonlySet<number>,
   observedOutputTypes: ReadonlyMap<number, string>,
+  observedOutputStatuses: ReadonlyMap<number, string>,
   observedContent: ReadonlyMap<string, "output_text" | "refusal">,
 ): void {
   const expectedStatus = eventType === "response.completed"
@@ -946,6 +961,10 @@ function validateTerminalResponse(
     }
     const observedType = observedOutputTypes.get(index);
     if (observedType !== undefined && stringMember(item, "type") !== observedType) {
+      invalid();
+    }
+    const observedStatus = observedOutputStatuses.get(index);
+    if (observedStatus !== undefined && stringMember(item, "status") !== observedStatus) {
       invalid();
     }
   }

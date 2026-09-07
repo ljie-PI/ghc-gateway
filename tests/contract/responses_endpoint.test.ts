@@ -160,7 +160,7 @@ describe("Responses endpoint", () => {
       const response = await gw.fetch(responsesRequest({
         model: "chat",
         input: "hi",
-        tools: [{ type: "function", name: "lookup", parameters: {} }],
+        tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
       }));
       expect(response.status).toBe(200);
       const body = JSON.parse(await response.text()) as { id: string; output: Array<{ type: string; call_id?: string }> };

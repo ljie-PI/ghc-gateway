@@ -954,6 +954,36 @@ describe("shared conversion request codecs", () => {
     expect(converted.degradations).toContain("reasoning.budget_coarsened");
   });
 
+  it("preserves explicit OpenAI reasoning disablement and maps it to no Messages reasoning", () => {
+    const chatToResponses = decoded(prepareConvertedRequest("chat", "responses", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "none",
+    }), "target", capability(["responses"])).bytes);
+    expect(chatToResponses).toMatchObject({ reasoning: { effort: "none" } });
+
+    const chatToMessages = decoded(prepareConvertedRequest("chat", "messages", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "none",
+    }), "target", capability(["messages"])).bytes);
+    expect(chatToMessages.output_config).toBeUndefined();
+
+    const responsesToChat = decoded(prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "hi",
+      reasoning: { effort: "none" },
+    }), "target", capability(["chat"])).bytes);
+    expect(responsesToChat).toMatchObject({ reasoning_effort: "none" });
+
+    const responsesToMessages = decoded(prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      input: "hi",
+      reasoning: { effort: "none" },
+    }), "target", capability(["messages"])).bytes);
+    expect(responsesToMessages.output_config).toBeUndefined();
+  });
+
   it("extracts documented JSON-encoded content media without scanning unrelated business keys", () => {
     const embedded = JSON.stringify({
       content: [{

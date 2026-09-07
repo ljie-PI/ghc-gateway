@@ -77,7 +77,7 @@ export type SemanticOutputFormat =
   };
 
 export interface SemanticReasoning {
-  readonly effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
+  readonly effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
 }
 
 export interface SemanticRequest {

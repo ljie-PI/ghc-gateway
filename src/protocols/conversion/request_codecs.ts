@@ -153,6 +153,7 @@ function decodeChatRequest(body: WireJsonObject): SemanticRequest {
   const reasoning = reasoningFromEffort(
     optionalString(oneMember(body, "reasoning_effort", "REQ-C-REASONING"), "REQ-C-REASONING"),
     "REQ-C-REASONING",
+    true,
   );
   return Object.freeze({
     source: "chat",
@@ -604,6 +605,7 @@ function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
         "REQ-R-EFFORT",
       ),
       "REQ-R-EFFORT",
+      true,
     ),
     metadata: validatedMetadata(oneMember(body, "metadata", "REQ-R-METADATA"), "responses"),
     degradations: [...degradations],
@@ -1347,9 +1349,11 @@ function encodeMessagesRequest(
   if (request.outputFormat?.kind === "json_object") {
     unsupported("REQ-TARGET-M-JSON-OBJECT");
   }
-  const targetReasoning = request.reasoning?.effort === "minimal"
-    ? { effort: "low" as const }
-    : request.reasoning;
+  const targetReasoning = request.reasoning?.effort === "none"
+    ? undefined
+    : request.reasoning?.effort === "minimal"
+      ? { effort: "low" as const }
+      : request.reasoning;
   const targetDegradations: ConversionDegradationRule[] = request.reasoning?.effort === "minimal"
     ? ["reasoning.budget_coarsened"]
     : [];
@@ -1814,9 +1818,16 @@ function aliasedPositiveInteger(
   return values[0];
 }
 
-function reasoningFromEffort(value: string | undefined, ruleId: string): SemanticReasoning | undefined {
+function reasoningFromEffort(
+  value: string | undefined,
+  ruleId: string,
+  allowNone = false,
+): SemanticReasoning | undefined {
   if (value === undefined) {
     return undefined;
+  }
+  if (value === "none" && allowNone) {
+    return { effort: "none" };
   }
   if (value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh") {
     return { effort: value };

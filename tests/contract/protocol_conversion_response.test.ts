@@ -1773,6 +1773,48 @@ describe("shared conversion response codecs", () => {
     },
   );
 
+  it.each(["message", "function_call"] as const)(
+    "rejects a terminal snapshot that promotes an ended incomplete Responses %s item",
+    async (itemType) => {
+      const incomplete = itemType === "message"
+        ? {
+          id: "msg_status",
+          type: "message",
+          status: "incomplete",
+          role: "assistant",
+          content: [{ type: "output_text", text: "partial", annotations: [] }],
+        }
+        : {
+          id: "fc_status",
+          type: "function_call",
+          status: "incomplete",
+          call_id: "call_status",
+          name: "lookup",
+          arguments: "{}",
+        };
+      const source = [
+        responseEvent(0, "response.output_item.done", { output_index: 0, item: incomplete }),
+        responseEvent(1, "response.completed", {
+          response: {
+            id: "resp_status_conflict",
+            object: "response",
+            status: "completed",
+            output: [{ ...incomplete, status: "completed" }],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        }),
+      ].join("");
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)),
+          streamContext("responses", "chat"),
+        )) {
+          void _emission;
+        }
+      }).rejects.toThrow();
+    },
+  );
+
   it.each(["chat", "messages"] as const)(
     "drains every done-only multipart Responses item before advancing %s delivery",
     async (target) => {
