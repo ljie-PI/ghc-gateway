@@ -206,7 +206,8 @@ function appendProtected(filePath: string, value: string, windowsSecurity: Windo
 function restrictWindowsAcl(target: string, directory: boolean): void {
   const identity = currentWindowsIdentity();
   const grant = directory ? `*${identity.sid}:(OI)(CI)(F)` : `*${identity.sid}:(F)`;
-  execFileSync("icacls", [target, "/inheritance:r", "/grant:r", grant], {
+  const icacls = windowsCommandPath("icacls");
+  execFileSync(icacls, [target, "/inheritance:r", "/grant:r", grant], {
     encoding: "utf8",
     windowsHide: true,
   });
@@ -259,7 +260,8 @@ function isWindowsReparsePoint(target: string): boolean {
 
 function assertWindowsAcl(target: string): void {
   const current = currentWindowsIdentity();
-  const output = execFileSync("icacls", [target], { encoding: "utf8", windowsHide: true });
+  const icacls = windowsCommandPath("icacls");
+  const output = execFileSync(icacls, [target], { encoding: "utf8", windowsHide: true });
   const identities: string[] = [];
   for (const rawLine of output.split(/\r?\n/u)) {
     const line = rawLine.trim();
