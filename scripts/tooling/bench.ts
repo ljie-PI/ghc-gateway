@@ -293,6 +293,10 @@ class BenchmarkPerformanceObserver implements ProtocolPerformanceObserver {
     }
   }
 
+  observe(measurement: PerformanceMeasurement, elapsedMs: number): void {
+    this.values[measurement].push(elapsedMs);
+  }
+
   reset(measurement: PerformanceMeasurement): void {
     this.values[measurement].length = 0;
   }
@@ -585,16 +589,29 @@ async function measureStreamEvents(runtime: BenchmarkRuntime, count: number): Pr
   let response = await runtime.gateway.fetch(openAiRequest(true));
   assertStatus(response, 200, "stream event warmup request");
   await response.arrayBuffer();
+  response = await runtime.gateway.fetch(responsesConvertedEventRequest());
+  assertStatus(response, 200, "converted stream event warmup request");
+  await response.arrayBuffer();
+
   runtime.performance.reset("event");
   runtime.backend.eventCount = count;
   response = await runtime.gateway.fetch(openAiRequest(true));
   assertStatus(response, 200, "stream event request");
   await response.arrayBuffer();
-  const values = [...runtime.performance.values.event];
-  if (values.length < count) {
-    throw new Error(`stream event benchmark expected at least ${count} samples, received ${values.length}`);
+  const nativeValues = runtime.performance.values.event.slice(0, count);
+  if (nativeValues.length < count) {
+    throw new Error(`native stream event benchmark expected ${count} samples, received ${nativeValues.length}`);
   }
-  return values.slice(0, count);
+
+  runtime.performance.reset("event");
+  response = await runtime.gateway.fetch(responsesConvertedEventRequest());
+  assertStatus(response, 200, "converted stream event request");
+  await response.arrayBuffer();
+  const convertedValues = runtime.performance.values.event.slice(0, count);
+  if (convertedValues.length < count) {
+    throw new Error(`converted stream event benchmark expected ${count} samples, received ${convertedValues.length}`);
+  }
+  return nativeValues.map((value, index) => Math.max(value, convertedValues[index] ?? 0));
 }
 
 async function measureCheckpoints(
@@ -675,6 +692,18 @@ function responsesCheckpointRequest(): Request {
       input: "benchmark",
       stream: true,
       tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
+    }),
+  });
+}
+
+function responsesConvertedEventRequest(): Request {
+  return new Request("http://127.0.0.1/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "chat",
+      input: "benchmark",
+      stream: true,
     }),
   });
 }
