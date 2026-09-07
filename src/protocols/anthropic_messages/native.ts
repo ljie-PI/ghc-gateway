@@ -18,7 +18,6 @@ import {
 } from "../../serialization/wire_json.js";
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { SemanticUsage } from "../conversion/types.js";
-import { takeSseRecord } from "../conversion/sse.js";
 import { mergeMessagesUsage } from "../conversion/usage.js";
 
 export function serializeNativeMessagesRequest(body: WireJsonObject, model: string): Uint8Array {
@@ -226,10 +225,42 @@ export async function createNativeMessagesStreamResponse(input: {
   return writer.response;
 }
 
+class NativeRecordAccumulator {
+  private readonly chunks: Uint8Array[] = [];
+  private fragments: Uint8Array[] = [];
+  byteLength = 0;
+
+  append(value: Uint8Array): void {
+    if (value.byteLength === 0) {
+      return;
+    }
+    this.fragments.push(value);
+    this.byteLength += value.byteLength;
+    if (this.fragments.length >= 1_024) {
+      this.chunks.push(Buffer.concat(this.fragments));
+      this.fragments = [];
+    }
+  }
+
+  peek(): Uint8Array {
+    return Buffer.concat([...this.chunks, ...this.fragments], this.byteLength);
+  }
+
+  take(): Uint8Array {
+    const value = this.peek();
+    this.chunks.length = 0;
+    this.fragments = [];
+    this.byteLength = 0;
+    return value;
+  }
+}
+
 class NativeMessagesObserver {
-  private readonly decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  private readonly encoder = new TextEncoder();
-  private pending = "";
+  private readonly pending = new NativeRecordAccumulator();
+  private readonly utf8Validator = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  private pendingCr = false;
+  private completeOnPendingCr = false;
+  private lineEmpty = true;
   private terminal = false;
   private semantic = false;
   private usage: SemanticUsage = {
@@ -256,47 +287,121 @@ class NativeMessagesObserver {
 
   consume(bytes: Uint8Array): readonly Uint8Array[] {
     try {
-      this.pending += this.decoder.decode(bytes, { stream: true });
+      this.utf8Validator.decode(bytes, { stream: true });
     } catch {
       invalid();
     }
-    return this.drain();
+    const records: Uint8Array[] = [];
+    let index = 0;
+    if (this.pendingCr) {
+      this.pendingCr = false;
+      if (bytes[0] === 0x0a) {
+        this.append(bytes.subarray(0, 1));
+        index = 1;
+      }
+      if (this.completeOnPendingCr) {
+        this.completeOnPendingCr = false;
+        this.emitRecord(records);
+        if (this.terminal) {
+          return records;
+        }
+      }
+    }
+    while (index < bytes.byteLength) {
+      let boundary = index;
+      while (boundary < bytes.byteLength && bytes[boundary] !== 0x0a && bytes[boundary] !== 0x0d) {
+        boundary += 1;
+      }
+      if (boundary > index) {
+        this.append(bytes.subarray(index, boundary));
+        this.lineEmpty = false;
+      }
+      if (boundary >= bytes.byteLength) {
+        break;
+      }
+      const character = bytes[boundary];
+      this.append(bytes.subarray(boundary, boundary + 1));
+      const complete = this.finishLine();
+      if (character === 0x0d) {
+        if (boundary + 1 >= bytes.byteLength) {
+          this.pendingCr = true;
+          this.completeOnPendingCr = complete;
+          break;
+        }
+        if (bytes[boundary + 1] === 0x0a) {
+          this.append(bytes.subarray(boundary + 1, boundary + 2));
+          boundary += 1;
+        }
+      }
+      if (complete) {
+        this.emitRecord(records);
+        if (this.terminal) {
+          return records;
+        }
+      }
+      index = boundary + 1;
+    }
+    return records;
   }
 
   finish(): { readonly usage: SemanticUsage; readonly records: readonly Uint8Array[] } {
     try {
-      this.pending += this.decoder.decode();
+      this.utf8Validator.decode();
     } catch {
       invalid();
     }
-    const records = this.drain(true);
-    if (this.pending.trim().length > 0 || !this.terminal) {
+    const records: Uint8Array[] = [];
+    if (this.pendingCr) {
+      this.pendingCr = false;
+      if (this.completeOnPendingCr) {
+        this.completeOnPendingCr = false;
+        this.emitRecord(records);
+      }
+    }
+    const trailing = this.pending.peek();
+    if (trailing.byteLength > 0) {
+      let decoded: string;
+      try {
+        decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(trailing);
+      } catch {
+        invalid();
+      }
+      if (decoded.trim().length > 0) {
+        throw truncated();
+      }
+    }
+    if (!this.terminal) {
       throw truncated();
     }
     return { usage: this.usage, records };
   }
 
-  private drain(final = false): readonly Uint8Array[] {
-    const records: Uint8Array[] = [];
-    for (;;) {
-      const extracted = takeSseRecord(this.pending, final);
-      if (extracted === undefined) {
-        if (this.encoder.encode(this.pending).byteLength > this.eventLimitBytes) {
-          invalid();
-        }
-        return records;
-      }
-      this.pending = extracted.rest;
-      if (this.encoder.encode(extracted.consumed).byteLength > this.eventLimitBytes) {
-        invalid();
-      }
-      this.observeRecord(extracted.raw.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n"));
-      records.push(this.encoder.encode(extracted.consumed));
-      if (this.terminal) {
-        this.pending = "";
-        return records;
-      }
+  private append(bytes: Uint8Array): void {
+    this.pending.append(bytes);
+    if (this.pending.byteLength > this.eventLimitBytes) {
+      invalid();
     }
+  }
+
+  private finishLine(): boolean {
+    if (this.lineEmpty) {
+      return true;
+    }
+    this.lineEmpty = true;
+    return false;
+  }
+
+  private emitRecord(records: Uint8Array[]): void {
+    const bytes = this.pending.take();
+    let raw: string;
+    try {
+      raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    } catch {
+      invalid();
+    }
+    this.observeRecord(raw.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n"));
+    records.push(bytes);
+    this.lineEmpty = true;
   }
 
   private observeRecord(raw: string): void {

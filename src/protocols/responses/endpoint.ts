@@ -1505,12 +1505,12 @@ function memberValue(object: WireJsonObject | undefined, key: string): WireJson 
 
 function hasClientMessagesContinuationContext(request: Readonly<ResponsesRequest>): boolean {
   const instructions = memberValue(request.body, "instructions");
-  if (typeof instructions === "string" && instructions.length > 0) {
+  if (hasNonEmptyContinuationContent(instructions)) {
     return true;
   }
   const input = memberValue(request.body, "input");
   if (typeof input === "string") {
-    return input.length > 0;
+    return input.trim().length > 0;
   }
   const items = isWireJsonArray(input) ? input.items : isWireJsonObject(input) ? [input] : [];
   return items.some((item) => {
@@ -1521,8 +1521,33 @@ function hasClientMessagesContinuationContext(request: Readonly<ResponsesRequest
     const role = memberValue(item, "role");
     return (type === undefined || type === "message")
       && (role === "user" || role === "system" || role === "developer")
-      && memberValue(item, "content") !== undefined;
+      && hasNonEmptyContinuationContent(memberValue(item, "content"));
   });
+}
+
+function hasNonEmptyContinuationContent(value: WireJson | undefined): boolean {
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (isWireJsonArray(value)) {
+    return value.items.some((item) => hasNonEmptyContinuationContent(item));
+  }
+  if (!isWireJsonObject(value)) {
+    return false;
+  }
+  const type = memberValue(value, "type");
+  if (type === "input_text" || type === "text") {
+    return hasNonEmptyContinuationContent(memberValue(value, "text"));
+  }
+  if (type === "input_image") {
+    return hasNonEmptyContinuationContent(memberValue(value, "image_url"));
+  }
+  if (type === "image") {
+    const source = objectMember(value, "source");
+    return hasNonEmptyContinuationContent(memberValue(source, "url"))
+      || hasNonEmptyContinuationContent(memberValue(source, "data"));
+  }
+  return false;
 }
 
 function observedInteger(value: WireJson | undefined): number | undefined {

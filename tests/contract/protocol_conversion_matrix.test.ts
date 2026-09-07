@@ -618,6 +618,24 @@ describe("protocol conversion matrix", () => {
       await rejected.text();
       expect(harness.backend.captured).toEqual([]);
 
+      for (const content of ["", [], [{ type: "input_text", text: "" }]]) {
+        const emptyContext = await harness.gw.fetch(jsonRequest("/v1/responses", {
+          model: "dual-messages",
+          previous_response_id: "resp_messages_owned",
+          input: [
+            { type: "message", role: "user", content },
+            {
+              type: "function_call_output",
+              call_id: "call_owned",
+              output: "result",
+            },
+          ],
+        }));
+        expect(emptyContext.status).not.toBe(200);
+        await emptyContext.text();
+      }
+      expect(harness.backend.captured).toEqual([]);
+
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "dual-messages",
         previous_response_id: "resp_messages_owned",
