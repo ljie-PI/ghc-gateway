@@ -364,7 +364,7 @@ async function extendedBridgeNonstreamResponse(
     chatOutputTokenField: plan.resolvedModel.capability.profile.chatOutputTokenField.value,
   }, scope.signal);
   const request = extendedChatRequest(
-    applyValidatedExtendedBudget(prepared.body, validatedCommon),
+    applyValidatedExtendedCommon(prepared.body, validatedCommon),
     plan.resolvedModel.upstreamModel,
     false,
     scope,
@@ -704,20 +704,24 @@ function extendedChatRequest(
   };
 }
 
-function applyValidatedExtendedBudget(
+function applyValidatedExtendedCommon(
   legacy: WireJsonObject,
   validated: WireJsonObject,
 ): WireJsonObject {
-  const budget = validated.members.find((member) => (
-    member.key === "max_tokens" || member.key === "max_completion_tokens"
-  ));
+  const normalizedKeys = new Set([
+    "max_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "reasoning_effort",
+    "metadata",
+  ]);
+  const normalized = validated.members.filter((member) => normalizedKeys.has(member.key));
   return {
     kind: "object",
     members: [
-      ...legacy.members.filter((member) => (
-        member.key !== "max_tokens" && member.key !== "max_completion_tokens"
-      )),
-      ...(budget === undefined ? [] : [budget]),
+      ...legacy.members.filter((member) => !normalizedKeys.has(member.key)),
+      ...normalized,
     ],
   };
 }

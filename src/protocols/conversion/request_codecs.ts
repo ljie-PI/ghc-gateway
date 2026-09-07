@@ -338,7 +338,7 @@ function decodeMessagesRequest(body: WireJsonObject): SemanticRequest {
     stream: optionalBoolean(oneMember(body, "stream", "REQ-M-STREAM"), "REQ-M-STREAM") ?? false,
     instructions,
     items,
-    tools: decodeMessagesTools(oneMember(body, "tools", "REQ-M-TOOLS")),
+    tools: decodeMessagesTools(oneMember(body, "tools", "REQ-M-TOOLS"), degradations),
     toolChoice: decodeMessagesToolChoice(oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE")),
     parallelToolCalls: messagesParallelToolCalls(oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE")),
     maxOutputTokens: positiveInteger(oneMember(body, "max_tokens", "REQ-M-LIMIT"), "REQ-M-LIMIT"),
@@ -1011,18 +1011,34 @@ function decodeChatTools(value: WireJson | undefined): readonly SemanticTool[] {
   });
 }
 
-function decodeMessagesTools(value: WireJson | undefined): readonly SemanticTool[] {
+function decodeMessagesTools(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): readonly SemanticTool[] {
   if (value === undefined) {
     return [];
   }
   return requiredArray(value, "REQ-M-TOOLS").items.map((item) => {
     const tool = requiredObject(item, "REQ-M-TOOL");
-    assertAllowedKeys(tool, new Set(["name", "description", "input_schema", "strict", "type"]), "REQ-M-TOOL");
+    assertAllowedKeys(
+      tool,
+      new Set(["name", "description", "input_schema", "strict", "type", "cache_control"]),
+      "REQ-M-TOOL",
+    );
+    const cacheControl = oneMember(tool, "cache_control", "REQ-M-TOOL-CACHE");
+    if (cacheControl !== undefined) {
+      validateCacheControl(cacheControl);
+      degradations.add("cache.control_omitted");
+    }
     const type = optionalString(oneMember(tool, "type", "REQ-M-TOOL-TYPE"), "REQ-M-TOOL-TYPE");
     if (type !== undefined && type !== "custom") {
       unsupported("REQ-M-TOOL-TYPE");
     }
-    return semanticTool(tool, "input_schema", "REQ-M-TOOL", false);
+    const decoded = semanticTool(tool, "input_schema", "REQ-M-TOOL", false);
+    if (decoded.strict === true && !isOpenAiStrictSchemaCompatible(decoded.parameters)) {
+      unsupported("REQ-M-TOOL-STRICT-SCHEMA");
+    }
+    return decoded;
   });
 }
 

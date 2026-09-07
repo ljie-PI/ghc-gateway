@@ -248,6 +248,69 @@ describe("shared conversion request codecs", () => {
     },
   );
 
+  it.each(["chat", "responses"] as const)(
+    "rejects an incompatible strict Messages tool schema before converting to %s",
+    (target) => {
+      expect(() => prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 8,
+        tools: [{
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: {
+              location: { type: "string" },
+              unit: { type: "string" },
+            },
+            required: ["location"],
+            additionalProperties: false,
+          },
+          strict: true,
+        }],
+      }), "target", capability([target]))).toThrow();
+    },
+  );
+
+  it.each(["chat", "responses"] as const)(
+    "preserves a compatible strict Messages tool schema for %s",
+    (target) => {
+      expect(() => prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 8,
+        tools: [{
+          name: "lookup",
+          input_schema: {
+            type: "object",
+            properties: { location: { type: "string" } },
+            required: ["location"],
+            additionalProperties: false,
+          },
+          strict: true,
+        }],
+      }), "target", capability([target]))).not.toThrow();
+    },
+  );
+
+  it.each(["chat", "responses"] as const)(
+    "omits a valid Messages tool cache hint through finite degradation for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 8,
+        tools: [{
+          name: "lookup",
+          input_schema: { type: "object" },
+          cache_control: { type: "ephemeral" },
+        }],
+      }), "target", capability([target]));
+      expect(converted.degradations).toContain("cache.control_omitted");
+      expect(JSON.stringify(decoded(converted.bytes))).not.toContain("cache_control");
+    },
+  );
+
   it("accepts Messages structured output without a source name using the fixed response name", () => {
     const converted = prepareConvertedRequest("messages", "responses", body({
       model: "source",

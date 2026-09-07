@@ -1206,7 +1206,7 @@ function responseOutput(
       }
       continue;
     }
-    const tool = [...tools.values()].find((candidate) => candidate.callId === item.callId);
+    const tool = item.key === undefined ? undefined : tools.get(item.key);
     if (tool !== undefined) {
       indexed.push({ index: tool.outputIndex, item: responseTool(tool, status, item.argumentsJson) });
     }

@@ -30,6 +30,7 @@ export class SemanticItemLedger {
   private readonly encoder = new TextEncoder();
   private usedBytes = 0;
   private readonly tools = new Map<string, ToolState>();
+  private readonly callIds = new Set<string>();
   private readonly messages = new Map<string, MessageState>();
   private readonly messageParts = new Map<string, MessagePartState>();
   private readonly order: Array<{ readonly kind: "message" | "tool"; readonly key: string }> = [];
@@ -107,7 +108,12 @@ export class SemanticItemLedger {
     readonly callId: string;
     readonly name: string;
   }): void {
-    if (this.tools.has(input.key) || input.callId.length === 0 || input.name.length === 0) {
+    if (
+      this.tools.has(input.key)
+      || this.callIds.has(input.callId)
+      || input.callId.length === 0
+      || input.name.length === 0
+    ) {
       invalid();
     }
     this.reserve(input.key);
@@ -116,6 +122,7 @@ export class SemanticItemLedger {
     }
     this.reserve(input.callId);
     this.reserve(input.name);
+    this.callIds.add(input.callId);
     this.tools.set(input.key, { ...input, argumentsJson: "", done: false });
     this.order.push({ kind: "tool", key: input.key });
   }

@@ -246,6 +246,26 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it.each([
+    ["none", "none"],
+    ["max", "xhigh"],
+  ] as const)("uses normalized Responses reasoning effort %s on the extended Chat route", async (source, expected) => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        reasoning: { effort: source },
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      expect(response.status).toBe(200);
+      const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as { reasoning_effort?: string };
+      expect(request.reasoning_effort).toBe(expected);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("round-trips a buffered namespace tool and preserves incomplete item status", async () => {
     const harness = await matrixGateway();
     try {
