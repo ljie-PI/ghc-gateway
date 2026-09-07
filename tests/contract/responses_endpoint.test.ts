@@ -147,7 +147,11 @@ describe("Responses endpoint", () => {
               finish_reason: "tool_calls",
               message: {
                 content: "done",
-                tool_calls: [{ id: "call_1", function: { name: "lookup", arguments: "{\"q\":\"x\"}" } }],
+                tool_calls: [{
+                  id: "call_1",
+                  type: "function",
+                  function: { name: "lookup", arguments: "{\"q\":\"x\"}" },
+                }],
               },
             }],
             usage: { prompt_tokens: 9, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 3 } },

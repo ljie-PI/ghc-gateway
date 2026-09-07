@@ -449,6 +449,69 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("rejects malformed Responses argument and Messages text delta payloads", async () => {
+    const responsesSource = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "fc_bad_delta",
+          type: "function_call",
+          call_id: "call_bad_delta",
+          name: "lookup",
+          arguments: "{}",
+          status: "in_progress",
+        },
+      }),
+      responseEvent(1, "response.function_call_arguments.delta", {
+        item_id: "fc_bad_delta",
+        output_index: 0,
+        delta: { changed: true },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(responsesSource)),
+        streamContext("responses", "messages"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+
+    const messagesSource = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_bad_text",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: { invalid: true } },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(messagesSource)),
+        streamContext("messages", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("rejects malformed final and buffered Chat tool discriminators", async () => {
     const stream = [
       "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"custom\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -3057,6 +3120,78 @@ describe("shared conversion response codecs", () => {
         },
         attempt: createRequestAttempt({
           requestId: "req_empty_announcement",
+          protocol: "openai_chat",
+          abortedErrorCount: 1,
+        }),
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      onTerminal: () => undefined,
+    })).rejects.toMatchObject({ failure: { kind: "upstream_timeout" } });
+  });
+
+  it("does not let empty reasoning announcements satisfy the first-semantic deadline", async () => {
+    async function* emptyReasoningThenAnswer(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(responseEvent(0, "response.reasoning_summary_part.added", {
+        item_id: "rs_empty",
+        output_index: 0,
+        summary_index: 0,
+        part: { type: "summary_text", text: "" },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      yield encoder.encode(responseEvent(1, "response.completed", {
+        response: {
+          id: "resp_late_reasoning",
+          object: "response",
+          status: "completed",
+          output: [{
+            id: "msg_late_reasoning",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "late", annotations: [] }],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }));
+    }
+    const config = defaultRuntimeConfigSnapshot();
+    const signal = new AbortController().signal;
+    await expect(createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: emptyReasoningThenAnswer(),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "chat",
+        target: "responses",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: ["reasoning.presentation_omitted"],
+        },
+      },
+      scope: {
+        requestId: "req_empty_reasoning",
+        signal,
+        deliverySignal: signal,
+        config: {
+          ...config,
+          timeouts: { ...config.timeouts, firstByteMs: 30 },
+        },
+        attempt: createRequestAttempt({
+          requestId: "req_empty_reasoning",
           protocol: "openai_chat",
           abortedErrorCount: 1,
         }),

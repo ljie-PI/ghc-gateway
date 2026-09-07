@@ -75,6 +75,7 @@ export async function* convertProtocolStream(
         started = true;
         yield { kind: "first_semantic" };
         yield* measuredEvent(context, () => emitter.start());
+        yield* measuredEvent(context, () => emitter.activateReserved());
       }
       if (event.kind === "semantic_progress") {
         continue;
@@ -84,7 +85,7 @@ export async function* convertProtocolStream(
           ledger.appendText(event.key, event.delta, event.orderKey);
           return started
             ? emitter.textDelta(event.key, event.delta, event.orderKey)
-            : emitter.reserveMessage(event.orderKey ?? event.key);
+            : emitter.reserveMessage(event.orderKey ?? event.key, "text");
         });
         continue;
       }
@@ -101,7 +102,7 @@ export async function* convertProtocolStream(
           }
           return started
             ? emitter.textDelta(event.key, "", event.orderKey)
-            : emitter.reserveMessage(event.orderKey ?? event.key);
+            : emitter.reserveMessage(event.orderKey ?? event.key, "text");
         });
         continue;
       }
@@ -110,7 +111,7 @@ export async function* convertProtocolStream(
           ledger.appendRefusal(event.key, event.delta, event.orderKey);
           return started
             ? emitter.refusalDelta(event.key, event.delta, event.orderKey)
-            : emitter.reserveMessage(event.orderKey ?? event.key);
+            : emitter.reserveMessage(event.orderKey ?? event.key, "refusal");
         });
         continue;
       }
@@ -127,7 +128,7 @@ export async function* convertProtocolStream(
           }
           return started
             ? emitter.refusalDelta(event.key, "", event.orderKey)
-            : emitter.reserveMessage(event.orderKey ?? event.key);
+            : emitter.reserveMessage(event.orderKey ?? event.key, "refusal");
         });
         continue;
       }
@@ -228,8 +229,9 @@ function measuredWork<T>(context: Readonly<StreamConversionContext>, work: () =>
 
 interface StreamEmitter {
   start(): Iterable<ConvertedStreamEmission>;
+  activateReserved(): Iterable<ConvertedStreamEmission>;
   messageStart(key: string): Iterable<ConvertedStreamEmission>;
-  reserveMessage(key: string): Iterable<ConvertedStreamEmission>;
+  reserveMessage(key: string, kind: "text" | "refusal"): Iterable<ConvertedStreamEmission>;
   contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission>;
   itemDone(outputIndex: number): Iterable<ConvertedStreamEmission>;
   textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
@@ -287,9 +289,11 @@ class ChatEmitter implements StreamEmitter {
     }
   }
 
+  *activateReserved(): Iterable<ConvertedStreamEmission> {}
+
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
-  *reserveMessage(_key: string): Iterable<ConvertedStreamEmission> {}
+  *reserveMessage(_key: string, _kind: "text" | "refusal"): Iterable<ConvertedStreamEmission> {}
 
   *contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
     this.responseFrontier.markContentDone(orderKey, contentIndex);
@@ -599,12 +603,14 @@ class MessagesEmitter implements StreamEmitter {
     });
   }
 
+  *activateReserved(): Iterable<ConvertedStreamEmission> {}
+
   messageStart(key: string): Iterable<ConvertedStreamEmission> {
     this.firstMessageKey ??= key;
     return [];
   }
 
-  reserveMessage(key: string): Iterable<ConvertedStreamEmission> {
+  reserveMessage(key: string, _kind: "text" | "refusal"): Iterable<ConvertedStreamEmission> {
     this.firstMessageKey ??= key;
     return [];
   }
@@ -946,10 +952,35 @@ class ResponsesEmitter implements StreamEmitter {
     yield this.responseEvent("response.in_progress", "in_progress", []);
   }
 
+  *activateReserved(): Iterable<ConvertedStreamEmission> {
+    for (const message of [...this.messages.values()].sort((left, right) => left.outputIndex - right.outputIndex)) {
+      if (message.itemAdded) {
+        continue;
+      }
+      message.itemAdded = true;
+      yield this.itemEvent(
+        "response.output_item.added",
+        message.outputIndex,
+        responseMessage(message, "in_progress", "", ""),
+      );
+      if (message.textIndex !== undefined) {
+        yield this.contentEvent("response.content_part.added", message, message.textIndex, outputText(""));
+      }
+      if (message.refusalIndex !== undefined) {
+        yield this.contentEvent("response.content_part.added", message, message.refusalIndex, refusal(""));
+      }
+    }
+  }
+
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
-  reserveMessage(key: string): Iterable<ConvertedStreamEmission> {
-    this.ensureMessage(key);
+  reserveMessage(key: string, kind: "text" | "refusal"): Iterable<ConvertedStreamEmission> {
+    const message = this.ensureMessage(key);
+    if (kind === "text" && message.textIndex === undefined) {
+      message.textIndex = message.nextContentIndex++;
+    } else if (kind === "refusal" && message.refusalIndex === undefined) {
+      message.refusalIndex = message.nextContentIndex++;
+    }
     return [];
   }
 

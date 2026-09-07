@@ -179,7 +179,12 @@ async function* decodeChatStream(
     if (delta !== undefined) {
       const reasoning = stringMember(delta, "reasoning_content");
       const thinkingBlocks = arrayMember(delta, "thinking_blocks");
-      if ((reasoning !== undefined && reasoning.length > 0) || (thinkingBlocks?.items.length ?? 0) > 0) {
+      if (
+        (reasoning !== undefined && reasoning.length > 0)
+        || thinkingBlocks?.items.some((item) => (
+          isWireJsonObject(item) && hasSubstantiveReasoning(item)
+        )) === true
+      ) {
         yield { kind: "semantic_progress" };
       }
       const contentValue = singleMember(delta, "content");
@@ -554,7 +559,9 @@ async function* decodeMessagesStream(
         yield { kind: "tool_start", key, callId, name };
       } else if (blockType === "thinking" || blockType === "redacted_thinking") {
         blocks.set(index, { kind: "ignored", closed: false });
-        yield { kind: "semantic_progress" };
+        if (hasSubstantiveReasoning(block)) {
+          yield { kind: "semantic_progress" };
+        }
       } else {
         invalid();
       }
@@ -572,11 +579,20 @@ async function* decodeMessagesStream(
       }
       const deltaType = stringMember(delta, "type");
       if (block.kind === "text" && deltaType === "text_delta") {
-        const text = stringMember(delta, "text") ?? "";
+        const text = singleMember(delta, "text");
+        if (typeof text !== "string") {
+          invalid();
+        }
         block.sawContent ||= text.length > 0;
         yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
       } else if (block.kind === "refusal" && (deltaType === "refusal_delta" || deltaType === "text_delta")) {
-        const refusal = stringMember(delta, "refusal") ?? stringMember(delta, "text") ?? "";
+        const refusalValue = deltaType === "refusal_delta"
+          ? singleMember(delta, "refusal")
+          : singleMember(delta, "text");
+        if (typeof refusalValue !== "string") {
+          invalid();
+        }
+        const refusal = refusalValue;
         block.sawContent ||= refusal.length > 0;
         yield {
           kind: "refusal_delta",
@@ -600,7 +616,7 @@ async function* decodeMessagesStream(
         };
       } else if (block.kind !== "ignored") {
         invalid();
-      } else {
+      } else if (hasSubstantiveReasoning(delta)) {
         yield { kind: "semantic_progress" };
       }
       continue;
@@ -785,11 +801,15 @@ async function* decodeResponsesStream(
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
+      const delta = singleMember(payload, "delta");
+      if (typeof delta !== "string") {
+        invalid();
+      }
       yield {
         kind: "text_delta",
         key: responseContentKey(payload, "text"),
         orderKey: responseStreamMessageKey(payload),
-        delta: stringMember(payload, "delta") ?? "",
+        delta,
       };
       continue;
     }
@@ -797,11 +817,15 @@ async function* decodeResponsesStream(
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
+      const text = singleMember(payload, "text");
+      if (typeof text !== "string") {
+        invalid();
+      }
       yield {
         kind: "text_done",
         key: responseContentKey(payload, "text"),
         orderKey: responseStreamMessageKey(payload),
-        text: stringMember(payload, "text") ?? "",
+        text,
       };
       yield {
         kind: "content_done",
@@ -815,11 +839,15 @@ async function* decodeResponsesStream(
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
+      const delta = singleMember(payload, "delta");
+      if (typeof delta !== "string") {
+        invalid();
+      }
       yield {
         kind: "refusal_delta",
         key: responseContentKey(payload, "refusal"),
         orderKey: responseStreamMessageKey(payload),
-        delta: stringMember(payload, "delta") ?? "",
+        delta,
       };
       continue;
     }
@@ -827,11 +855,15 @@ async function* decodeResponsesStream(
       const outputIndex = requiredOutputIndex(payload);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
+      const refusal = singleMember(payload, "refusal");
+      if (typeof refusal !== "string") {
+        invalid();
+      }
       yield {
         kind: "refusal_done",
         key: responseContentKey(payload, "refusal"),
         orderKey: responseStreamMessageKey(payload),
-        refusal: stringMember(payload, "refusal") ?? "",
+        refusal,
       };
       yield {
         kind: "content_done",
@@ -848,7 +880,11 @@ async function* decodeResponsesStream(
         invalid();
       }
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
-      yield { kind: "tool_arguments_delta", key: identity.key, delta: stringMember(payload, "delta") ?? "" };
+      const delta = singleMember(payload, "delta");
+      if (typeof delta !== "string") {
+        invalid();
+      }
+      yield { kind: "tool_arguments_delta", key: identity.key, delta };
       continue;
     }
     if (type === "response.function_call_arguments.done") {
@@ -997,7 +1033,9 @@ async function* decodeResponsesStream(
       continue;
     }
     if (type.startsWith("response.reasoning_")) {
-      yield { kind: "semantic_progress" };
+      if (hasSubstantiveReasoning(payload)) {
+        yield { kind: "semantic_progress" };
+      }
       continue;
     }
     if (type === "error") {
@@ -1167,7 +1205,18 @@ function responseHasRefusal(response: WireJsonObject): boolean {
 }
 
 function hasSubstantiveReasoning(item: WireJsonObject): boolean {
-  return ["reasoning_text", "content", "summary", "encrypted_content"].some((key) => (
+  return [
+    "reasoning_text",
+    "thinking",
+    "signature",
+    "data",
+    "delta",
+    "text",
+    "part",
+    "content",
+    "summary",
+    "encrypted_content",
+  ].some((key) => (
     memberValues(item, key).some((value) => hasNonemptyString(value))
   ));
 }
@@ -1180,7 +1229,12 @@ function hasNonemptyString(value: WireJson): boolean {
     return value.items.some((item) => hasNonemptyString(item));
   }
   if (isWireJsonObject(value)) {
-    return value.members.some((member) => hasNonemptyString(member.value));
+    return value.members.some((member) => (
+      member.key !== "type"
+      && member.key !== "id"
+      && member.key !== "status"
+      && hasNonemptyString(member.value)
+    ));
   }
   return false;
 }
