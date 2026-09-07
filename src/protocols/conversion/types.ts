@@ -201,7 +201,7 @@ export type SemanticStreamEvent =
   | { readonly kind: "text_done"; readonly key: string; readonly orderKey?: string | undefined; readonly text: string }
   | { readonly kind: "refusal_delta"; readonly key: string; readonly orderKey?: string | undefined; readonly delta: string }
   | { readonly kind: "refusal_done"; readonly key: string; readonly orderKey?: string | undefined; readonly refusal: string }
-  | { readonly kind: "content_done"; readonly orderKey: string; readonly contentIndex: number }
+  | { readonly kind: "content_done"; readonly key: string; readonly orderKey: string; readonly contentIndex: number }
   | { readonly kind: "item_done"; readonly outputIndex: number }
   | {
     readonly kind: "tool_start";

@@ -386,6 +386,28 @@ describe("shared conversion request codecs", () => {
     });
   });
 
+  it("preserves source function-tool strictness defaults across OpenAI protocols", () => {
+    const chatToResponses = decoded(prepareConvertedRequest("chat", "responses", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{
+        type: "function",
+        function: { name: "lookup", parameters: { type: "object" } },
+      }],
+    }), "target", capability(["responses"])).bytes);
+    expect(chatToResponses.tools).toMatchObject([{ type: "function", name: "lookup", strict: false }]);
+
+    const responsesToChat = decoded(prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "hi",
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+    }), "target", capability(["chat"])).bytes);
+    expect(responsesToChat.tools).toMatchObject([{
+      type: "function",
+      function: { name: "lookup", strict: true },
+    }]);
+  });
+
   it.each(["messages", "responses"] as const)(
     "accepts nullable Chat assistant refusal in a complete tool round for %s",
     (target) => {
@@ -837,6 +859,40 @@ describe("shared conversion request codecs", () => {
             { type: "image", source: { type: "base64", media_type: "image/png" } },
           ],
         }],
+      },
+    ]);
+  });
+
+  it("extracts nested JSON-encoded Chat image_url tool-result media", () => {
+    const converted = decoded(prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: JSON.stringify({
+              content: [{
+                type: "image_url",
+                image_url: { url: "data:image/png;base64,QUJD" },
+              }],
+            }),
+          }],
+        },
+      ],
+      max_tokens: 8,
+    }), "target", capability(["chat"])).bytes);
+    expect(converted.messages).toMatchObject([
+      { role: "assistant", tool_calls: [{ id: "call_1" }] },
+      { role: "tool", tool_call_id: "call_1" },
+      {
+        role: "user",
+        content: [
+          { type: "text" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+        ],
       },
     ]);
   });

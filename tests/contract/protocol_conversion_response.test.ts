@@ -1117,6 +1117,82 @@ describe("shared conversion response codecs", () => {
     },
   );
 
+  it.each(["chat", "messages"] as const)(
+    "rejects terminal growth of an item after its done snapshot advanced %s delivery",
+    async (target) => {
+      const source = [
+        responseEvent(0, "response.output_item.added", {
+          output_index: 0,
+          item: {
+            id: "msg_done_first",
+            type: "message",
+            status: "in_progress",
+            role: "assistant",
+            content: [],
+          },
+        }),
+        responseEvent(1, "response.output_text.delta", {
+          item_id: "msg_done_first", output_index: 0, content_index: 0, delta: "A",
+        }),
+        responseEvent(2, "response.output_item.done", {
+          output_index: 0,
+          item: {
+            id: "msg_done_first",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "A", annotations: [] }],
+          },
+        }),
+        responseEvent(3, "response.output_item.added", {
+          output_index: 1,
+          item: {
+            id: "msg_live_second",
+            type: "message",
+            status: "in_progress",
+            role: "assistant",
+            content: [],
+          },
+        }),
+        responseEvent(4, "response.output_text.delta", {
+          item_id: "msg_live_second", output_index: 1, content_index: 0, delta: "B",
+        }),
+        responseEvent(5, "response.completed", {
+          response: {
+            id: "resp_late_growth",
+            object: "response",
+            status: "completed",
+            output: [
+              {
+                id: "msg_done_first",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "A+", annotations: [] }],
+              },
+              {
+                id: "msg_live_second",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "B", annotations: [] }],
+              },
+            ],
+            usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+          },
+        }),
+      ].join("");
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)),
+          streamContext("responses", target),
+        )) {
+          void _emission;
+        }
+      }).rejects.toThrow();
+    },
+  );
+
   it("rejects contradictory Responses content-part and terminal snapshots", async () => {
     const source = [
       responseEvent(0, "response.output_item.added", {
@@ -1262,11 +1338,6 @@ describe("shared conversion response codecs", () => {
         type: "content_block_start",
         index: 0,
         content_block: { type: "text", text: "" },
-      }),
-      messageEvent("content_block_delta", {
-        type: "content_block_delta",
-        index: 0,
-        delta: { type: "text_delta", text: "" },
       }),
       messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
       messageEvent("content_block_start", {

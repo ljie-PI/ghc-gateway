@@ -14,6 +14,7 @@ interface ToolState {
 interface MessageState {
   readonly key: string;
   readonly partKeys: string[];
+  frozen: boolean;
 }
 
 interface MessagePartState {
@@ -22,6 +23,7 @@ interface MessagePartState {
   refusal: string;
   textSeen: boolean;
   refusalSeen: boolean;
+  frozen: boolean;
 }
 
 export class SemanticItemLedger {
@@ -40,18 +42,66 @@ export class SemanticItemLedger {
 
   appendText(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
-    this.message(orderKey);
+    this.observeText(key, orderKey);
     const part = this.messagePart(key, orderKey);
-    part.textSeen = true;
+    if (part.frozen) {
+      invalid();
+    }
     part.text += delta;
+  }
+
+  observeText(key: string, orderKey = key): boolean {
+    const message = this.message(orderKey);
+    if (message.frozen && !this.messageParts.has(key)) {
+      invalid();
+    }
+    const part = this.messagePart(key, orderKey);
+    const first = !part.textSeen;
+    part.textSeen = true;
+    return first;
   }
 
   appendRefusal(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
-    this.message(orderKey);
+    this.observeRefusal(key, orderKey);
     const part = this.messagePart(key, orderKey);
-    part.refusalSeen = true;
+    if (part.frozen) {
+      invalid();
+    }
     part.refusal += delta;
+  }
+
+  observeRefusal(key: string, orderKey = key): boolean {
+    const message = this.message(orderKey);
+    if (message.frozen && !this.messageParts.has(key)) {
+      invalid();
+    }
+    const part = this.messagePart(key, orderKey);
+    const first = !part.refusalSeen;
+    part.refusalSeen = true;
+    return first;
+  }
+
+  finishContent(key: string): void {
+    const part = this.messageParts.get(key);
+    if (part === undefined) {
+      invalid();
+    }
+    part.frozen = true;
+  }
+
+  finishMessage(key: string): void {
+    const message = this.messages.get(key);
+    if (message === undefined) {
+      return;
+    }
+    message.frozen = true;
+    for (const partKey of message.partKeys) {
+      const part = this.messageParts.get(partKey);
+      if (part !== undefined) {
+        part.frozen = true;
+      }
+    }
   }
 
   startTool(input: {
@@ -193,7 +243,7 @@ export class SemanticItemLedger {
     let message = this.messages.get(key);
     if (message === undefined) {
       this.reserve(key);
-      message = { key, partKeys: [] };
+      message = { key, partKeys: [], frozen: false };
       this.messages.set(key, message);
       this.order.push({ kind: "message", key });
     }
@@ -206,7 +256,14 @@ export class SemanticItemLedger {
       if (key !== groupKey) {
         this.reserve(key);
       }
-      part = { groupKey, text: "", refusal: "", textSeen: false, refusalSeen: false };
+      part = {
+        groupKey,
+        text: "",
+        refusal: "",
+        textSeen: false,
+        refusalSeen: false,
+        frozen: false,
+      };
       this.messageParts.set(key, part);
       this.message(groupKey).partKeys.push(key);
     } else if (part.groupKey !== groupKey) {

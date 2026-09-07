@@ -76,10 +76,13 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "text_done") {
+      const first = ledger.observeText(event.key, event.orderKey);
       const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
       if (suffix.length > 0) {
         ledger.appendText(event.key, suffix, event.orderKey);
         yield* emitter.textDelta(event.key, suffix, event.orderKey);
+      } else if (first) {
+        yield* emitter.textDelta(event.key, "", event.orderKey);
       }
       continue;
     }
@@ -89,18 +92,23 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "refusal_done") {
+      const first = ledger.observeRefusal(event.key, event.orderKey);
       const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
       if (suffix.length > 0) {
         ledger.appendRefusal(event.key, suffix, event.orderKey);
         yield* emitter.refusalDelta(event.key, suffix, event.orderKey);
+      } else if (first) {
+        yield* emitter.refusalDelta(event.key, "", event.orderKey);
       }
       continue;
     }
     if (event.kind === "content_done") {
+      ledger.finishContent(event.key);
       yield* emitter.contentDone(event.orderKey, event.contentIndex);
       continue;
     }
     if (event.kind === "item_done") {
+      ledger.finishMessage(`responses:${event.outputIndex}:message`);
       yield* emitter.itemDone(event.outputIndex);
       continue;
     }

@@ -408,14 +408,14 @@ async function* decodeMessagesStream(
       if (blockType === "text") {
         blocks.set(index, { kind: "text", closed: false });
         const text = stringMember(block, "text");
-        if (text !== undefined && text.length > 0) {
-          yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
+        if (text !== undefined) {
+          yield { kind: "text_done", key: `messages:${index}:text`, text };
         }
       } else if (blockType === "refusal") {
         blocks.set(index, { kind: "refusal", closed: false });
         const refusal = stringMember(block, "refusal") ?? stringMember(block, "text");
-        if (refusal !== undefined && refusal.length > 0) {
-          yield { kind: "refusal_delta", key: `messages:${index}:refusal`, delta: refusal };
+        if (refusal !== undefined) {
+          yield { kind: "refusal_done", key: `messages:${index}:refusal`, refusal };
         }
       } else if (blockType === "tool_use") {
         const callId = stringMember(block, "id");
@@ -504,6 +504,20 @@ async function* decodeMessagesStream(
           block.initialArguments = undefined;
         }
         yield { kind: "tool_done", key: block.key };
+      } else if (block.kind === "text") {
+        yield {
+          kind: "content_done",
+          key: `messages:${index}:text`,
+          orderKey: `messages:${index}:text`,
+          contentIndex: 0,
+        };
+      } else if (block.kind === "refusal") {
+        yield {
+          kind: "content_done",
+          key: `messages:${index}:refusal`,
+          orderKey: `messages:${index}:refusal`,
+          contentIndex: 0,
+        };
       }
       continue;
     }
@@ -643,6 +657,7 @@ async function* decodeResponsesStream(
       };
       yield {
         kind: "content_done",
+        key: responseContentKey(payload, "text"),
         orderKey: responseStreamMessageKey(payload),
         contentIndex: requiredContentIndex(payload),
       };
@@ -672,6 +687,7 @@ async function* decodeResponsesStream(
       };
       yield {
         kind: "content_done",
+        key: responseContentKey(payload, "refusal"),
         orderKey: responseStreamMessageKey(payload),
         contentIndex: requiredContentIndex(payload),
       };
@@ -799,6 +815,9 @@ async function* decodeResponsesStream(
       if (type === "response.content_part.done") {
         yield {
           kind: "content_done",
+          key: partType === "output_text"
+            ? `responses:${outputIndex}:${contentIndex}:text`
+            : `responses:${outputIndex}:${contentIndex}:refusal`,
           orderKey: `responses:${outputIndex}:message`,
           contentIndex,
         };

@@ -793,9 +793,11 @@ function decodeToolResultContent(
   if (isWireJsonObject(value)) {
     const type = oneMember(value, "type", "REQ-TOOL-RESULT-TYPE");
     if (type === "image") {
+      assertAllowedKeys(value, new Set(["type", "source"]), "REQ-TOOL-RESULT-IMAGE");
       return [decodeMessagesImage(oneMember(value, "source", "REQ-TOOL-RESULT-IMAGE"))];
     }
     if (type === "input_image") {
+      assertAllowedKeys(value, new Set(["type", "image_url", "detail"]), "REQ-TOOL-RESULT-IMAGE");
       return [imageContent(
         requiredString(
           oneMember(value, "image_url", "REQ-TOOL-RESULT-IMAGE-URL"),
@@ -805,6 +807,19 @@ function decodeToolResultContent(
           oneMember(value, "detail", "REQ-TOOL-RESULT-IMAGE-DETAIL"),
           "REQ-TOOL-RESULT-IMAGE-DETAIL",
         ),
+        "REQ-TOOL-RESULT-IMAGE",
+      )];
+    }
+    if (type === "image_url") {
+      assertAllowedKeys(value, new Set(["type", "image_url"]), "REQ-TOOL-RESULT-IMAGE");
+      const image = requiredObject(
+        oneMember(value, "image_url", "REQ-TOOL-RESULT-IMAGE"),
+        "REQ-TOOL-RESULT-IMAGE",
+      );
+      assertAllowedKeys(image, new Set(["url", "detail"]), "REQ-TOOL-RESULT-IMAGE");
+      return [imageContent(
+        requiredString(oneMember(image, "url", "REQ-TOOL-RESULT-IMAGE-URL"), "REQ-TOOL-RESULT-IMAGE-URL"),
+        optionalString(oneMember(image, "detail", "REQ-TOOL-RESULT-IMAGE-DETAIL"), "REQ-TOOL-RESULT-IMAGE-DETAIL"),
         "REQ-TOOL-RESULT-IMAGE",
       )];
     }
@@ -889,6 +904,28 @@ function decodeToolResultContent(
         )],
       };
     }
+    if (type === "image_url") {
+      assertAllowedKeys(value, new Set(["type", "image_url"]), "REQ-TOOL-RESULT-EMBEDDED-IMAGE");
+      const image = requiredObject(
+        oneMember(value, "image_url", "REQ-TOOL-RESULT-EMBEDDED-IMAGE"),
+        "REQ-TOOL-RESULT-EMBEDDED-IMAGE",
+      );
+      assertAllowedKeys(image, new Set(["url", "detail"]), "REQ-TOOL-RESULT-EMBEDDED-IMAGE");
+      return {
+        value: "[cc-switch: tool result media moved to the following user message]",
+        media: [imageContent(
+          requiredString(
+            oneMember(image, "url", "REQ-TOOL-RESULT-EMBEDDED-URL"),
+            "REQ-TOOL-RESULT-EMBEDDED-URL",
+          ),
+          optionalString(
+            oneMember(image, "detail", "REQ-TOOL-RESULT-EMBEDDED-DETAIL"),
+            "REQ-TOOL-RESULT-EMBEDDED-DETAIL",
+          ),
+          "REQ-TOOL-RESULT-EMBEDDED-IMAGE",
+        )],
+      };
+    }
     const members: Array<{ key: string; value: WireJson }> = [];
     const media: SemanticImage[] = [];
     for (const member of value.members) {
@@ -962,7 +999,7 @@ function decodeChatTools(value: WireJson | undefined): readonly SemanticTool[] {
     }
     const fn = requiredObject(oneMember(tool, "function", "REQ-C-TOOL-FUNCTION"), "REQ-C-TOOL-FUNCTION");
     assertAllowedKeys(fn, new Set(["name", "description", "parameters", "strict"]), "REQ-C-TOOL-FUNCTION");
-    return semanticTool(fn, "parameters", "REQ-C-TOOL");
+    return semanticTool(fn, "parameters", "REQ-C-TOOL", false);
   });
 }
 
@@ -977,7 +1014,7 @@ function decodeMessagesTools(value: WireJson | undefined): readonly SemanticTool
     if (type !== undefined && type !== "custom") {
       unsupported("REQ-M-TOOL-TYPE");
     }
-    return semanticTool(tool, "input_schema", "REQ-M-TOOL");
+    return semanticTool(tool, "input_schema", "REQ-M-TOOL", false);
   });
 }
 
@@ -995,18 +1032,23 @@ function decodeResponsesTools(value: WireJson | undefined): readonly SemanticToo
     if (requiredString(oneMember(tool, "type", "REQ-R-TOOL-TYPE"), "REQ-R-TOOL-TYPE") !== "function") {
       unsupported("REQ-R-TOOL-TYPE");
     }
-    return semanticTool(tool, "parameters", "REQ-R-TOOL");
+    return semanticTool(tool, "parameters", "REQ-R-TOOL", true);
   });
 }
 
-function semanticTool(object: WireJsonObject, schemaKey: string, ruleId: string): SemanticTool {
+function semanticTool(
+  object: WireJsonObject,
+  schemaKey: string,
+  ruleId: string,
+  defaultStrict: boolean,
+): SemanticTool {
   const description = optionalString(oneMember(object, "description", `${ruleId}-DESCRIPTION`), `${ruleId}-DESCRIPTION`);
   const strict = optionalBoolean(oneMember(object, "strict", `${ruleId}-STRICT`), `${ruleId}-STRICT`);
   return {
     name: requiredString(oneMember(object, "name", `${ruleId}-NAME`), `${ruleId}-NAME`),
     ...(description === undefined ? {} : { description }),
     parameters: requiredObject(oneMember(object, schemaKey, `${ruleId}-SCHEMA`), `${ruleId}-SCHEMA`),
-    ...(strict === undefined ? {} : { strict }),
+    strict: strict ?? defaultStrict,
   };
 }
 
