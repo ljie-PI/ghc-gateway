@@ -100,19 +100,33 @@ async function executeAnthropicMessages(
   }
   usage.setResolvedModel(resolved.upstreamModel);
   const stream = readStream(request.body);
-  const plan = planProtocolExecution({
+  let plan = planProtocolExecution({
     source: "messages",
     body: request.body,
     stream,
     capability: resolved.capability,
     resolvedModel: resolved.upstreamModel,
   });
-  if (plan.kind === "converted" && betaFeatures.length > 0) {
-    throw new GatewayFailureError({
-      kind: "unsupported_semantics",
-      source: "converter",
-      phase: "convert",
-    });
+  if (plan.kind === "converted") {
+    if (betaFeatures.some((feature) => feature !== "prompt-caching-2024-07-31")) {
+      throw new GatewayFailureError({
+        kind: "unsupported_semantics",
+        source: "converter",
+        phase: "convert",
+      });
+    }
+    if (
+      betaFeatures.includes("prompt-caching-2024-07-31")
+      && !plan.request.degradations.includes("cache.control_omitted")
+    ) {
+      plan = Object.freeze({
+        ...plan,
+        request: Object.freeze({
+          ...plan.request,
+          degradations: [...plan.request.degradations, "cache.control_omitted" as const],
+        }),
+      });
+    }
   }
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
   if (plan.kind === "native") {

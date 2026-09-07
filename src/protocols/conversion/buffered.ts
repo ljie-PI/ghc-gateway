@@ -46,6 +46,7 @@ export function convertBufferedResponse(
 ): ConvertedBufferedResponse {
   const payload = parseObject(bytes, context.maxBytes);
   const semantic = decodeBuffered(context.source, payload);
+  validateUniqueCallIds(semantic.items);
   const envelope = responseEnvelope(semantic, context);
   const checkpoint = context.target === "responses"
     ? responseCheckpoint(envelope)
@@ -61,6 +62,19 @@ export function convertBufferedResponse(
     },
     ...(checkpoint === undefined ? {} : { checkpoint }),
   };
+}
+
+function validateUniqueCallIds(items: readonly SemanticResponseItem[]): void {
+  const callIds = new Set<string>();
+  for (const item of items) {
+    if (item.type !== "tool_call") {
+      continue;
+    }
+    if (callIds.has(item.callId)) {
+      upstreamInvalid();
+    }
+    callIds.add(item.callId);
+  }
 }
 
 function decodeBuffered(source: InferenceProtocol, payload: WireJsonObject): SemanticResponse {

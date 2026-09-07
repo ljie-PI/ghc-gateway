@@ -8,6 +8,29 @@ import type { ChatRequest } from "../../src/protocols/chat_completions/types.js"
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("Anthropic request route", () => {
+  it("degrades prompt-caching beta hints on converted requests instead of rejecting them", async () => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{
+          name: "lookup",
+          input_schema: { type: "object" },
+          cache_control: { type: "ephemeral" },
+        }],
+      }, {
+        "anthropic-beta": "prompt-caching-2024-07-31",
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(capturedRequests).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
   it("observes pre-endpoint body failures once without coupling accounting to the presenter", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const { gw, close } = await anthropicGateway({ usageUpdates });

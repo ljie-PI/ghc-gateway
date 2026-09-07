@@ -11,7 +11,7 @@ export async function* decodeSseRecords(
   eventLimitBytes: number,
 ): AsyncIterable<SseRecord> {
   let pending = "";
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
   try {
     for await (const chunk of bytes) {
       pending += decoder.decode(chunk, { stream: true });

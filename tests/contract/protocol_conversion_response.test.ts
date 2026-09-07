@@ -1392,6 +1392,26 @@ describe("shared conversion response codecs", () => {
     })), context("responses", "chat"))).toThrow();
   });
 
+  it("rejects duplicate buffered Chat call IDs before producing a Responses checkpoint", () => {
+    expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "chatcmpl_duplicate",
+      object: "chat.completion",
+      choices: [{
+        index: 0,
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_duplicate", type: "function", function: { name: "first", arguments: "{}" } },
+            { id: "call_duplicate", type: "function", function: { name: "second", arguments: "{}" } },
+          ],
+        },
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    })), context("chat", "responses"))).toThrow();
+  });
+
   it("rejects incomplete tool items inside a completed Responses stream", async () => {
     const source = responseEvent(0, "response.completed", {
       response: {
@@ -1991,6 +2011,31 @@ describe("shared conversion response codecs", () => {
         void _emission;
       }
     }).rejects.toThrow();
+  });
+
+  it("decodes a split leading BOM before the first converted Responses SSE event", async () => {
+    const source = `\uFEFF${responseEvent(0, "response.completed", {
+      response: {
+        id: "resp_bom",
+        object: "response",
+        status: "completed",
+        output: [{
+          id: "msg_bom",
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: "answer", annotations: [] }],
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      },
+    })}`;
+    const text = wireText(await collectStream(
+      "responses",
+      "chat",
+      splitEveryByte(encoder.encode(source)),
+    ));
+    expect(text).toContain("answer");
+    expect(text).toContain("data: [DONE]");
   });
 
   it("preserves Chat text after a buffered tool and emits refusal text once", async () => {
