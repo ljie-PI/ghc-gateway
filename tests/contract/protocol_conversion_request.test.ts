@@ -402,10 +402,10 @@ describe("shared conversion request codecs", () => {
       input: "hi",
       tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
     }), "target", capability(["chat"])).bytes);
-    expect(responsesToChat.tools).toMatchObject([{
-      type: "function",
-      function: { name: "lookup", strict: false },
-    }]);
+    expect(responsesToChat).toMatchObject({
+      tools: [{ type: "function", function: { name: "lookup" } }],
+    });
+    expect(JSON.stringify(responsesToChat)).not.toContain("\"strict\"");
 
     const strictCompatible = decoded(prepareConvertedRequest("responses", "chat", body({
       model: "source",
@@ -419,6 +419,7 @@ describe("shared conversion request codecs", () => {
           required: ["value"],
           additionalProperties: false,
         },
+        strict: true,
       }],
     }), "target", capability(["chat"])).bytes);
     expect(strictCompatible.tools).toMatchObject([{

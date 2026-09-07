@@ -173,7 +173,7 @@ describe("protocol conversion matrix", () => {
     }
   });
 
-  it("preserves Responses function strict defaults on the extended Chat route", async () => {
+  it("preserves compatible Responses function strict defaults on the extended Chat route", async () => {
     const harness = await matrixGateway();
     try {
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
@@ -182,10 +182,12 @@ describe("protocol conversion matrix", () => {
         tools: [
           {
             type: "function",
-            name: "loose_lookup",
+            name: "strict_lookup",
             parameters: {
               type: "object",
-              properties: { optional_value: { type: "string" } },
+              properties: { value: { type: "string" } },
+              required: ["value"],
+              additionalProperties: false,
             },
           },
           {
@@ -193,13 +195,14 @@ describe("protocol conversion matrix", () => {
             name: "ns",
             tools: [{
               type: "function",
-              name: "strict_lookup",
+              name: "nested_strict_lookup",
               parameters: {
                 type: "object",
                 properties: { value: { type: "string" } },
                 required: ["value"],
                 additionalProperties: false,
               },
+              strict: true,
             }],
           },
           { type: "custom", name: "render", format: { type: "text" } },
@@ -209,9 +212,39 @@ describe("protocol conversion matrix", () => {
       const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as {
         tools: Array<{ function: { name: string; strict?: boolean } }>;
       };
-      expect(request.tools.find((tool) => tool.function.name === "loose_lookup")?.function.strict).toBe(false);
-      expect(request.tools.find((tool) => tool.function.name !== "loose_lookup"
+      expect(request.tools.find((tool) => tool.function.name === "strict_lookup")?.function.strict).toBeUndefined();
+      expect(request.tools.find((tool) => tool.function.name !== "strict_lookup"
         && tool.function.name !== "render")?.function.strict).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("preserves omitted Responses auto strictness on the extended Chat route", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        tools: [
+          {
+            type: "function",
+            name: "ambiguous",
+            parameters: {
+              type: "object",
+              properties: { optional_value: { type: "string" } },
+            },
+          },
+          { type: "custom", name: "render", format: { type: "text" } },
+        ],
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
+      const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as {
+        tools: Array<{ function: { name: string; strict?: boolean } }>;
+      };
+      expect(request.tools.find((tool) => tool.function.name === "ambiguous")?.function.strict).toBeUndefined();
     } finally {
       await harness.close();
     }

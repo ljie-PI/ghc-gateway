@@ -1020,6 +1020,12 @@ function* finalItemEvents(
           orderKey: `responses:${outputIndex}:message`,
           text,
         };
+        yield {
+          kind: "content_done",
+          key: `responses:${outputIndex}:${contentIndex}:text`,
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
+        };
       } else if (partType === "refusal") {
         const refusal = stringMember(part, "refusal");
         if (refusal === undefined) {
@@ -1030,6 +1036,12 @@ function* finalItemEvents(
           key: `responses:${outputIndex}:${contentIndex}:refusal`,
           orderKey: `responses:${outputIndex}:message`,
           refusal,
+        };
+        yield {
+          kind: "content_done",
+          key: `responses:${outputIndex}:${contentIndex}:refusal`,
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
         };
       } else {
         invalid();

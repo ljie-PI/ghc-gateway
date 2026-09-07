@@ -1263,6 +1263,51 @@ describe("shared conversion response codecs", () => {
     },
   );
 
+  it.each(["chat", "messages"] as const)(
+    "drains every done-only multipart Responses item before advancing %s delivery",
+    async (target) => {
+      const first = {
+        id: "msg_done_parts",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "A", annotations: [] },
+          { type: "output_text", text: "B", annotations: [] },
+        ],
+      };
+      const second = {
+        id: "msg_done_after",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "C", annotations: [] }],
+      };
+      const source = [
+        responseEvent(0, "response.output_item.done", { output_index: 0, item: first }),
+        responseEvent(1, "response.output_item.done", { output_index: 1, item: second }),
+        responseEvent(2, "response.completed", {
+          response: {
+            id: "resp_done_parts",
+            object: "response",
+            status: "completed",
+            output: [first, second],
+            usage: { input_tokens: 1, output_tokens: 3, total_tokens: 4 },
+          },
+        }),
+      ].join("");
+      const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
+      const field = target === "chat" ? "content" : "text";
+      const separator = target === "chat" ? ":" : ": ";
+      const a = text.indexOf(`"${field}"${separator}"A"`);
+      const b = text.indexOf(`"${field}"${separator}"B"`);
+      const c = text.indexOf(`"${field}"${separator}"C"`);
+      expect(a).toBeGreaterThanOrEqual(0);
+      expect(b).toBeGreaterThan(a);
+      expect(c).toBeGreaterThan(b);
+    },
+  );
+
   it("rejects contradictory Responses content-part and terminal snapshots", async () => {
     const source = [
       responseEvent(0, "response.output_item.added", {

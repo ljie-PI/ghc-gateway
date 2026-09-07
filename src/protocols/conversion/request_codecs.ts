@@ -1033,9 +1033,7 @@ function decodeResponsesTools(value: WireJson | undefined): readonly SemanticToo
       unsupported("REQ-R-TOOL-TYPE");
     }
     const decoded = semanticTool(tool, "parameters", "REQ-R-TOOL");
-    return decoded.strict === undefined
-      ? { ...decoded, strict: isOpenAiStrictSchemaCompatible(decoded.parameters) }
-      : decoded;
+    return decoded;
   });
 }
 
