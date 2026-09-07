@@ -406,9 +406,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       let unavailableAfterCleanup = false;
       let ownershipChanged = false;
       const transaction = this.database.transaction(() => {
+        let revisionBumped = false;
         const receiptsExpired = canSkipExpiry ? false : this.expireReceipts(nowMs);
         const legacyExpired = canSkipExpiry ? false : this.expireLegacy(nowMs);
-        const current = this.readReceipt(ownership.accountId, responseId);
+        const current = canSkipExpiry ? existing : this.readReceipt(ownership.accountId, responseId);
         unavailableAfterCleanup = current === undefined
           || current.checkpoint_state === "expired"
           || current.created_at_ms + this.ttlMs <= nowMs;
@@ -427,7 +428,12 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         }
         const checkpointChanged = !unavailableAfterCleanup && !ownershipChanged && calls.length > 0
           ? canSkipExpiry && existing.checkpoint_state === "route_only"
-            ? this.insertCheckpoint(ownership.accountId, responseId, calls)
+            ? (revisionBumped = this.insertFirstCheckpoint(
+              ownership.accountId,
+              responseId,
+              calls,
+              nowMs,
+            ))
             : this.upsertCheckpoint(ownership.accountId, responseId, calls)
           : false;
         const checkpointEvicted = receiptsExpired || legacyExpired || receiptChanged || checkpointChanged
@@ -436,14 +442,14 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         const receiptEvicted = receiptsExpired || legacyExpired
           ? this.evictReceiptOverflow()
           : false;
-        if (
+        if (!revisionBumped && (
           receiptsExpired
           || legacyExpired
           || receiptChanged
           || checkpointChanged
           || checkpointEvicted
           || receiptEvicted
-        ) {
+        )) {
           this.bumpRevision(nowMs);
         }
       });
@@ -593,6 +599,33 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     return true;
   }
 
+  private insertFirstCheckpoint(
+    accountId: string,
+    responseId: string,
+    calls: readonly StoredCall[],
+    nowMs: number,
+  ): true {
+    const inserted = this.statement(
+      `INSERT INTO response_scoped_checkpoints
+       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
+       SELECT ?, ?, next_checkpoint_seq, ?, ?
+       FROM responses_continuation_state
+       WHERE singleton_id = 1`,
+    ).run(accountId, responseId, nowMs, nowMs + this.ttlMs);
+    if (inserted.changes !== 1) {
+      throw new Error("Responses history state is unavailable");
+    }
+    this.insertCalls(accountId, responseId, calls);
+    this.statement(
+      `UPDATE responses_continuation_state
+       SET next_checkpoint_seq = next_checkpoint_seq + 1,
+           revision = revision + 1,
+           updated_at_ms = ?
+       WHERE singleton_id = 1`,
+    ).run(nowMs);
+    return true;
+  }
+
   private expireLegacy(nowMs: number): boolean {
     const expired = this.statement(
       "SELECT response_id FROM responses WHERE created_at_ms + ? <= ?",
@@ -611,7 +644,12 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private evictCheckpointOverflow(): boolean {
-    let overflow = this.responseCount() + this.legacyCount() - this.maxResponses;
+    let overflow = (this.statement(
+      `SELECT
+         (SELECT COUNT(*) FROM response_scoped_checkpoints)
+         + (SELECT COUNT(*) FROM responses)
+         - ? AS overflow`,
+    ).get(this.maxResponses) as { overflow: number }).overflow;
     if (overflow <= 0) {
       return false;
     }
