@@ -20,6 +20,7 @@ const DEFAULT_TTL_DAYS = 7;
 const DEFAULT_MAX_RESPONSES = 512;
 const DEFAULT_MAX_RECEIPTS = 2_048;
 const DAY_MS = 86_400_000;
+const JSON_ENCODER = new TextEncoder();
 const JSON_DECODER = new TextDecoder();
 export const RESPONSES_CHAT_CONVERSION_VERSION = "responses-chat-v1";
 export const RESPONSES_MESSAGES_CONVERSION_VERSION = "responses-messages-v1";
@@ -370,7 +371,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       && existing.created_at_ms + this.ttlMs > this.nowMs()
       && sameOwnership(existing, ownership)
       && checkpointRank(checkpointState) <= checkpointRank(existing.checkpoint_state)
-      && (calls.length === 0 || callsEqual(this.readCalls(ownership.accountId, responseId), calls))
+      && (calls.length === 0 || callRowsEqual(this.readCallRows(ownership.accountId, responseId), calls))
     ) {
       return;
     }
@@ -715,8 +716,8 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     responseId: string,
     calls: readonly StoredCall[],
   ): boolean {
-    const existingCalls = this.readCalls(accountId, responseId);
-    if (existingCalls.length > 0 && callsEqual(existingCalls, calls)) {
+    const existingCalls = this.readCallRows(accountId, responseId);
+    if (existingCalls.length > 0 && callRowsEqual(existingCalls, calls)) {
       return false;
     }
     const existing = this.statement(
@@ -772,14 +773,8 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   private readCalls(accountId: string, responseId: string): readonly StoredCall[] {
-    const rows = this.statement(
-      `SELECT response_id, ordinal, call_id, kind, item_json
-       FROM response_scoped_calls
-       WHERE account_id = ? AND response_id = ?
-       ORDER BY ordinal ASC`,
-    ).all(accountId, responseId) as CallRow[];
-    return rows.map((row) => {
-      const itemBytes = new TextEncoder().encode(row.item_json);
+    return this.readCallRows(accountId, responseId).map((row) => {
+      const itemBytes = JSON_ENCODER.encode(row.item_json);
       const item = parseWireJson(itemBytes, {
         maxBytes: Math.max(itemBytes.byteLength, 1),
         maxDepth: 64,
@@ -796,6 +791,15 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         item,
       };
     });
+  }
+
+  private readCallRows(accountId: string, responseId: string): readonly CallRow[] {
+    return this.statement(
+      `SELECT response_id, ordinal, call_id, kind, item_json
+       FROM response_scoped_calls
+       WHERE account_id = ? AND response_id = ?
+       ORDER BY ordinal ASC`,
+    ).all(accountId, responseId) as CallRow[];
   }
 
   private responseCount(): number {
@@ -1013,13 +1017,14 @@ function responseFromCalls(responseId: string, calls: readonly StoredCall[]): St
   return { responseId, calls, byCallId };
 }
 
-function callsEqual(left: readonly StoredCall[], right: readonly StoredCall[]): boolean {
+function callRowsEqual(left: readonly CallRow[], right: readonly StoredCall[]): boolean {
   return left.length === right.length && left.every((call, index) => {
     const other = right[index];
     return other !== undefined
-      && call.callId === other.callId
+      && call.ordinal === other.ordinal
+      && call.call_id === other.callId
       && call.kind === other.kind
-      && call.itemJson === other.itemJson;
+      && call.item_json === other.itemJson;
   });
 }
 
