@@ -1,6 +1,7 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
 import { chooseOutputTokenBudget } from "../../copilot/model_capabilities.js";
 import {
+  duplicateMemberNames,
   isWireJsonArray,
   isWireJsonObject,
   parseWireJson,
@@ -148,7 +149,7 @@ function decodeChatRequest(body: WireJsonObject): SemanticRequest {
   const items: SemanticRequestItem[] = [];
   const messages = requiredArray(oneMember(body, "messages", "REQ-C-MESSAGES"), "REQ-C-MESSAGES");
   for (const value of messages.items) {
-    decodeChatMessage(value, items);
+    decodeChatMessage(value, items, degradations);
   }
   const reasoning = reasoningFromEffort(
     optionalString(oneMember(body, "reasoning_effort", "REQ-C-REASONING"), "REQ-C-REASONING"),
@@ -187,7 +188,11 @@ function decodeChatRequest(body: WireJsonObject): SemanticRequest {
   });
 }
 
-function decodeChatMessage(value: WireJson, output: SemanticRequestItem[]): void {
+function decodeChatMessage(
+  value: WireJson,
+  output: SemanticRequestItem[],
+  degradations: Set<ConversionDegradationRule>,
+): void {
   const message = requiredObject(value, "REQ-C-MESSAGE");
   const role = requiredString(oneMember(message, "role", "REQ-C-MESSAGE-ROLE"), "REQ-C-MESSAGE-ROLE");
   if (role === "system" || role === "developer" || role === "user") {
@@ -203,7 +208,25 @@ function decodeChatMessage(value: WireJson, output: SemanticRequestItem[]): void
     return;
   }
   if (role === "assistant") {
-    assertAllowedKeys(message, new Set(["role", "content", "tool_calls", "refusal"]), "REQ-C-ASSISTANT");
+    assertAllowedKeys(
+      message,
+      new Set(["role", "content", "tool_calls", "refusal", "reasoning_items"]),
+      "REQ-C-ASSISTANT",
+    );
+    const reasoningItems = oneMember(message, "reasoning_items", "REQ-C-ASSISTANT-REASONING");
+    if (reasoningItems !== undefined) {
+      for (const item of requiredArray(reasoningItems, "REQ-C-ASSISTANT-REASONING").items) {
+        const object = requiredObject(item, "REQ-C-ASSISTANT-REASONING");
+        if (duplicateMemberNames(object).length > 0) {
+          invalid("REQ-C-ASSISTANT-REASONING");
+        }
+        requiredString(
+          oneMember(object, "type", "REQ-C-ASSISTANT-REASONING-TYPE"),
+          "REQ-C-ASSISTANT-REASONING-TYPE",
+        );
+      }
+      degradations.add("reasoning.state_omitted");
+    }
     const content = decodeChatContent(
       oneMember(message, "content", "REQ-C-ASSISTANT-CONTENT"),
       true,

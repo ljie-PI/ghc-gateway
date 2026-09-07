@@ -449,6 +449,34 @@ describe("shared conversion request codecs", () => {
     });
   });
 
+  it.each(["messages", "responses"] as const)(
+    "degrades valid Chat reasoning_items without rejecting a complete tool round for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("chat", target, body({
+        model: "source",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            reasoning_items: [{
+              type: "reasoning",
+              id: "rs_1",
+              encrypted_content: "opaque",
+            }],
+            tool_calls: [{
+              id: "call_1",
+              type: "function",
+              function: { name: "lookup", arguments: "{}" },
+            }],
+          },
+          { role: "tool", tool_call_id: "call_1", content: "ok" },
+        ],
+      }), "target", capability([target]));
+      expect(converted.degradations).toContain("reasoning.state_omitted");
+      expect(JSON.stringify(decoded(converted.bytes))).not.toContain("reasoning_items");
+    },
+  );
+
   it("preserves source function-tool strictness defaults across OpenAI protocols", () => {
     const chatToResponses = decoded(prepareConvertedRequest("chat", "responses", body({
       model: "source",

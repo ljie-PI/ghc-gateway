@@ -108,22 +108,31 @@ async function executeAnthropicMessages(
     resolvedModel: resolved.upstreamModel,
   });
   if (plan.kind === "converted") {
-    if (betaFeatures.some((feature) => feature !== "prompt-caching-2024-07-31")) {
+    if (betaFeatures.some((feature) => (
+      feature !== "prompt-caching-2024-07-31"
+      && feature !== "interleaved-thinking-2025-05-14"
+    ))) {
       throw new GatewayFailureError({
         kind: "unsupported_semantics",
         source: "converter",
         phase: "convert",
       });
     }
-    if (
-      betaFeatures.includes("prompt-caching-2024-07-31")
-      && !plan.request.degradations.includes("cache.control_omitted")
-    ) {
+    const existingDegradations = plan.request.degradations;
+    const betaDegradations = [
+      ...(betaFeatures.includes("prompt-caching-2024-07-31")
+        ? ["cache.control_omitted" as const]
+        : []),
+      ...(betaFeatures.includes("interleaved-thinking-2025-05-14")
+        ? ["reasoning.presentation_omitted" as const]
+        : []),
+    ].filter((rule) => !existingDegradations.includes(rule));
+    if (betaDegradations.length > 0) {
       plan = Object.freeze({
         ...plan,
         request: Object.freeze({
           ...plan.request,
-          degradations: [...plan.request.degradations, "cache.control_omitted" as const],
+          degradations: [...existingDegradations, ...betaDegradations],
         }),
       });
     }

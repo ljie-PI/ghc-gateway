@@ -31,6 +31,36 @@ describe("Anthropic request route", () => {
     }
   });
 
+  it("degrades interleaved-thinking beta on a complete converted tool round", async () => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 16,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "plan", signature: "opaque" },
+              { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+            ],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }],
+          },
+        ],
+      }, {
+        "anthropic-beta": "interleaved-thinking-2025-05-14",
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(capturedRequests).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
   it("observes pre-endpoint body failures once without coupling accounting to the presenter", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const { gw, close } = await anthropicGateway({ usageUpdates });
