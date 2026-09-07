@@ -91,10 +91,7 @@ export class SemanticItemLedger {
   }
 
   finishMessage(key: string): void {
-    const message = this.messages.get(key);
-    if (message === undefined) {
-      return;
-    }
+    const message = this.message(key);
     message.frozen = true;
     for (const partKey of message.partKeys) {
       const part = this.messageParts.get(partKey);
@@ -193,7 +190,7 @@ export class SemanticItemLedger {
             ...(!part.refusalSeen ? [] : [{ key, part: { type: "refusal", text: part.refusal } as const }]),
           ];
         });
-        if (entries.length > 0) {
+        if (entries.length > 0 || message.frozen) {
           items.push({
             type: "message",
             key: entry.key,

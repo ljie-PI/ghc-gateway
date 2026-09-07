@@ -108,7 +108,9 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "item_done") {
-      ledger.finishMessage(`responses:${event.outputIndex}:message`);
+      if (event.itemType === "message") {
+        ledger.finishMessage(`responses:${event.outputIndex}:message`);
+      }
       yield* emitter.itemDone(event.outputIndex);
       continue;
     }
@@ -187,6 +189,11 @@ class ChatEmitter implements StreamEmitter {
   private readonly toolIndexes = new Map<string, number>();
   private readonly streamedToolArguments = new Map<string, string>();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
+  private readonly pendingContent = new Map<string, {
+    readonly orderKey: string;
+    readonly kind: "text" | "refusal";
+    delta: string;
+  }>();
   private readonly responseFrontier = new ResponseEmissionFrontier();
   private responseDeliveryBlocked = false;
 
@@ -205,20 +212,20 @@ class ChatEmitter implements StreamEmitter {
 
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
-  contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
-    this.responseFrontier.completeContent(orderKey, contentIndex);
-    return [];
+  *contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.markContentDone(orderKey, contentIndex);
+    yield* this.drainReadyContent();
   }
 
-  itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
-    this.responseFrontier.completeItem(outputIndex);
-    return [];
+  *itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.markItemDone(outputIndex);
+    yield* this.drainReadyContent();
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     if (this.sourceResponses) {
       if (this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)) {
-        this.responseDeliveryBlocked = true;
+        this.queueContent(key, orderKey, "text", delta);
         return;
       }
     }
@@ -235,7 +242,7 @@ class ChatEmitter implements StreamEmitter {
   *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     if (this.sourceResponses) {
       if (this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)) {
-        this.responseDeliveryBlocked = true;
+        this.queueContent(key, orderKey, "refusal", delta);
         return;
       }
     }
@@ -378,6 +385,55 @@ class ChatEmitter implements StreamEmitter {
     this.streamedContent.set(key, current);
   }
 
+  private queueContent(
+    key: string,
+    orderKey: string | undefined,
+    kind: "text" | "refusal",
+    delta: string,
+  ): void {
+    if (orderKey === undefined) {
+      invalid();
+    }
+    const pending = this.pendingContent.get(key);
+    if (pending !== undefined) {
+      if (pending.orderKey !== orderKey || pending.kind !== kind) {
+        invalid();
+      }
+      pending.delta += delta;
+      return;
+    }
+    this.pendingContent.set(key, { orderKey, kind, delta });
+  }
+
+  private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
+    if (this.responseDeliveryBlocked) {
+      return;
+    }
+    for (;;) {
+      const ready = [...this.pendingContent.entries()].find(([key, pending]) => (
+        this.responseFrontier.allowsContent(key, pending.orderKey)
+      ));
+      if (ready !== undefined) {
+        const [key, pending] = ready;
+        this.pendingContent.delete(key);
+        yield this.chunk(wireObject([
+          [pending.kind === "refusal" ? "refusal" : "content", pending.delta],
+        ]));
+        this.recordStreamed(key, pending.kind, pending.delta);
+      }
+      const orderKey = this.responseFrontier.currentItemOrderKey();
+      if (this.responseFrontier.contentDoneAtFrontier(orderKey)) {
+        this.responseFrontier.advanceContent(orderKey);
+        continue;
+      }
+      if (this.responseFrontier.itemDoneAtFrontier()) {
+        this.responseFrontier.advanceItem();
+        continue;
+      }
+      return;
+    }
+  }
+
   private chunk(delta: ReturnType<typeof wireObject>, finish?: string): ConvertedStreamEmission {
     return {
       kind: "wire",
@@ -405,6 +461,11 @@ class MessagesEmitter implements StreamEmitter {
   private firstMessageKey: string | undefined;
   private readonly responseFrontier = new ResponseEmissionFrontier();
   private responseDeliveryBlocked = false;
+  private readonly pendingContent = new Map<string, {
+    readonly orderKey: string;
+    readonly kind: "text" | "refusal";
+    delta: string;
+  }>();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly tools = new Map<string, {
     readonly callId: string;
@@ -443,14 +504,14 @@ class MessagesEmitter implements StreamEmitter {
     return [];
   }
 
-  contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
-    this.responseFrontier.completeContent(orderKey, contentIndex);
-    return [];
+  *contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.markContentDone(orderKey, contentIndex);
+    yield* this.drainReadyContent();
   }
 
-  itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
-    this.responseFrontier.completeItem(outputIndex);
-    return [];
+  *itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.markItemDone(outputIndex);
+    yield* this.drainReadyContent();
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
@@ -462,7 +523,7 @@ class MessagesEmitter implements StreamEmitter {
         : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
       if (this.context.source === "responses") {
-        this.responseDeliveryBlocked = true;
+        this.queueContent(key, orderKey, "text", delta);
       }
       return;
     }
@@ -479,7 +540,7 @@ class MessagesEmitter implements StreamEmitter {
         : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
       if (this.context.source === "responses") {
-        this.responseDeliveryBlocked = true;
+        this.queueContent(key, orderKey, "refusal", delta);
       }
       return;
     }
@@ -626,6 +687,53 @@ class MessagesEmitter implements StreamEmitter {
     const current = this.streamedContent.get(key) ?? { text: "", refusal: "" };
     current[kind] += delta;
     this.streamedContent.set(key, current);
+  }
+
+  private queueContent(
+    key: string,
+    orderKey: string | undefined,
+    kind: "text" | "refusal",
+    delta: string,
+  ): void {
+    if (orderKey === undefined) {
+      invalid();
+    }
+    const pending = this.pendingContent.get(key);
+    if (pending !== undefined) {
+      if (pending.orderKey !== orderKey || pending.kind !== kind) {
+        invalid();
+      }
+      pending.delta += delta;
+      return;
+    }
+    this.pendingContent.set(key, { orderKey, kind, delta });
+  }
+
+  private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
+    if (this.responseDeliveryBlocked) {
+      return;
+    }
+    for (;;) {
+      const ready = [...this.pendingContent.entries()].find(([key, pending]) => (
+        this.responseFrontier.allowsContent(key, pending.orderKey)
+      ));
+      if (ready !== undefined) {
+        const [key, pending] = ready;
+        this.pendingContent.delete(key);
+        yield* this.emitLiveText(pending.kind === "refusal" ? `refusal:${key}` : key, pending.delta);
+        this.recordStreamed(key, pending.kind, pending.delta);
+      }
+      const orderKey = this.responseFrontier.currentItemOrderKey();
+      if (this.responseFrontier.contentDoneAtFrontier(orderKey)) {
+        this.responseFrontier.advanceContent(orderKey);
+        continue;
+      }
+      if (this.responseFrontier.itemDoneAtFrontier()) {
+        this.responseFrontier.advanceItem();
+        continue;
+      }
+      return;
+    }
   }
 
   private event(value: Record<string, unknown>): ConvertedStreamEmission {
@@ -944,22 +1052,37 @@ class ResponseEmissionFrontier {
     return match?.[1] !== undefined && Number.parseInt(match[1], 10) === this.item;
   }
 
-  completeContent(orderKey: string, contentIndex: number): void {
+  markContentDone(orderKey: string, contentIndex: number): void {
     const completed = this.completedContent.get(orderKey) ?? new Set<number>();
     completed.add(contentIndex);
     this.completedContent.set(orderKey, completed);
-    let frontier = this.content.get(orderKey) ?? 0;
-    while (completed.delete(frontier)) {
-      frontier += 1;
-    }
-    this.content.set(orderKey, frontier);
   }
 
-  completeItem(outputIndex: number): void {
+  contentDoneAtFrontier(orderKey: string): boolean {
+    return this.completedContent.get(orderKey)?.has(this.content.get(orderKey) ?? 0) === true;
+  }
+
+  advanceContent(orderKey: string): void {
+    const frontier = this.content.get(orderKey) ?? 0;
+    this.completedContent.get(orderKey)?.delete(frontier);
+    this.content.set(orderKey, frontier + 1);
+  }
+
+  markItemDone(outputIndex: number): void {
     this.completedItems.add(outputIndex);
-    while (this.completedItems.delete(this.item)) {
-      this.item += 1;
-    }
+  }
+
+  itemDoneAtFrontier(): boolean {
+    return this.completedItems.has(this.item);
+  }
+
+  advanceItem(): void {
+    this.completedItems.delete(this.item);
+    this.item += 1;
+  }
+
+  currentItemOrderKey(): string {
+    return `responses:${this.item}:message`;
   }
 }
 

@@ -1,7 +1,6 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
 import { chooseOutputTokenBudget } from "../../copilot/model_capabilities.js";
 import {
-  duplicateMemberNames,
   isWireJsonArray,
   isWireJsonObject,
   parseWireJson,
@@ -43,6 +42,7 @@ import {
   wireNumber,
   wireObject,
 } from "./wire.js";
+import { isOpenAiStrictSchemaCompatible } from "./strict_schema.js";
 
 const CHAT_TOP_LEVEL = new Set([
   "model",
@@ -1032,7 +1032,10 @@ function decodeResponsesTools(value: WireJson | undefined): readonly SemanticToo
     if (requiredString(oneMember(tool, "type", "REQ-R-TOOL-TYPE"), "REQ-R-TOOL-TYPE") !== "function") {
       unsupported("REQ-R-TOOL-TYPE");
     }
-    return semanticTool(tool, "parameters", "REQ-R-TOOL", true);
+    const decoded = semanticTool(tool, "parameters", "REQ-R-TOOL");
+    return decoded.strict === undefined
+      ? { ...decoded, strict: isOpenAiStrictSchemaCompatible(decoded.parameters) }
+      : decoded;
   });
 }
 
@@ -1040,7 +1043,7 @@ function semanticTool(
   object: WireJsonObject,
   schemaKey: string,
   ruleId: string,
-  defaultStrict: boolean,
+  defaultStrict?: boolean,
 ): SemanticTool {
   const description = optionalString(oneMember(object, "description", `${ruleId}-DESCRIPTION`), `${ruleId}-DESCRIPTION`);
   const strict = optionalBoolean(oneMember(object, "strict", `${ruleId}-STRICT`), `${ruleId}-STRICT`);
@@ -1048,7 +1051,7 @@ function semanticTool(
     name: requiredString(oneMember(object, "name", `${ruleId}-NAME`), `${ruleId}-NAME`),
     ...(description === undefined ? {} : { description }),
     parameters: requiredObject(oneMember(object, schemaKey, `${ruleId}-SCHEMA`), `${ruleId}-SCHEMA`),
-    strict: strict ?? defaultStrict,
+    ...(strict === undefined && defaultStrict === undefined ? {} : { strict: strict ?? defaultStrict }),
   };
 }
 
@@ -1188,79 +1191,8 @@ function decodeMessagesOutputFormat(value: WireJson | undefined): SemanticOutput
 }
 
 function validateOpenAiStrictSchema(schema: WireJsonObject, root = false, depth = 0): void {
-  if (depth > 32 || duplicateMemberNames(schema).length > 0) {
+  if (!isOpenAiStrictSchemaCompatible(schema, root, depth)) {
     unsupported("REQ-M-FORMAT-STRICT-SCHEMA");
-  }
-  const type = oneMember(schema, "type", "REQ-M-FORMAT-STRICT-SCHEMA");
-  const objectType = type === "object"
-    || (isWireJsonArray(type) && type.items.includes("object"));
-  if (root && !objectType) {
-    unsupported("REQ-M-FORMAT-STRICT-SCHEMA");
-  }
-  if (objectType) {
-    const propertiesValue = oneMember(schema, "properties", "REQ-M-FORMAT-STRICT-SCHEMA");
-    const properties = propertiesValue === undefined
-      ? wireObject([])
-      : requiredObject(propertiesValue, "REQ-M-FORMAT-STRICT-SCHEMA");
-    if (
-      duplicateMemberNames(properties).length > 0
-      || oneMember(schema, "additionalProperties", "REQ-M-FORMAT-STRICT-SCHEMA") !== false
-    ) {
-      unsupported("REQ-M-FORMAT-STRICT-SCHEMA");
-    }
-    const propertyNames = properties.members.map((member) => member.key);
-    const requiredValue = oneMember(schema, "required", "REQ-M-FORMAT-STRICT-SCHEMA");
-    const requiredNames = requiredValue === undefined
-      ? []
-      : requiredArray(requiredValue, "REQ-M-FORMAT-STRICT-SCHEMA").items.map((item) => (
-        requiredString(item, "REQ-M-FORMAT-STRICT-SCHEMA")
-      ));
-    if (
-      new Set(requiredNames).size !== requiredNames.length
-      || propertyNames.length !== requiredNames.length
-      || propertyNames.some((name) => !requiredNames.includes(name))
-    ) {
-      unsupported("REQ-M-FORMAT-STRICT-SCHEMA");
-    }
-    for (const property of properties.members) {
-      validateOpenAiStrictSchema(
-        requiredObject(property.value, "REQ-M-FORMAT-STRICT-SCHEMA"),
-        false,
-        depth + 1,
-      );
-    }
-  }
-  const items = oneMember(schema, "items", "REQ-M-FORMAT-STRICT-SCHEMA");
-  if (items !== undefined) {
-    validateOpenAiStrictSchema(
-      requiredObject(items, "REQ-M-FORMAT-STRICT-SCHEMA"),
-      false,
-      depth + 1,
-    );
-  }
-  const anyOf = oneMember(schema, "anyOf", "REQ-M-FORMAT-STRICT-SCHEMA");
-  if (anyOf !== undefined) {
-    for (const branch of requiredArray(anyOf, "REQ-M-FORMAT-STRICT-SCHEMA").items) {
-      validateOpenAiStrictSchema(
-        requiredObject(branch, "REQ-M-FORMAT-STRICT-SCHEMA"),
-        false,
-        depth + 1,
-      );
-    }
-  }
-  const definitions = oneMember(schema, "$defs", "REQ-M-FORMAT-STRICT-SCHEMA");
-  if (definitions !== undefined) {
-    const object = requiredObject(definitions, "REQ-M-FORMAT-STRICT-SCHEMA");
-    if (duplicateMemberNames(object).length > 0) {
-      unsupported("REQ-M-FORMAT-STRICT-SCHEMA");
-    }
-    for (const definition of object.members) {
-      validateOpenAiStrictSchema(
-        requiredObject(definition.value, "REQ-M-FORMAT-STRICT-SCHEMA"),
-        false,
-        depth + 1,
-      );
-    }
   }
 }
 

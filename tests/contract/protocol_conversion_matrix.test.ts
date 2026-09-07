@@ -173,6 +173,50 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("preserves Responses function strict defaults on the extended Chat route", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        tools: [
+          {
+            type: "function",
+            name: "loose_lookup",
+            parameters: {
+              type: "object",
+              properties: { optional_value: { type: "string" } },
+            },
+          },
+          {
+            type: "namespace",
+            name: "ns",
+            tools: [{
+              type: "function",
+              name: "strict_lookup",
+              parameters: {
+                type: "object",
+                properties: { value: { type: "string" } },
+                required: ["value"],
+                additionalProperties: false,
+              },
+            }],
+          },
+          { type: "custom", name: "render", format: { type: "text" } },
+        ],
+      }));
+      expect(response.status).toBe(200);
+      const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as {
+        tools: Array<{ function: { name: string; strict?: boolean } }>;
+      };
+      expect(request.tools.find((tool) => tool.function.name === "loose_lookup")?.function.strict).toBe(false);
+      expect(request.tools.find((tool) => tool.function.name !== "loose_lookup"
+        && tool.function.name !== "render")?.function.strict).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("round-trips a buffered namespace tool and preserves incomplete item status", async () => {
     const harness = await matrixGateway();
     try {

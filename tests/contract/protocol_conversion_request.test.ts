@@ -404,7 +404,26 @@ describe("shared conversion request codecs", () => {
     }), "target", capability(["chat"])).bytes);
     expect(responsesToChat.tools).toMatchObject([{
       type: "function",
-      function: { name: "lookup", strict: true },
+      function: { name: "lookup", strict: false },
+    }]);
+
+    const strictCompatible = decoded(prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "hi",
+      tools: [{
+        type: "function",
+        name: "strict_lookup",
+        parameters: {
+          type: "object",
+          properties: { value: { type: "string" } },
+          required: ["value"],
+          additionalProperties: false,
+        },
+      }],
+    }), "target", capability(["chat"])).bytes);
+    expect(strictCompatible.tools).toMatchObject([{
+      type: "function",
+      function: { name: "strict_lookup", strict: true },
     }]);
   });
 

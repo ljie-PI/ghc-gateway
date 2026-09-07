@@ -9,6 +9,7 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import type { ResponsesRequest } from "./dto.js";
+import { isOpenAiStrictSchemaCompatible } from "../conversion/strict_schema.js";
 
 export type ToolBindingKind = "function" | "namespace" | "custom" | "tool_search";
 
@@ -142,9 +143,12 @@ function addFunctionTool(context: MutableToolContext, tool: WireJsonObject, name
     ["description", description],
     ["parameters", parameters],
   ];
-  if (strict === true || strict === false) {
-    functionMembers.push(["strict", strict]);
-  }
+  functionMembers.push([
+    "strict",
+    strict === true || strict === false
+      ? strict
+      : isOpenAiStrictSchemaCompatible(parameters),
+  ]);
   addChatTool(context, chatName, {
     kind: namespace === undefined ? "function" : "namespace",
     originalName,

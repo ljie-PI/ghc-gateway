@@ -534,7 +534,14 @@ describe("shared conversion response codecs", () => {
         }),
       ].join("");
       const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
-      expect(text.indexOf("A")).toBeLessThan(text.indexOf("BC"));
+      const field = target === "chat" ? "content" : "text";
+      const separator = target === "chat" ? ":" : ": ";
+      const a = text.indexOf(`"${field}"${separator}"A"`);
+      const b = text.indexOf(`"${field}"${separator}"B"`);
+      const c = text.indexOf(`"${field}"${separator}"C"`);
+      expect(a).toBeGreaterThanOrEqual(0);
+      expect(b).toBeGreaterThan(a);
+      expect(c).toBeGreaterThan(b);
       expect(text).toContain(target === "chat" ? "data: [DONE]" : "event: message_stop");
     },
   );
@@ -1172,6 +1179,69 @@ describe("shared conversion response codecs", () => {
               },
               {
                 id: "msg_live_second",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "B", annotations: [] }],
+              },
+            ],
+            usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+          },
+        }),
+      ].join("");
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)),
+          streamContext("responses", target),
+        )) {
+          void _emission;
+        }
+      }).rejects.toThrow();
+    },
+  );
+
+  it.each(["chat", "messages"] as const)(
+    "freezes a done-only empty Responses message before advancing %s delivery",
+    async (target) => {
+      const source = [
+        responseEvent(0, "response.output_item.done", {
+          output_index: 0,
+          item: {
+            id: "msg_done_empty",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [],
+          },
+        }),
+        responseEvent(1, "response.output_item.added", {
+          output_index: 1,
+          item: {
+            id: "msg_after_empty",
+            type: "message",
+            status: "in_progress",
+            role: "assistant",
+            content: [],
+          },
+        }),
+        responseEvent(2, "response.output_text.delta", {
+          item_id: "msg_after_empty", output_index: 1, content_index: 0, delta: "B",
+        }),
+        responseEvent(3, "response.completed", {
+          response: {
+            id: "resp_empty_growth",
+            object: "response",
+            status: "completed",
+            output: [
+              {
+                id: "msg_done_empty",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "A", annotations: [] }],
+              },
+              {
+                id: "msg_after_empty",
                 type: "message",
                 status: "completed",
                 role: "assistant",

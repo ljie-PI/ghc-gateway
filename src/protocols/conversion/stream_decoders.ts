@@ -731,7 +731,7 @@ async function* decodeResponsesStream(
       observedOutputTypes.set(outputIndex, itemType);
       observeFinalItemContent(item, outputIndex, observedContent, budget);
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
-      yield { kind: "item_done", outputIndex };
+      yield { kind: "item_done", outputIndex, itemType };
       continue;
     }
     if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
