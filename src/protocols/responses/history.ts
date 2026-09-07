@@ -391,6 +391,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         const receiptChanged = !unavailableAfterCleanup
           && !ownershipChanged
           && current !== undefined
+          && current.checkpoint_state !== "expired"
           && checkpointRank(checkpointState) > checkpointRank(current.checkpoint_state);
         if (receiptChanged) {
           this.statement(
