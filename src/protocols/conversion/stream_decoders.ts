@@ -522,15 +522,22 @@ async function* decodeMessagesStream(
       budget.reserveEntry();
       const blockType = stringMember(block, "type");
       if (blockType === "text") {
-        const text = stringMember(block, "text");
-        blocks.set(index, { kind: "text", closed: false, sawContent: text !== undefined && text.length > 0 });
-        if (text !== undefined && text.length > 0) {
+        const text = singleMember(block, "text");
+        if (typeof text !== "string") {
+          invalid();
+        }
+        blocks.set(index, { kind: "text", closed: false, sawContent: text.length > 0 });
+        if (text.length > 0) {
           yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
         }
       } else if (blockType === "refusal") {
-        const refusal = stringMember(block, "refusal") ?? stringMember(block, "text");
-        blocks.set(index, { kind: "refusal", closed: false, sawContent: refusal !== undefined && refusal.length > 0 });
-        if (refusal !== undefined && refusal.length > 0) {
+        const refusalValue = singleMember(block, "refusal") ?? singleMember(block, "text");
+        if (typeof refusalValue !== "string") {
+          invalid();
+        }
+        const refusal = refusalValue;
+        blocks.set(index, { kind: "refusal", closed: false, sawContent: refusal.length > 0 });
+        if (refusal.length > 0) {
           yield { kind: "refusal_delta", key: `messages:${index}:refusal`, delta: refusal };
         }
       } else if (blockType === "tool_use") {
@@ -894,7 +901,12 @@ async function* decodeResponsesStream(
         invalid();
       }
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
-      yield { kind: "tool_done", key: identity.key, argumentsJson: stringMember(payload, "arguments") };
+      const argumentsJson = singleMember(payload, "arguments");
+      const name = singleMember(payload, "name");
+      if (typeof argumentsJson !== "string" || typeof name !== "string" || name !== identity.name) {
+        invalid();
+      }
+      yield { kind: "tool_done", key: identity.key, argumentsJson };
       continue;
     }
     if (type === "response.output_item.done") {
@@ -931,6 +943,9 @@ async function* decodeResponsesStream(
         observedOutputStatuses.set(outputIndex, itemStatus);
       }
       observeFinalItemContent(item, outputIndex, observedContent, budget);
+      if (itemType === "reasoning" && hasSubstantiveReasoning(item)) {
+        yield { kind: "semantic_progress" };
+      }
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
       yield { kind: "item_done", outputIndex, itemType };
       continue;

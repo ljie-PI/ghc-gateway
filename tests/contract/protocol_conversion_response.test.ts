@@ -307,6 +307,65 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("rejects malformed Responses arguments-done and Messages initial text snapshots", async () => {
+    const responsesSource = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "fc_bad_done",
+          type: "function_call",
+          call_id: "call_bad_done",
+          name: "lookup",
+          arguments: "{}",
+          status: "in_progress",
+        },
+      }),
+      responseEvent(1, "response.function_call_arguments.done", {
+        item_id: "fc_bad_done",
+        output_index: 0,
+        name: "lookup",
+        arguments: { invalid: true },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(responsesSource)),
+        streamContext("responses", "messages"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+
+    const messagesSource = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_bad_initial",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: { answer: "lost" } },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(messagesSource)),
+        streamContext("messages", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it.each([
     "{\"arguments\":{\"changed\":true}}",
     "{\"name\":7}",
@@ -2972,9 +3031,9 @@ describe("shared conversion response codecs", () => {
     expect(await response.text()).toContain("\"text\": \"ok\"");
   });
 
-  it("treats substantive Responses reasoning snapshots as first-semantic progress", async () => {
+  it("treats substantive Responses reasoning done snapshots as first-semantic progress", async () => {
     async function* reasoningThenAnswer(): AsyncIterable<Uint8Array> {
-      yield encoder.encode(responseEvent(0, "response.output_item.added", {
+      yield encoder.encode(responseEvent(0, "response.output_item.done", {
         output_index: 0,
         item: {
           id: "rs_progress",

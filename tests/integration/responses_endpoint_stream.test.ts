@@ -196,7 +196,7 @@ describe("Responses endpoint stream integration", () => {
       expect(history.checkpointStates).toEqual(["partial", "complete"]);
       expect(history.records).toHaveLength(2);
       expect(history.records[0]?.output).toHaveLength(1);
-      expect(history.records[1]?.output).toEqual([]);
+      expect(history.records[1]?.output).toEqual(history.records[0]?.output);
     } finally {
       await opened.close();
     }
