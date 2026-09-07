@@ -106,6 +106,7 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
     content.push({ type: "text", text });
   }
   const refusal = stringOrNullMember(message, "refusal");
+  const refused = refusal !== undefined && refusal !== null;
   if (refusal !== undefined && refusal !== null) {
     content.push({ type: "refusal", text: refusal });
   }
@@ -121,11 +122,16 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   if (finishReason === "tool_calls" && !items.some((item) => item.type === "tool_call")) {
     upstreamInvalid();
   }
+  const effectiveFinishReason = refused && finishReason === "stop" ? "refusal" : finishReason;
   return {
     source: "chat",
     items,
-    status: finishReason === "length" || finishReason === "content_filter" ? "incomplete" : "completed",
-    finishReason,
+    status: effectiveFinishReason === "length"
+      || effectiveFinishReason === "content_filter"
+      || effectiveFinishReason === "refusal"
+      ? "incomplete"
+      : "completed",
+    finishReason: effectiveFinishReason,
     usage: chatUsage(objectMember(payload, "usage")),
   };
 }

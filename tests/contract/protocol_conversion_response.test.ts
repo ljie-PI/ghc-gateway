@@ -106,6 +106,31 @@ describe("shared conversion response codecs", () => {
     expect(converted.observations.terminal).toBe("incomplete");
   });
 
+  it("maps explicit Chat refusal content to machine-readable Messages refusal status", async () => {
+    const buffered = convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "chatcmpl_refusal",
+      object: "chat.completion",
+      choices: [{
+        index: 0,
+        finish_reason: "stop",
+        message: { role: "assistant", content: null, refusal: "cannot comply" },
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    })), context("chat", "messages"));
+    expect(decoded(buffered.bytes)).toMatchObject({
+      stop_reason: "refusal",
+      content: [{ type: "text", text: "cannot comply" }],
+    });
+
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"cannot comply\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const text = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(text).toContain("\"stop_reason\": \"refusal\"");
+    expect(text).toContain("cannot comply");
+  });
+
   it("counts Messages cache tokens exactly once when converting to Responses", () => {
     const converted = convertBufferedResponse(encoder.encode(JSON.stringify({
       id: "msg_source",

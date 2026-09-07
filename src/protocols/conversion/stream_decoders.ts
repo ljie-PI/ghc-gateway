@@ -143,12 +143,15 @@ async function* decodeChatStream(
       for (const event of pendingPostTool.splice(0)) {
         yield event;
       }
+      const terminalFinish = chatRefusal.length > 0 && pendingFinish === "stop"
+        ? "refusal"
+        : pendingFinish;
       yield {
         kind: "terminal",
-        status: pendingFinish === "length" || pendingFinish === "content_filter" || pendingFinish === "refusal"
+        status: terminalFinish === "length" || terminalFinish === "content_filter" || terminalFinish === "refusal"
           ? "incomplete"
           : "completed",
-        finishReason: pendingFinish,
+        finishReason: terminalFinish,
       };
       return;
     }
