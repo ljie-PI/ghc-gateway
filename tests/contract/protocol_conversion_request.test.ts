@@ -829,6 +829,40 @@ describe("shared conversion request codecs", () => {
     }), "target", capability(["messages"]))).toThrow();
   });
 
+  it.each(["", []] as const)(
+    "rejects empty leading Chat user context before Messages tools: %j",
+    (content) => {
+      expect(() => prepareConvertedRequest("chat", "messages", body({
+        model: "source",
+        messages: [
+          { role: "user", content },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "call_1",
+              type: "function",
+              function: { name: "lookup", arguments: "{}" },
+            }],
+          },
+          { role: "tool", tool_call_id: "call_1", content: "ok" },
+        ],
+      }), "target", capability(["messages"]))).toThrow();
+    },
+  );
+
+  it("rejects an empty leading Responses user message before Messages tools", () => {
+    expect(() => prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      instructions: "system instructions are not a user turn",
+      input: [
+        { type: "message", role: "user", content: [] },
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: "ok" },
+      ],
+    }), "target", capability(["messages"]))).toThrow();
+  });
+
   it.each(["chat", "messages"] as const)(
     "rejects a new tool round before every prior parallel call has a result for %s",
     (target) => {

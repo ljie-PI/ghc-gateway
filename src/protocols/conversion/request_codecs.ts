@@ -1573,10 +1573,37 @@ function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObj
   if (output.length === 0) {
     unsupported("REQ-TARGET-M-EMPTY");
   }
-  if (oneMember(output[0] as WireJsonObject, "role", "REQ-INTERNAL") !== "user") {
+  const first = output[0] as WireJsonObject;
+  if (
+    oneMember(first, "role", "REQ-INTERNAL") !== "user"
+    || !hasSubstantiveMessagesUserContent(oneMember(first, "content", "REQ-INTERNAL"))
+  ) {
     unsupported("REQ-TARGET-M-LEADING-USER");
   }
   return output;
+}
+
+function hasSubstantiveMessagesUserContent(value: WireJson | undefined): boolean {
+  if (typeof value === "string") {
+    return value.trim().length > 0;
+  }
+  if (!isWireJsonArray(value)) {
+    return false;
+  }
+  return value.items.some((item) => {
+    if (!isWireJsonObject(item)) {
+      return false;
+    }
+    const type = oneMember(item, "type", "REQ-INTERNAL");
+    if (type === "text") {
+      const text = oneMember(item, "text", "REQ-INTERNAL");
+      return typeof text === "string" && text.trim().length > 0;
+    }
+    if (type === "image") {
+      return true;
+    }
+    return false;
+  });
 }
 
 function encodeMessagesSystem(content: readonly SemanticContent[]): WireJson | undefined {
