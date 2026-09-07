@@ -490,6 +490,25 @@ describe("shared conversion response codecs", () => {
     },
   );
 
+  it.each(["messages", "responses"] as const)(
+    "keeps final-only Chat text before its tool call when converting to %s",
+    async (target) => {
+      const source = [
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Before tool\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join("");
+      const text = wireText(await collectStream("chat", target, chunks(encoder.encode(source))));
+      const textPosition = target === "messages"
+        ? text.indexOf("\"text\": \"Before tool\"")
+        : text.indexOf("\"type\":\"response.output_text.delta\"");
+      const toolPosition = target === "messages"
+        ? text.indexOf("\"type\": \"tool_use\"")
+        : text.indexOf("\"type\":\"function_call\"");
+      expect(textPosition).toBeGreaterThanOrEqual(0);
+      expect(toolPosition).toBeGreaterThan(textPosition);
+    },
+  );
+
   it("accepts Chat usage:null and preserves source tool indexes across delayed arguments", async () => {
     const source = [
       "data: {\"id\":\"x\",\"usage\":null,\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
@@ -1359,6 +1378,46 @@ describe("shared conversion response codecs", () => {
       }
     })()).rejects.toThrow();
     expect(delivered).not.toContain("synthetic-sensitive-diagnostic");
+  });
+
+  it("recognizes a BOM-prefixed native Messages error event without forwarding its diagnostics", async () => {
+    const signal = new AbortController().signal;
+    await expect(createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: chunks(encoder.encode([
+          "\uFEFFevent: error\ndata: {\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}\n\n",
+          messageEvent("message_start", {
+            type: "message_start",
+            message: {
+              id: "msg_after_error",
+              type: "message",
+              role: "assistant",
+              content: [],
+              model: "native",
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: 1, output_tokens: 0 },
+            },
+          }),
+          messageEvent("message_stop", { type: "message_stop" }),
+        ].join(""))),
+        async cancel() {},
+      },
+      scope: {
+        requestId: "req_native_bom_error",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native_bom_error",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    })).rejects.toThrow();
   });
 });
 

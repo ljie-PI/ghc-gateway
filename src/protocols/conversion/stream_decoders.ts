@@ -228,11 +228,16 @@ async function* decodeChatStream(
         if (suffix.length > 0) {
           budget.reserve(suffix);
           chatText = contentValue;
-          pendingPostTool.push({
+          const event = {
             kind: "text_delta",
             key: toolObserved ? "chat:message:1" : "chat:message:0",
             delta: suffix,
-          });
+          } as const;
+          if (toolObserved) {
+            pendingPostTool.push(event);
+          } else {
+            yield event;
+          }
         }
       }
       const refusalValue = singleMember(finalMessage, "refusal");
@@ -247,11 +252,16 @@ async function* decodeChatStream(
         if (suffix.length > 0) {
           budget.reserve(suffix);
           chatRefusal = refusalValue;
-          pendingPostTool.push({
+          const event = {
             kind: "refusal_delta",
             key: toolObserved ? "chat:message:1" : "chat:message:0",
             delta: suffix,
-          });
+          } as const;
+          if (toolObserved) {
+            pendingPostTool.push(event);
+          } else {
+            yield event;
+          }
         }
       }
       const calls = arrayMember(finalMessage, "tool_calls");

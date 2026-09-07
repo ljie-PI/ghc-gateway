@@ -283,7 +283,8 @@ class NativeMessagesObserver {
   }
 
   private observeRecord(raw: string): void {
-    const event = raw.split("\n")
+    const observed = raw.startsWith("\uFEFF") ? raw.slice(1) : raw;
+    const event = observed.split("\n")
       .filter((line) => line.startsWith("event:"))
       .map((line) => line.slice(6).trim())
       .at(-1);
@@ -295,7 +296,7 @@ class NativeMessagesObserver {
         phase: "stream",
       });
     }
-    const data = raw.split("\n")
+    const data = observed.split("\n")
       .filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).replace(/^ /u, ""))
       .join("\n");
