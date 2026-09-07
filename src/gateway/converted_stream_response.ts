@@ -35,6 +35,8 @@ export async function createConvertedStreamResponse(input: {
 }): Promise<Response> {
   const cancelExchange = createExchangeCancellation(input.upstream);
   const performanceObserver = input.performanceObserver;
+  let eventElapsedMs = 0;
+  const aggregateEventMeasurements = performanceObserver?.observe !== undefined;
   const emissions = convertProtocolStream(
     withByteIdleDeadlines(
       input.upstream.bytes,
@@ -54,7 +56,24 @@ export async function createConvertedStreamResponse(input: {
       degradations: input.plan.request.degradations,
       measureEvent: performanceObserver === undefined
         ? undefined
-        : (work) => performanceObserver.measure("event", work),
+        : aggregateEventMeasurements
+          ? (work) => {
+            const startedAt = performance.now();
+            try {
+              return work();
+            } finally {
+              eventElapsedMs += performance.now() - startedAt;
+            }
+          }
+          : (work) => performanceObserver.measure("event", work),
+      flushEventMeasurement: !aggregateEventMeasurements || performanceObserver === undefined
+        ? undefined
+        : () => {
+          if (eventElapsedMs > 0) {
+            performanceObserver.observe?.("event", eventElapsedMs);
+            eventElapsedMs = 0;
+          }
+        },
     },
   );
   const iterator = emissions[Symbol.asyncIterator]();

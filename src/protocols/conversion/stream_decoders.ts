@@ -667,7 +667,11 @@ async function* decodeResponsesStream(
       }
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       const itemType = stringMember(item, "type");
-      if (itemType === undefined) {
+      if (
+        itemType !== "message"
+        && itemType !== "function_call"
+        && itemType !== "reasoning"
+      ) {
         invalid();
       }
       observedOutputTypes.set(outputIndex, itemType);
@@ -704,6 +708,9 @@ async function* decodeResponsesStream(
         if (argumentsJson !== undefined && argumentsJson.length > 0) {
           yield { kind: "tool_arguments_delta", key, delta: argumentsJson };
         }
+      }
+      if (itemType === "reasoning" && hasSubstantiveReasoning(item)) {
+        yield { kind: "semantic_progress" };
       }
       continue;
     }
@@ -1090,6 +1097,25 @@ function responseHasRefusal(response: WireJsonObject): boolean {
       isWireJsonObject(part) && stringMember(part, "type") === "refusal"
     )) === true;
   }) === true;
+}
+
+function hasSubstantiveReasoning(item: WireJsonObject): boolean {
+  return ["reasoning_text", "content", "summary", "encrypted_content"].some((key) => (
+    memberValues(item, key).some((value) => hasNonemptyString(value))
+  ));
+}
+
+function hasNonemptyString(value: WireJson): boolean {
+  if (typeof value === "string") {
+    return value.length > 0;
+  }
+  if (isWireJsonArray(value)) {
+    return value.items.some((item) => hasNonemptyString(item));
+  }
+  if (isWireJsonObject(value)) {
+    return value.members.some((member) => hasNonemptyString(member.value));
+  }
+  return false;
 }
 
 function* finalResponseEvents(

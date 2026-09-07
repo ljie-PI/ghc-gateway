@@ -26,6 +26,7 @@ export interface StreamConversionContext {
   readonly nowUnixSeconds: () => number;
   readonly degradations?: readonly ConversionDegradationRule[];
   readonly measureEvent?: (<T>(work: () => T) => T) | undefined;
+  readonly flushEventMeasurement?: (() => void) | undefined;
 }
 
 const ZERO_USAGE: SemanticUsage = {
@@ -57,121 +58,125 @@ export async function* convertProtocolStream(
     context.accumulatorBytes,
     context.measureEvent,
   )) {
-    if (event.kind === "usage") {
-      usage = event.usage;
-      yield { kind: "usage", usage };
-      continue;
-    }
-    if (!started) {
-      started = true;
-      yield { kind: "first_semantic" };
-      yield* measuredEvent(context, () => emitter.start());
-    }
-    if (event.kind === "semantic_progress") {
-      continue;
-    }
-    if (event.kind === "message_start") {
-      yield* measuredEvent(context, () => {
-        ledger.startMessage(event.key);
-        return emitter.messageStart(event.key);
-      });
-      continue;
-    }
-    if (event.kind === "text_delta") {
-      yield* measuredEvent(context, () => {
-        ledger.appendText(event.key, event.delta, event.orderKey);
-        return emitter.textDelta(event.key, event.delta, event.orderKey);
-      });
-      continue;
-    }
-    if (event.kind === "text_done") {
-      yield* measuredEvent(context, () => {
-        const first = ledger.observeText(event.key, event.orderKey);
-        const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
-        if (suffix.length > 0) {
-          ledger.appendText(event.key, suffix, event.orderKey);
-          return emitter.textDelta(event.key, suffix, event.orderKey);
-        }
-        return first ? emitter.textDelta(event.key, "", event.orderKey) : [];
-      });
-      continue;
-    }
-    if (event.kind === "refusal_delta") {
-      yield* measuredEvent(context, () => {
-        ledger.appendRefusal(event.key, event.delta, event.orderKey);
-        return emitter.refusalDelta(event.key, event.delta, event.orderKey);
-      });
-      continue;
-    }
-    if (event.kind === "refusal_done") {
-      yield* measuredEvent(context, () => {
-        const first = ledger.observeRefusal(event.key, event.orderKey);
-        const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
-        if (suffix.length > 0) {
-          ledger.appendRefusal(event.key, suffix, event.orderKey);
-          return emitter.refusalDelta(event.key, suffix, event.orderKey);
-        }
-        return first ? emitter.refusalDelta(event.key, "", event.orderKey) : [];
-      });
-      continue;
-    }
-    if (event.kind === "content_done") {
-      yield* measuredEvent(context, () => {
-        ledger.finishContent(event.key);
-        return emitter.contentDone(event.orderKey, event.contentIndex);
-      });
-      continue;
-    }
-    if (event.kind === "item_done") {
-      yield* measuredEvent(context, () => {
-        if (event.itemType === "message") {
-          ledger.finishMessage(`responses:${event.outputIndex}:message`);
-        }
-        return emitter.itemDone(event.outputIndex);
-      });
-      continue;
-    }
-    if (event.kind === "tool_start") {
-      yield* measuredEvent(context, () => {
-        ledger.startTool(event);
-        return emitter.toolStart(event.key, event.callId, event.name, event.itemId);
-      });
-      continue;
-    }
-    if (event.kind === "tool_arguments_delta") {
-      yield* measuredEvent(context, () => {
-        ledger.appendToolArguments(event.key, event.delta);
-        return emitter.toolArgumentsDelta(event.key, event.delta);
-      });
-      continue;
-    }
-    if (event.kind === "tool_done") {
-      yield* measuredEvent(context, () => (function* (): Iterable<ConvertedStreamEmission> {
-        const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
-        if (suffix.length > 0) {
-          yield* emitter.toolArgumentsDelta(event.key, suffix);
-        }
-        if (context.target === "messages" && event.completed !== false) {
-          yield* emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson);
-        }
-      })());
-      continue;
-    }
-    if (event.kind === "terminal") {
-      if (terminal) {
-        invalid();
+    try {
+      if (event.kind === "usage") {
+        usage = event.usage;
+        yield { kind: "usage", usage };
+        continue;
       }
-      terminal = true;
-      if (event.status === "completed") {
-        measuredWork(context, () => ledger.finishOpenTools());
-        for (const key of ledger.toolKeys()) {
-          yield* measuredEvent(context, () => emitter.toolDone(key, ledger.tool(key).argumentsJson));
-        }
+      if (!started) {
+        started = true;
+        yield { kind: "first_semantic" };
+        yield* measuredEvent(context, () => emitter.start());
       }
-      const items = measuredWork(context, () => ledger.items(event.status));
-      yield* measuredEvent(context, () => emitter.finish(event, usage, items));
-      yield { kind: "terminal", terminal: event.status };
-      return;
+      if (event.kind === "semantic_progress") {
+        continue;
+      }
+      if (event.kind === "message_start") {
+        yield* measuredEvent(context, () => {
+          ledger.startMessage(event.key);
+          return emitter.messageStart(event.key);
+        });
+        continue;
+      }
+      if (event.kind === "text_delta") {
+        yield* measuredEvent(context, () => {
+          ledger.appendText(event.key, event.delta, event.orderKey);
+          return emitter.textDelta(event.key, event.delta, event.orderKey);
+        });
+        continue;
+      }
+      if (event.kind === "text_done") {
+        yield* measuredEvent(context, () => {
+          const first = ledger.observeText(event.key, event.orderKey);
+          const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
+          if (suffix.length > 0) {
+            ledger.appendText(event.key, suffix, event.orderKey);
+            return emitter.textDelta(event.key, suffix, event.orderKey);
+          }
+          return first ? emitter.textDelta(event.key, "", event.orderKey) : [];
+        });
+        continue;
+      }
+      if (event.kind === "refusal_delta") {
+        yield* measuredEvent(context, () => {
+          ledger.appendRefusal(event.key, event.delta, event.orderKey);
+          return emitter.refusalDelta(event.key, event.delta, event.orderKey);
+        });
+        continue;
+      }
+      if (event.kind === "refusal_done") {
+        yield* measuredEvent(context, () => {
+          const first = ledger.observeRefusal(event.key, event.orderKey);
+          const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
+          if (suffix.length > 0) {
+            ledger.appendRefusal(event.key, suffix, event.orderKey);
+            return emitter.refusalDelta(event.key, suffix, event.orderKey);
+          }
+          return first ? emitter.refusalDelta(event.key, "", event.orderKey) : [];
+        });
+        continue;
+      }
+      if (event.kind === "content_done") {
+        yield* measuredEvent(context, () => {
+          ledger.finishContent(event.key);
+          return emitter.contentDone(event.orderKey, event.contentIndex);
+        });
+        continue;
+      }
+      if (event.kind === "item_done") {
+        yield* measuredEvent(context, () => {
+          if (event.itemType === "message") {
+            ledger.finishMessage(`responses:${event.outputIndex}:message`);
+          }
+          return emitter.itemDone(event.outputIndex);
+        });
+        continue;
+      }
+      if (event.kind === "tool_start") {
+        yield* measuredEvent(context, () => {
+          ledger.startTool(event);
+          return emitter.toolStart(event.key, event.callId, event.name, event.itemId);
+        });
+        continue;
+      }
+      if (event.kind === "tool_arguments_delta") {
+        yield* measuredEvent(context, () => {
+          ledger.appendToolArguments(event.key, event.delta);
+          return emitter.toolArgumentsDelta(event.key, event.delta);
+        });
+        continue;
+      }
+      if (event.kind === "tool_done") {
+        yield* measuredEvent(context, () => (function* (): Iterable<ConvertedStreamEmission> {
+          const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
+          if (suffix.length > 0) {
+            yield* emitter.toolArgumentsDelta(event.key, suffix);
+          }
+          if (context.target === "messages" && event.completed !== false) {
+            yield* emitter.toolDone(event.key, ledger.tool(event.key).argumentsJson);
+          }
+        })());
+        continue;
+      }
+      if (event.kind === "terminal") {
+        if (terminal) {
+          invalid();
+        }
+        terminal = true;
+        if (event.status === "completed") {
+          measuredWork(context, () => ledger.finishOpenTools());
+          for (const key of ledger.toolKeys()) {
+            yield* measuredEvent(context, () => emitter.toolDone(key, ledger.tool(key).argumentsJson));
+          }
+        }
+        const items = measuredWork(context, () => ledger.items(event.status));
+        yield* measuredEvent(context, () => emitter.finish(event, usage, items));
+        yield { kind: "terminal", terminal: event.status };
+        return;
+      }
+    } finally {
+      context.flushEventMeasurement?.();
     }
   }
   invalid();

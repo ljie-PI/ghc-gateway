@@ -2721,6 +2721,105 @@ describe("shared conversion response codecs", () => {
     expect(await response.text()).toContain("\"text\": \"ok\"");
   });
 
+  it("treats substantive Responses reasoning snapshots as first-semantic progress", async () => {
+    async function* reasoningThenAnswer(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "rs_progress",
+          type: "reasoning",
+          reasoning_text: "plan",
+          summary: [],
+        },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      yield encoder.encode(responseEvent(1, "response.completed", {
+        response: {
+          id: "resp_reasoning_progress",
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              id: "rs_progress",
+              type: "reasoning",
+              reasoning_text: "plan",
+              summary: [],
+            },
+            {
+              id: "msg_reasoning_progress",
+              type: "message",
+              status: "completed",
+              role: "assistant",
+              content: [{ type: "output_text", text: "ok", annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }));
+    }
+    const config = defaultRuntimeConfigSnapshot();
+    const signal = new AbortController().signal;
+    const response = await createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: reasoningThenAnswer(),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "chat",
+        target: "responses",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: ["reasoning.presentation_omitted"],
+        },
+      },
+      scope: {
+        requestId: "req_reasoning_snapshot",
+        signal,
+        deliverySignal: signal,
+        config: {
+          ...config,
+          timeouts: { ...config.timeouts, firstByteMs: 50 },
+        },
+        attempt: createRequestAttempt({
+          requestId: "req_reasoning_snapshot",
+          protocol: "openai_chat",
+          abortedErrorCount: 1,
+        }),
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      onTerminal: () => undefined,
+    });
+    expect(await response.text()).toContain("\"content\":\"ok\"");
+  });
+
+  it("rejects unsupported Responses item types before retaining their metadata", async () => {
+    const source = responseEvent(0, "response.output_item.added", {
+      output_index: 0,
+      item: { id: "unknown", type: "x".repeat(100_000), status: "in_progress" },
+    });
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("measures converted stream event work without wrapping upstream waits", async () => {
     let eventMeasurements = 0;
     const signal = new AbortController().signal;
