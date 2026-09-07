@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { HttpControlClient } from "../../../src/cli/control_client.js";
 import type { EffectiveModelCapabilitySnapshot } from "../../../src/copilot/capability_registry.js";
 import type { ChatOutputTokenField } from "../../../src/copilot/model_capabilities.js";
+import { UPSTREAM_PROTOCOL_HEADER } from "../../../src/gateway/execution_evidence.js";
 import { planProtocolExecution } from "../../../src/protocols/conversion/planner.js";
 import type { InferenceProtocol } from "../../../src/protocols/conversion/types.js";
 import {
@@ -113,6 +114,7 @@ export interface LiveCallSnapshot {
   readonly catalogCalls: number;
   readonly byPath: Readonly<Record<string, number>>;
   readonly byRoute: Readonly<Partial<Record<LiveRouteKey, number>>>;
+  readonly observedUpstream: Readonly<Partial<Record<LiveRouteKey, InferenceProtocol>>>;
   readonly maxInferenceCalls: number;
 }
 
@@ -131,6 +133,7 @@ export class LiveCallLedger {
   private catalogCalls = 0;
   private readonly byPath = new Map<string, number>();
   private readonly byRoute = new Map<LiveRouteKey, number>();
+  private readonly observedUpstream = new Map<LiveRouteKey, InferenceProtocol>();
   private activeRoute: LiveRouteKey | undefined;
 
   constructor(readonly maxInferenceCalls = LIVE_MAX_INFERENCE_CALLS) {}
@@ -144,20 +147,37 @@ export class LiveCallLedger {
       }
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
       const path = url.pathname;
-      this.byPath.set(`${method} ${path}`, (this.byPath.get(`${method} ${path}`) ?? 0) + 1);
+      let inferenceRoute: LiveRoute | undefined;
       if (method === "GET" && path === "/v1/models") {
         this.catalogCalls += 1;
       } else if (method === "POST" && isInferencePath(path)) {
         if (this.activeRoute === undefined) {
           throw new Error("live inference call is missing an explicit route ledger owner");
         }
-        this.inferenceCalls += 1;
-        this.byRoute.set(this.activeRoute, (this.byRoute.get(this.activeRoute) ?? 0) + 1);
-        if (this.inferenceCalls > this.maxInferenceCalls) {
+        if (this.inferenceCalls >= this.maxInferenceCalls) {
           throw new Error(`live inference call budget exceeded (${this.maxInferenceCalls})`);
         }
+        inferenceRoute = LIVE_ROUTES.find((routeItem) => routeItem.key === this.activeRoute);
+        if (inferenceRoute === undefined) {
+          throw new Error("live inference call has an unknown route ledger owner");
+        }
+        this.inferenceCalls += 1;
+        this.byRoute.set(this.activeRoute, (this.byRoute.get(this.activeRoute) ?? 0) + 1);
       }
-      return await globalThis.fetch(input, init);
+      this.byPath.set(`${method} ${path}`, (this.byPath.get(`${method} ${path}`) ?? 0) + 1);
+      const response = await globalThis.fetch(input, init);
+      if (inferenceRoute !== undefined && response.ok) {
+        const observed = response.headers.get(UPSTREAM_PROTOCOL_HEADER);
+        if (!isInferenceProtocol(observed) || observed !== inferenceRoute.target) {
+          throw new Error("live inference response did not prove its expected upstream protocol");
+        }
+        const prior = this.observedUpstream.get(inferenceRoute.key);
+        if (prior !== undefined && prior !== observed) {
+          throw new Error("live inference route changed upstream protocol within one matrix cell");
+        }
+        this.observedUpstream.set(inferenceRoute.key, observed);
+      }
+      return response;
     };
   }
 
@@ -179,6 +199,7 @@ export class LiveCallLedger {
       catalogCalls: this.catalogCalls,
       byPath: Object.fromEntries([...this.byPath.entries()].sort()),
       byRoute: Object.fromEntries([...this.byRoute.entries()].sort()),
+      observedUpstream: Object.fromEntries([...this.observedUpstream.entries()].sort()),
       maxInferenceCalls: this.maxInferenceCalls,
     };
   }
@@ -281,8 +302,10 @@ async function readAdminModels(
       bootstrapUrl = url;
     },
   );
+  let models: LiveCapabilityModels | undefined;
+  let readFailure: Error | undefined;
   try {
-    await control.adminOpen({ dataDir });
+    await control.adminOpen({ dataDir, timeoutMs: LIVE_REQUEST_TIMEOUT_MS });
     const parsedBootstrapUrl = bootstrapUrl === undefined ? null : new URL(bootstrapUrl);
     if (parsedBootstrapUrl !== null && parsedBootstrapUrl.origin !== origin) {
       throw new Error("managed Admin bootstrap origin does not match the selected gateway");
@@ -293,7 +316,7 @@ async function readAdminModels(
     if (bootstrapToken === null) {
       throw new Error("managed Admin bootstrap did not produce a token");
     }
-    const bootstrap = await globalThis.fetch(`${origin}/admin/api/v1/auth/bootstrap`, {
+    const bootstrap = await boundedLiveFetch(`${origin}/admin/api/v1/auth/bootstrap`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -310,7 +333,7 @@ async function readAdminModels(
     if (cookie === undefined || csrfToken === undefined) {
       throw new Error("managed Admin bootstrap returned an incomplete session");
     }
-    const response = await globalThis.fetch(
+    const response = await boundedLiveFetch(
       `${origin}/admin/api/v1/models?accountId=${encodeURIComponent(configuration.accountId)}`,
       { headers: { cookie } },
     );
@@ -322,19 +345,25 @@ async function readAdminModels(
     if (data === null) {
       throw new Error("managed Admin model catalog returned an invalid envelope");
     }
-    return data as unknown as LiveCapabilityModels;
-  } finally {
-    if (cookie !== undefined && csrfToken !== undefined) {
-      await globalThis.fetch(`${origin}/admin/api/v1/auth/logout`, {
-        method: "POST",
-        headers: {
-          cookie,
-          "x-ghcg-csrf": csrfToken,
-          origin,
-        },
-      }).catch(() => undefined);
-    }
+    models = data as unknown as LiveCapabilityModels;
+  } catch (error: unknown) {
+    readFailure = safeAdminReadFailure(error);
   }
+  const logoutFailure = cookie === undefined || csrfToken === undefined
+    ? undefined
+    : await logoutAdminSession(origin, cookie, csrfToken);
+  if (logoutFailure !== undefined) {
+    throw readFailure === undefined
+      ? logoutFailure
+      : new Error("managed Admin model read and logout cleanup both failed");
+  }
+  if (readFailure !== undefined) {
+    throw readFailure;
+  }
+  if (models === undefined) {
+    throw new Error("managed Admin model catalog returned no result");
+  }
+  return models;
 }
 
 export function assertSelectedDefaultAccount(
@@ -486,6 +515,7 @@ export async function consumeAtLeastOne<T>(stream: AsyncIterable<T>): Promise<nu
 export async function expectCancelledStream<T>(
   stream: AsyncIterable<T>,
   abort: () => void,
+  isCancellationError: (error: unknown) => boolean,
 ): Promise<void> {
   const iterator = stream[Symbol.asyncIterator]();
   abort();
@@ -497,7 +527,13 @@ export async function expectCancelledStream<T>(
         throw new Error("cancelled live stream did not terminate within five seconds");
       }
       const outcome = await nextWithTimeout(iterator, remainingMs);
-      if (outcome.kind === "terminal") {
+      if (outcome.kind === "done") {
+        return;
+      }
+      if (outcome.kind === "rejected") {
+        if (!isCancellationError(outcome.error)) {
+          throw new Error("cancelled live stream ended with a non-cancellation failure");
+        }
         return;
       }
     }
@@ -622,6 +658,45 @@ async function safeJson(response: Response): Promise<unknown> {
   }
 }
 
+async function boundedLiveFetch(
+  input: string | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  return await globalThis.fetch(input, {
+    ...init,
+    signal: AbortSignal.timeout(LIVE_REQUEST_TIMEOUT_MS),
+  });
+}
+
+function safeAdminReadFailure(error: unknown): Error {
+  return error instanceof Error && error.message.startsWith("managed Admin ")
+    ? error
+    : new Error("managed Admin request failed: network_error");
+}
+
+async function logoutAdminSession(
+  origin: string,
+  cookie: string,
+  csrfToken: string,
+): Promise<Error | undefined> {
+  let logout: Response;
+  try {
+    logout = await boundedLiveFetch(`${origin}/admin/api/v1/auth/logout`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "x-ghcg-csrf": csrfToken,
+        origin,
+      },
+    });
+  } catch (_error: unknown) {
+    return new Error("managed Admin logout failed: network_error");
+  }
+  return logout.ok
+    ? undefined
+    : new Error(`managed Admin logout failed: ${safeAdminErrorCode(await safeJson(logout), logout.status)}`);
+}
+
 function safeAdminErrorCode(body: unknown, status: number): string {
   const code = nestedString(body, ["error", "code"]);
   return code !== undefined && /^[a-z_]{1,64}$/u.test(code)
@@ -658,15 +733,19 @@ function nestedString(value: unknown, pathParts: readonly string[]): string | un
 async function nextWithTimeout<T>(
   iterator: AsyncIterator<T>,
   timeoutMs: number,
-): Promise<{ readonly kind: "value" } | { readonly kind: "terminal" }> {
+): Promise<
+  | { readonly kind: "value" }
+  | { readonly kind: "done" }
+  | { readonly kind: "rejected"; readonly error: unknown }
+> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       Promise.resolve(iterator.next()).then(
         (result) => result.done === true
-          ? { kind: "terminal" as const }
+          ? { kind: "done" as const }
           : { kind: "value" as const },
-        () => ({ kind: "terminal" as const }),
+        (error: unknown) => ({ kind: "rejected" as const, error }),
       ),
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(

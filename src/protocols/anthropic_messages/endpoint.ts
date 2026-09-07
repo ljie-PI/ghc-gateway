@@ -28,6 +28,7 @@ import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js"
 import type { TelemetryRecorder } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentAnthropicFailure } from "./failure_presenter.js";
+import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
 import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
@@ -139,17 +140,23 @@ async function executeAnthropicMessages(
   }
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
   if (plan.kind === "native") {
-    return await executeNativeMessages(
-      copilot,
-      request.body,
-      resolved.upstreamModel,
-      stream,
-      betaFeatures,
-      scope,
-      usage,
+    return withUpstreamProtocol(
+      await executeNativeMessages(
+        copilot,
+        request.body,
+        resolved.upstreamModel,
+        stream,
+        betaFeatures,
+        scope,
+        usage,
+      ),
+      "messages",
     );
   }
-  return await executeConvertedMessages(dependencies, copilot, plan, scope, usage);
+  return withUpstreamProtocol(
+    await executeConvertedMessages(dependencies, copilot, plan, scope, usage),
+    plan.target,
+  );
 }
 
 async function executeNativeMessages(

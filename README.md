@@ -126,6 +126,9 @@ All routes use the same loopback listener. Inference routes do not require a sep
 
 No unversioned, compact, trailing-slash, or legacy route aliases are registered.
 The retired Ollama-compatible routes `/api/chat`, `/api/tags`, and `/api/version` are not registered.
+Successful inference responses include the content-free
+`x-ghcg-upstream-protocol: chat|messages|responses` header so operators can verify the
+captured native or converted route without exposing credentials or request/response content.
 
 ### Protocol Routing And Conversion
 
@@ -337,7 +340,7 @@ For each prefix, set exactly one selection:
 - `<PREFIX>_UNSUPPORTED_MODEL=<model-id>` plus `<PREFIX>_UNSUPPORTED_STATUS=403|404` performs one explicit entitlement check for that matrix cell and records the rejection.
 - `<PREFIX>_UNAVAILABLE=catalog_not_declared` records a gap only when the current capability catalog contains no enabled model that would select that route.
 
-`GHC_GATEWAY_LIVE_BASE_URL` defaults to `http://127.0.0.1:31400`. Set `GHC_GATEWAY_LIVE_DATA_DIR` when the managed daemon uses a non-default data directory. The suite verifies process identity and the selected account through the freshly built CLI, obtains one one-use Admin bootstrap entirely in memory to read the current capability declarations, logs that Admin Session out, and never prints its token, cookie, or CSRF value. It never changes the default account, disables SDK retries, runs sequentially, uses a 30-second request timeout and 64-token output budgets, and permits at most 12 inference calls plus two SDK model-list requests. It emits content-free JSON route statuses and an exact call ledger.
+`GHC_GATEWAY_LIVE_BASE_URL` defaults to `http://127.0.0.1:31400`. Set `GHC_GATEWAY_LIVE_DATA_DIR` when the managed daemon uses a non-default data directory. The suite verifies process identity and the selected account through the freshly built CLI, obtains one one-use Admin bootstrap entirely in memory to read the current capability declarations, and requires bounded successful logout without printing its token, cookie, or CSRF value. It never changes the default account, disables SDK retries, runs sequentially, uses 30-second request and Admin-operation timeouts with 64-token output budgets, and permits at most 12 inference calls plus two SDK model-list requests. Each successful inference must return the expected `x-ghcg-upstream-protocol` evidence header. The suite emits content-free JSON route statuses and an exact call ledger.
 
 Example invocation after all route variables are set:
 

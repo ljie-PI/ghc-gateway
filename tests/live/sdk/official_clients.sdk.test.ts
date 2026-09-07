@@ -3,7 +3,7 @@ import type {
   MessageCreateParamsNonStreaming,
   MessageCreateParamsStreaming,
 } from "@anthropic-ai/sdk/resources/messages/messages";
-import OpenAI from "openai";
+import OpenAI, { APIUserAbortError } from "openai";
 import type {
   ChatCompletionCreateParamsNonStreaming,
 } from "openai/resources/chat/completions/completions";
@@ -291,13 +291,13 @@ describe("guarded live official SDK protocol matrix", () => {
       assertPlan("m_to_m", model, request);
       const stream = await anthropic.messages.create(request);
       let eventCount = 0;
-      let sawMessageStop = false;
+      let lastEventType: string | undefined;
       for await (const event of stream) {
         eventCount += 1;
-        sawMessageStop ||= event.type === "message_stop";
+        lastEventType = event.type;
       }
       expect(eventCount).toBeGreaterThan(0);
-      expect(sawMessageStop).toBe(true);
+      expect(lastEventType).toBe("message_stop");
     });
   });
 
@@ -403,16 +403,16 @@ describe("guarded live official SDK protocol matrix", () => {
       const stream = await openai.responses.create(request);
       let responseId: string | undefined;
       let eventCount = 0;
-      let sawCompleted = false;
+      let lastEventType: string | undefined;
       for await (const event of stream) {
         eventCount += 1;
+        lastEventType = event.type;
         if (event.type === "response.completed") {
-          sawCompleted = true;
           responseId = event.response.id;
         }
       }
       expect(eventCount).toBeGreaterThan(0);
-      expect(sawCompleted).toBe(true);
+      expect(lastEventType).toBe("response.completed");
       if (responseId === undefined || responseId.length === 0) {
         throw new Error("native Responses stream omitted its response ID");
       }
@@ -426,7 +426,11 @@ describe("guarded live official SDK protocol matrix", () => {
       };
       assertPlan("r_to_r", model, cancellationRequest);
       const cancelled = await openai.responses.create(cancellationRequest);
-      await expectCancelledStream(cancelled, () => cancelled.controller.abort());
+      await expectCancelledStream(
+        cancelled,
+        () => cancelled.controller.abort(),
+        (error) => error instanceof APIUserAbortError,
+      );
       expect(cancelled.controller.signal.aborted).toBe(true);
     });
   });

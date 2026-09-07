@@ -39,6 +39,7 @@ describe("protocol conversion matrix", () => {
       try {
         const response = await harness.gw.fetch(protocolRequest(source, model));
         expect(response.status).toBe(200);
+        expect(response.headers.get("x-ghcg-upstream-protocol")).toBe(expectedKind);
         expect(await response.text()).toContain("ok");
         expect(harness.backend.captured.map((entry) => entry.kind)).toEqual([expectedKind]);
       } finally {

@@ -114,7 +114,10 @@ describe("live SDK acceptance harness", () => {
   });
 
   it("counts only explicit loopback inference calls and enforces the hard budget", async () => {
-    const remote = vi.fn(async () => new Response("{}", { status: 200 }));
+    const remote = vi.fn(async () => new Response("{}", {
+      status: 200,
+      headers: { "x-ghcg-upstream-protocol": "responses" },
+    }));
     vi.stubGlobal("fetch", remote);
     const ledger = new LiveCallLedger(1);
     const guarded = ledger.fetch("http://127.0.0.1:31400");
@@ -128,12 +131,26 @@ describe("live SDK acceptance harness", () => {
     })).rejects.toThrow(/call budget exceeded/u);
     await expect(guarded("https://example.com/v1/models")).rejects.toThrow(/outside/u);
     expect(ledger.snapshot()).toMatchObject({
-      inferenceCalls: 2,
+      inferenceCalls: 1,
       catalogCalls: 1,
-      byRoute: { r_to_r: 2 },
+      byRoute: { r_to_r: 1 },
+      observedUpstream: { r_to_r: "responses" },
       maxInferenceCalls: 1,
     });
     expect(remote).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a successful response that does not prove the expected upstream protocol", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", {
+      status: 200,
+      headers: { "x-ghcg-upstream-protocol": "chat" },
+    })));
+    const ledger = new LiveCallLedger(1);
+    const guarded = ledger.fetch("http://127.0.0.1:31400");
+    await expect(ledger.run("r_to_r", async () => {
+      await guarded("http://127.0.0.1:31400/v1/responses", { method: "POST" });
+    })).rejects.toThrow(/prove its expected upstream protocol/u);
+    expect(ledger.snapshot().observedUpstream).toEqual({});
   });
 
   it("waits past an in-flight value until an aborted stream reaches a terminal state", async () => {
@@ -158,10 +175,24 @@ describe("live SDK acceptance harness", () => {
     };
     await expectCancelledStream(stream, () => {
       aborted = true;
-    });
+    }, () => false);
     expect(aborted).toBe(true);
     expect(nextCount).toBe(2);
     expect(returned).toBe(true);
+  });
+
+  it("rejects a non-cancellation stream failure after abort", async () => {
+    const stream: AsyncIterable<number> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<number>> {
+            throw new Error("upstream failed");
+          },
+        };
+      },
+    };
+    await expect(expectCancelledStream(stream, () => undefined, () => false))
+      .rejects.toThrow(/non-cancellation failure/u);
   });
 });
 

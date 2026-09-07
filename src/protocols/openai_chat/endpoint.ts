@@ -44,6 +44,7 @@ import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk } from "./wire.js";
 import { presentOpenAiChatFailure } from "./failure_presenter.js";
+import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
 import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
@@ -117,7 +118,10 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
       });
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       if (plan.kind === "converted") {
-        return await executeConvertedChat(dependencies, copilot, plan, scope, usage);
+        return withUpstreamProtocol(
+          await executeConvertedChat(dependencies, copilot, plan, scope, usage),
+          plan.target,
+        );
       }
       const prepared = prepareOpenAiChatRequest(decoded, resolved);
 
@@ -137,7 +141,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
           throw new GatewayFailureError({ kind: "invalid_upstream_response" });
         }
 
-        return measure(dependencies.performanceObserver, "buffered", () => {
+        return withUpstreamProtocol(measure(dependencies.performanceObserver, "buffered", () => {
           const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
           usage.success(usageNumbers(usageObservationFromPayload(payload)));
           return new Response(Buffer.from(serializeWireJson(payload)), {
@@ -148,7 +152,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
               "x-request-id": scope.requestId,
             },
           });
-        });
+        }), "chat");
       }
 
       const upstreamController = new AbortController();
@@ -200,7 +204,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         throw upstreamStreamEventFailure();
       }
 
-      return openAiChatStreamResponse({
+      return withUpstreamProtocol(openAiChatStreamResponse({
         status: upstream.status,
         signal: scope.signal,
         requestId: scope.requestId,
@@ -212,7 +216,7 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         releaseUpstreamAbort: () => scope.signal.removeEventListener("abort", abortUpstream),
         dependencies,
         usage,
-      });
+      }), "chat");
     },
   };
 }

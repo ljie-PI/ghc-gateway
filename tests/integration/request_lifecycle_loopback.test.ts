@@ -39,6 +39,20 @@ describe("request lifecycle over loopback", () => {
       expect(response.headers.get("content-length")).toBe(String(Buffer.byteLength(expectedBody)));
       expect(await response.text()).toBe(expectedBody);
     }
+
+    const notReadyPort = await availablePort();
+    const notReadyGateway = await createGateway({
+      startup: parseStartupConfig(["--port", String(notReadyPort)], {}, { homedir: "Q:\\ghc-gateway-loopback" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [], { isReady: () => false });
+    closing.push(notReadyGateway);
+    await notReadyGateway.listen();
+    await (await fetch(`http://127.0.0.1:${notReadyPort}/healthz`)).text();
+    const notReadyBody = "{\"status\":\"not_ready\"}";
+    const notReady = await fetch(`http://127.0.0.1:${notReadyPort}/readyz`);
+    expect(notReady.status).toBe(503);
+    expect(notReady.headers.get("content-length")).toBe(String(Buffer.byteLength(notReadyBody)));
+    expect(await notReady.text()).toBe(notReadyBody);
   });
 
   it("delivers a nonempty precommit 504 when an internal deadline cancels only upstream work", async () => {
