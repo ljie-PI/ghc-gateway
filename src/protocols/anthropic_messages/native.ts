@@ -42,6 +42,10 @@ export function validatedNativeMessagesBody(bytes: Uint8Array, maxBytes: number)
     if (!isWireJsonObject(parsed)) {
       invalid();
     }
+    const types = memberValues(parsed, "type");
+    if (types.length > 1 || types[0] === "error") {
+      invalid();
+    }
     return bytes;
   } catch (error: unknown) {
     if (error instanceof GatewayFailureError) {

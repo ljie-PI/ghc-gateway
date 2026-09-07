@@ -5,7 +5,10 @@ import type {
   ConvertedStreamEmission,
   InferenceProtocol,
 } from "../../src/protocols/conversion/types.js";
-import { createNativeMessagesStreamResponse } from "../../src/protocols/anthropic_messages/native.js";
+import {
+  createNativeMessagesStreamResponse,
+  validatedNativeMessagesBody,
+} from "../../src/protocols/anthropic_messages/native.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
@@ -552,6 +555,22 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("rejects a final Chat snapshot that nulls previously observed text", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"discarded\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("holds later Responses text behind an earlier unfinished Messages tool block", async () => {
     const response = {
       id: "resp_order",
@@ -636,6 +655,156 @@ describe("shared conversion response codecs", () => {
     const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
     expect(text.indexOf("\"text\": \"FIRST\"")).toBeLessThan(text.indexOf("\"text\": \"SECOND\""));
   });
+
+  it.each(["chat", "messages"] as const)(
+    "reconciles earlier Responses message suffixes before later messages for %s",
+    async (target) => {
+      const first = {
+        id: "msg_first",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "AB", annotations: [] }],
+      };
+      const second = {
+        id: "msg_second",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "C", annotations: [] }],
+      };
+      const source = [
+        responseEvent(0, "response.output_item.added", {
+          output_index: 0,
+          item: { ...first, status: "in_progress", content: [] },
+        }),
+        responseEvent(1, "response.output_item.added", {
+          output_index: 1,
+          item: { ...second, status: "in_progress", content: [] },
+        }),
+        responseEvent(2, "response.output_text.delta", {
+          item_id: "msg_first", output_index: 0, content_index: 0, delta: "A",
+        }),
+        responseEvent(3, "response.output_text.delta", {
+          item_id: "msg_second", output_index: 1, content_index: 0, delta: "C",
+        }),
+        responseEvent(4, "response.completed", {
+          response: {
+            id: "resp_suffix_order",
+            object: "response",
+            status: "completed",
+            output: [first, second],
+            usage: { input_tokens: 1, output_tokens: 3, total_tokens: 4 },
+          },
+        }),
+      ].join("");
+      const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
+      const firstPosition = target === "chat"
+        ? text.indexOf("\"content\":\"AB\"")
+        : text.indexOf("\"text\": \"AB\"");
+      const secondPosition = target === "chat"
+        ? text.indexOf("\"content\":\"C\"")
+        : text.indexOf("\"text\": \"C\"");
+      expect(firstPosition).toBeGreaterThanOrEqual(0);
+      expect(secondPosition).toBeGreaterThan(firstPosition);
+    },
+  );
+
+  it.each(["chat", "messages"] as const)(
+    "preserves Responses content-part order when a later part streams first for %s",
+    async (target) => {
+      const message = {
+        id: "msg_parts",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "FIRST", annotations: [] },
+          { type: "output_text", text: "SECOND", annotations: [] },
+        ],
+      };
+      const source = [
+        responseEvent(0, "response.output_item.added", {
+          output_index: 0,
+          item: { ...message, status: "in_progress", content: [] },
+        }),
+        responseEvent(1, "response.content_part.added", {
+          item_id: "msg_parts",
+          output_index: 0,
+          content_index: 0,
+          part: { type: "output_text", text: "", annotations: [] },
+        }),
+        responseEvent(2, "response.content_part.added", {
+          item_id: "msg_parts",
+          output_index: 0,
+          content_index: 1,
+          part: { type: "output_text", text: "", annotations: [] },
+        }),
+        responseEvent(3, "response.output_text.delta", {
+          item_id: "msg_parts", output_index: 0, content_index: 1, delta: "SECOND",
+        }),
+        responseEvent(4, "response.completed", {
+          response: {
+            id: "resp_parts",
+            object: "response",
+            status: "completed",
+            output: [message],
+            usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+          },
+        }),
+      ].join("");
+      const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
+      expect(text.indexOf("FIRST")).toBeLessThan(text.indexOf("SECOND"));
+    },
+  );
+
+  it.each(["arguments", "call_id", "name"] as const)(
+    "rejects null final Responses tool %s after valid stream metadata",
+    async (field) => {
+      const finalTool: Record<string, unknown> = {
+        id: "fc_1",
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+        status: "completed",
+      };
+      finalTool[field] = null;
+      const source = [
+        responseEvent(0, "response.output_item.added", {
+          output_index: 0,
+          item: {
+            id: "fc_1",
+            type: "function_call",
+            call_id: "call_1",
+            name: "lookup",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        responseEvent(1, "response.function_call_arguments.done", {
+          item_id: "fc_1", output_index: 0, name: "lookup", arguments: "{}",
+        }),
+        responseEvent(2, "response.completed", {
+          response: {
+            id: "resp_tool_null",
+            object: "response",
+            status: "completed",
+            output: [finalTool],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        }),
+      ].join("");
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)),
+          streamContext("responses", "chat"),
+        )) {
+          void _emission;
+        }
+      }).rejects.toThrow();
+    },
+  );
 
   it("preserves Chat text after a buffered tool and emits refusal text once", async () => {
     const source = [
@@ -1273,6 +1442,7 @@ describe("shared conversion response codecs", () => {
       },
       onTerminal: (value) => result.push(value),
     });
+
     const text = await response.text();
     const expected = [
       messageEvent("message_start", {
@@ -1301,6 +1471,13 @@ describe("shared conversion response codecs", () => {
       kind: "success",
       usage: { inputTokens: 6, outputTokens: 1, cacheReadTokens: 2 },
     }]);
+  });
+
+  it.each([
+    "{\"type\":\"error\",\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
+    "{\"type\":\"message\",\"type\":\"error\",\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
+  ])("rejects native buffered Messages error envelopes before delivery", (payload) => {
+    expect(() => validatedNativeMessagesBody(encoder.encode(payload), 1_048_576)).toThrow();
   });
 
   it("bounds native Messages pre-semantic buffering", async () => {

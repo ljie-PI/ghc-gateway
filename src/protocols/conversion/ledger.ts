@@ -127,7 +127,7 @@ export class SemanticItemLedger {
         if (message === undefined) {
           invalid();
         }
-        const entries = message.partKeys.flatMap((key) => {
+        const entries = [...message.partKeys].sort(compareMessagePartKeys).flatMap((key) => {
           const part = this.messageParts.get(key);
           if (part === undefined) {
             invalid();
@@ -208,6 +208,15 @@ export class SemanticItemLedger {
     }
     return part;
   }
+}
+
+function compareMessagePartKeys(left: string, right: string): number {
+  const leftMatch = /^responses:\d+:(\d+):/u.exec(left);
+  const rightMatch = /^responses:\d+:(\d+):/u.exec(right);
+  if (leftMatch?.[1] === undefined || rightMatch?.[1] === undefined) {
+    return 0;
+  }
+  return Number.parseInt(leftMatch[1], 10) - Number.parseInt(rightMatch[1], 10);
 }
 
 function validateArguments(value: string): WireJsonObject {

@@ -220,6 +220,9 @@ async function* decodeChatStream(
       if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
         invalid();
       }
+      if ((contentValue === undefined || contentValue === null) && chatText.length > 0) {
+        invalid();
+      }
       if (typeof contentValue === "string") {
         if (!contentValue.startsWith(chatText)) {
           invalid();
@@ -242,6 +245,9 @@ async function* decodeChatStream(
       }
       const refusalValue = singleMember(finalMessage, "refusal");
       if (refusalValue !== undefined && refusalValue !== null && typeof refusalValue !== "string") {
+        invalid();
+      }
+      if ((refusalValue === undefined || refusalValue === null) && chatRefusal.length > 0) {
         invalid();
       }
       if (typeof refusalValue === "string") {
@@ -949,40 +955,36 @@ function* finalItemEvents(
     return;
   }
   if (type === "function_call") {
+    const finalItemId = requiredStreamString(item, "id");
+    const finalCallId = requiredStreamString(item, "call_id");
+    const finalName = requiredStreamString(item, "name");
+    const finalArguments = requiredStreamString(item, "arguments", true);
     let identity = toolsByIndex.get(outputIndex);
     if (identity === undefined) {
-      const callId = stringMember(item, "call_id");
-      const name = stringMember(item, "name");
-      if (callId === undefined || name === undefined) {
-        invalid();
-      }
       identity = {
         key: `responses:${outputIndex}`,
-        itemId: stringMember(item, "id"),
-        callId,
-        name,
+        itemId: finalItemId,
+        callId: finalCallId,
+        name: finalName,
       };
       toolsByIndex.set(outputIndex, identity);
       yield {
         kind: "tool_start",
         key: identity.key,
         itemId: identity.itemId,
-        callId,
-        name,
+        callId: finalCallId,
+        name: finalName,
       };
     } else {
-      const finalCallId = stringMember(item, "call_id");
-      const finalName = stringMember(item, "name");
-      const finalItemId = stringMember(item, "id");
       if (
-        (finalCallId !== undefined && finalCallId !== identity.callId)
-        || (finalName !== undefined && finalName !== identity.name)
-        || (identity.itemId !== undefined && finalItemId !== undefined && finalItemId !== identity.itemId)
+        finalCallId !== identity.callId
+        || finalName !== identity.name
+        || (identity.itemId !== undefined && finalItemId !== identity.itemId)
       ) {
         invalid();
       }
     }
-    yield { kind: "tool_done", key: identity.key, argumentsJson: stringMember(item, "arguments") };
+    yield { kind: "tool_done", key: identity.key, argumentsJson: finalArguments };
     return;
   }
 
@@ -1028,6 +1030,18 @@ function parseEventObject(data: string, eventLimitBytes: number): WireJsonObject
       cause: error,
     });
   }
+}
+
+function requiredStreamString(object: WireJsonObject, key: string, allowEmpty = false): string {
+  const values = memberValues(object, key);
+  if (
+    values.length !== 1
+    || typeof values[0] !== "string"
+    || (!allowEmpty && values[0].length === 0)
+  ) {
+    invalid();
+  }
+  return values[0];
 }
 
 function chatFinish(value: WireJson): SemanticResponse["finishReason"] {

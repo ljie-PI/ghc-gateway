@@ -111,6 +111,21 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("rejects duplicate fields in flat namespace children before inference", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(rawRequest(
+        "/v1/responses",
+        "{\"model\":\"native-chat\",\"input\":\"render\",\"tools\":[{\"type\":\"namespace\",\"name\":\"ns\",\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"},\"strict\":false,\"strict\":true}]}]}",
+      ));
+      expect(response.status).toBe(400);
+      await response.text();
+      expect(harness.backend.captured).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("round-trips a buffered custom tool through scoped Responses history", async () => {
     const harness = await matrixGateway();
     try {

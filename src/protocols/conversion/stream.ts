@@ -164,19 +164,29 @@ function createEmitter(context: Readonly<StreamConversionContext>): StreamEmitte
 class ChatEmitter implements StreamEmitter {
   private readonly id: string;
   private readonly created: number;
+  private readonly bufferResponses: boolean;
   private roleSent = false;
   private readonly toolIndexes = new Map<string, number>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `chatcmpl_${context.createUuid()}`;
     this.created = context.nowUnixSeconds();
+    this.bufferResponses = context.source === "responses";
   }
 
-  *start(): Iterable<ConvertedStreamEmission> {}
+  *start(): Iterable<ConvertedStreamEmission> {
+    if (this.bufferResponses) {
+      yield this.chunk(wireObject([["role", "assistant"]]));
+      this.roleSent = true;
+    }
+  }
 
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
   *textDelta(_key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
+    if (this.bufferResponses) {
+      return;
+    }
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
       ["content", delta],
@@ -185,6 +195,9 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *refusalDelta(_key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
+    if (this.bufferResponses) {
+      return;
+    }
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
       ["refusal", delta],
@@ -193,6 +206,9 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *toolStart(key: string, callId: string, name: string): Iterable<ConvertedStreamEmission> {
+    if (this.bufferResponses) {
+      return;
+    }
     const index = this.toolIndexes.size;
     this.toolIndexes.set(key, index);
     yield this.chunk(wireObject([
@@ -208,6 +224,9 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    if (this.bufferResponses) {
+      return;
+    }
     const index = this.toolIndexes.get(key);
     if (index === undefined) {
       invalid();
@@ -225,7 +244,11 @@ class ChatEmitter implements StreamEmitter {
   *finish(
     terminal: Extract<SemanticStreamEvent, { readonly kind: "terminal" }>,
     usage: Readonly<SemanticUsage>,
+    items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
+    if (this.bufferResponses) {
+      yield* this.emitBufferedItems(items);
+    }
     if (!this.roleSent) {
       yield this.chunk(wireObject([["role", "assistant"], ["content", ""]]));
       this.roleSent = true;
@@ -243,6 +266,29 @@ class ChatEmitter implements StreamEmitter {
       ])),
     };
     yield { kind: "wire", bytes: encodeOpenAiChatDone() };
+  }
+
+  private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
+    for (const item of items) {
+      if (item.type === "message") {
+        for (const part of item.content) {
+          yield this.chunk(wireObject([
+            [part.type === "refusal" ? "refusal" : "content", part.text],
+          ]));
+        }
+        continue;
+      }
+      const index = this.toolIndexes.size;
+      this.toolIndexes.set(item.key ?? `tool:${index}`, index);
+      yield this.chunk(wireObject([
+        ["tool_calls", wireArray([wireObject([
+          ["index", wireNumber(index)],
+          ["id", item.callId],
+          ["type", "function"],
+          ["function", wireObject([["name", item.name], ["arguments", item.argumentsJson]])],
+        ])])],
+      ]));
+    }
   }
 
   private chunk(delta: ReturnType<typeof wireObject>, finish?: string): ConvertedStreamEmission {
@@ -311,7 +357,7 @@ class MessagesEmitter implements StreamEmitter {
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const messageKey = orderKey ?? key;
     this.firstMessageKey ??= messageKey;
-    if (this.bufferAfterTool || messageKey !== this.firstMessageKey) {
+    if (this.context.source === "responses" || this.bufferAfterTool || messageKey !== this.firstMessageKey) {
       return;
     }
     yield* this.emitLiveText(key, delta);
@@ -321,7 +367,7 @@ class MessagesEmitter implements StreamEmitter {
   *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const messageKey = orderKey ?? key;
     this.firstMessageKey ??= messageKey;
-    if (this.bufferAfterTool || messageKey !== this.firstMessageKey) {
+    if (this.context.source === "responses" || this.bufferAfterTool || messageKey !== this.firstMessageKey) {
       return;
     }
     yield* this.emitLiveText(`refusal:${key}`, delta);

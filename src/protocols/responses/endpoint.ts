@@ -1094,6 +1094,9 @@ function assertExtendedToolName(tool: WireJsonObject): void {
 }
 
 function validateExtendedCustomTool(tool: WireJsonObject): string {
+  if (duplicateMemberNames(tool).length > 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
   assertExtendedToolKeys(tool, new Set(["type", "name", "description", "format"]));
   assertExtendedToolName(tool);
   const name = memberValue(tool, "name") as string;
@@ -1116,6 +1119,9 @@ function validateExtendedCustomTool(tool: WireJsonObject): string {
 }
 
 function validateExtendedFunctionTool(tool: WireJsonObject): WireJsonObject {
+  if (duplicateMemberNames(tool).length > 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
   assertExtendedToolKeys(tool, new Set(["type", "function", "name", "description", "parameters", "strict"]));
   const nested = memberValue(tool, "function");
   const shape = isWireJsonObject(nested) ? nested : tool;
