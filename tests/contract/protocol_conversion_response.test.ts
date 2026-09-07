@@ -336,6 +336,26 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it.each([null, 123, { invalid: true }])(
+    "rejects malformed buffered Responses message status: %j",
+    (status) => {
+      expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
+        id: "resp_bad_message_status",
+        object: "response",
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [{
+          id: "msg_bad_status",
+          type: "message",
+          status,
+          role: "assistant",
+          content: [{ type: "output_text", text: "partial", annotations: [] }],
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      })), context("responses", "chat"))).toThrow();
+    },
+  );
+
   it("rejects malformed Responses arguments-done and Messages initial text snapshots", async () => {
     const responsesSource = [
       responseEvent(0, "response.output_item.added", {
@@ -1025,6 +1045,49 @@ describe("shared conversion response codecs", () => {
         void _emission;
       }
     }).rejects.toThrow();
+  });
+
+  it("accepts equivalent populated Messages tool input with reordered streamed object keys", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_tool_reordered",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "call_1",
+          name: "lookup",
+          input: { city: "Paris", units: "C" },
+        },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{\"units\":\"C\",\"city\":\"Paris\"}" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const text = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
+    expect(text).toContain("{\\\"city\\\":\\\"Paris\\\",\\\"units\\\":\\\"C\\\"}");
+    expect(text).toContain("response.completed");
   });
 
   it("rejects conflicting final arguments that were queued behind an earlier tool index", async () => {

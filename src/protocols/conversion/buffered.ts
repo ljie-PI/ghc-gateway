@@ -286,7 +286,7 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
     }
     const type = stringMember(value, "type");
     if (type === "message") {
-      const itemStatus = stringMember(value, "status");
+      const itemStatus = optionalItemStatus(value);
       if (
         (itemStatus !== undefined
           && itemStatus !== "completed"
@@ -334,7 +334,7 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
       if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0 || argumentsJson === undefined) {
         upstreamInvalid();
       }
-      const itemStatus = stringMember(value, "status");
+      const itemStatus = optionalItemStatus(value);
       if (
         itemStatus !== undefined
         && itemStatus !== "completed"
@@ -699,6 +699,20 @@ function stringMember(object: WireJsonObject | undefined, key: string): string |
   }
   const value = singleMember(object, key);
   return typeof value === "string" ? value : undefined;
+}
+
+function optionalItemStatus(object: WireJsonObject): string | undefined {
+  const value = singleMember(object, "status");
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    typeof value !== "string"
+    || (value !== "completed" && value !== "incomplete" && value !== "in_progress")
+  ) {
+    upstreamInvalid();
+  }
+  return value;
 }
 
 function stringOrNullMember(object: WireJsonObject, key: string): string | null | undefined {

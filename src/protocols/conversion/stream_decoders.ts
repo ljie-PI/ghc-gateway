@@ -2,6 +2,7 @@ import { parseChatSse } from "../../copilot/chat_sse.js";
 import { upstreamStreamEventFailure } from "../../copilot/failures.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import {
+  duplicateMemberNames,
   isWireJsonArray,
   isWireJsonNumber,
   isWireJsonObject,
@@ -1292,11 +1293,38 @@ function sameToolArguments(left: string, right: string): boolean {
     const rightValue = parseWireJson(rightBytes, { maxBytes: Math.max(1, rightBytes.byteLength), maxDepth: 32 });
     return isWireJsonObject(leftValue)
       && isWireJsonObject(rightValue)
-      && new TextDecoder().decode(serializeWireJson(leftValue))
-        === new TextDecoder().decode(serializeWireJson(rightValue));
+      && equalWireJson(leftValue, rightValue);
   } catch {
     return false;
   }
+}
+
+function equalWireJson(left: WireJson, right: WireJson): boolean {
+  if (isWireJsonNumber(left) || isWireJsonNumber(right)) {
+    return isWireJsonNumber(left) && isWireJsonNumber(right) && left.lexeme === right.lexeme;
+  }
+  if (isWireJsonArray(left) || isWireJsonArray(right)) {
+    return isWireJsonArray(left)
+      && isWireJsonArray(right)
+      && left.items.length === right.items.length
+      && left.items.every((item, index) => equalWireJson(item, right.items[index] as WireJson));
+  }
+  if (isWireJsonObject(left) || isWireJsonObject(right)) {
+    if (
+      !isWireJsonObject(left)
+      || !isWireJsonObject(right)
+      || left.members.length !== right.members.length
+      || duplicateMemberNames(left).length > 0
+      || duplicateMemberNames(right).length > 0
+    ) {
+      return false;
+    }
+    return left.members.every((member) => {
+      const matches = right.members.filter((candidate) => candidate.key === member.key);
+      return matches.length === 1 && equalWireJson(member.value, matches[0]!.value);
+    });
+  }
+  return left === right;
 }
 
 function* finalResponseEvents(
