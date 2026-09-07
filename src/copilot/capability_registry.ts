@@ -227,6 +227,12 @@ export class ModelCapabilityRegistry {
       live.chatOutputTokenField,
       fallback.chatOutputTokenField,
     );
+    const supportedParameters = effectiveField(
+      undefined,
+      live.supportedParameters,
+      fallback.supportedParameters,
+      sameStrings,
+    );
     const defaultOutputTokens = effectiveField(
       override?.defaultOutputTokens,
       live.defaultOutputTokens,
@@ -253,7 +259,7 @@ export class ModelCapabilityRegistry {
         defaultOutputTokens,
         maxOutputTokens.value,
       ),
-      profile: { chatOutputTokenField },
+      profile: { chatOutputTokenField, supportedParameters },
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
@@ -282,6 +288,12 @@ export function capabilitySnapshotFromCatalog(
       model.capabilities.chatOutputTokenField,
       UNKNOWN_DECLARATIONS.chatOutputTokenField,
     );
+    const supportedParameters = effectiveField(
+      undefined,
+      model.capabilities.supportedParameters,
+      UNKNOWN_DECLARATIONS.supportedParameters,
+      sameStrings,
+    );
     return deepFreeze({
       accountId: account.accountId,
       modelId: model.id,
@@ -297,7 +309,7 @@ export function capabilitySnapshotFromCatalog(
       maxInputTokens,
       maxOutputTokens,
       defaultOutputTokens: resolveDefaultOutputTokens(defaultConfiguration, maxOutputTokens.value),
-      profile: { chatOutputTokenField },
+      profile: { chatOutputTokenField, supportedParameters },
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
@@ -321,9 +333,14 @@ function deepFreeze<T>(value: T): T {
     if (!Object.isFrozen(value)) {
       Object.freeze(value);
     }
+
     for (const nested of Object.values(value as Record<string, unknown>)) {
       deepFreeze(nested);
     }
   }
   return value;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

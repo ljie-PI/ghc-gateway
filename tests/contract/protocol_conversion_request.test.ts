@@ -584,6 +584,32 @@ describe("shared conversion request codecs", () => {
     }), "target", capability(["messages"]))).toThrow();
   });
 
+  it("rejects conditional sampling and format fields when model support is unknown", () => {
+    const base = capability(["responses"]);
+    const unknown = {
+      ...base,
+      profile: {
+        ...base.profile,
+        supportedParameters: {
+          value: null,
+          source: "unknown" as const,
+          conflict: false,
+          liveState: "missing" as const,
+        },
+      },
+    };
+    expect(() => prepareConvertedRequest("chat", "responses", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 0.3,
+    }), "target", unknown)).toThrow();
+    expect(() => prepareConvertedRequest("chat", "responses", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: { type: "json_object" },
+    }), "target", unknown)).toThrow();
+  });
+
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {
     const converted = prepareConvertedRequest("responses", "chat", body({
       model: "source",
@@ -1337,6 +1363,18 @@ function capability(
     },
     profile: {
       chatOutputTokenField: { value: tokenField, source: "live", conflict: false, liveState: "value" },
+      supportedParameters: {
+        value: [
+          "temperature",
+          "top_p",
+          "response_format",
+          "text.format",
+          "output_config.format",
+        ],
+        source: "live",
+        conflict: false,
+        liveState: "value",
+      },
     },
     revision: {
       credentialGeneration: 0,

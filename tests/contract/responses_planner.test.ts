@@ -69,6 +69,7 @@ describe("Responses planner", () => {
       },
       profile: {
         chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+        supportedParameters: { value: [], source: "unknown", conflict: false, liveState: "missing" },
       },
       revision: { credentialGeneration: 1, catalogGeneration: 1, overrideRevision: 0, builtinRevision: null },
     };

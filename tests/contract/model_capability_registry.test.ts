@@ -38,6 +38,7 @@ describe("model capability registry", () => {
           vendor: "test",
           model_picker_enabled: true,
           supported_endpoints: ["/responses", "/chat/completions"],
+          supported_parameters: ["top_p", "temperature", "response_format"],
           capabilities: {
             limits: {
               max_prompt_tokens: 200_000,
@@ -75,6 +76,12 @@ describe("model capability registry", () => {
       protocols: { value: ["chat", "responses"], source: "live" },
       maxInputTokens: { value: 200_000, source: "live" },
       maxOutputTokens: { value: 32_000, source: "live" },
+      profile: {
+        supportedParameters: {
+          value: ["response_format", "temperature", "top_p"],
+          source: "live",
+        },
+      },
     });
     expect(capability(snapshot, "live-conflict").protocols).toMatchObject({
       value: null,

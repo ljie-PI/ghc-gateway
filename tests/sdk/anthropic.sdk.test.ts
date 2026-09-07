@@ -33,6 +33,7 @@ const CHAT_WEATHER_TOOL = {
       properties: { city: { type: "string" } },
       required: ["city"],
     },
+    strict: false,
   },
 };
 

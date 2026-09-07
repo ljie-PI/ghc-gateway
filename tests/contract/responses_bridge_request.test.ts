@@ -323,6 +323,7 @@ describe("Responses bridge request conversion", () => {
       },
       profile: {
         chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+        supportedParameters: { value: [], source: "unknown", conflict: false, liveState: "missing" },
       },
       revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
     };

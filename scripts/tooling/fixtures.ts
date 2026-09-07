@@ -767,6 +767,12 @@ function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveMode
         conflict: false,
         liveState: "value",
       },
+      supportedParameters: {
+        value: ["temperature", "top_p", "response_format", "text.format", "output_config.format"],
+        source: "live",
+        conflict: false,
+        liveState: "value",
+      },
     },
     revision: {
       credentialGeneration: 0,
@@ -971,6 +977,12 @@ function fixtureCapability(
     },
     profile: {
       chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+      supportedParameters: {
+        value: ["temperature", "top_p", "response_format", "text.format", "output_config.format"],
+        source: "builtin",
+        conflict: false,
+        liveState: "missing",
+      },
     },
     revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
   };

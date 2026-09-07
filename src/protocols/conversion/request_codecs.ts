@@ -1318,6 +1318,7 @@ function encodeChatRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
+  validateConditionalTargetParameters(request, context.capability, "chat");
   const messages = encodeChatMessages(request);
   const budget = request.source === "messages"
     ? outputBudget(request.maxOutputTokens, context.capability)
@@ -1349,6 +1350,7 @@ function encodeResponsesRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
+  validateConditionalTargetParameters(request, context.capability, "responses");
   if (request.stop !== undefined) {
     unsupported("REQ-TARGET-R-STOP");
   }
@@ -1378,6 +1380,7 @@ function encodeMessagesRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
+  validateConditionalTargetParameters(request, context.capability, "messages");
   if (request.temperature !== undefined && request.temperature > 1) {
     unsupported("REQ-TARGET-M-TEMPERATURE");
   }
@@ -1416,6 +1419,31 @@ function encodeMessagesRequest(
     ["metadata", request.metadata],
   ]);
   return encodedRequest(request, body, targetDegradations);
+}
+
+function validateConditionalTargetParameters(
+  request: Readonly<SemanticRequest>,
+  capability: Readonly<EffectiveModelCapabilitySnapshot>,
+  target: InferenceProtocol,
+): void {
+  const supported = capability.profile.supportedParameters.value;
+  if (request.temperature !== undefined && supported?.includes("temperature") !== true) {
+    unsupported("REQ-TARGET-TEMPERATURE-CAPABILITY");
+  }
+  if (request.topP !== undefined && supported?.includes("top_p") !== true) {
+    unsupported("REQ-TARGET-TOP-P-CAPABILITY");
+  }
+  if (request.outputFormat === undefined) {
+    return;
+  }
+  const formatKeys = target === "chat"
+    ? ["response_format"]
+    : target === "responses"
+      ? ["text.format", "response_format"]
+      : ["output_config.format", "output_config"];
+  if (!formatKeys.some((key) => supported?.includes(key) === true)) {
+    unsupported("REQ-TARGET-FORMAT-CAPABILITY");
+  }
 }
 
 function splitMessagesInstructions(request: Readonly<SemanticRequest>): {
