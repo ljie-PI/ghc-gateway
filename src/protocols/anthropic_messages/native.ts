@@ -43,7 +43,12 @@ export function validatedNativeMessagesBody(bytes: Uint8Array, maxBytes: number)
       invalid();
     }
     const types = memberValues(parsed, "type");
-    if (types.length > 1 || types[0] === "error") {
+    if (
+      types.length !== 1
+      || typeof types[0] !== "string"
+      || types[0] === "error"
+      || memberValues(parsed, "error").length > 0
+    ) {
       invalid();
     }
     return bytes;
@@ -318,10 +323,14 @@ class NativeMessagesObserver {
       invalid();
     }
     const types = memberValues(payload, "type");
-    if (types.length > 1) {
+    if (
+      types.length !== 1
+      || typeof types[0] !== "string"
+      || memberValues(payload, "error").length > 0
+    ) {
       invalid();
     }
-    const type = typeof types[0] === "string" ? types[0] : undefined;
+    const type = types[0];
     if (type === "error") {
       this.semantic = true;
       throw new GatewayFailureError({

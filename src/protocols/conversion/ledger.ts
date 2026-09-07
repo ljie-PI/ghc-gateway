@@ -20,6 +20,8 @@ interface MessagePartState {
   readonly groupKey: string;
   text: string;
   refusal: string;
+  textSeen: boolean;
+  refusalSeen: boolean;
 }
 
 export class SemanticItemLedger {
@@ -39,13 +41,17 @@ export class SemanticItemLedger {
   appendText(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
     this.message(orderKey);
-    this.messagePart(key, orderKey).text += delta;
+    const part = this.messagePart(key, orderKey);
+    part.textSeen = true;
+    part.text += delta;
   }
 
   appendRefusal(key: string, delta: string, orderKey = key): void {
     this.reserve(delta);
     this.message(orderKey);
-    this.messagePart(key, orderKey).refusal += delta;
+    const part = this.messagePart(key, orderKey);
+    part.refusalSeen = true;
+    part.refusal += delta;
   }
 
   startTool(input: {
@@ -133,8 +139,8 @@ export class SemanticItemLedger {
             invalid();
           }
           return [
-            ...(part.text.length === 0 ? [] : [{ key, part: { type: "text", text: part.text } as const }]),
-            ...(part.refusal.length === 0 ? [] : [{ key, part: { type: "refusal", text: part.refusal } as const }]),
+            ...(!part.textSeen ? [] : [{ key, part: { type: "text", text: part.text } as const }]),
+            ...(!part.refusalSeen ? [] : [{ key, part: { type: "refusal", text: part.refusal } as const }]),
           ];
         });
         if (entries.length > 0) {
@@ -200,7 +206,7 @@ export class SemanticItemLedger {
       if (key !== groupKey) {
         this.reserve(key);
       }
-      part = { groupKey, text: "", refusal: "" };
+      part = { groupKey, text: "", refusal: "", textSeen: false, refusalSeen: false };
       this.messageParts.set(key, part);
       this.message(groupKey).partKeys.push(key);
     } else if (part.groupKey !== groupKey) {

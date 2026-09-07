@@ -801,6 +801,95 @@ describe("shared conversion response codecs", () => {
   );
 
   it.each(["chat", "messages"] as const)(
+    "advances incremental Responses delivery after a completed earlier reasoning item for %s",
+    async (target) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      async function* source(): AsyncIterable<Uint8Array> {
+        yield encoder.encode([
+          responseEvent(0, "response.output_item.added", {
+            output_index: 0,
+            item: { id: "rs_0", type: "reasoning", status: "in_progress", summary: [] },
+          }),
+          responseEvent(1, "response.output_item.done", {
+            output_index: 0,
+            item: { id: "rs_0", type: "reasoning", status: "completed", summary: [] },
+          }),
+          responseEvent(2, "response.output_item.added", {
+            output_index: 1,
+            item: {
+              id: "msg_after_reasoning",
+              type: "message",
+              status: "in_progress",
+              role: "assistant",
+              content: [],
+            },
+          }),
+          responseEvent(3, "response.output_text.delta", {
+            item_id: "msg_after_reasoning",
+            output_index: 1,
+            content_index: 0,
+            delta: "A",
+          }),
+        ].join(""));
+        await gate;
+        yield encoder.encode(responseEvent(4, "response.completed", {
+          response: {
+            id: "resp_after_reasoning",
+            object: "response",
+            status: "completed",
+            output: [
+              { id: "rs_0", type: "reasoning", status: "completed", summary: [] },
+              {
+                id: "msg_after_reasoning",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "A", annotations: [] }],
+              },
+            ],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        }));
+      }
+      const iterator = convertProtocolStream(
+        source(),
+        streamContext("responses", target),
+      )[Symbol.asyncIterator]();
+      let prefix = "";
+      try {
+        for (let index = 0; index < 10 && !prefix.includes("A"); index += 1) {
+          const next = await Promise.race([
+            iterator.next(),
+            new Promise<never>((_, reject) => setTimeout(
+              () => reject(new Error("Responses frontier did not advance after completed reasoning")),
+              500,
+            )),
+          ]);
+          if (next.done) {
+            break;
+          }
+          if (next.value.kind === "wire") {
+            prefix += decoder.decode(next.value.bytes);
+          }
+        }
+        expect(prefix).toContain("A");
+        expect(prefix).not.toContain("response.completed");
+      } finally {
+        release();
+      }
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done) {
+          break;
+        }
+      }
+    },
+  );
+
+  it.each(["chat", "messages"] as const)(
     "orders an earlier terminal-only Responses item before an observed later item for %s",
     async (target) => {
       const first = {
@@ -1059,6 +1148,52 @@ describe("shared conversion response codecs", () => {
     ].join("");
     const text = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
     expect(text).toContain("\"arguments\":\"{}\"");
+    expect(text).toContain("response.completed");
+  });
+
+  it("retains an announced empty Messages text item before a following Responses tool", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_empty_text",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const text = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
+    expect(text).toContain("\"output_index\":0,\"item\":{\"type\":\"message\"");
+    expect(text).toContain("\"output_index\":1,\"item\":{\"type\":\"function_call\"");
+    expect(text).toContain("\"content\":[{\"type\":\"output_text\",\"text\":\"\"");
     expect(text).toContain("response.completed");
   });
 
@@ -1650,6 +1785,8 @@ describe("shared conversion response codecs", () => {
   it.each([
     "{\"type\":\"error\",\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
     "{\"type\":\"message\",\"type\":\"error\",\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
+    "{\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
+    "{\"type\":null,\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
   ])("rejects native buffered Messages error envelopes before delivery", (payload) => {
     expect(() => validatedNativeMessagesBody(encoder.encode(payload), 1_048_576)).toThrow();
   });
@@ -1921,6 +2058,64 @@ describe("shared conversion response codecs", () => {
         config: defaultRuntimeConfigSnapshot(),
         attempt: createRequestAttempt({
           requestId: "req_native_unparseable",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    });
+    const reader = response.body?.getReader();
+    if (reader === undefined) {
+      throw new Error("missing response body");
+    }
+    let delivered = "";
+    await expect((async () => {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          return;
+        }
+        delivered += decoder.decode(next.value, { stream: true });
+      }
+    })()).rejects.toThrow();
+    expect(delivered).not.toContain("synthetic-sensitive-diagnostic");
+  });
+
+  it.each([
+    "{\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
+    "{\"type\":null,\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}",
+  ])("rejects untyped native Messages stream diagnostics before forwarding", async (payload) => {
+    async function* upstream(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_untyped_error",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "native",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }));
+      yield encoder.encode(`event: message_delta\ndata: ${payload}\n\n`);
+    }
+    const signal = new AbortController().signal;
+    const response = await createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: upstream(),
+        async cancel() {},
+      },
+      scope: {
+        requestId: "req_native_untyped",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native_untyped",
           protocol: "anthropic",
           abortedErrorCount: 1,
         }),

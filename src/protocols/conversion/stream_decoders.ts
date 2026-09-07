@@ -641,6 +641,11 @@ async function* decodeResponsesStream(
         orderKey: responseStreamMessageKey(payload),
         text: stringMember(payload, "text") ?? "",
       };
+      yield {
+        kind: "content_done",
+        orderKey: responseStreamMessageKey(payload),
+        contentIndex: requiredContentIndex(payload),
+      };
       continue;
     }
     if (type === "response.refusal.delta") {
@@ -664,6 +669,11 @@ async function* decodeResponsesStream(
         key: responseContentKey(payload, "refusal"),
         orderKey: responseStreamMessageKey(payload),
         refusal: stringMember(payload, "refusal") ?? "",
+      };
+      yield {
+        kind: "content_done",
+        orderKey: responseStreamMessageKey(payload),
+        contentIndex: requiredContentIndex(payload),
       };
       continue;
     }
@@ -705,6 +715,7 @@ async function* decodeResponsesStream(
       observedOutputTypes.set(outputIndex, itemType);
       observeFinalItemContent(item, outputIndex, observedContent, budget);
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
+      yield { kind: "item_done", outputIndex };
       continue;
     }
     if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
@@ -784,6 +795,13 @@ async function* decodeResponsesStream(
         };
       } else {
         invalid();
+      }
+      if (type === "response.content_part.done") {
+        yield {
+          kind: "content_done",
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
+        };
       }
       continue;
     }
@@ -912,6 +930,14 @@ function observeFinalItemContent(
 
 function requiredOutputIndex(object: WireJsonObject): number {
   const value = integerMember(object, "output_index");
+  if (value === undefined || value < 0) {
+    invalid();
+  }
+  return value;
+}
+
+function requiredContentIndex(object: WireJsonObject): number {
+  const value = integerMember(object, "content_index");
   if (value === undefined || value < 0) {
     invalid();
   }

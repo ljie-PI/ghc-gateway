@@ -136,7 +136,7 @@ describe("shared conversion request codecs", () => {
         format: {
           type: "json_schema",
           name: "answer",
-          schema: { type: "object" },
+          schema: { type: "object", properties: {}, additionalProperties: false },
         },
       },
     }), "target", capability(["responses"]));
@@ -152,7 +152,8 @@ describe("shared conversion request codecs", () => {
         format: {
           type: "json_schema",
           name: "answer",
-          schema: { type: "object" },
+          schema: { type: "object", properties: {}, additionalProperties: false },
+          strict: true,
         },
       },
     });
@@ -255,7 +256,12 @@ describe("shared conversion request codecs", () => {
       output_config: {
         format: {
           type: "json_schema",
-          schema: { type: "object", properties: { value: { type: "string" } } },
+          schema: {
+            type: "object",
+            properties: { value: { type: "string" } },
+            required: ["value"],
+            additionalProperties: false,
+          },
         },
       },
     }), "target", capability(["responses"]));
@@ -264,7 +270,12 @@ describe("shared conversion request codecs", () => {
         format: {
           type: "json_schema",
           name: "response",
-          schema: { type: "object" },
+          schema: {
+            type: "object",
+            properties: { value: { type: "string" } },
+            required: ["value"],
+            additionalProperties: false,
+          },
           strict: true,
         },
       },
@@ -281,7 +292,12 @@ describe("shared conversion request codecs", () => {
         output_config: {
           format: {
             type: "json_schema",
-            schema: { type: "object", required: ["value"], properties: { value: { type: "string" } } },
+            schema: {
+              type: "object",
+              required: ["value"],
+              properties: { value: { type: "string" } },
+              additionalProperties: false,
+            },
           },
         },
       }), "target", capability([target])).bytes);
@@ -310,6 +326,31 @@ describe("shared conversion request codecs", () => {
             type: "json_schema",
             schema: { type: "object" },
             strict: false,
+          },
+        },
+      }), "target", capability([target]))).toThrow();
+    },
+  );
+
+  it.each(["chat", "responses"] as const)(
+    "rejects a Messages schema with optional non-nullable properties for strict %s output",
+    (target) => {
+      expect(() => prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 8,
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: {
+                required_value: { type: "string" },
+                optional_value: { type: "string" },
+              },
+              required: ["required_value"],
+              additionalProperties: false,
+            },
           },
         },
       }), "target", capability([target]))).toThrow();
@@ -769,6 +810,35 @@ describe("shared conversion request codecs", () => {
         },
       ],
     }), "target", capability(["messages"]))).toThrow();
+  });
+
+  it("extracts a nested approved whole-string tool-result image data URL", () => {
+    const dataUrl = `data:image/png;base64,${"A".repeat(8192)}`;
+    const converted = decoded(prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      input: [
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: { content: dataUrl },
+        },
+      ],
+    }), "target", capability(["messages"])).bytes);
+    expect(converted.messages).toMatchObject([
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1" }] },
+      {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "call_1",
+          content: [
+            { type: "text" },
+            { type: "image", source: { type: "base64", media_type: "image/png" } },
+          ],
+        }],
+      },
+    ]);
   });
 
   it("coarsens minimal reasoning to a supported Messages effort", () => {

@@ -96,6 +96,14 @@ export async function* convertProtocolStream(
       }
       continue;
     }
+    if (event.kind === "content_done") {
+      yield* emitter.contentDone(event.orderKey, event.contentIndex);
+      continue;
+    }
+    if (event.kind === "item_done") {
+      yield* emitter.itemDone(event.outputIndex);
+      continue;
+    }
     if (event.kind === "tool_start") {
       ledger.startTool(event);
       yield* emitter.toolStart(event.key, event.callId, event.name, event.itemId);
@@ -139,6 +147,8 @@ export async function* convertProtocolStream(
 interface StreamEmitter {
   start(): Iterable<ConvertedStreamEmission>;
   messageStart(key: string): Iterable<ConvertedStreamEmission>;
+  contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission>;
+  itemDone(outputIndex: number): Iterable<ConvertedStreamEmission>;
   textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
   refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
   toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission>;
@@ -168,6 +178,7 @@ class ChatEmitter implements StreamEmitter {
   private roleSent = false;
   private readonly toolIndexes = new Map<string, number>();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
+  private readonly responseFrontier = new ResponseEmissionFrontier();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `chatcmpl_${context.createUuid()}`;
@@ -184,8 +195,18 @@ class ChatEmitter implements StreamEmitter {
 
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
+  contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.completeContent(orderKey, contentIndex);
+    return [];
+  }
+
+  itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.completeItem(outputIndex);
+    return [];
+  }
+
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.sourceResponses && !isPrimaryResponsesContent(key, orderKey)) {
+    if (this.sourceResponses && !this.responseFrontier.allowsContent(key, orderKey)) {
       return;
     }
     yield this.chunk(wireObject([
@@ -199,7 +220,7 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.sourceResponses && !isPrimaryResponsesContent(key, orderKey)) {
+    if (this.sourceResponses && !this.responseFrontier.allowsContent(key, orderKey)) {
       return;
     }
     yield this.chunk(wireObject([
@@ -213,7 +234,7 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *toolStart(key: string, callId: string, name: string): Iterable<ConvertedStreamEmission> {
-    if (this.sourceResponses && !isPrimaryResponsesItem(key)) {
+    if (this.sourceResponses && !this.responseFrontier.allowsItem(key)) {
       return;
     }
     const index = this.toolIndexes.size;
@@ -345,6 +366,7 @@ class MessagesEmitter implements StreamEmitter {
   private bufferedBytes = 0;
   private bufferAfterTool = false;
   private firstMessageKey: string | undefined;
+  private readonly responseFrontier = new ResponseEmissionFrontier();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly tools = new Map<string, {
     readonly callId: string;
@@ -383,13 +405,23 @@ class MessagesEmitter implements StreamEmitter {
     return [];
   }
 
+  contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.completeContent(orderKey, contentIndex);
+    return [];
+  }
+
+  itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
+    this.responseFrontier.completeItem(outputIndex);
+    return [];
+  }
+
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const messageKey = orderKey ?? key;
     this.firstMessageKey ??= messageKey;
     if (
-      (this.context.source === "responses" && !isPrimaryResponsesContent(key, orderKey))
-      || this.bufferAfterTool
-      || messageKey !== this.firstMessageKey
+      this.context.source === "responses"
+        ? !this.responseFrontier.allowsContent(key, orderKey)
+        : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
       return;
     }
@@ -401,9 +433,9 @@ class MessagesEmitter implements StreamEmitter {
     const messageKey = orderKey ?? key;
     this.firstMessageKey ??= messageKey;
     if (
-      (this.context.source === "responses" && !isPrimaryResponsesContent(key, orderKey))
-      || this.bufferAfterTool
-      || messageKey !== this.firstMessageKey
+      this.context.source === "responses"
+        ? !this.responseFrontier.allowsContent(key, orderKey)
+        : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
       return;
     }
@@ -594,6 +626,10 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
+
+  *contentDone(_orderKey: string, _contentIndex: number): Iterable<ConvertedStreamEmission> {}
+
+  *itemDone(_outputIndex: number): Iterable<ConvertedStreamEmission> {}
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const message = this.ensureMessage(orderKey ?? key);
@@ -837,12 +873,47 @@ class ResponsesEmitter implements StreamEmitter {
   }
 }
 
-function isPrimaryResponsesContent(key: string, orderKey: string | undefined): boolean {
-  return orderKey === "responses:0:message" && /^responses:0:0:/u.test(key);
-}
+class ResponseEmissionFrontier {
+  private item = 0;
+  private readonly completedItems = new Set<number>();
+  private readonly content = new Map<string, number>();
+  private readonly completedContent = new Map<string, Set<number>>();
 
-function isPrimaryResponsesItem(key: string): boolean {
-  return key === "responses:0";
+  allowsContent(key: string, orderKey: string | undefined): boolean {
+    if (orderKey === undefined) {
+      return false;
+    }
+    const itemMatch = /^responses:(\d+):message$/u.exec(orderKey);
+    const contentMatch = /^responses:\d+:(\d+):/u.exec(key);
+    if (itemMatch?.[1] === undefined || contentMatch?.[1] === undefined) {
+      return false;
+    }
+    return Number.parseInt(itemMatch[1], 10) === this.item
+      && Number.parseInt(contentMatch[1], 10) === (this.content.get(orderKey) ?? 0);
+  }
+
+  allowsItem(key: string): boolean {
+    const match = /^responses:(\d+)$/u.exec(key);
+    return match?.[1] !== undefined && Number.parseInt(match[1], 10) === this.item;
+  }
+
+  completeContent(orderKey: string, contentIndex: number): void {
+    const completed = this.completedContent.get(orderKey) ?? new Set<number>();
+    completed.add(contentIndex);
+    this.completedContent.set(orderKey, completed);
+    let frontier = this.content.get(orderKey) ?? 0;
+    while (completed.delete(frontier)) {
+      frontier += 1;
+    }
+    this.content.set(orderKey, frontier);
+  }
+
+  completeItem(outputIndex: number): void {
+    this.completedItems.add(outputIndex);
+    while (this.completedItems.delete(this.item)) {
+      this.item += 1;
+    }
+  }
 }
 
 function responseOutput(
