@@ -655,7 +655,10 @@ async function* decodeMessagesStream(
           && block.initialArguments !== undefined
           && block.initialArguments !== "{}"
         ) {
-          if (!sameToolArguments(block.initialArguments, block.bufferedArguments)) {
+          if (!measuredDecode(
+            measureEvent,
+            () => sameToolArguments(block.initialArguments as string, block.bufferedArguments),
+          )) {
             invalid();
           }
           budget.release(block.bufferedArguments);
@@ -1343,16 +1346,78 @@ function normalizeJsonNumber(value: string): string {
   if (digits.length === 0) {
     return "0";
   }
-  let exponent = BigInt(match[4] ?? "0") - BigInt(fraction.length);
+  let exponentAdjustment = -fraction.length;
   let trailingZeros = 0;
   for (let index = digits.length - 1; index >= 0 && digits[index] === "0"; index -= 1) {
     trailingZeros += 1;
   }
   if (trailingZeros > 0) {
     digits = digits.slice(0, -trailingZeros);
-    exponent += BigInt(trailingZeros);
+    exponentAdjustment += trailingZeros;
   }
-  return `${match[1] ?? ""}${digits}e${exponent}`;
+  return `${match[1] ?? ""}${digits}e${adjustSignedDecimal(match[4] ?? "0", exponentAdjustment)}`;
+}
+
+function adjustSignedDecimal(value: string, adjustment: number): string {
+  const left = signedDecimal(value);
+  const right = signedDecimal(String(adjustment));
+  if (left.negative === right.negative) {
+    return signedMagnitude(left.negative, addMagnitude(left.digits, right.digits));
+  }
+  const comparison = compareMagnitude(left.digits, right.digits);
+  if (comparison === 0) {
+    return "0";
+  }
+  return comparison > 0
+    ? signedMagnitude(left.negative, subtractMagnitude(left.digits, right.digits))
+    : signedMagnitude(right.negative, subtractMagnitude(right.digits, left.digits));
+}
+
+function signedDecimal(value: string): { readonly negative: boolean; readonly digits: string } {
+  const negative = value.startsWith("-");
+  const unsigned = value.startsWith("-") || value.startsWith("+") ? value.slice(1) : value;
+  const digits = unsigned.replace(/^0+/u, "") || "0";
+  return { negative: negative && digits !== "0", digits };
+}
+
+function signedMagnitude(negative: boolean, digits: string): string {
+  return negative && digits !== "0" ? `-${digits}` : digits;
+}
+
+function compareMagnitude(left: string, right: string): number {
+  return left.length === right.length
+    ? left === right ? 0 : left > right ? 1 : -1
+    : left.length > right.length ? 1 : -1;
+}
+
+function addMagnitude(left: string, right: string): string {
+  const output: string[] = [];
+  let carry = 0;
+  for (let offset = 0; offset < Math.max(left.length, right.length) || carry > 0; offset += 1) {
+    const leftDigit = offset < left.length ? left.charCodeAt(left.length - 1 - offset) - 48 : 0;
+    const rightDigit = offset < right.length ? right.charCodeAt(right.length - 1 - offset) - 48 : 0;
+    const total = leftDigit + rightDigit + carry;
+    output.push(String(total % 10));
+    carry = Math.floor(total / 10);
+  }
+  return output.reverse().join("");
+}
+
+function subtractMagnitude(left: string, right: string): string {
+  const output: string[] = [];
+  let borrow = 0;
+  for (let offset = 0; offset < left.length; offset += 1) {
+    let digit = left.charCodeAt(left.length - 1 - offset) - 48 - borrow;
+    const rightDigit = offset < right.length ? right.charCodeAt(right.length - 1 - offset) - 48 : 0;
+    if (digit < rightDigit) {
+      digit += 10;
+      borrow = 1;
+    } else {
+      borrow = 0;
+    }
+    output.push(String(digit - rightDigit));
+  }
+  return output.reverse().join("").replace(/^0+/u, "") || "0";
 }
 
 function* finalResponseEvents(

@@ -54,10 +54,11 @@ export function isOpenAiStrictSchemaCompatible(
     ) {
       return false;
     }
+    const requiredNames = new Set(requiredItems);
     const propertyNames = propertyObject.members.map((member) => member.key);
     if (
       propertyNames.length !== requiredItems.length
-      || propertyNames.some((name) => !requiredItems.includes(name))
+      || propertyNames.some((name) => !requiredNames.has(name))
       || propertyObject.members.some((member) => (
         !isWireJsonObject(member.value)
         || !isOpenAiStrictSchemaCompatible(member.value, false, depth + 1)
