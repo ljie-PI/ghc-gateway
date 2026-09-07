@@ -173,6 +173,49 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("continues an ordinary function call declared alongside an extended tool", async () => {
+    const harness = await matrixGateway();
+    try {
+      const tools = [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object" },
+          strict: false,
+        },
+        { type: "custom", name: "render", format: { type: "text" } },
+      ];
+      const first = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "ordinary-mixed",
+        tools,
+      }));
+      expect(first.status).toBe(200);
+      const firstBody = await first.json() as {
+        id: string;
+        output: Array<{ type: string; call_id?: string; name?: string }>;
+      };
+      expect(firstBody.output).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "function_call", call_id: "call_ordinary", name: "lookup" }),
+      ]));
+
+      const second = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        previous_response_id: firstBody.id,
+        input: [{
+          type: "function_call_output",
+          call_id: "call_ordinary",
+          output: "done",
+        }],
+        tools,
+      }));
+      expect(second.status).toBe(200);
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat", "chat"]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("preserves compatible Responses function strict defaults on the extended Chat route", async () => {
     const harness = await matrixGateway();
     try {
@@ -765,6 +808,7 @@ async function matrixGateway(): Promise<MatrixHarness> {
       const hasToolResult = captured.messages?.some((message) => message.role === "tool") === true;
       const custom = captured.tools?.some((tool) => tool.function?.name === "render") === true;
       const namespace = captured.tools?.some((tool) => tool.function?.name === "ns__lookup") === true;
+      const ordinaryMixed = decoder.decode(request.body).includes("ordinary-mixed");
       const partialCustom = decoder.decode(request.body).includes("partial-custom");
       const toolCall = partialCustom
         ? {
@@ -772,17 +816,23 @@ async function matrixGateway(): Promise<MatrixHarness> {
           type: "function",
           function: { name: "render", arguments: "{\"input\":\"x\"" },
         }
-        : namespace
+        : ordinaryMixed
           ? {
-            id: "call_namespace",
+            id: "call_ordinary",
             type: "function",
-            function: { name: "ns__lookup", arguments: "{}" },
+            function: { name: "lookup", arguments: "{}" },
           }
-          : {
-            id: "call_custom",
-            type: "function",
-            function: { name: "render", arguments: "{\"input\":\"hello\"}" },
-          };
+          : namespace
+            ? {
+              id: "call_namespace",
+              type: "function",
+              function: { name: "ns__lookup", arguments: "{}" },
+            }
+            : {
+              id: "call_custom",
+              type: "function",
+              function: { name: "render", arguments: "{\"input\":\"hello\"}" },
+            };
       return {
         status: 200,
         headers: new Headers(),

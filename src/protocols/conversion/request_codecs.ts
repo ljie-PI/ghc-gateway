@@ -214,8 +214,11 @@ function decodeChatMessage(
       "REQ-C-ASSISTANT",
     );
     const reasoningItems = oneMember(message, "reasoning_items", "REQ-C-ASSISTANT-REASONING");
+    let hasReasoningItems = false;
     if (reasoningItems !== undefined) {
-      for (const item of requiredArray(reasoningItems, "REQ-C-ASSISTANT-REASONING").items) {
+      const items = requiredArray(reasoningItems, "REQ-C-ASSISTANT-REASONING").items;
+      hasReasoningItems = items.length > 0;
+      for (const item of items) {
         const object = requiredObject(item, "REQ-C-ASSISTANT-REASONING");
         if (duplicateMemberNames(object).length > 0) {
           invalid("REQ-C-ASSISTANT-REASONING");
@@ -246,7 +249,7 @@ function decodeChatMessage(
         output.push(decodeChatToolCall(call));
       }
     }
-    if (combined.length === 0 && calls === undefined) {
+    if (combined.length === 0 && calls === undefined && !hasReasoningItems) {
       invalid("REQ-C-ASSISTANT-EMPTY");
     }
     return;

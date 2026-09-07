@@ -896,7 +896,7 @@ function validateExtendedResponsesRequest(
   };
   const validated = prepareConvertedRequest("responses", "chat", sanitized, model, capability);
   rejectExtendedInstructionReordering(memberValue(body, "input"));
-  rejectUnsafeExtendedHistory(memberValue(body, "input"));
+  rejectUnsafeExtendedHistory(memberValue(body, "input"), toolChoiceKeys);
   return validated.body;
 }
 
@@ -1214,7 +1214,10 @@ function rejectExtendedInstructionReordering(input: WireJson | undefined): void 
   }
 }
 
-function rejectUnsafeExtendedHistory(input: WireJson | undefined): void {
+function rejectUnsafeExtendedHistory(
+  input: WireJson | undefined,
+  declaredToolKeys: ReadonlySet<string>,
+): void {
   if (!isWireJsonArray(input)) {
     return;
   }
@@ -1262,7 +1265,11 @@ function rejectUnsafeExtendedHistory(input: WireJson | undefined): void {
     }
     if (type === "function_call") {
       const name = memberValue(item, "name");
-      if (typeof callId === "string" && typeof name === "string" && discoveredNames.has(name)) {
+      if (
+        typeof callId === "string"
+        && typeof name === "string"
+        && (discoveredNames.has(name) || declaredToolKeys.has(`\u0000${name}`))
+      ) {
         extendedCalls.add(callId);
         continue;
       }
