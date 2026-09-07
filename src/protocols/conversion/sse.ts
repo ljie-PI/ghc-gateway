@@ -11,22 +11,30 @@ export async function* decodeSseRecords(
   eventLimitBytes: number,
 ): AsyncIterable<SseRecord> {
   let pending = "";
+  let pendingBytes = 0;
+  let scanIndex = 0;
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+  const encoder = new TextEncoder();
   try {
     for await (const chunk of bytes) {
+      pendingBytes += chunk.byteLength;
       pending += decoder.decode(chunk, { stream: true });
       for (;;) {
-        const extracted = takeSseRecord(pending);
+        const extracted = takeSseRecord(pending, false, scanIndex);
         if (extracted === undefined) {
-          if (new TextEncoder().encode(pending).byteLength > eventLimitBytes) {
+          if (pendingBytes > eventLimitBytes) {
             throw new ChatSseError("event_too_large", "SSE event exceeds limit");
           }
+          scanIndex = Math.max(0, pending.length - 2);
           break;
         }
-        if (new TextEncoder().encode(extracted.consumed).byteLength > eventLimitBytes) {
+        const consumedBytes = encoder.encode(extracted.consumed).byteLength;
+        if (consumedBytes > eventLimitBytes) {
           throw new ChatSseError("event_too_large", "SSE event exceeds limit");
         }
         pending = extracted.rest;
+        pendingBytes = pending.length === 0 ? 0 : Math.max(0, pendingBytes - consumedBytes);
+        scanIndex = 0;
         const parsed = parseRecord(normalizeSseNewlines(extracted.raw));
         if (parsed !== undefined) {
           yield parsed;
@@ -36,14 +44,17 @@ export async function* decodeSseRecords(
     }
     pending += decoder.decode();
     for (;;) {
-      const extracted = takeSseRecord(pending, true);
+      const extracted = takeSseRecord(pending, true, scanIndex);
       if (extracted === undefined) {
         break;
       }
-      if (new TextEncoder().encode(extracted.consumed).byteLength > eventLimitBytes) {
+      const consumedBytes = encoder.encode(extracted.consumed).byteLength;
+      if (consumedBytes > eventLimitBytes) {
         throw new ChatSseError("event_too_large", "SSE event exceeds limit");
       }
       pending = extracted.rest;
+      pendingBytes = pending.length === 0 ? 0 : Math.max(0, pendingBytes - consumedBytes);
+      scanIndex = 0;
       const parsed = parseRecord(normalizeSseNewlines(extracted.raw));
       if (parsed !== undefined) {
         yield parsed;
@@ -67,12 +78,12 @@ export async function* decodeSseRecords(
   }
 }
 
-export function takeSseRecord(value: string, final = false): {
+export function takeSseRecord(value: string, final = false, startIndex = 0): {
   readonly raw: string;
   readonly consumed: string;
   readonly rest: string;
 } | undefined {
-  for (let index = 0; index < value.length; index += 1) {
+  for (let index = startIndex; index < value.length; index += 1) {
     const first = lineBreakLength(value, index, final);
     if (first === 0) {
       continue;

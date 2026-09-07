@@ -605,7 +605,7 @@ describe("protocol conversion matrix", () => {
         conversionVersion: "responses-messages-v1",
       }, "complete", new AbortController().signal);
 
-      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+      const rejected = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "dual-messages",
         previous_response_id: "resp_messages_owned",
         input: [{
@@ -614,11 +614,32 @@ describe("protocol conversion matrix", () => {
           output: "result",
         }],
       }));
+      expect(rejected.status).not.toBe(200);
+      await rejected.text();
+      expect(harness.backend.captured).toEqual([]);
+
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "dual-messages",
+        previous_response_id: "resp_messages_owned",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Use the tool result for the original task." }],
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_owned",
+            output: "result",
+          },
+        ],
+      }));
       expect(response.status).toBe(200);
       expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["messages"]);
       const forwarded = decoder.decode(harness.messagesBodies[0]);
       expect(forwarded).not.toContain("previous_response_id");
       expect(forwarded).toContain("call_owned");
+      expect(forwarded).toContain("original task");
     } finally {
       await harness.close();
     }

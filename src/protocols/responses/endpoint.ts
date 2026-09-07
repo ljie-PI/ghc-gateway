@@ -44,7 +44,7 @@ import {
   validateExternalContinuation,
 } from "./continuation.js";
 import { decodeResponsesRequest, ResponsesRequestDecodeError } from "./decoder.js";
-import { consumeResponsesPreviousResponseId } from "./dto.js";
+import { consumeResponsesPreviousResponseId, type ResponsesRequest } from "./dto.js";
 import { convertChatResponseToResponses } from "./bridge_nonstream.js";
 import { prepareChatBridgeRequest } from "./bridge_request.js";
 import {
@@ -143,6 +143,16 @@ async function executeResponses(
     && continuationReceipt.upstreamProtocol !== "responses";
   let planningRequest = decoded;
   if (convertedContinuation && continuationReceipt !== undefined) {
+    if (
+      continuationReceipt.upstreamProtocol === "messages"
+      && !hasClientMessagesContinuationContext(decoded)
+    ) {
+      throw new GatewayFailureError({
+        kind: "continuation_unavailable",
+        source: "continuation",
+        phase: "resume",
+      });
+    }
     try {
       planningRequest = consumeResponsesPreviousResponseId(
         await dependencies.history.enrich(decoded, continuationReceipt, scope.signal),
@@ -154,6 +164,7 @@ async function executeResponses(
           phase: "resume",
         }));
       }
+
       throw new GatewayFailureError({
         kind: "continuation_unavailable",
         source: "continuation",
@@ -1490,6 +1501,28 @@ function memberValue(object: WireJsonObject | undefined, key: string): WireJson 
   }
   const values = memberValues(object, key);
   return values.length === 1 ? values[0] : undefined;
+}
+
+function hasClientMessagesContinuationContext(request: Readonly<ResponsesRequest>): boolean {
+  const instructions = memberValue(request.body, "instructions");
+  if (typeof instructions === "string" && instructions.length > 0) {
+    return true;
+  }
+  const input = memberValue(request.body, "input");
+  if (typeof input === "string") {
+    return input.length > 0;
+  }
+  const items = isWireJsonArray(input) ? input.items : isWireJsonObject(input) ? [input] : [];
+  return items.some((item) => {
+    if (!isWireJsonObject(item)) {
+      return false;
+    }
+    const type = memberValue(item, "type");
+    const role = memberValue(item, "role");
+    return (type === undefined || type === "message")
+      && (role === "user" || role === "system" || role === "developer")
+      && memberValue(item, "content") !== undefined;
+  });
 }
 
 function observedInteger(value: WireJson | undefined): number | undefined {
