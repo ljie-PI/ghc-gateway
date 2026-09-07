@@ -341,6 +341,27 @@ describe("shared conversion request codecs", () => {
     ]);
   });
 
+  it.each(["chat", "messages"] as const)(
+    "rejects a Responses tool result without required output before converting to %s",
+    (target) => {
+      expect(() => prepareConvertedRequest("responses", target, body({
+        model: "source",
+        input: [
+          {
+            type: "function_call",
+            call_id: "call_1",
+            name: "lookup",
+            arguments: "{}",
+          },
+          {
+            type: "function_call_output",
+            call_id: "call_1",
+          },
+        ],
+      }), "target", capability([target]))).toThrow();
+    },
+  );
+
   it("replays converter-emitted Responses message IDs and annotations through Messages", () => {
     const converted = prepareConvertedRequest("responses", "messages", body({
       model: "source",

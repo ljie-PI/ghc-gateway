@@ -527,7 +527,7 @@ function decodeMessagesToolResult(
       oneMember(value, "tool_use_id", "REQ-M-TOOL-RESULT-ID"),
       "REQ-M-TOOL-RESULT-ID",
     ),
-    content: decodeToolResultContent(rawContent, degradations),
+    content: rawContent === undefined ? [] : decodeToolResultContent(rawContent, degradations),
     isError: optionalBoolean(
       oneMember(value, "is_error", "REQ-M-TOOL-RESULT-ERROR"),
       "REQ-M-TOOL-RESULT-ERROR",
@@ -755,9 +755,6 @@ function decodeToolResultContent(
   value: WireJson | undefined,
   degradations: Set<ConversionDegradationRule>,
 ): readonly SemanticContent[] {
-  if (value === undefined) {
-    return [];
-  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (
