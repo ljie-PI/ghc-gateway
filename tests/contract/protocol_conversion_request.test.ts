@@ -163,6 +163,62 @@ describe("shared conversion request codecs", () => {
     ]);
   });
 
+  it.each(["chat", "responses"] as const)(
+    "preserves a valid content-free Messages tool result when converting to %s",
+    (target) => {
+      const converted = prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [
+          {
+            role: "assistant",
+            content: [{
+              type: "tool_use",
+              id: "call_1",
+              name: "lookup",
+              input: { q: "x" },
+            }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "call_1" }],
+          },
+        ],
+        max_tokens: 32,
+        tools: [{ name: "lookup", input_schema: { type: "object" } }],
+      }), "target", capability([target]));
+
+      const request = decoded(converted.bytes);
+      if (target === "chat") {
+        expect(request.messages).toEqual([
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "call_1",
+              type: "function",
+              function: { name: "lookup", arguments: "{\"q\":\"x\"}" },
+            }],
+          },
+          { role: "tool", tool_call_id: "call_1", content: "" },
+        ]);
+        return;
+      }
+      expect(request.input).toEqual([
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "lookup",
+          arguments: "{\"q\":\"x\"}",
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: [],
+        },
+      ]);
+    },
+  );
+
   it("accepts Messages structured output without a source name using the fixed response name", () => {
     const converted = prepareConvertedRequest("messages", "responses", body({
       model: "source",

@@ -755,6 +755,9 @@ function decodeToolResultContent(
   value: WireJson | undefined,
   degradations: Set<ConversionDegradationRule>,
 ): readonly SemanticContent[] {
+  if (value === undefined) {
+    return [];
+  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (
