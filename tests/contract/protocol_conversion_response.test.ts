@@ -3278,6 +3278,83 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("ingests populated initial Responses message snapshots and rejects later replacement", async () => {
+    const initial = {
+      id: "msg_initial_content",
+      type: "message",
+      status: "in_progress",
+      role: "assistant",
+      content: [{ type: "output_text", text: "ORIGINAL", annotations: [] }],
+    };
+    const completed = { ...initial, status: "completed" };
+    const valid = [
+      responseEvent(0, "response.output_item.added", { output_index: 0, item: initial }),
+      responseEvent(1, "response.completed", {
+        response: {
+          id: "resp_initial_content",
+          object: "response",
+          status: "completed",
+          output: [completed],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    expect(wireText(await collectStream("responses", "chat", chunks(encoder.encode(valid))))).toContain("ORIGINAL");
+
+    const conflicting = [
+      responseEvent(0, "response.output_item.added", { output_index: 0, item: initial }),
+      responseEvent(1, "response.completed", {
+        response: {
+          id: "resp_initial_conflict",
+          object: "response",
+          status: "completed",
+          output: [{
+            ...completed,
+            content: [{ type: "output_text", text: "REPLACED", annotations: [] }],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(conflicting)),
+        streamContext("responses", "messages"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("rejects malformed initial Responses function arguments before later deltas", async () => {
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "fc_bad_initial",
+          type: "function_call",
+          call_id: "call_bad_initial",
+          name: "lookup",
+          arguments: { lost: true },
+          status: "in_progress",
+        },
+      }),
+      responseEvent(1, "response.function_call_arguments.delta", {
+        item_id: "fc_bad_initial",
+        output_index: 0,
+        delta: "{}",
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("measures converted stream event work without wrapping upstream waits", async () => {
     let eventMeasurements = 0;
     const signal = new AbortController().signal;

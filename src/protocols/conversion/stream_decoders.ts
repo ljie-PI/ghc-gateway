@@ -766,7 +766,9 @@ async function* decodeResponsesStream(
       }
       observedOutputTypes.set(outputIndex, itemType);
       if (itemType === "message") {
+        observeFinalItemContent(item, outputIndex, observedContent, budget);
         yield { kind: "message_start", key: `responses:${outputIndex}:message` };
+        yield* messageContentEvents(item, outputIndex, false);
       }
       if (itemType === "function_call") {
         const key = `responses:${outputIndex}`;
@@ -794,8 +796,11 @@ async function* decodeResponsesStream(
           callId,
           name,
         };
-        const argumentsJson = stringMember(item, "arguments");
-        if (argumentsJson !== undefined && argumentsJson.length > 0) {
+        const argumentsJson = singleMember(item, "arguments");
+        if (typeof argumentsJson !== "string") {
+          invalid();
+        }
+        if (argumentsJson.length > 0) {
           yield { kind: "tool_arguments_delta", key, delta: argumentsJson };
         }
       }
@@ -1278,54 +1283,7 @@ function* finalItemEvents(
 ): Iterable<SemanticStreamEvent> {
   const type = stringMember(item, "type");
   if (type === "message") {
-    const content = arrayMember(item, "content");
-    if (content === undefined) {
-      invalid();
-    }
-    for (let contentIndex = 0; contentIndex < content.items.length; contentIndex += 1) {
-      const part = content.items[contentIndex];
-      if (!isWireJsonObject(part)) {
-        invalid();
-      }
-      const partType = stringMember(part, "type");
-      if (partType === "output_text") {
-        const text = stringMember(part, "text");
-        if (text === undefined) {
-          invalid();
-        }
-        yield {
-          kind: "text_done",
-          key: `responses:${outputIndex}:${contentIndex}:text`,
-          orderKey: `responses:${outputIndex}:message`,
-          text,
-        };
-        yield {
-          kind: "content_done",
-          key: `responses:${outputIndex}:${contentIndex}:text`,
-          orderKey: `responses:${outputIndex}:message`,
-          contentIndex,
-        };
-      } else if (partType === "refusal") {
-        const refusal = stringMember(part, "refusal");
-        if (refusal === undefined) {
-          invalid();
-        }
-        yield {
-          kind: "refusal_done",
-          key: `responses:${outputIndex}:${contentIndex}:refusal`,
-          orderKey: `responses:${outputIndex}:message`,
-          refusal,
-        };
-        yield {
-          kind: "content_done",
-          key: `responses:${outputIndex}:${contentIndex}:refusal`,
-          orderKey: `responses:${outputIndex}:message`,
-          contentIndex,
-        };
-      } else {
-        invalid();
-      }
-    }
+    yield* messageContentEvents(item, outputIndex, true);
     return;
   }
   if (type === "function_call") {
@@ -1375,6 +1333,67 @@ function* finalItemEvents(
     return;
   }
   invalid();
+}
+
+function* messageContentEvents(
+  item: WireJsonObject,
+  outputIndex: number,
+  complete: boolean,
+): Iterable<SemanticStreamEvent> {
+  const content = arrayMember(item, "content");
+  if (content === undefined) {
+    invalid();
+  }
+  for (let contentIndex = 0; contentIndex < content.items.length; contentIndex += 1) {
+    const part = content.items[contentIndex];
+    if (!isWireJsonObject(part)) {
+      invalid();
+    }
+    const partType = stringMember(part, "type");
+    if (partType === "output_text") {
+      const text = stringMember(part, "text");
+      if (text === undefined) {
+        invalid();
+      }
+      const key = `responses:${outputIndex}:${contentIndex}:text`;
+      yield {
+        kind: "text_done",
+        key,
+        orderKey: `responses:${outputIndex}:message`,
+        text,
+      };
+      if (complete) {
+        yield {
+          kind: "content_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
+        };
+      }
+    } else if (partType === "refusal") {
+      const refusal = stringMember(part, "refusal");
+      if (refusal === undefined) {
+        invalid();
+      }
+      const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+      yield {
+        kind: "refusal_done",
+        key,
+        orderKey: `responses:${outputIndex}:message`,
+        refusal,
+      };
+      if (complete) {
+        yield {
+          kind: "content_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          contentIndex,
+        };
+      }
+    } else {
+      invalid();
+    }
+  }
 }
 
 interface ResponseToolIdentity {
