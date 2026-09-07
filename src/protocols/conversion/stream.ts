@@ -630,6 +630,7 @@ class MessagesEmitter implements StreamEmitter {
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
     yield* this.closeActiveText();
+    yield* this.closeOpenTools();
     yield* this.emitBufferedItems(items);
     yield* this.closeOpenTools();
     yield this.event({

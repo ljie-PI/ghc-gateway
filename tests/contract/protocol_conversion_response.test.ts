@@ -1336,6 +1336,33 @@ describe("shared conversion response codecs", () => {
     })), context("responses", "chat"))).toThrow();
   });
 
+  it("rejects incomplete tool items inside a completed Responses stream", async () => {
+    const source = responseEvent(0, "response.completed", {
+      response: {
+        id: "resp_stream_contradiction",
+        object: "response",
+        status: "completed",
+        output: [{
+          id: "fc_incomplete",
+          type: "function_call",
+          call_id: "call_incomplete",
+          name: "lookup",
+          arguments: "{}",
+          status: "incomplete",
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      },
+    });
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("rejects incomplete tool items inside a completed buffered Responses result", () => {
     expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
       id: "resp_buffered_contradiction",
@@ -1366,12 +1393,64 @@ describe("shared conversion response codecs", () => {
     expect(text).toContain("\"stop_reason\": \"max_tokens\"");
   });
 
+  it.each(["messages", "responses"] as const)(
+    "preserves an identified Chat tool with no argument bytes at a length terminal for %s",
+    async (target) => {
+      const source = [
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_empty_args\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join("");
+      const text = wireText(await collectStream("chat", target, chunks(encoder.encode(source))));
+      expect(text).toContain("call_empty_args");
+      expect(text).toContain(target === "responses" ? "response.incomplete" : "\"stop_reason\": \"max_tokens\"");
+    },
+  );
+
   it("closes each incomplete Chat tool before starting the next Messages block", async () => {
     const source = [
       "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"first\",\"arguments\":\"{\\\"a\\\":\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"second\",\"arguments\":\"{\\\"b\\\":\"}}]},\"finish_reason\":\"length\"}]}\n\n",
       "data: [DONE]\n\n",
     ].join("");
     const text = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    const startFirst = text.indexOf("\"name\": \"first\"");
+    const stopFirst = text.indexOf("event: content_block_stop", startFirst);
+    const startSecond = text.indexOf("\"name\": \"second\"");
+    const stopSecond = text.indexOf("event: content_block_stop", startSecond);
+    expect(startFirst).toBeGreaterThanOrEqual(0);
+    expect(stopFirst).toBeGreaterThan(startFirst);
+    expect(startSecond).toBeGreaterThan(stopFirst);
+    expect(stopSecond).toBeGreaterThan(startSecond);
+  });
+
+  it("closes an emitted incomplete Responses tool before starting the next Messages tool", async () => {
+    const source = responseEvent(0, "response.incomplete", {
+      response: {
+        id: "resp_two_incomplete_tools",
+        object: "response",
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [
+          {
+            id: "fc_a",
+            type: "function_call",
+            call_id: "call_a",
+            name: "first",
+            arguments: "{\"a\":",
+            status: "incomplete",
+          },
+          {
+            id: "fc_b",
+            type: "function_call",
+            call_id: "call_b",
+            name: "second",
+            arguments: "{\"b\":",
+            status: "incomplete",
+          },
+        ],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      },
+    });
+    const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
     const startFirst = text.indexOf("\"name\": \"first\"");
     const stopFirst = text.indexOf("event: content_block_stop", startFirst);
     const startSecond = text.indexOf("\"name\": \"second\"");

@@ -92,6 +92,31 @@ async function* decodeChatStream(
       if (pendingFinish === undefined) {
         invalid();
       }
+      if (pendingFinish === "length" || pendingFinish === "content_filter") {
+        for (const [index, tool] of [...tools.entries()].sort(([left], [right]) => left - right)) {
+          if (tool.started) {
+            continue;
+          }
+          if (tool.id.length === 0 || tool.name.length === 0) {
+            invalid();
+          }
+          tool.started = true;
+          yield {
+            kind: "tool_start",
+            key: `chat:${index}`,
+            callId: tool.id,
+            name: tool.name,
+          };
+          if (tool.pendingArguments.length > 0) {
+            yield {
+              kind: "tool_arguments_delta",
+              key: `chat:${index}`,
+              delta: tool.pendingArguments,
+            };
+            tool.pendingArguments = "";
+          }
+        }
+      }
       for (const [index, tool] of tools) {
         if (pendingFinish === "length" || pendingFinish === "content_filter") {
           continue;
@@ -890,6 +915,18 @@ function validateTerminalResponse(
   const output = arrayMember(response, "output");
   if (output === undefined) {
     invalid();
+  }
+  for (const item of output.items) {
+    if (!isWireJsonObject(item) || stringMember(item, "type") !== "function_call") {
+      continue;
+    }
+    const itemStatus = stringMember(item, "status");
+    if (
+      itemStatus === undefined
+      || (expectedStatus === "completed" && itemStatus !== "completed")
+    ) {
+      invalid();
+    }
   }
   for (const index of observedOutputIndexes) {
     const item = output.items[index];
