@@ -478,6 +478,34 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("rejects incomplete message items inside completed buffered and streaming Responses", async () => {
+    const response = {
+      id: "resp_incomplete_message",
+      object: "response",
+      status: "completed",
+      output: [{
+        id: "msg_incomplete",
+        type: "message",
+        status: "incomplete",
+        role: "assistant",
+        content: [{ type: "output_text", text: "partial", annotations: [] }],
+      }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    expect(() => convertBufferedResponse(
+      encoder.encode(JSON.stringify(response)),
+      context("responses", "chat"),
+    )).toThrow();
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(responseEvent(0, "response.completed", { response }))),
+        streamContext("responses", "messages"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it.each(["messages", "responses"] as const)(
     "treats repeated complete Chat tool names as idempotent for %s",
     async (target) => {
@@ -489,6 +517,19 @@ describe("shared conversion response codecs", () => {
       const text = wireText(await collectStream("chat", target, chunks(encoder.encode(source))));
       expect(text).toContain("lookup");
       expect(text).not.toContain("lookuplookup");
+    },
+  );
+
+  it.each(["messages", "responses"] as const)(
+    "keeps a zero-byte Chat tool before trailing text at a restricted %s terminal",
+    async (target) => {
+      const source = [
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_before_text\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"AFTER\"},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join("");
+      const text = wireText(await collectStream("chat", target, chunks(encoder.encode(source))));
+      expect(text.indexOf("call_before_text")).toBeLessThan(text.indexOf("AFTER"));
     },
   );
 
@@ -1417,6 +1458,96 @@ describe("shared conversion response codecs", () => {
     const startSecond = text.indexOf("\"name\": \"second\"");
     const stopSecond = text.indexOf("event: content_block_stop", startSecond);
     expect(startFirst).toBeGreaterThanOrEqual(0);
+    expect(stopFirst).toBeGreaterThan(startFirst);
+    expect(startSecond).toBeGreaterThan(stopFirst);
+    expect(stopSecond).toBeGreaterThan(startSecond);
+  });
+
+  it("closes intermediate incomplete Responses tool items before advancing Messages output", async () => {
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "fc_a",
+          type: "function_call",
+          call_id: "call_a",
+          name: "first",
+          arguments: "",
+          status: "in_progress",
+        },
+      }),
+      responseEvent(1, "response.function_call_arguments.delta", {
+        item_id: "fc_a", output_index: 0, delta: "{\"a\":",
+      }),
+      responseEvent(2, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "fc_a",
+          type: "function_call",
+          call_id: "call_a",
+          name: "first",
+          arguments: "{\"a\":",
+          status: "incomplete",
+        },
+      }),
+      responseEvent(3, "response.output_item.added", {
+        output_index: 1,
+        item: {
+          id: "fc_b",
+          type: "function_call",
+          call_id: "call_b",
+          name: "second",
+          arguments: "",
+          status: "in_progress",
+        },
+      }),
+      responseEvent(4, "response.function_call_arguments.delta", {
+        item_id: "fc_b", output_index: 1, delta: "{\"b\":",
+      }),
+      responseEvent(5, "response.output_item.done", {
+        output_index: 1,
+        item: {
+          id: "fc_b",
+          type: "function_call",
+          call_id: "call_b",
+          name: "second",
+          arguments: "{\"b\":",
+          status: "incomplete",
+        },
+      }),
+      responseEvent(6, "response.incomplete", {
+        response: {
+          id: "resp_intermediate_incomplete",
+          object: "response",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [
+            {
+              id: "fc_a",
+              type: "function_call",
+              call_id: "call_a",
+              name: "first",
+              arguments: "{\"a\":",
+              status: "incomplete",
+            },
+            {
+              id: "fc_b",
+              type: "function_call",
+              call_id: "call_b",
+              name: "second",
+              arguments: "{\"b\":",
+              status: "incomplete",
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
+    const startFirst = text.indexOf("\"name\": \"first\"");
+    const stopFirst = text.indexOf("event: content_block_stop", startFirst);
+    const startSecond = text.indexOf("\"name\": \"second\"");
+    const stopSecond = text.indexOf("event: content_block_stop", startSecond);
     expect(stopFirst).toBeGreaterThan(startFirst);
     expect(startSecond).toBeGreaterThan(stopFirst);
     expect(stopSecond).toBeGreaterThan(startSecond);

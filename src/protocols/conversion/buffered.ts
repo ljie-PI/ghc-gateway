@@ -269,6 +269,16 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
     }
     const type = stringMember(value, "type");
     if (type === "message") {
+      const itemStatus = stringMember(value, "status");
+      if (
+        (itemStatus !== undefined
+          && itemStatus !== "completed"
+          && itemStatus !== "incomplete"
+          && itemStatus !== "in_progress")
+        || (status === "completed" && itemStatus !== undefined && itemStatus !== "completed")
+      ) {
+        upstreamInvalid();
+      }
       const content = arrayMember(value, "content");
       if (content === undefined) {
         upstreamInvalid();

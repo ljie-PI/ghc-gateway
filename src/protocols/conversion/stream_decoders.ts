@@ -84,6 +84,31 @@ async function* decodeChatStream(
       }
     }
   };
+  const startIdentifiedTools = function* (): Iterable<SemanticStreamEvent> {
+    for (const [index, tool] of [...tools.entries()].sort(([left], [right]) => left - right)) {
+      if (tool.started) {
+        continue;
+      }
+      if (tool.id.length === 0 || tool.name.length === 0) {
+        invalid();
+      }
+      tool.started = true;
+      yield {
+        kind: "tool_start",
+        key: `chat:${index}`,
+        callId: tool.id,
+        name: tool.name,
+      };
+      if (tool.pendingArguments.length > 0) {
+        yield {
+          kind: "tool_arguments_delta",
+          key: `chat:${index}`,
+          delta: tool.pendingArguments,
+        };
+        tool.pendingArguments = "";
+      }
+    }
+  };
   for await (const frame of parseChatSse(bytes, eventLimitBytes)) {
     if (frame.kind === "error") {
       throw upstreamStreamEventFailure();
@@ -93,29 +118,7 @@ async function* decodeChatStream(
         invalid();
       }
       if (pendingFinish === "length" || pendingFinish === "content_filter") {
-        for (const [index, tool] of [...tools.entries()].sort(([left], [right]) => left - right)) {
-          if (tool.started) {
-            continue;
-          }
-          if (tool.id.length === 0 || tool.name.length === 0) {
-            invalid();
-          }
-          tool.started = true;
-          yield {
-            kind: "tool_start",
-            key: `chat:${index}`,
-            callId: tool.id,
-            name: tool.name,
-          };
-          if (tool.pendingArguments.length > 0) {
-            yield {
-              kind: "tool_arguments_delta",
-              key: `chat:${index}`,
-              delta: tool.pendingArguments,
-            };
-            tool.pendingArguments = "";
-          }
-        }
+        yield* startIdentifiedTools();
       }
       for (const [index, tool] of tools) {
         if (pendingFinish === "length" || pendingFinish === "content_filter") {
@@ -391,7 +394,11 @@ async function* decodeChatStream(
     const finish = singleMember(choice, "finish_reason");
     if (finish !== undefined && finish !== null) {
       pendingFinish = chatFinish(finish);
-      yield* startReadyTools();
+      if (pendingFinish === "length" || pendingFinish === "content_filter") {
+        yield* startIdentifiedTools();
+      } else {
+        yield* startReadyTools();
+      }
       for (const event of pendingPostTool.splice(0)) {
         yield event;
       }
@@ -917,7 +924,11 @@ function validateTerminalResponse(
     invalid();
   }
   for (const item of output.items) {
-    if (!isWireJsonObject(item) || stringMember(item, "type") !== "function_call") {
+    if (!isWireJsonObject(item)) {
+      continue;
+    }
+    const itemType = stringMember(item, "type");
+    if (itemType !== "function_call" && itemType !== "message") {
       continue;
     }
     const itemStatus = stringMember(item, "status");

@@ -496,6 +496,7 @@ class MessagesEmitter implements StreamEmitter {
     done: boolean;
     streamIndex?: number | undefined;
     closed: boolean;
+    itemEnded: boolean;
   }>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
@@ -534,6 +535,14 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   *itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
+    const tool = this.tools.get(`responses:${outputIndex}`);
+    if (tool !== undefined) {
+      tool.itemEnded = true;
+      if (tool.streamIndex !== undefined && !tool.closed) {
+        tool.closed = true;
+        yield this.event({ type: "content_block_stop", index: tool.streamIndex });
+      }
+    }
     this.responseFrontier.markItemDone(outputIndex);
     yield* this.drainReadyContent();
   }
@@ -578,7 +587,7 @@ class MessagesEmitter implements StreamEmitter {
       invalid();
     }
     this.bufferAfterTool = true;
-    const tool = { callId, name, argumentsJson: "", done: false, closed: false };
+    const tool = { callId, name, argumentsJson: "", done: false, closed: false, itemEnded: false };
     this.tools.set(key, tool);
     if (this.context.source === "responses" && this.responseFrontier.allowsItem(key)) {
       yield* this.emitTool(key, tool);
@@ -776,6 +785,7 @@ class MessagesEmitter implements StreamEmitter {
     streamIndex?: number | undefined;
     readonly done: boolean;
     closed: boolean;
+    readonly itemEnded: boolean;
   }, close = false): Iterable<ConvertedStreamEmission> {
     if (tool.streamIndex !== undefined) {
       return;
@@ -796,7 +806,7 @@ class MessagesEmitter implements StreamEmitter {
         delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
       });
     }
-    if ((tool.done || close) && !tool.closed) {
+    if ((tool.done || tool.itemEnded || close) && !tool.closed) {
       tool.closed = true;
       yield this.event({ type: "content_block_stop", index });
     }
