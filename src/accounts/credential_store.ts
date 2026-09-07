@@ -219,8 +219,17 @@ function assertWindowsAclCurrentUserOnly(target: string): void {
   }
 }
 
+function windowsCommandPath(command: string): string {
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
+    return path.join(systemRoot, "System32", `${command}.exe`);
+  }
+  return command;
+}
+
 function currentWindowsIdentity(): { readonly name: string; readonly sid: string } {
-  const csv = execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).trim();
+  const whoami = windowsCommandPath("whoami");
+  const csv = execFileSync(whoami, ["/user", "/fo", "csv", "/nh"], { encoding: "utf8", windowsHide: true }).trim();
   const match = /^"([^"]+)","([^"]+)"$/u.exec(csv);
   if (match === null || match[1] === undefined || match[2] === undefined) {
     throw new Error("unable to resolve current Windows identity");
