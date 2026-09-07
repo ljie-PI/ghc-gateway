@@ -307,6 +307,35 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("rejects failed message items inside an incomplete Responses terminal", async () => {
+    const response = {
+      id: "resp_failed_message",
+      object: "response",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{
+        id: "msg_failed",
+        type: "message",
+        status: "failed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "partial", annotations: [] }],
+      }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    expect(() => convertBufferedResponse(
+      encoder.encode(JSON.stringify(response)),
+      context("responses", "chat"),
+    )).toThrow();
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(responseEvent(0, "response.incomplete", { response }))),
+        streamContext("responses", "messages"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("rejects malformed Responses arguments-done and Messages initial text snapshots", async () => {
     const responsesSource = [
       responseEvent(0, "response.output_item.added", {
@@ -954,6 +983,48 @@ describe("shared conversion response codecs", () => {
     const text = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
     expect(text.indexOf("\"call_id\":\"call_a\"")).toBeLessThan(text.indexOf("\"call_id\":\"call_b\""));
     expect(text).toContain("response.completed");
+  });
+
+  it("rejects conflicting populated Messages tool input and streamed arguments", async () => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_tool_conflict",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "call_1",
+          name: "lookup",
+          input: { city: "Paris" },
+        },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "{\"city\":\"London\"}" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("messages", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
   });
 
   it("rejects conflicting final arguments that were queued behind an earlier tool index", async () => {

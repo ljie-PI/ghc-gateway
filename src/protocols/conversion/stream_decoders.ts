@@ -559,6 +559,7 @@ async function* decodeMessagesStream(
           key,
           closed: false,
           initialArguments,
+          bufferedArguments: "",
           sawArgumentsDelta: false,
         });
         budget.reserve(callId);
@@ -607,15 +608,21 @@ async function* decodeMessagesStream(
           delta: refusal,
         };
       } else if (block.kind === "tool" && deltaType === "input_json_delta" && block.key !== undefined) {
-        if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
-          budget.release(block.initialArguments);
-          block.initialArguments = undefined;
-        }
-        block.sawArgumentsDelta = true;
         const partialJson = singleMember(delta, "partial_json");
         if (typeof partialJson !== "string") {
           invalid();
         }
+        if (block.initialArguments !== undefined && block.initialArguments !== "{}") {
+          budget.reserve(partialJson);
+          block.bufferedArguments += partialJson;
+          block.sawArgumentsDelta = true;
+          continue;
+        }
+        if (!block.sawArgumentsDelta && block.initialArguments === "{}") {
+          budget.release(block.initialArguments);
+          block.initialArguments = undefined;
+        }
+        block.sawArgumentsDelta = true;
         yield {
           kind: "tool_arguments_delta",
           key: block.key,
@@ -639,7 +646,24 @@ async function* decodeMessagesStream(
       }
       block.closed = true;
       if (block.kind === "tool" && block.key !== undefined) {
-        if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
+        if (
+          block.sawArgumentsDelta
+          && block.initialArguments !== undefined
+          && block.initialArguments !== "{}"
+        ) {
+          if (!sameToolArguments(block.initialArguments, block.bufferedArguments)) {
+            invalid();
+          }
+          budget.release(block.bufferedArguments);
+          block.bufferedArguments = "";
+          yield {
+            kind: "tool_arguments_delta",
+            key: block.key,
+            delta: block.initialArguments,
+          };
+          budget.release(block.initialArguments);
+          block.initialArguments = undefined;
+        } else if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
           yield {
             kind: "tool_arguments_delta",
             key: block.key,
@@ -1101,6 +1125,7 @@ function validateTerminalResponse(
     const itemStatus = stringMember(item, "status");
     if (
       itemStatus === undefined
+      || (itemStatus !== "completed" && itemStatus !== "incomplete" && itemStatus !== "in_progress")
       || (expectedStatus === "completed" && itemStatus !== "completed")
     ) {
       invalid();
@@ -1259,6 +1284,21 @@ function hasNonemptyString(value: WireJson): boolean {
   return false;
 }
 
+function sameToolArguments(left: string, right: string): boolean {
+  try {
+    const leftBytes = new TextEncoder().encode(left);
+    const rightBytes = new TextEncoder().encode(right);
+    const leftValue = parseWireJson(leftBytes, { maxBytes: Math.max(1, leftBytes.byteLength), maxDepth: 32 });
+    const rightValue = parseWireJson(rightBytes, { maxBytes: Math.max(1, rightBytes.byteLength), maxDepth: 32 });
+    return isWireJsonObject(leftValue)
+      && isWireJsonObject(rightValue)
+      && new TextDecoder().decode(serializeWireJson(leftValue))
+        === new TextDecoder().decode(serializeWireJson(rightValue));
+  } catch {
+    return false;
+  }
+}
+
 function* finalResponseEvents(
   response: WireJsonObject,
   toolsByIndex: Map<number, ResponseToolIdentity>,
@@ -1410,6 +1450,7 @@ type MessageBlockState =
     readonly kind: "tool";
     readonly key: string;
     initialArguments?: string | undefined;
+    bufferedArguments: string;
     sawArgumentsDelta: boolean;
     closed: boolean;
   };
