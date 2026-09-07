@@ -1318,6 +1318,37 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("rejects malformed completed buffered tools inside an incomplete Responses result", () => {
+    expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "resp_buffered_malformed",
+      object: "response",
+      status: "incomplete",
+      incomplete_details: { reason: "max_output_tokens" },
+      output: [{
+        id: "fc_malformed",
+        type: "function_call",
+        call_id: "call_malformed",
+        name: "lookup",
+        arguments: "{\"q\":",
+        status: "completed",
+      }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    })), context("responses", "chat"))).toThrow();
+  });
+
+  it("closes an incomplete Chat tool block before the Messages terminal", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_partial\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":\"length\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const text = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    const stop = text.indexOf("event: content_block_stop");
+    const terminal = text.indexOf("event: message_stop");
+    expect(stop).toBeGreaterThanOrEqual(0);
+    expect(terminal).toBeGreaterThan(stop);
+    expect(text).toContain("\"stop_reason\": \"max_tokens\"");
+  });
+
   it.each(["chat", "messages"] as const)(
     "rejects terminal growth of an item after its done snapshot advanced %s delivery",
     async (target) => {
@@ -2551,6 +2582,36 @@ describe("shared conversion response codecs", () => {
       }
     })()).rejects.toThrow();
     expect(delivered).not.toContain("synthetic-sensitive-diagnostic");
+  });
+
+  it("classifies invalid native Messages UTF-8 as an upstream response failure", async () => {
+    const signal = new AbortController().signal;
+    await expect(createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: chunks(new Uint8Array([0xff])),
+        async cancel() {},
+      },
+      scope: {
+        requestId: "req_native_utf8",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native_utf8",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    })).rejects.toMatchObject({
+      failure: {
+        kind: "invalid_upstream_response",
+        source: "parser",
+        phase: "stream",
+      },
+    });
   });
 
   it.each([

@@ -631,6 +631,7 @@ class MessagesEmitter implements StreamEmitter {
   ): Iterable<ConvertedStreamEmission> {
     yield* this.closeActiveText();
     yield* this.emitBufferedItems(items);
+    yield* this.closeOpenTools();
     yield this.event({
       type: "message_delta",
       delta: {
@@ -778,6 +779,7 @@ class MessagesEmitter implements StreamEmitter {
     if (tool.streamIndex !== undefined) {
       return;
     }
+    yield* this.closeActiveText();
     const index = this.nextIndex++;
     tool.streamIndex = index;
     this.emittedResponseTools.add(key);
@@ -796,6 +798,16 @@ class MessagesEmitter implements StreamEmitter {
     if (tool.done && !tool.closed) {
       tool.closed = true;
       yield this.event({ type: "content_block_stop", index });
+    }
+  }
+
+  private *closeOpenTools(): Iterable<ConvertedStreamEmission> {
+    for (const tool of this.tools.values()) {
+      if (tool.streamIndex === undefined || tool.closed) {
+        continue;
+      }
+      tool.closed = true;
+      yield this.event({ type: "content_block_stop", index: tool.streamIndex });
     }
   }
 

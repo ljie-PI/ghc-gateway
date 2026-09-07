@@ -255,12 +255,20 @@ class NativeMessagesObserver {
   }
 
   consume(bytes: Uint8Array): readonly Uint8Array[] {
-    this.pending += this.decoder.decode(bytes, { stream: true });
+    try {
+      this.pending += this.decoder.decode(bytes, { stream: true });
+    } catch {
+      invalid();
+    }
     return this.drain();
   }
 
   finish(): { readonly usage: SemanticUsage; readonly records: readonly Uint8Array[] } {
-    this.pending += this.decoder.decode();
+    try {
+      this.pending += this.decoder.decode();
+    } catch {
+      invalid();
+    }
     const records = this.drain(true);
     if (this.pending.trim().length > 0 || !this.terminal) {
       throw truncated();

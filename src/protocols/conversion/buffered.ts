@@ -307,7 +307,16 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
       if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0 || argumentsJson === undefined) {
         upstreamInvalid();
       }
-      if (status === "completed") {
+      const itemStatus = stringMember(value, "status");
+      if (
+        itemStatus !== undefined
+        && itemStatus !== "completed"
+        && itemStatus !== "incomplete"
+        && itemStatus !== "in_progress"
+      ) {
+        upstreamInvalid();
+      }
+      if (itemStatus === "completed" || (itemStatus === undefined && status === "completed")) {
         validateCompleteArguments(argumentsJson);
       }
       const itemId = stringMember(value, "id");
