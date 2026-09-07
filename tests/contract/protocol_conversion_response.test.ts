@@ -307,6 +307,57 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it.each([
+    "{\"arguments\":{\"changed\":true}}",
+    "{\"name\":7}",
+  ])("rejects malformed present Chat tool delta fields: %s", async (functionDelta) => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+      `data: {"id":"x","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":${functionDelta}}]},"finish_reason":"tool_calls"}]}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("rejects Chat choice changes across stream frames", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"FIRST\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"SECOND\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
+  it("rejects conflicting Chat finish reasons across stream frames", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("chat", "messages"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("keeps Messages tool blocks in source order when completion arrives out of order", async () => {
     const response = {
       id: "resp_tools",

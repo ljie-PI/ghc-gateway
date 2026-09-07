@@ -165,6 +165,13 @@ async function* decodeChatStream(
       invalid();
     }
     const choice = choices.items[0];
+    const choiceIndexValue = singleMember(choice, "index");
+    if (
+      choiceIndexValue !== undefined
+      && (!isWireJsonNumber(choiceIndexValue) || choiceIndexValue.lexeme !== "0")
+    ) {
+      invalid();
+    }
     const delta = objectMember(choice, "delta");
     if (delta !== undefined) {
       const reasoning = stringMember(delta, "reasoning_content");
@@ -213,6 +220,13 @@ async function* decodeChatStream(
           if (!isWireJsonObject(value)) {
             invalid();
           }
+          const toolIndexValue = singleMember(value, "index");
+          if (
+            toolIndexValue !== undefined
+            && (!isWireJsonNumber(toolIndexValue) || !/^(?:0|[1-9]\d*)$/u.test(toolIndexValue.lexeme))
+          ) {
+            invalid();
+          }
           const index = integerMember(value, "index") ?? position;
           if (index === undefined || index < 0) {
             invalid();
@@ -229,7 +243,15 @@ async function* decodeChatStream(
             started: false,
             done: false,
           };
-          const id = stringMember(value, "id");
+          const toolType = singleMember(value, "type");
+          if (toolType !== undefined && toolType !== "function") {
+            invalid();
+          }
+          const idValue = singleMember(value, "id");
+          if (idValue !== undefined && typeof idValue !== "string") {
+            invalid();
+          }
+          const id = typeof idValue === "string" ? idValue : undefined;
           if (id !== undefined) {
             if (tool.id.length > 0 && tool.id !== id) {
               invalid();
@@ -237,8 +259,16 @@ async function* decodeChatStream(
             budget.reserve(id);
             tool.id = id;
           }
-          const fn = objectMember(value, "function");
-          const nameDelta = stringMember(fn, "name");
+          const functionValue = singleMember(value, "function");
+          if (functionValue !== undefined && !isWireJsonObject(functionValue)) {
+            invalid();
+          }
+          const fn = isWireJsonObject(functionValue) ? functionValue : undefined;
+          const nameValue = fn === undefined ? undefined : singleMember(fn, "name");
+          if (nameValue !== undefined && typeof nameValue !== "string") {
+            invalid();
+          }
+          const nameDelta = typeof nameValue === "string" ? nameValue : undefined;
           if (nameDelta !== undefined) {
             if (tool.started) {
               if (nameDelta.length > 0 && nameDelta !== tool.name) {
@@ -254,7 +284,11 @@ async function* decodeChatStream(
               tool.name += nameDelta;
             }
           }
-          const argumentsDelta = stringMember(fn, "arguments");
+          const argumentsValue = fn === undefined ? undefined : singleMember(fn, "arguments");
+          if (argumentsValue !== undefined && typeof argumentsValue !== "string") {
+            invalid();
+          }
+          const argumentsDelta = typeof argumentsValue === "string" ? argumentsValue : undefined;
           if (argumentsDelta !== undefined && argumentsDelta.length > 0) {
             budget.reserve(argumentsDelta);
             tool.pendingArguments += argumentsDelta;
@@ -412,7 +446,11 @@ async function* decodeChatStream(
     }
     const finish = singleMember(choice, "finish_reason");
     if (finish !== undefined && finish !== null) {
-      pendingFinish = chatFinish(finish);
+      const observedFinish = chatFinish(finish);
+      if (pendingFinish !== undefined && pendingFinish !== observedFinish) {
+        invalid();
+      }
+      pendingFinish = observedFinish;
       if (pendingFinish === "tool_calls" && tools.size === 0) {
         invalid();
       }
