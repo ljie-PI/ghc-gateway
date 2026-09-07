@@ -613,6 +613,9 @@ async function* decodeMessagesStream(
         if (typeof partialJson !== "string") {
           invalid();
         }
+        if (partialJson.length === 0) {
+          continue;
+        }
         if (block.initialArguments !== undefined && block.initialArguments !== "{}") {
           budget.reserve(partialJson);
           block.bufferedArguments += partialJson;
@@ -1341,9 +1344,10 @@ function normalizeJsonNumber(value: string): string {
     return "0";
   }
   let exponent = BigInt(match[4] ?? "0") - BigInt(fraction.length);
-  while (digits.endsWith("0")) {
-    digits = digits.slice(0, -1);
-    exponent += 1n;
+  const trailingZeros = /0+$/u.exec(digits)?.[0].length ?? 0;
+  if (trailingZeros > 0) {
+    digits = digits.slice(0, -trailingZeros);
+    exponent += BigInt(trailingZeros);
   }
   return `${match[1] ?? ""}${digits}e${exponent}`;
 }

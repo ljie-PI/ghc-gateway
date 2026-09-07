@@ -1090,6 +1090,47 @@ describe("shared conversion response codecs", () => {
     expect(text).toContain("response.completed");
   });
 
+  it.each([
+    [{}, "{}"],
+    [{ x: 1 }, "{\"x\":1}"],
+  ] as const)("treats an empty Messages argument delta as a no-op for initial input %j", async (input, expected) => {
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_empty_argument_delta",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "source",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "call_empty_delta", name: "lookup", input },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: "" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: 1 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const text = wireText(await collectStream("messages", "responses", chunks(encoder.encode(source))));
+    expect(text).toContain(expected.replaceAll("\"", "\\\""));
+    expect(text).toContain("response.completed");
+  });
+
   it("reconciles wide reordered tool inputs with equivalent numeric spellings", async () => {
     const entries = Array.from({ length: 1_000 }, (_, index) => [`key_${index}`, index + 1] as const);
     const initial = Object.fromEntries(entries);
