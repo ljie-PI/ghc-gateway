@@ -1,6 +1,5 @@
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
@@ -62,7 +61,9 @@ export function assertOfflineSdkTestsEnabled(env: NodeJS.ProcessEnv = process.en
 
 export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
   assertOfflineSdkTestsEnabled();
-  const dataDir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-sdk-"));
+  const artifactRoot = path.resolve("artifacts", "test-data");
+  await mkdir(artifactRoot, { recursive: true });
+  const dataDir = await mkdtemp(path.join(artifactRoot, "ghc-gateway-sdk-"));
   const port = await reserveLoopbackPort();
   const database = openDatabase({
     path: path.join(dataDir, "state.db"),

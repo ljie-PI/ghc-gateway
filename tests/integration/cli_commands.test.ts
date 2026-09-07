@@ -405,7 +405,24 @@ describe("CLI commands", () => {
         accountId: "github.com/42",
       });
       harness.directory.preferences.get = originalGet;
-      expect(await client.request("models.list", {}, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", items: [{ id: "gpt" }] });
+      expect(await client.request("models.list", {}, { dataDir: "unused" })).toMatchObject({
+        accountId: "github.com/42",
+        credentialGeneration: 1,
+        capabilityRevision: 0,
+        items: [{
+          id: "gpt",
+          discovered: true,
+          configured: false,
+          verified: true,
+          enabled: true,
+          visible: true,
+          protocols: ["chat", "responses"],
+          protocolsSource: "live",
+          protocolsConflict: false,
+          protocolsLiveState: "value",
+          chatOutputTokenField: null,
+        }],
+      });
       expect(await client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "gpt", validity: "valid" });
       const isCurrent = harness.catalog.isCurrent.bind(harness.catalog);
       harness.catalog.isCurrent = () => false;
@@ -903,7 +920,13 @@ async function dispatcherHarness(options: {
   readonly backend: ScriptedCopilotBackend;
   readonly history: SqliteResponsesHistory;
   readonly runtimeConfig: RuntimeConfigStore;
-  capiModels: Array<{ readonly id: string; readonly name: string; readonly vendor: string; readonly model_picker_enabled: boolean }>;
+  capiModels: Array<{
+    readonly id: string;
+    readonly name: string;
+    readonly vendor: string;
+    readonly model_picker_enabled: boolean;
+    readonly model_info?: Readonly<{ readonly supported_endpoints?: readonly string[] }>;
+  }>;
   readonly close: () => void;
   readonly advanceTime: (milliseconds: number) => void;
 }> {
@@ -922,7 +945,13 @@ async function dispatcherHarness(options: {
   });
   const directory = new AccountDirectory(database, new MemoryCredentialStore(), now);
   const harness = {
-    capiModels: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }],
+    capiModels: [{
+      id: "gpt",
+      name: "GPT",
+      vendor: "openai",
+      model_picker_enabled: true,
+      model_info: { supported_endpoints: ["/v1/chat/completions", "/v1/responses"] },
+    }],
   };
   const catalog = new CopilotModelCatalog({
     async fetch() {

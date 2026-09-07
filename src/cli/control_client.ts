@@ -4,6 +4,12 @@ import { UNSUPPORTED_RUNTIME_MESSAGE } from "../runtime_support.js";
 import type { AccountSummary } from "../accounts/account_directory.js";
 import type { ModelPreference } from "../accounts/model_preferences.js";
 import type { CapabilityCatalogSnapshot } from "../copilot/capability_registry.js";
+import type {
+  CapabilityFieldState,
+  CapabilitySource,
+  ChatOutputTokenField,
+  NativeModelProtocol,
+} from "../copilot/model_capabilities.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import { DaemonIdentityFile, type DaemonIdentity } from "../daemon/identity_file.js";
@@ -129,8 +135,10 @@ export interface AuthStatus {
 
 export interface AdminModels {
   readonly accountId: string;
+  readonly credentialGeneration: number;
   readonly catalogGeneration: number;
   readonly fetchedAt: string;
+  readonly capabilityRevision: number;
   readonly preferredModel: {
     readonly revision: number;
     readonly modelId: string;
@@ -140,6 +148,16 @@ export interface AdminModels {
     readonly id: string;
     readonly name: string;
     readonly vendor: string;
+    readonly discovered: boolean;
+    readonly configured: boolean;
+    readonly verified: boolean;
+    readonly enabled: boolean;
+    readonly visible: boolean;
+    readonly protocols: readonly NativeModelProtocol[] | null;
+    readonly protocolsSource: CapabilitySource;
+    readonly protocolsConflict: boolean;
+    readonly protocolsLiveState: CapabilityFieldState;
+    readonly chatOutputTokenField: ChatOutputTokenField | null;
     readonly maxInputTokens: number | null;
     readonly maxOutputTokens: number | null;
   }[];
@@ -653,8 +671,10 @@ export function adminModelsFromCatalog(
 ): AdminModels {
   return {
     accountId,
+    credentialGeneration: catalog.credentialGeneration,
     catalogGeneration: catalog.catalogGeneration,
     fetchedAt: catalog.fetchedAt,
+    capabilityRevision: catalog.capabilityRevision,
     preferredModel: preferredModel === null
       ? null
       : {
@@ -667,6 +687,16 @@ export function adminModelsFromCatalog(
         id: model.modelId,
         name: model.name,
         vendor: model.vendor,
+        discovered: model.discovered,
+        configured: model.configured,
+        verified: model.verified,
+        enabled: model.enabled,
+        visible: model.visible,
+        protocols: model.protocols.value,
+        protocolsSource: model.protocols.source,
+        protocolsConflict: model.protocols.conflict,
+        protocolsLiveState: model.protocols.liveState,
+        chatOutputTokenField: model.profile.chatOutputTokenField.value,
         maxInputTokens: model.maxInputTokens.value,
         maxOutputTokens: model.maxOutputTokens.value,
       };
