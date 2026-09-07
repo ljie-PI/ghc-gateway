@@ -310,12 +310,11 @@ Automated tests are offline and use scripted GitHub/Copilot remotes. Official-cl
 GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 ```
 
-The live suite can contact real GitHub Copilot and must not be run as part of normal development or CI. Build first, then inspect the exact managed account and its native protocol declarations without changing the default account:
+The live suite can contact real GitHub Copilot and must not be run as part of normal development or CI. Build first, then inspect the exact managed process and account without changing the default account:
 
 ```bash
 node dist/src/cli/main.js --json status
 node dist/src/cli/main.js --json accounts list
-node dist/src/cli/main.js --json models list --account <account-id>
 ```
 
 Set `GHC_GATEWAY_LIVE_ACCOUNT_ID` to the current default account and configure every matrix route explicitly. The suite refuses a different active account rather than switching the default. The route prefixes are:
@@ -338,7 +337,7 @@ For each prefix, set exactly one selection:
 - `<PREFIX>_UNSUPPORTED_MODEL=<model-id>` plus `<PREFIX>_UNSUPPORTED_STATUS=403|404` performs one explicit entitlement check for that matrix cell and records the rejection.
 - `<PREFIX>_UNAVAILABLE=catalog_not_declared` records a gap only when the current capability catalog contains no enabled model that would select that route.
 
-`GHC_GATEWAY_LIVE_BASE_URL` defaults to `http://127.0.0.1:31400`. Set `GHC_GATEWAY_LIVE_DATA_DIR` when the managed daemon uses a non-default data directory. The suite verifies the selected account and route declarations through the freshly built CLI, never changes the default account, disables SDK retries, runs sequentially, uses a 30-second request timeout and 64-token output budgets, and permits at most 12 inference calls plus two model-list requests. It emits content-free JSON route statuses and an exact call ledger.
+`GHC_GATEWAY_LIVE_BASE_URL` defaults to `http://127.0.0.1:31400`. Set `GHC_GATEWAY_LIVE_DATA_DIR` when the managed daemon uses a non-default data directory. The suite verifies process identity and the selected account through the freshly built CLI, obtains one one-use Admin bootstrap entirely in memory to read the current capability declarations, logs that Admin Session out, and never prints its token, cookie, or CSRF value. It never changes the default account, disables SDK retries, runs sequentially, uses a 30-second request timeout and 64-token output budgets, and permits at most 12 inference calls plus two SDK model-list requests. It emits content-free JSON route statuses and an exact call ledger.
 
 Example invocation after all route variables are set:
 

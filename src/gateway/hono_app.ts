@@ -459,5 +459,8 @@ function isStreamingResponse(response: Response): boolean {
 }
 
 function compactJson(status: number, body: Record<string, string>): Response {
-  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+  const wire = JSON.stringify(body);
+  const headers = new Headers(JSON_HEADERS);
+  headers.set("Content-Length", String(new TextEncoder().encode(wire).byteLength));
+  return new Response(wire, { status, headers });
 }

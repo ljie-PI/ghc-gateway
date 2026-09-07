@@ -5,7 +5,7 @@ import {
   expectCancelledStream,
   LIVE_ROUTES,
   LiveCallLedger,
-  type LiveCliModel,
+  type LiveCapabilityModel,
   type LiveRouteKey,
   type LiveRouteSelection,
   parseManagedConvertedResponseId,
@@ -183,7 +183,7 @@ function modelSelection(modelId: string): LiveRouteSelection {
 function liveModel(
   id: string,
   protocols: readonly ("chat" | "messages" | "responses")[],
-): LiveCliModel {
+): LiveCapabilityModel {
   return {
     id,
     discovered: true,

@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { HttpControlClient } from "../../../src/cli/control_client.js";
 import type { EffectiveModelCapabilitySnapshot } from "../../../src/copilot/capability_registry.js";
 import type { ChatOutputTokenField } from "../../../src/copilot/model_capabilities.js";
 import { planProtocolExecution } from "../../../src/protocols/conversion/planner.js";
@@ -75,7 +77,7 @@ export interface LiveCliAccounts {
   readonly items: readonly LiveCliAccount[];
 }
 
-export interface LiveCliModel {
+export interface LiveCapabilityModel {
   readonly id: string;
   readonly discovered: boolean;
   readonly configured: boolean;
@@ -91,19 +93,19 @@ export interface LiveCliModel {
   readonly maxOutputTokens: number | null;
 }
 
-export interface LiveCliModels {
+export interface LiveCapabilityModels {
   readonly accountId: string;
   readonly credentialGeneration: number;
   readonly catalogGeneration: number;
   readonly capabilityRevision: number;
-  readonly items: readonly LiveCliModel[];
+  readonly items: readonly LiveCapabilityModel[];
 }
 
 export interface LiveManagedState {
   readonly port: number;
   readonly managed: boolean;
   readonly accounts: LiveCliAccounts;
-  readonly models: LiveCliModels;
+  readonly models: LiveCapabilityModels;
 }
 
 export interface LiveCallSnapshot {
@@ -256,16 +258,83 @@ export async function readLiveManagedState(
   }
   const accounts = await runCliJson<LiveCliAccounts>(configuration.dataDir, ["accounts", "list"], cwd);
   assertSelectedDefaultAccount(configuration.accountId, accounts);
-  const models = await runCliJson<LiveCliModels>(
-    configuration.dataDir,
-    ["models", "list", "--account", configuration.accountId],
-    cwd,
-  );
+  const models = await readAdminModels(configuration);
   if (models.accountId !== configuration.accountId) {
     throw new Error("managed gateway returned a model catalog for a different account");
   }
   validateRouteSelections(configuration.routes, models.items, configuration.accountId);
   return { port: status.port, managed: true, accounts, models };
+}
+
+async function readAdminModels(
+  configuration: Readonly<LiveConfiguration>,
+): Promise<LiveCapabilityModels> {
+  const origin = new URL(configuration.baseUrl).origin;
+  const dataDir = configuration.dataDir ?? path.join(homedir(), ".ghc-gateway");
+  let bootstrapUrl: string | undefined;
+  let cookie: string | undefined;
+  let csrfToken: string | undefined;
+  const control = new HttpControlClient(
+    globalThis.fetch,
+    undefined,
+    (url) => {
+      bootstrapUrl = url;
+    },
+  );
+  try {
+    await control.adminOpen({ dataDir });
+    const parsedBootstrapUrl = bootstrapUrl === undefined ? null : new URL(bootstrapUrl);
+    if (parsedBootstrapUrl !== null && parsedBootstrapUrl.origin !== origin) {
+      throw new Error("managed Admin bootstrap origin does not match the selected gateway");
+    }
+    const bootstrapToken = parsedBootstrapUrl === null
+      ? null
+      : new URLSearchParams(parsedBootstrapUrl.hash.slice(1)).get("bootstrap_token");
+    if (bootstrapToken === null) {
+      throw new Error("managed Admin bootstrap did not produce a token");
+    }
+    const bootstrap = await globalThis.fetch(`${origin}/admin/api/v1/auth/bootstrap`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin,
+      },
+      body: JSON.stringify({ token: bootstrapToken }),
+    });
+    const bootstrapBody = await safeJson(bootstrap);
+    if (!bootstrap.ok) {
+      throw new Error(`managed Admin bootstrap failed: ${safeAdminErrorCode(bootstrapBody, bootstrap.status)}`);
+    }
+    cookie = bootstrap.headers.get("set-cookie")?.split(";", 1)[0];
+    csrfToken = nestedString(bootstrapBody, ["data", "csrfToken"]);
+    if (cookie === undefined || csrfToken === undefined) {
+      throw new Error("managed Admin bootstrap returned an incomplete session");
+    }
+    const response = await globalThis.fetch(
+      `${origin}/admin/api/v1/models?accountId=${encodeURIComponent(configuration.accountId)}`,
+      { headers: { cookie } },
+    );
+    const body = await safeJson(response);
+    if (!response.ok) {
+      throw new Error(`managed Admin model catalog failed: ${safeAdminErrorCode(body, response.status)}`);
+    }
+    const data = nestedObject(body, ["data"]);
+    if (data === null) {
+      throw new Error("managed Admin model catalog returned an invalid envelope");
+    }
+    return data as unknown as LiveCapabilityModels;
+  } finally {
+    if (cookie !== undefined && csrfToken !== undefined) {
+      await globalThis.fetch(`${origin}/admin/api/v1/auth/logout`, {
+        method: "POST",
+        headers: {
+          cookie,
+          "x-ghcg-csrf": csrfToken,
+          origin,
+        },
+      }).catch(() => undefined);
+    }
+  }
 }
 
 export function assertSelectedDefaultAccount(
@@ -282,7 +351,7 @@ export function assertSelectedDefaultAccount(
 
 export function validateRouteSelections(
   selections: Readonly<Record<LiveRouteKey, LiveRouteSelection>>,
-  models: readonly LiveCliModel[],
+  models: readonly LiveCapabilityModel[],
   accountId = "live-account",
 ): void {
   const byId = new Map(models.map((model) => [model.id, model]));
@@ -320,7 +389,7 @@ export function assertLiveRequestPlan(
   routeKey: LiveRouteKey,
   modelId: string,
   body: unknown,
-  models: readonly LiveCliModel[],
+  models: readonly LiveCapabilityModel[],
   accountId: string,
 ): void {
   const routeItem = LIVE_ROUTES.find((candidate) => candidate.key === routeKey);
@@ -545,6 +614,47 @@ function isInferenceProtocol(value: unknown): value is InferenceProtocol {
   return value === "chat" || value === "messages" || value === "responses";
 }
 
+async function safeJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json() as unknown;
+  } catch (_error: unknown) {
+    return null;
+  }
+}
+
+function safeAdminErrorCode(body: unknown, status: number): string {
+  const code = nestedString(body, ["error", "code"]);
+  return code !== undefined && /^[a-z_]{1,64}$/u.test(code)
+    ? code
+    : `http_${status}`;
+}
+
+function nestedObject(
+  value: unknown,
+  pathParts: readonly string[],
+): Readonly<Record<string, unknown>> | null {
+  let current = value;
+  for (const part of pathParts) {
+    if (current === null || typeof current !== "object" || !(part in current)) {
+      return null;
+    }
+    current = Reflect.get(current, part);
+  }
+  return current !== null && typeof current === "object" && !Array.isArray(current)
+    ? current as Readonly<Record<string, unknown>>
+    : null;
+}
+
+function nestedString(value: unknown, pathParts: readonly string[]): string | undefined {
+  const parent = nestedObject(value, pathParts.slice(0, -1));
+  const key = pathParts.at(-1);
+  if (parent === null || key === undefined) {
+    return undefined;
+  }
+  const candidate = parent[key];
+  return typeof candidate === "string" ? candidate : undefined;
+}
+
 async function nextWithTimeout<T>(
   iterator: AsyncIterator<T>,
   timeoutMs: number,
@@ -596,7 +706,7 @@ async function returnWithTimeout<T>(
 
 function plannedTarget(
   routeItem: Readonly<LiveRoute>,
-  model: Readonly<LiveCliModel>,
+  model: Readonly<LiveCapabilityModel>,
   body: unknown,
   accountId: string,
 ): InferenceProtocol | null {
@@ -619,7 +729,7 @@ function plannedTarget(
 }
 
 function planningCapability(
-  model: Readonly<LiveCliModel>,
+  model: Readonly<LiveCapabilityModel>,
   accountId: string,
 ): EffectiveModelCapabilitySnapshot {
   return {
