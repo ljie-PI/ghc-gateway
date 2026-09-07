@@ -20,6 +20,7 @@ const DEFAULT_TTL_DAYS = 7;
 const DEFAULT_MAX_RESPONSES = 512;
 const DEFAULT_MAX_RECEIPTS = 2_048;
 const DAY_MS = 86_400_000;
+const JSON_DECODER = new TextDecoder();
 export const RESPONSES_CHAT_CONVERSION_VERSION = "responses-chat-v1";
 export const RESPONSES_MESSAGES_CONVERSION_VERSION = "responses-messages-v1";
 
@@ -895,9 +896,9 @@ function extractRecordableCalls(responseId: string, output: readonly WireJson[] 
       responseId,
       ordinal: calls.length,
       callId,
-      kind: memberValues(item, "type")[0] as ResponsesCallKind,
+      kind: firstMemberValue(item, "type") as ResponsesCallKind,
       item: itemObject,
-      itemJson: new TextDecoder().decode(serializeWireJson(itemObject)),
+      itemJson: JSON_DECODER.decode(serializeWireJson(itemObject)),
     });
   }
   return calls;
@@ -911,7 +912,7 @@ function outputItems(output: readonly WireJson[] | WireJson): readonly WireJson[
     return output.items;
   }
   if (isWireJsonObject(output)) {
-    const nested = memberValues(output, "output")[0];
+    const nested = firstMemberValue(output, "output");
     return isWireJsonArray(nested) ? nested.items : [output];
   }
   return [];
@@ -931,7 +932,7 @@ function isCallItem(item: WireJson): item is WireJsonObject {
   if (!isWireJsonObject(item)) {
     return false;
   }
-  const type = memberValues(item, "type")[0];
+  const type = firstMemberValue(item, "type");
   return typeof type === "string" && (RESPONSE_CALL_KINDS as readonly string[]).includes(type);
 }
 
@@ -939,13 +940,22 @@ function isOutputItem(item: WireJson): item is WireJsonObject {
   if (!isWireJsonObject(item)) {
     return false;
   }
-  const type = memberValues(item, "type")[0];
+  const type = firstMemberValue(item, "type");
   return typeof type === "string" && (RESPONSE_CALL_OUTPUT_KINDS as readonly string[]).includes(type);
 }
 
 function callIdFromItem(item: WireJsonObject): string | undefined {
-  return trimmedString(memberValues(item, "call_id")[0])
-    ?? trimmedString(memberValues(item, "id")[0]);
+  return trimmedString(firstMemberValue(item, "call_id"))
+    ?? trimmedString(firstMemberValue(item, "id"));
+}
+
+function firstMemberValue(item: WireJsonObject, key: string): WireJson | undefined {
+  for (const member of item.members) {
+    if (member.key === key) {
+      return member.value;
+    }
+  }
+  return undefined;
 }
 
 function trimmedString(value: WireJson | undefined): string | undefined {

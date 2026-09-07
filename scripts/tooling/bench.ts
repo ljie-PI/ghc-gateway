@@ -360,10 +360,9 @@ export async function runBenchmarkIteration(
     await runStreamExecutions(runtime, abortedCount, true);
     const stabilized = await stabilizedResidentSamples();
 
-    // Start the durable-commit seam from the stabilized heap so earlier latency phases do not own its GC samples.
-    const checkpointValues = await measureCheckpoints(runtime, workload.checkpointStreams);
     const bufferedValues = await measureBufferedRequests(runtime, workload.bufferedSamples);
     const streamEventValues = await measureStreamEvents(runtime, workload.eventSamples);
+    const checkpointValues = await measureCheckpoints(runtime, workload.checkpointStreams);
     await ensureEventLoopSamples(eventLoop.valuesMs, 100);
     await eventLoop.stop();
 
