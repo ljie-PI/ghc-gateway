@@ -445,7 +445,7 @@ export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifac
 }
 
 async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-bench-"));
+  const dataDir = await benchmarkDataDir("runtime-");
   const port = await availablePort();
   const nowMs = (): number => 1_700_000_000_000;
   const database = openDatabase({
@@ -876,7 +876,7 @@ async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
 async function runCompiledIdleWorker(): Promise<IdleWorkerResult> {
   const workerPath = path.resolve("artifacts/bench/scripts/tooling/bench_idle.js");
   await writeFile(workerPath, idleWorkerSource(), "utf8");
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), "ghc-gateway-idle-"));
+  const dataDir = await benchmarkDataDir("idle-");
   const port = await availablePort();
   return await new Promise<IdleWorkerResult>((resolve, reject) => {
     const launchArgs = idleLaunchArgs(workerPath);
@@ -971,11 +971,18 @@ function idleLaunchArgs(workerPath: string): string[] {
     return [
       "--jitless",
       "--optimize-for-size",
+      "--gc-global",
       "--expose-gc",
       workerPath,
     ];
   }
-  return ["--jitless", "--optimize-for-size", "--expose-gc", workerPath];
+  return ["--jitless", "--optimize-for-size", "--gc-global", "--expose-gc", workerPath];
+}
+
+async function benchmarkDataDir(prefix: string): Promise<string> {
+  const root = path.resolve("artifacts", "bench", "data");
+  await mkdir(root, { recursive: true });
+  return await mkdtemp(path.join(root, prefix));
 }
 
 function idleWorkerSource(): string {
