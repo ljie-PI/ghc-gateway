@@ -203,10 +203,11 @@ function protectFile(filePath: string): void {
 function restrictWindowsAcl(target: string): void {
   const current = currentWindowsIdentity();
   const grant = isDirectory(target) ? `*${current.sid}:(OI)(CI)(F)` : `*${current.sid}:(F)`;
-  execFileSync("icacls", [target, "/inheritance:r", "/grant:r", grant], { stdio: "ignore", windowsHide: true });
+  const icacls = windowsCommandPath("icacls");
+  execFileSync(icacls, [target, "/inheritance:r", "/grant:r", grant], { stdio: "ignore", windowsHide: true });
   for (const identity of windowsAclIdentities(target)) {
     if (!isCurrentWindowsIdentity(identity, current)) {
-      execFileSync("icacls", [target, "/remove:g", identity], { stdio: "ignore", windowsHide: true });
+      execFileSync(icacls, [target, "/remove:g", identity], { stdio: "ignore", windowsHide: true });
     }
   }
 }
@@ -238,7 +239,8 @@ function currentWindowsIdentity(): { readonly name: string; readonly sid: string
 }
 
 function windowsAclIdentities(target: string): readonly string[] {
-  const output = execFileSync("icacls", [target], { encoding: "utf8", windowsHide: true });
+  const icacls = windowsCommandPath("icacls");
+  const output = execFileSync(icacls, [target], { encoding: "utf8", windowsHide: true });
   const identities: string[] = [];
   for (const rawLine of output.split(/\r?\n/u)) {
     const line = rawLine.trim();
