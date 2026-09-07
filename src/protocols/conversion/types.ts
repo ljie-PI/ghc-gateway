@@ -196,6 +196,7 @@ export interface ConvertedBufferedResponse {
 }
 
 export type SemanticStreamEvent =
+  | { readonly kind: "semantic_progress" }
   | { readonly kind: "message_start"; readonly key: string }
   | { readonly kind: "text_delta"; readonly key: string; readonly orderKey?: string | undefined; readonly delta: string }
   | { readonly kind: "text_done"; readonly key: string; readonly orderKey?: string | undefined; readonly text: string }

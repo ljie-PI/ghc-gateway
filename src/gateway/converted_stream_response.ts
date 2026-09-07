@@ -13,6 +13,7 @@ import { convertProtocolStream } from "../protocols/conversion/stream.js";
 import type {
   ConversionCheckpointIntent,
   ConvertedProtocolPlan,
+  ConvertedStreamEmission,
   SemanticUsage,
 } from "../protocols/conversion/types.js";
 import type { ProtocolPerformanceObserver } from "../telemetry/runtime.js";
@@ -67,27 +68,35 @@ export async function createConvertedStreamResponse(input: {
   };
   const prefetched: Uint8Array[] = [];
   const firstSemanticStartedAt = Date.now();
+  let firstSemanticObserved = false;
   try {
     for (;;) {
-      const elapsed = Date.now() - firstSemanticStartedAt;
-      if (elapsed >= input.scope.config.timeouts.firstByteMs) {
-        throw new GatewayFailureError({
-          kind: "upstream_timeout",
-          source: "converter",
-          phase: "stream",
-        });
+      let next: IteratorResult<ConvertedStreamEmission>;
+      if (firstSemanticObserved) {
+        next = await iterator.next();
+      } else {
+        const remaining = input.scope.config.timeouts.firstByteMs - (Date.now() - firstSemanticStartedAt);
+        if (remaining <= 0) {
+          throw new GatewayFailureError({
+            kind: "upstream_timeout",
+            source: "converter",
+            phase: "stream",
+          });
+        }
+        next = await nextWithDeadline(
+          iterator,
+          remaining,
+          input.scope.signal,
+          { source: "converter", phase: "stream" },
+        );
       }
-      const next = await nextWithDeadline(
-        iterator,
-        input.scope.config.timeouts.firstByteMs - elapsed,
-        input.scope.signal,
-        { source: "converter", phase: "stream" },
-      );
       if (next.done === true) {
         throw truncated();
       }
       const emission = next.value;
-      if (emission.kind === "checkpoint") {
+      if (emission.kind === "first_semantic") {
+        firstSemanticObserved = true;
+      } else if (emission.kind === "checkpoint") {
         await input.persistCheckpoint?.(emission.intent);
       } else if (emission.kind === "usage") {
         observedUsage = emission.usage;

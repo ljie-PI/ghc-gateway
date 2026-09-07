@@ -2662,6 +2662,65 @@ describe("shared conversion response codecs", () => {
     })).rejects.toMatchObject({ failure: { kind: "upstream_timeout" } });
   });
 
+  it("treats omitted reasoning as semantic progress for the first-semantic deadline", async () => {
+    async function* reasoningThenAnswer(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(
+        "data: {\"id\":\"reasoning\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan\"},\"finish_reason\":null}]}\n\n",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      yield encoder.encode([
+        "data: {\"id\":\"answer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join(""));
+    }
+    const config = defaultRuntimeConfigSnapshot();
+    const signal = new AbortController().signal;
+    const response = await createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: reasoningThenAnswer(),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "messages",
+        target: "chat",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: ["reasoning.presentation_omitted"],
+        },
+      },
+      scope: {
+        requestId: "req_reasoning_progress",
+        signal,
+        deliverySignal: signal,
+        config: {
+          ...config,
+          timeouts: { ...config.timeouts, firstByteMs: 50 },
+        },
+        attempt: createRequestAttempt({
+          requestId: "req_reasoning_progress",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      onTerminal: () => undefined,
+    });
+    expect(await response.text()).toContain("\"text\": \"ok\"");
+  });
+
   it("measures converted stream event work without wrapping upstream waits", async () => {
     let eventMeasurements = 0;
     const signal = new AbortController().signal;
@@ -2721,6 +2780,7 @@ describe("shared conversion response codecs", () => {
     });
     await response.text();
     expect(eventMeasurements).toBeGreaterThan(0);
+    expect(eventMeasurements).toBeLessThan(20);
   });
 
   it("finishes a native Messages stream at message_stop without waiting for upstream EOF", async () => {

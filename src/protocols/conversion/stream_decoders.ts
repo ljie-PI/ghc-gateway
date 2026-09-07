@@ -25,20 +25,22 @@ export function decodeProtocolStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
   accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
 ): AsyncIterable<SemanticStreamEvent> {
   if (source === "chat") {
-    return decodeChatStream(bytes, eventLimitBytes, accumulatorBytes);
+    return decodeChatStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
   }
   if (source === "messages") {
-    return decodeMessagesStream(bytes, eventLimitBytes, accumulatorBytes);
+    return decodeMessagesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
   }
-  return decodeResponsesStream(bytes, eventLimitBytes, accumulatorBytes);
+  return decodeResponsesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
 }
 
 async function* decodeChatStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
   accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const tools = new Map<number, {
@@ -109,7 +111,7 @@ async function* decodeChatStream(
       }
     }
   };
-  for await (const frame of parseChatSse(bytes, eventLimitBytes)) {
+  for await (const frame of parseChatSse(bytes, eventLimitBytes, measureEvent)) {
     if (frame.kind === "error") {
       throw upstreamStreamEventFailure();
     }
@@ -165,6 +167,11 @@ async function* decodeChatStream(
     const choice = choices.items[0];
     const delta = objectMember(choice, "delta");
     if (delta !== undefined) {
+      const reasoning = stringMember(delta, "reasoning_content");
+      const thinkingBlocks = arrayMember(delta, "thinking_blocks");
+      if ((reasoning !== undefined && reasoning.length > 0) || (thinkingBlocks?.items.length ?? 0) > 0) {
+        yield { kind: "semantic_progress" };
+      }
       const content = stringMember(delta, "content");
       if (content !== undefined && content.length > 0) {
         budget.reserve(content);
@@ -411,16 +418,17 @@ async function* decodeMessagesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
   accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const blocks = new Map<number, MessageBlockState>();
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
   let observedUsage = emptyUsage();
-  for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
+  for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
     if (record.data === "[DONE]") {
       invalid();
     }
-    const payload = parseEventObject(record.data, eventLimitBytes);
+    const payload = measuredDecode(measureEvent, () => parseEventObject(record.data, eventLimitBytes));
     const type = stringMember(payload, "type");
     if (type === undefined || (record.eventName !== undefined && record.eventName !== type)) {
       invalid();
@@ -487,6 +495,7 @@ async function* decodeMessagesStream(
         yield { kind: "tool_start", key, callId, name };
       } else if (blockType === "thinking" || blockType === "redacted_thinking") {
         blocks.set(index, { kind: "ignored", closed: false });
+        yield { kind: "semantic_progress" };
       } else {
         invalid();
       }
@@ -528,6 +537,8 @@ async function* decodeMessagesStream(
         };
       } else if (block.kind !== "ignored") {
         invalid();
+      } else {
+        yield { kind: "semantic_progress" };
       }
       continue;
     }
@@ -623,6 +634,7 @@ async function* decodeResponsesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
   accumulatorBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const toolsByIndex = new Map<number, ResponseToolIdentity>();
@@ -631,11 +643,11 @@ async function* decodeResponsesStream(
   const observedOutputStatuses = new Map<number, string>();
   const observedContent = new Map<string, "output_text" | "refusal">();
   let lastSequence = -1;
-  for await (const record of decodeSseRecords(bytes, eventLimitBytes)) {
+  for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
     if (record.data === "[DONE]") {
       invalid();
     }
-    const payload = parseEventObject(record.data, eventLimitBytes);
+    const payload = measuredDecode(measureEvent, () => parseEventObject(record.data, eventLimitBytes));
     const type = stringMember(payload, "type");
     if (type === undefined || (record.eventName !== undefined && record.eventName !== type)) {
       invalid();
@@ -907,8 +919,11 @@ async function* decodeResponsesStream(
     if (
       type === "response.created"
       || type === "response.in_progress"
-      || type.startsWith("response.reasoning_")
     ) {
+      continue;
+    }
+    if (type.startsWith("response.reasoning_")) {
+      yield { kind: "semantic_progress" };
       continue;
     }
     if (type === "error") {
@@ -1237,6 +1252,13 @@ function parseEventObject(data: string, eventLimitBytes: number): WireJsonObject
       cause: error,
     });
   }
+}
+
+function measuredDecode<T>(
+  measureEvent: (<Result>(work: () => Result) => Result) | undefined,
+  work: () => T,
+): T {
+  return measureEvent === undefined ? work() : measureEvent(work);
 }
 
 function requiredStreamString(object: WireJsonObject, key: string, allowEmpty = false): string {

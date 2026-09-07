@@ -55,6 +55,7 @@ export async function* convertProtocolStream(
     bytes,
     context.eventLimitBytes,
     context.accumulatorBytes,
+    context.measureEvent,
   )) {
     if (event.kind === "usage") {
       usage = event.usage;
@@ -64,24 +65,27 @@ export async function* convertProtocolStream(
     if (!started) {
       started = true;
       yield { kind: "first_semantic" };
-      yield* measuredEmissions(context, () => emitter.start());
+      yield* measuredEvent(context, () => emitter.start());
+    }
+    if (event.kind === "semantic_progress") {
+      continue;
     }
     if (event.kind === "message_start") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         ledger.startMessage(event.key);
         return emitter.messageStart(event.key);
       });
       continue;
     }
     if (event.kind === "text_delta") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         ledger.appendText(event.key, event.delta, event.orderKey);
         return emitter.textDelta(event.key, event.delta, event.orderKey);
       });
       continue;
     }
     if (event.kind === "text_done") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         const first = ledger.observeText(event.key, event.orderKey);
         const suffix = reconcileSnapshot(ledger.textValue(event.key), event.text);
         if (suffix.length > 0) {
@@ -93,14 +97,14 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "refusal_delta") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         ledger.appendRefusal(event.key, event.delta, event.orderKey);
         return emitter.refusalDelta(event.key, event.delta, event.orderKey);
       });
       continue;
     }
     if (event.kind === "refusal_done") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         const first = ledger.observeRefusal(event.key, event.orderKey);
         const suffix = reconcileSnapshot(ledger.refusalValue(event.key), event.refusal);
         if (suffix.length > 0) {
@@ -112,14 +116,14 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "content_done") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         ledger.finishContent(event.key);
         return emitter.contentDone(event.orderKey, event.contentIndex);
       });
       continue;
     }
     if (event.kind === "item_done") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         if (event.itemType === "message") {
           ledger.finishMessage(`responses:${event.outputIndex}:message`);
         }
@@ -128,21 +132,21 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "tool_start") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         ledger.startTool(event);
         return emitter.toolStart(event.key, event.callId, event.name, event.itemId);
       });
       continue;
     }
     if (event.kind === "tool_arguments_delta") {
-      yield* measuredEmissions(context, () => {
+      yield* measuredEvent(context, () => {
         ledger.appendToolArguments(event.key, event.delta);
         return emitter.toolArgumentsDelta(event.key, event.delta);
       });
       continue;
     }
     if (event.kind === "tool_done") {
-      yield* measuredEmissions(context, () => (function* (): Iterable<ConvertedStreamEmission> {
+      yield* measuredEvent(context, () => (function* (): Iterable<ConvertedStreamEmission> {
         const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
         if (suffix.length > 0) {
           yield* emitter.toolArgumentsDelta(event.key, suffix);
@@ -158,36 +162,30 @@ export async function* convertProtocolStream(
         invalid();
       }
       terminal = true;
-      yield* measuredEmissions(context, () => (function* (): Iterable<ConvertedStreamEmission> {
-        if (event.status === "completed") {
-          ledger.finishOpenTools();
-          for (const key of ledger.toolKeys()) {
-            yield* emitter.toolDone(key, ledger.tool(key).argumentsJson);
-          }
+      if (event.status === "completed") {
+        measuredWork(context, () => ledger.finishOpenTools());
+        for (const key of ledger.toolKeys()) {
+          yield* measuredEvent(context, () => emitter.toolDone(key, ledger.tool(key).argumentsJson));
         }
-        const items = ledger.items(event.status);
-        yield* emitter.finish(event, usage, items);
-      })());
+      }
+      const items = measuredWork(context, () => ledger.items(event.status));
+      yield* measuredEvent(context, () => emitter.finish(event, usage, items));
       yield { kind: "terminal", terminal: event.status };
       return;
     }
-
-    function* measuredEmissions(
-      context: Readonly<StreamConversionContext>,
-      work: () => Iterable<ConvertedStreamEmission>,
-    ): Iterable<ConvertedStreamEmission> {
-      const measure = context.measureEvent;
-      const iterator = measure === undefined
-        ? work()[Symbol.iterator]()
-        : measure(() => work()[Symbol.iterator]());
-      let next = measure === undefined ? iterator.next() : measure(() => iterator.next());
-      while (!next.done) {
-        yield next.value;
-        next = measure === undefined ? iterator.next() : measure(() => iterator.next());
-      }
-    }
   }
   invalid();
+}
+
+function measuredEvent(
+  context: Readonly<StreamConversionContext>,
+  work: () => Iterable<ConvertedStreamEmission>,
+): readonly ConvertedStreamEmission[] {
+  return measuredWork(context, () => [...work()]);
+}
+
+function measuredWork<T>(context: Readonly<StreamConversionContext>, work: () => T): T {
+  return context.measureEvent === undefined ? work() : context.measureEvent(work);
 }
 
 interface StreamEmitter {

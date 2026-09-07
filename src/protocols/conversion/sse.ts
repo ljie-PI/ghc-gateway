@@ -9,6 +9,7 @@ export interface SseRecord {
 export async function* decodeSseRecords(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
+  measureEvent?: (<T>(work: () => T) => T) | undefined,
 ): AsyncIterable<SseRecord> {
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
   const encoder = new TextEncoder();
@@ -30,7 +31,9 @@ export async function* decodeSseRecords(
       recordLines.push(value);
       return;
     }
-    const parsed = parseRecordLines(recordLines);
+    const parsed = measureEvent === undefined
+      ? parseRecordLines(recordLines)
+      : measureEvent(() => parseRecordLines(recordLines));
     recordLines = [];
     recordBytes = 0;
     if (parsed !== undefined) {
