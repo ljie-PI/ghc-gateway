@@ -58,6 +58,7 @@ import { RESPONSES_JSON_HEADERS, RESPONSES_STREAM_HEADERS } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentResponsesFailure } from "./failure_presenter.js";
+import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
 import { planProtocolExecution, prepareConvertedRequest } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
@@ -207,14 +208,17 @@ async function executeResponses(
       originalRequest: planningRequest,
       resolvedModel: resolved,
     };
-    return await extendedBridgeNonstreamResponse(
-      dependencies,
-      ownership,
-      bound,
-      extendedPlan,
-      validatedCommon,
-      scope,
-      usage,
+    return withUpstreamProtocol(
+      await extendedBridgeNonstreamResponse(
+        dependencies,
+        ownership,
+        bound,
+        extendedPlan,
+        validatedCommon,
+        scope,
+        usage,
+      ),
+      "chat",
     );
   }
   const plan = planProtocolExecution({
@@ -245,7 +249,7 @@ async function executeResponses(
       upstreamUrl: `${bound.target.endpoint.replace(/\/+$/u, "")}/responses`,
       stream: decoded.stream,
     };
-    return decoded.stream
+    return withUpstreamProtocol(decoded.stream
       ? await nativeStreamResponse(
         dependencies.history,
         ownership,
@@ -255,11 +259,11 @@ async function executeResponses(
         usage,
         dependencies.performanceObserver,
       )
-      : await nativeNonstreamResponse(dependencies.history, ownership, bound, nativePlan, scope, usage);
+      : await nativeNonstreamResponse(dependencies.history, ownership, bound, nativePlan, scope, usage), "responses");
   }
-  return decoded.stream
+  return withUpstreamProtocol(decoded.stream
     ? await convertedStreamResponse(dependencies, ownership, bound, plan, scope, usage)
-    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, scope, usage);
+    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, scope, usage), plan.target);
 }
 
 function decodeRequest(body: WireJsonObject) {

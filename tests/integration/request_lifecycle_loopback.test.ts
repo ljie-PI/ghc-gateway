@@ -22,6 +22,39 @@ describe("request lifecycle over loopback", () => {
     await Promise.allSettled(closing.splice(0).map(async (gateway) => await gateway.close()));
   });
 
+  it("writes an exact Content-Length for each loopback probe response", async () => {
+    const port = await availablePort();
+    const gateway = await createGateway({
+      startup: parseStartupConfig(["--port", String(port)], {}, { homedir: "Q:\\ghc-gateway-loopback" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, []);
+    closing.push(gateway);
+    await gateway.listen();
+
+    for (const [route, expectedBody] of [
+      ["/healthz", "{\"status\":\"ok\",\"version\":\"0.1.0\"}"],
+      ["/readyz", "{\"status\":\"ready\"}"],
+    ] as const) {
+      const response = await fetch(`http://127.0.0.1:${port}${route}`);
+      expect(response.headers.get("content-length")).toBe(String(Buffer.byteLength(expectedBody)));
+      expect(await response.text()).toBe(expectedBody);
+    }
+
+    const notReadyPort = await availablePort();
+    const notReadyGateway = await createGateway({
+      startup: parseStartupConfig(["--port", String(notReadyPort)], {}, { homedir: "Q:\\ghc-gateway-loopback" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [], { isReady: () => false });
+    closing.push(notReadyGateway);
+    await notReadyGateway.listen();
+    await (await fetch(`http://127.0.0.1:${notReadyPort}/healthz`)).text();
+    const notReadyBody = "{\"status\":\"not_ready\"}";
+    const notReady = await fetch(`http://127.0.0.1:${notReadyPort}/readyz`);
+    expect(notReady.status).toBe(503);
+    expect(notReady.headers.get("content-length")).toBe(String(Buffer.byteLength(notReadyBody)));
+    expect(await notReady.text()).toBe(notReadyBody);
+  });
+
   it("delivers a nonempty precommit 504 when an internal deadline cancels only upstream work", async () => {
     const usage: UsageUpdate[] = [];
     const gateway = await responsesGateway({
