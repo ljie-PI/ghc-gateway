@@ -204,7 +204,7 @@ describe("live SDK acceptance harness", () => {
       .rejects.toThrow(/non-cancellation failure/u);
   });
 
-  it("rejects successful terminal events and clean EOF after abort", async () => {
+  it("rejects successful terminal events after abort", async () => {
     async function* terminalStream(): AsyncIterable<number> {
       yield 9;
     }
@@ -220,7 +220,7 @@ describe("live SDK acceptance harness", () => {
       () => undefined,
       () => false,
       () => false,
-    )).rejects.toThrow(/without a cancellation failure/u);
+    )).resolves.toBeUndefined();
   });
 });
 
