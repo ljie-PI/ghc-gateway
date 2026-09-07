@@ -969,7 +969,8 @@ function validateTerminalResponse(
       invalid();
     }
     const observedStatus = observedOutputStatuses.get(index);
-    if (observedStatus !== undefined && stringMember(item, "status") !== observedStatus) {
+    const finalStatus = stringMember(item, "status");
+    if (observedStatus !== undefined && finalStatus !== undefined && finalStatus !== observedStatus) {
       invalid();
     }
   }

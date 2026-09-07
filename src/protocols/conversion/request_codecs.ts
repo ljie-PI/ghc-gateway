@@ -1262,7 +1262,7 @@ function decodeMessagesThinking(
   }
   if (type === "adaptive") {
     degradations.add("reasoning.budget_coarsened");
-    return { effort: "xhigh", adaptive: true };
+    return { effort: "xhigh" };
   }
   if (type !== "enabled") {
     unsupported("REQ-M-THINKING-TYPE");
@@ -1842,13 +1842,10 @@ function mergeReasoning(
   first: SemanticReasoning | undefined,
   second: SemanticReasoning | undefined,
 ): SemanticReasoning | undefined {
-  if (first?.effort !== undefined && second?.adaptive === true) {
+  if (first?.effort !== undefined) {
     return first;
   }
-  if (first?.effort !== undefined && second?.effort !== undefined && first.effort !== second.effort) {
-    invalid("REQ-M-REASONING-CONFLICT");
-  }
-  return first ?? second;
+  return second;
 }
 
 function effortFromBudget(value: number): "low" | "medium" | "high" | "xhigh" {

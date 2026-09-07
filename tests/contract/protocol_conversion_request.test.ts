@@ -1004,6 +1004,26 @@ describe("shared conversion request codecs", () => {
     },
   );
 
+  it.each(["chat", "responses"] as const)(
+    "uses explicit Messages effort over enabled thinking budget fallback for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 8192,
+        thinking: { type: "enabled", budget_tokens: 4096 },
+        output_config: { effort: "high" },
+      }), "target", capability([target]));
+      const request = decoded(converted.bytes);
+      if (target === "chat") {
+        expect(request).toMatchObject({ reasoning_effort: "high" });
+      } else {
+        expect(request).toMatchObject({ reasoning: { effort: "high" } });
+      }
+      expect(converted.degradations).toContain("reasoning.budget_coarsened");
+    },
+  );
+
   it("extracts documented JSON-encoded content media without scanning unrelated business keys", () => {
     const embedded = JSON.stringify({
       content: [{

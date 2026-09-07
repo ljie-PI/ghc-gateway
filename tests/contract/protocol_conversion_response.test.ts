@@ -1850,6 +1850,46 @@ describe("shared conversion response codecs", () => {
   );
 
   it.each(["chat", "messages"] as const)(
+    "accepts terminal omission of previously observed optional reasoning status for %s",
+    async (target) => {
+      const doneReasoning = {
+        id: "rs_optional_status",
+        type: "reasoning",
+        status: "completed",
+        summary: [],
+      };
+      const terminalReasoning = {
+        id: "rs_optional_status",
+        type: "reasoning",
+        summary: [],
+      };
+      const message = {
+        id: "msg_optional_status",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "answer", annotations: [] }],
+      };
+      const source = [
+        responseEvent(0, "response.output_item.done", { output_index: 0, item: doneReasoning }),
+        responseEvent(1, "response.output_item.done", { output_index: 1, item: message }),
+        responseEvent(2, "response.completed", {
+          response: {
+            id: "resp_optional_reasoning_status",
+            object: "response",
+            status: "completed",
+            output: [terminalReasoning, message],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        }),
+      ].join("");
+      const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
+      expect(text).toContain("answer");
+      expect(text).toContain(target === "chat" ? "data: [DONE]" : "event: message_stop");
+    },
+  );
+
+  it.each(["chat", "messages"] as const)(
     "drains every done-only multipart Responses item before advancing %s delivery",
     async (target) => {
       const first = {
