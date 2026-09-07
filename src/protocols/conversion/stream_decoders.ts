@@ -1344,7 +1344,10 @@ function normalizeJsonNumber(value: string): string {
     return "0";
   }
   let exponent = BigInt(match[4] ?? "0") - BigInt(fraction.length);
-  const trailingZeros = /0+$/u.exec(digits)?.[0].length ?? 0;
+  let trailingZeros = 0;
+  for (let index = digits.length - 1; index >= 0 && digits[index] === "0"; index -= 1) {
+    trailingZeros += 1;
+  }
   if (trailingZeros > 0) {
     digits = digits.slice(0, -trailingZeros);
     exponent += BigInt(trailingZeros);
