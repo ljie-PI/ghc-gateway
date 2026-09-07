@@ -426,7 +426,9 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
           ).run(checkpointState, ownership.accountId, responseId);
         }
         const checkpointChanged = !unavailableAfterCleanup && !ownershipChanged && calls.length > 0
-          ? this.upsertCheckpoint(ownership.accountId, responseId, calls)
+          ? canSkipExpiry && existing.checkpoint_state === "route_only"
+            ? this.insertCheckpoint(ownership.accountId, responseId, calls)
+            : this.upsertCheckpoint(ownership.accountId, responseId, calls)
           : false;
         const checkpointEvicted = receiptsExpired || legacyExpired || receiptChanged || checkpointChanged
           ? this.evictCheckpointOverflow()
@@ -740,21 +742,40 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
        WHERE account_id = ? AND response_id = ?`,
     ).get(accountId, responseId);
     if (existing === undefined) {
-      const state = this.readState();
-      const nowMs = this.nowMs();
-      this.statement(
-        `INSERT INTO response_scoped_checkpoints
-         (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
-         VALUES (?, ?, ?, ?, ?)`,
-      ).run(accountId, responseId, state.next_checkpoint_seq, nowMs, nowMs + this.ttlMs);
-      this.statement(
-        "UPDATE responses_continuation_state SET next_checkpoint_seq = ? WHERE singleton_id = 1",
-      ).run(state.next_checkpoint_seq + 1);
+      return this.insertCheckpoint(accountId, responseId, calls);
     } else {
       this.statement(
         "DELETE FROM response_scoped_calls WHERE account_id = ? AND response_id = ?",
       ).run(accountId, responseId);
     }
+    this.insertCalls(accountId, responseId, calls);
+    return true;
+  }
+
+  private insertCheckpoint(
+    accountId: string,
+    responseId: string,
+    calls: readonly StoredCall[],
+  ): boolean {
+    const state = this.readState();
+    const nowMs = this.nowMs();
+    this.statement(
+      `INSERT INTO response_scoped_checkpoints
+       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(accountId, responseId, state.next_checkpoint_seq, nowMs, nowMs + this.ttlMs);
+    this.statement(
+      "UPDATE responses_continuation_state SET next_checkpoint_seq = ? WHERE singleton_id = 1",
+    ).run(state.next_checkpoint_seq + 1);
+    this.insertCalls(accountId, responseId, calls);
+    return true;
+  }
+
+  private insertCalls(
+    accountId: string,
+    responseId: string,
+    calls: readonly StoredCall[],
+  ): void {
     const insertCall = this.statement(
       `INSERT INTO response_scoped_calls
        (account_id, response_id, ordinal, call_id, kind, item_json)
@@ -763,7 +784,6 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     for (const call of calls) {
       insertCall.run(accountId, responseId, call.ordinal, call.callId, call.kind, call.itemJson);
     }
-    return true;
   }
 
   private readReceipt(accountId: string, responseId: string): ReceiptRow | undefined {
