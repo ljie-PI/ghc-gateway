@@ -480,22 +480,25 @@ class ChatEmitter implements StreamEmitter {
 
   private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
     for (;;) {
-      const readyTool = [...this.pendingTools.entries()].find(([key]) => (
-        this.responseFrontier.allowsItem(key)
-      ));
+      const toolKey = `responses:${this.responseFrontier.currentItemIndex()}`;
+      const readyTool = this.pendingTools.get(toolKey);
       if (readyTool !== undefined) {
-        const [key, tool] = readyTool;
-        this.pendingTools.delete(key);
-        yield* this.emitToolStart(key, tool.callId, tool.name);
-        if (tool.argumentsJson.length > 0) {
-          yield* this.toolArgumentsDelta(key, tool.argumentsJson);
+        this.pendingTools.delete(toolKey);
+        yield* this.emitToolStart(toolKey, readyTool.callId, readyTool.name);
+        if (readyTool.argumentsJson.length > 0) {
+          yield* this.toolArgumentsDelta(toolKey, readyTool.argumentsJson);
         }
       }
-      const ready = [...this.pendingContent.entries()].find(([key, pending]) => (
-        this.responseFrontier.allowsContent(key, pending.orderKey)
-      ));
-      if (ready !== undefined) {
-        const [key, pending] = ready;
+      const contentIndex = this.responseFrontier.currentContentIndex();
+      const textKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:text`;
+      const refusalKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:refusal`;
+      const key = this.pendingContent.has(textKey) ? textKey : this.pendingContent.has(refusalKey) ? refusalKey : undefined;
+      if (key !== undefined) {
+        const pending = this.pendingContent.get(key) as {
+          readonly orderKey: string;
+          readonly kind: "text" | "refusal";
+          delta: string;
+        };
         this.pendingContent.delete(key);
         yield this.chunk(wireObject([
           [pending.kind === "refusal" ? "refusal" : "content", pending.delta],
@@ -842,11 +845,16 @@ class MessagesEmitter implements StreamEmitter {
       if (tool !== undefined && !this.emittedResponseTools.has(toolKey)) {
         yield* this.emitTool(toolKey, tool);
       }
-      const ready = [...this.pendingContent.entries()].find(([key, pending]) => (
-        this.responseFrontier.allowsContent(key, pending.orderKey)
-      ));
-      if (ready !== undefined) {
-        const [key, pending] = ready;
+      const contentIndex = this.responseFrontier.currentContentIndex();
+      const textKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:text`;
+      const refusalKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:refusal`;
+      const key = this.pendingContent.has(textKey) ? textKey : this.pendingContent.has(refusalKey) ? refusalKey : undefined;
+      if (key !== undefined) {
+        const pending = this.pendingContent.get(key) as {
+          readonly orderKey: string;
+          readonly kind: "text" | "refusal";
+          delta: string;
+        };
         this.pendingContent.delete(key);
         yield* this.emitLiveText(pending.kind === "refusal" ? `refusal:${key}` : key, pending.delta);
         this.recordStreamed(key, pending.kind, pending.delta);
@@ -1310,6 +1318,10 @@ class ResponseEmissionFrontier {
 
   currentItemIndex(): number {
     return this.item;
+  }
+
+  currentContentIndex(): number {
+    return this.content.get(this.currentItemOrderKey()) ?? 0;
   }
 }
 
