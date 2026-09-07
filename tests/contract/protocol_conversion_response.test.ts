@@ -475,6 +475,21 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it.each(["messages", "responses"] as const)(
+    "fills delayed Chat tool identity from the final snapshot for %s",
+    async (target) => {
+      const source = [
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join("");
+      const text = wireText(await collectStream("chat", target, chunks(encoder.encode(source))));
+      expect(text).toContain("call_1");
+      expect(text).toContain("lookup");
+      expect(text).toContain("{\\\"q\\\":1}");
+    },
+  );
+
   it("accepts Chat usage:null and preserves source tool indexes across delayed arguments", async () => {
     const source = [
       "data: {\"id\":\"x\",\"usage\":null,\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\"}},{\"index\":1,\"id\":\"call_b\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
@@ -1286,6 +1301,64 @@ describe("shared conversion response codecs", () => {
     const first = await reader.read();
     expect(decoder.decode(first.value)).not.toContain("secret");
     await expect(reader.read()).rejects.toThrow();
+  });
+
+  it.each([
+    "{\"error\":{\"type\":\"api_error\",\"message\":\"synthetic-sensitive-diagnostic\"}}",
+    "{\"error\":\"synthetic-sensitive-diagnostic\"",
+  ])("withholds native Messages event:error diagnostics without a valid type discriminator", async (diagnostic) => {
+    const signal = new AbortController().signal;
+    async function* upstream(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_error_event",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "native",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }));
+      yield encoder.encode(`event: error\ndata: ${diagnostic}\n\n`);
+    }
+    const response = await createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: upstream(),
+        async cancel() {},
+      },
+      scope: {
+        requestId: "req_native_error_event",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native_error_event",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    });
+    const reader = response.body?.getReader();
+    if (reader === undefined) {
+      throw new Error("missing response body");
+    }
+    let delivered = "";
+    await expect((async () => {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          return;
+        }
+        delivered += decoder.decode(next.value, { stream: true });
+      }
+    })()).rejects.toThrow();
+    expect(delivered).not.toContain("synthetic-sensitive-diagnostic");
   });
 });
 

@@ -1293,6 +1293,7 @@ function splitMessagesInstructions(request: Readonly<SemanticRequest>): {
 
 function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[] {
   const output: WireJsonObject[] = [];
+  let toolRoundOpen = false;
   if (request.instructions.length > 0) {
     output.push(wireObject([["role", "system"], ["content", textContent(request.instructions) ?? ""]]));
   }
@@ -1302,6 +1303,9 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
       continue;
     }
     if (item.type === "message") {
+      if (toolRoundOpen) {
+        unsupported("REQ-TARGET-C-TOOL-ROUND-ORDER");
+      }
       output.push(wireObject([
         ["role", item.role],
         ["content", encodeChatContent(item.content)],
@@ -1322,6 +1326,7 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
           ["tool_calls", wireArray([encodeChatToolCall(item)])],
         ]));
       }
+      toolRoundOpen = true;
       continue;
     }
     const results: SemanticToolResultItem[] = [];
@@ -1351,6 +1356,7 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
         );
       }
     }
+    toolRoundOpen = false;
     if (mediaContent.length > 0) {
       output.push(wireObject([["role", "user"], ["content", wireArray(mediaContent)]]));
     }

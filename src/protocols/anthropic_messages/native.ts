@@ -283,6 +283,18 @@ class NativeMessagesObserver {
   }
 
   private observeRecord(raw: string): void {
+    const event = raw.split("\n")
+      .filter((line) => line.startsWith("event:"))
+      .map((line) => line.slice(6).trim())
+      .at(-1);
+    if (event === "error") {
+      this.semantic = true;
+      throw new GatewayFailureError({
+        kind: "upstream_stream_error",
+        source: "parser",
+        phase: "stream",
+      });
+    }
     const data = raw.split("\n")
       .filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).replace(/^ /u, ""))

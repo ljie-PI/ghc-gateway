@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
-import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
+import { planProtocolExecution, prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
 import {
   isWireJsonObject,
   parseWireJson,
@@ -498,7 +498,7 @@ describe("shared conversion request codecs", () => {
   });
 
   it("preserves a valid Messages text/tool/text round followed by its bound result", () => {
-    const converted = prepareConvertedRequest("messages", "responses", body({
+    const request = body({
       model: "source",
       messages: [
         {
@@ -515,7 +515,8 @@ describe("shared conversion request codecs", () => {
         },
       ],
       max_tokens: 8,
-    }), "target", capability(["responses"]));
+    });
+    const converted = prepareConvertedRequest("messages", "responses", request, "target", capability(["responses"]));
     expect(decoded(converted.bytes)).toMatchObject({
       input: [
         { type: "message", role: "assistant", content: [{ text: "before" }] },
@@ -524,6 +525,20 @@ describe("shared conversion request codecs", () => {
         { type: "function_call_output", call_id: "call_1", output: "ok" },
       ],
     });
+    expect(() => prepareConvertedRequest(
+      "messages",
+      "chat",
+      request,
+      "target",
+      capability(["chat"]),
+    )).toThrow();
+    expect(planProtocolExecution({
+      source: "messages",
+      body: request,
+      stream: false,
+      resolvedModel: "target",
+      capability: capability(["chat", "responses"]),
+    })).toMatchObject({ kind: "converted", target: "responses" });
   });
 
   it("preserves Messages tool errors with explicit compatible markers", () => {

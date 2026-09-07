@@ -291,9 +291,25 @@ async function* decodeChatStream(
               done: false,
             };
             tools.set(index, tool);
-          } else if (tool.id !== id || tool.name !== name) {
-            invalid();
-          } else if (!tool.started) {
+          } else {
+            if (tool.id.length === 0) {
+              budget.reserve(id);
+              tool.id = id;
+            } else if (tool.id !== id) {
+              invalid();
+            }
+            if (tool.name.length === 0) {
+              budget.reserve(name);
+              tool.name = name;
+            } else if (tool.name !== name) {
+              if (tool.started || !name.startsWith(tool.name)) {
+                invalid();
+              }
+              budget.reserve(name.slice(tool.name.length));
+              tool.name = name;
+            }
+          }
+          if (!tool.started) {
             tool.argumentsSeen = true;
           }
           tool.argumentsSeen = true;
