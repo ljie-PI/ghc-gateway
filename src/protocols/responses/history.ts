@@ -382,8 +382,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       const nowMs = this.nowMs();
       const cleanupKey = receiptCleanupKey(ownership.accountId, responseId);
       const cleanupValidUntil = this.recentReceiptCleanup.get(cleanupKey);
-      this.recentReceiptCleanup.delete(cleanupKey);
       const canSkipExpiry = cleanupValidUntil !== undefined && nowMs < cleanupValidUntil;
+      if (!canSkipExpiry || checkpointState === "complete") {
+        this.recentReceiptCleanup.delete(cleanupKey);
+      }
       let unavailableAfterCleanup = false;
       let ownershipChanged = false;
       const transaction = this.database.transaction(() => {
