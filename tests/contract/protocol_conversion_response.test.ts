@@ -493,6 +493,52 @@ describe("shared conversion response codecs", () => {
     },
   );
 
+  it.each(["chat", "messages"] as const)(
+    "keeps a buffered Responses part prefix ahead of later eligible deltas for %s",
+    async (target) => {
+      const message = {
+        id: "msg_gap",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "A", annotations: [] },
+          { type: "output_text", text: "BC", annotations: [] },
+        ],
+      };
+      const source = [
+        responseEvent(0, "response.output_item.added", {
+          output_index: 0,
+          item: { ...message, status: "in_progress", content: [] },
+        }),
+        responseEvent(1, "response.output_text.delta", {
+          item_id: "msg_gap", output_index: 0, content_index: 0, delta: "A",
+        }),
+        responseEvent(2, "response.output_text.delta", {
+          item_id: "msg_gap", output_index: 0, content_index: 1, delta: "B",
+        }),
+        responseEvent(3, "response.output_text.done", {
+          item_id: "msg_gap", output_index: 0, content_index: 0, text: "A",
+        }),
+        responseEvent(4, "response.output_text.delta", {
+          item_id: "msg_gap", output_index: 0, content_index: 1, delta: "C",
+        }),
+        responseEvent(5, "response.completed", {
+          response: {
+            id: "resp_gap",
+            object: "response",
+            status: "completed",
+            output: [message],
+            usage: { input_tokens: 1, output_tokens: 3, total_tokens: 4 },
+          },
+        }),
+      ].join("");
+      const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
+      expect(text.indexOf("A")).toBeLessThan(text.indexOf("BC"));
+      expect(text).toContain(target === "chat" ? "data: [DONE]" : "event: message_stop");
+    },
+  );
+
   it.each(["messages", "responses"] as const)(
     "keeps final-only Chat text before its tool call when converting to %s",
     async (target) => {
@@ -610,6 +656,52 @@ describe("shared conversion response codecs", () => {
     ].join("");
     const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
     expect(text.indexOf("\"id\": \"call_1\"")).toBeLessThan(text.indexOf("\"text\": \"after\""));
+  });
+
+  it("keeps Messages text behind an earlier completed but buffered Responses tool", async () => {
+    const tool = {
+      id: "fc_1",
+      type: "function_call",
+      call_id: "call_1",
+      name: "lookup",
+      arguments: "{}",
+      status: "completed",
+    };
+    const message = {
+      id: "msg_after_tool",
+      type: "message",
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text: "AFTER", annotations: [] }],
+    };
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { ...tool, status: "in_progress", arguments: "" },
+      }),
+      responseEvent(1, "response.function_call_arguments.done", {
+        item_id: "fc_1", output_index: 0, name: "lookup", arguments: "{}",
+      }),
+      responseEvent(2, "response.output_item.done", { output_index: 0, item: tool }),
+      responseEvent(3, "response.output_item.added", {
+        output_index: 1,
+        item: { ...message, status: "in_progress", content: [] },
+      }),
+      responseEvent(4, "response.output_text.delta", {
+        item_id: "msg_after_tool", output_index: 1, content_index: 0, delta: "AFTER",
+      }),
+      responseEvent(5, "response.completed", {
+        response: {
+          id: "resp_tool_then_text",
+          object: "response",
+          status: "completed",
+          output: [tool, message],
+          usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+        },
+      }),
+    ].join("");
+    const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
+    expect(text.indexOf("\"type\": \"tool_use\"")).toBeLessThan(text.indexOf("\"text\": \"AFTER\""));
   });
 
   it("holds later Responses messages until earlier message content is reconciled for Messages", async () => {

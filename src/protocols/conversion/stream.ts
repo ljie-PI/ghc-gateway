@@ -177,8 +177,10 @@ class ChatEmitter implements StreamEmitter {
   private readonly sourceResponses: boolean;
   private roleSent = false;
   private readonly toolIndexes = new Map<string, number>();
+  private readonly streamedToolArguments = new Map<string, string>();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly responseFrontier = new ResponseEmissionFrontier();
+  private responseDeliveryBlocked = false;
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `chatcmpl_${context.createUuid()}`;
@@ -206,8 +208,11 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.sourceResponses && !this.responseFrontier.allowsContent(key, orderKey)) {
-      return;
+    if (this.sourceResponses) {
+      if (this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)) {
+        this.responseDeliveryBlocked = true;
+        return;
+      }
     }
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
@@ -220,8 +225,11 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.sourceResponses && !this.responseFrontier.allowsContent(key, orderKey)) {
-      return;
+    if (this.sourceResponses) {
+      if (this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)) {
+        this.responseDeliveryBlocked = true;
+        return;
+      }
     }
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
@@ -234,11 +242,15 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *toolStart(key: string, callId: string, name: string): Iterable<ConvertedStreamEmission> {
-    if (this.sourceResponses && !this.responseFrontier.allowsItem(key)) {
-      return;
+    if (this.sourceResponses) {
+      if (this.responseDeliveryBlocked || !this.responseFrontier.allowsItem(key)) {
+        this.responseDeliveryBlocked = true;
+        return;
+      }
     }
     const index = this.toolIndexes.size;
     this.toolIndexes.set(key, index);
+    this.streamedToolArguments.set(key, "");
     yield this.chunk(wireObject([
       ...(!this.roleSent ? [["role", "assistant"] as const] : []),
       ["tool_calls", wireArray([wireObject([
@@ -252,6 +264,9 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+    if (this.sourceResponses && this.responseDeliveryBlocked) {
+      return;
+    }
     const index = this.toolIndexes.get(key);
     if (index === undefined) {
       if (this.sourceResponses) {
@@ -265,6 +280,7 @@ class ChatEmitter implements StreamEmitter {
         ["function", wireObject([["arguments", delta]])],
       ])])],
     ]));
+    this.streamedToolArguments.set(key, `${this.streamedToolArguments.get(key) ?? ""}${delta}`);
   }
 
   *toolDone(_key: string, _argumentsJson: string): Iterable<ConvertedStreamEmission> {}
@@ -320,6 +336,19 @@ class ChatEmitter implements StreamEmitter {
         continue;
       }
       if (item.key !== undefined && this.toolIndexes.has(item.key)) {
+        const streamed = this.streamedToolArguments.get(item.key) ?? "";
+        if (!item.argumentsJson.startsWith(streamed)) {
+          invalid();
+        }
+        const remaining = item.argumentsJson.slice(streamed.length);
+        if (remaining.length > 0) {
+          yield this.chunk(wireObject([
+            ["tool_calls", wireArray([wireObject([
+              ["index", wireNumber(this.toolIndexes.get(item.key) as number)],
+              ["function", wireObject([["arguments", remaining]])],
+            ])])],
+          ]));
+        }
         continue;
       }
       const index = this.toolIndexes.size;
@@ -367,6 +396,7 @@ class MessagesEmitter implements StreamEmitter {
   private bufferAfterTool = false;
   private firstMessageKey: string | undefined;
   private readonly responseFrontier = new ResponseEmissionFrontier();
+  private responseDeliveryBlocked = false;
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly tools = new Map<string, {
     readonly callId: string;
@@ -420,9 +450,12 @@ class MessagesEmitter implements StreamEmitter {
     this.firstMessageKey ??= messageKey;
     if (
       this.context.source === "responses"
-        ? !this.responseFrontier.allowsContent(key, orderKey)
+        ? this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)
         : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
+      if (this.context.source === "responses") {
+        this.responseDeliveryBlocked = true;
+      }
       return;
     }
     yield* this.emitLiveText(key, delta);
@@ -434,9 +467,12 @@ class MessagesEmitter implements StreamEmitter {
     this.firstMessageKey ??= messageKey;
     if (
       this.context.source === "responses"
-        ? !this.responseFrontier.allowsContent(key, orderKey)
+        ? this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)
         : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
+      if (this.context.source === "responses") {
+        this.responseDeliveryBlocked = true;
+      }
       return;
     }
     yield* this.emitLiveText(`refusal:${key}`, delta);
@@ -449,6 +485,9 @@ class MessagesEmitter implements StreamEmitter {
       invalid();
     }
     this.bufferAfterTool = true;
+    if (this.context.source === "responses") {
+      this.responseDeliveryBlocked = true;
+    }
     this.tools.set(key, { callId, name, argumentsJson: "", done: false });
   }
 
