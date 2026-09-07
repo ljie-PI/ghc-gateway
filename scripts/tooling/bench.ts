@@ -853,7 +853,6 @@ async function runCompiledWorker(run: number): Promise<BenchmarkRunResult> {
   const { stdout, stderr } = await execFileAsync(process.execPath, [
     "--jitless",
     "--optimize-for-size",
-    "--gc-global",
     "--expose-gc",
     workerPath,
     "__worker",
@@ -972,12 +971,11 @@ function idleLaunchArgs(workerPath: string): string[] {
     return [
       "--jitless",
       "--optimize-for-size",
-      "--gc-global",
       "--expose-gc",
       workerPath,
     ];
   }
-  return ["--jitless", "--optimize-for-size", "--gc-global", "--expose-gc", workerPath];
+  return ["--jitless", "--optimize-for-size", "--expose-gc", workerPath];
 }
 
 function idleWorkerSource(): string {
