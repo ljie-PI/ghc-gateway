@@ -793,8 +793,11 @@ async function* decodeResponsesStream(
       observedOutputTypes.set(outputIndex, itemType);
       const itemStatus = stringMember(item, "status");
       if (
-        itemStatus === undefined
-        || (itemStatus !== "completed" && itemStatus !== "incomplete" && itemStatus !== "in_progress")
+        ((itemType === "message" || itemType === "function_call") && itemStatus === undefined)
+        || (itemStatus !== undefined
+          && itemStatus !== "completed"
+          && itemStatus !== "incomplete"
+          && itemStatus !== "in_progress")
       ) {
         invalid();
       }
@@ -802,7 +805,9 @@ async function* decodeResponsesStream(
       if (observedStatus !== undefined && observedStatus !== itemStatus) {
         invalid();
       }
-      observedOutputStatuses.set(outputIndex, itemStatus);
+      if (itemStatus !== undefined) {
+        observedOutputStatuses.set(outputIndex, itemStatus);
+      }
       observeFinalItemContent(item, outputIndex, observedContent, budget);
       yield* finalItemEvents(item, outputIndex, toolsByIndex);
       yield { kind: "item_done", outputIndex, itemType };

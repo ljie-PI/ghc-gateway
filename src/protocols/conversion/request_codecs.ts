@@ -1262,7 +1262,7 @@ function decodeMessagesThinking(
   }
   if (type === "adaptive") {
     degradations.add("reasoning.budget_coarsened");
-    return { effort: "xhigh" };
+    return { effort: "xhigh", adaptive: true };
   }
   if (type !== "enabled") {
     unsupported("REQ-M-THINKING-TYPE");
@@ -1842,6 +1842,9 @@ function mergeReasoning(
   first: SemanticReasoning | undefined,
   second: SemanticReasoning | undefined,
 ): SemanticReasoning | undefined {
+  if (first?.effort !== undefined && second?.adaptive === true) {
+    return first;
+  }
   if (first?.effort !== undefined && second?.effort !== undefined && first.effort !== second.effort) {
     invalid("REQ-M-REASONING-CONFLICT");
   }

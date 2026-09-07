@@ -984,6 +984,26 @@ describe("shared conversion request codecs", () => {
     expect(responsesToMessages.output_config).toBeUndefined();
   });
 
+  it.each(["chat", "responses"] as const)(
+    "uses explicit Messages effort over adaptive thinking for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 16,
+        thinking: { type: "adaptive" },
+        output_config: { effort: "high" },
+      }), "target", capability([target]));
+      const request = decoded(converted.bytes);
+      if (target === "chat") {
+        expect(request).toMatchObject({ reasoning_effort: "high" });
+      } else {
+        expect(request).toMatchObject({ reasoning: { effort: "high" } });
+      }
+      expect(converted.degradations).toContain("reasoning.budget_coarsened");
+    },
+  );
+
   it("extracts documented JSON-encoded content media without scanning unrelated business keys", () => {
     const embedded = JSON.stringify({
       content: [{

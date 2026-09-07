@@ -1816,6 +1816,40 @@ describe("shared conversion response codecs", () => {
   );
 
   it.each(["chat", "messages"] as const)(
+    "accepts a statusless completed Responses reasoning item before %s answer output",
+    async (target) => {
+      const reasoning = {
+        id: "rs_statusless",
+        type: "reasoning",
+        summary: [],
+      };
+      const message = {
+        id: "msg_after_reasoning",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "answer", annotations: [] }],
+      };
+      const source = [
+        responseEvent(0, "response.output_item.done", { output_index: 0, item: reasoning }),
+        responseEvent(1, "response.output_item.done", { output_index: 1, item: message }),
+        responseEvent(2, "response.completed", {
+          response: {
+            id: "resp_statusless_reasoning",
+            object: "response",
+            status: "completed",
+            output: [reasoning, message],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        }),
+      ].join("");
+      const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
+      expect(text).toContain("answer");
+      expect(text).toContain(target === "chat" ? "data: [DONE]" : "event: message_stop");
+    },
+  );
+
+  it.each(["chat", "messages"] as const)(
     "drains every done-only multipart Responses item before advancing %s delivery",
     async (target) => {
       const first = {
