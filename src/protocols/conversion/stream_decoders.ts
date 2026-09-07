@@ -181,6 +181,10 @@ async function* decodeChatStream(
     }
     const delta = objectMember(choice, "delta");
     if (delta !== undefined) {
+      const audio = singleMember(delta, "audio");
+      if (audio !== undefined && audio !== null) {
+        invalid();
+      }
       const reasoning = stringMember(delta, "reasoning_content");
       const thinkingBlocks = arrayMember(delta, "thinking_blocks");
       if (
@@ -321,6 +325,10 @@ async function* decodeChatStream(
     }
     const finalMessage = objectMember(choice, "message");
     if (finalMessage !== undefined) {
+      const audio = singleMember(finalMessage, "audio");
+      if (audio !== undefined && audio !== null) {
+        invalid();
+      }
       const contentValue = singleMember(finalMessage, "content");
       if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
         invalid();

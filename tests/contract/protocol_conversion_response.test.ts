@@ -193,6 +193,15 @@ describe("shared conversion response codecs", () => {
       { message: { content: "b" }, finish_reason: "stop" },
     ] }],
     ["unknown finish", { choices: [{ message: { content: "a" }, finish_reason: "mystery" }] }],
+    ["unsupported audio output", {
+      choices: [{
+        message: {
+          content: null,
+          audio: { id: "audio_1", data: "UklGRg==", transcript: "spoken answer" },
+        },
+        finish_reason: "stop",
+      }],
+    }],
     ["invalid complete tool arguments", {
       choices: [{
         message: {
@@ -207,6 +216,18 @@ describe("shared conversion response codecs", () => {
       encoder.encode(JSON.stringify(payload)),
       context("chat", "messages"),
     )).toThrow();
+  });
+
+  it.each([
+    ["delta", "{\"audio\":{\"data\":\"UklGRg==\"}}"],
+    ["final snapshot", undefined],
+  ] as const)("rejects unsupported substantive Chat audio in a %s", async (_name, deltaJson) => {
+    const chunk = deltaJson === undefined
+      ? "{\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"audio\":{\"id\":\"audio_1\",\"data\":\"UklGRg==\",\"transcript\":\"spoken answer\"}},\"finish_reason\":\"stop\"}]}"
+      : `{"id":"x","choices":[{"index":0,"delta":${deltaJson},"finish_reason":"stop"}]}`;
+    const source = `data: ${chunk}\n\ndata: [DONE]\n\n`;
+
+    await expect(collectStream("chat", "messages", chunks(encoder.encode(source)))).rejects.toThrow();
   });
 
   it("streams parallel same-name Messages tools to monotonic Responses events across UTF-8/CRLF splits", async () => {

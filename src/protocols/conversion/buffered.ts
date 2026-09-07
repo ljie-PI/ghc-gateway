@@ -101,6 +101,10 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   const finishReason = chatFinishReason(singleMember(choice, "finish_reason"));
   const completeTools = finishReason !== "length" && finishReason !== "content_filter";
   const content: Array<Extract<SemanticContent, { readonly type: "text" | "refusal" }>> = [];
+  const audio = singleMember(message, "audio");
+  if (audio !== undefined && audio !== null) {
+    upstreamInvalid();
+  }
   const text = stringOrNullMember(message, "content");
   if (text !== undefined && text !== null) {
     content.push({ type: "text", text });
