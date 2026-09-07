@@ -430,6 +430,9 @@ describe("guarded live official SDK protocol matrix", () => {
         cancelled,
         () => cancelled.controller.abort(),
         (error) => error instanceof APIUserAbortError,
+        (event) => event.type === "response.completed"
+          || event.type === "response.incomplete"
+          || event.type === "response.failed",
       );
       expect(cancelled.controller.signal.aborted).toBe(true);
     });

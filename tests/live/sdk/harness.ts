@@ -518,6 +518,7 @@ export async function expectCancelledStream<T>(
   stream: AsyncIterable<T>,
   abort: () => void,
   isCancellationError: (error: unknown) => boolean,
+  isTerminalEvent: (value: T) => boolean,
 ): Promise<void> {
   const iterator = stream[Symbol.asyncIterator]();
   abort();
@@ -530,13 +531,16 @@ export async function expectCancelledStream<T>(
       }
       const outcome = await nextWithTimeout(iterator, remainingMs);
       if (outcome.kind === "done") {
-        return;
+        throw new Error("cancelled live stream ended without a cancellation failure");
       }
       if (outcome.kind === "rejected") {
         if (!isCancellationError(outcome.error)) {
           throw new Error("cancelled live stream ended with a non-cancellation failure");
         }
         return;
+      }
+      if (isTerminalEvent(outcome.value)) {
+        throw new Error("cancelled live stream emitted a terminal event after abort");
       }
     }
   } finally {
@@ -736,7 +740,7 @@ async function nextWithTimeout<T>(
   iterator: AsyncIterator<T>,
   timeoutMs: number,
 ): Promise<
-  | { readonly kind: "value" }
+  | { readonly kind: "value"; readonly value: T }
   | { readonly kind: "done" }
   | { readonly kind: "rejected"; readonly error: unknown }
 > {
@@ -746,7 +750,7 @@ async function nextWithTimeout<T>(
       Promise.resolve(iterator.next()).then(
         (result) => result.done === true
           ? { kind: "done" as const }
-          : { kind: "value" as const },
+          : { kind: "value" as const, value: result.value },
         (error: unknown) => ({ kind: "rejected" as const, error }),
       ),
       new Promise<never>((_resolve, reject) => {

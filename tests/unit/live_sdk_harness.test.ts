@@ -160,18 +160,20 @@ describe("live SDK acceptance harness", () => {
     expect(cancelled).toBe(true);
   });
 
-  it("waits past an in-flight value until an aborted stream reaches a terminal state", async () => {
+  it("waits past nonterminal values for an explicit cancellation failure", async () => {
     let nextCount = 0;
     let returned = false;
     let aborted = false;
+    const cancellation = new Error("cancelled");
     const stream: AsyncIterable<number> = {
       [Symbol.asyncIterator]() {
         return {
           async next() {
             nextCount += 1;
-            return nextCount === 1
-              ? { done: false as const, value: 1 }
-              : { done: true as const, value: undefined };
+            if (nextCount === 1) {
+              return { done: false as const, value: 1 };
+            }
+            throw cancellation;
           },
           async return() {
             returned = true;
@@ -182,7 +184,7 @@ describe("live SDK acceptance harness", () => {
     };
     await expectCancelledStream(stream, () => {
       aborted = true;
-    }, () => false);
+    }, (error) => error === cancellation, () => false);
     expect(aborted).toBe(true);
     expect(nextCount).toBe(2);
     expect(returned).toBe(true);
@@ -198,8 +200,27 @@ describe("live SDK acceptance harness", () => {
         };
       },
     };
-    await expect(expectCancelledStream(stream, () => undefined, () => false))
+    await expect(expectCancelledStream(stream, () => undefined, () => false, () => false))
       .rejects.toThrow(/non-cancellation failure/u);
+  });
+
+  it("rejects successful terminal events and clean EOF after abort", async () => {
+    async function* terminalStream(): AsyncIterable<number> {
+      yield 9;
+    }
+    await expect(expectCancelledStream(
+      terminalStream(),
+      () => undefined,
+      () => false,
+      (value) => value === 9,
+    )).rejects.toThrow(/terminal event/u);
+
+    await expect(expectCancelledStream(
+      { async *[Symbol.asyncIterator]() {} },
+      () => undefined,
+      () => false,
+      () => false,
+    )).rejects.toThrow(/without a cancellation failure/u);
   });
 });
 
