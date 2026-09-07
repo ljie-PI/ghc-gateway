@@ -233,6 +233,12 @@ export class ModelCapabilityRegistry {
       fallback.supportedParameters,
       sameStrings,
     );
+    const reasoningEfforts = effectiveField(
+      undefined,
+      live.reasoningEfforts,
+      fallback.reasoningEfforts,
+      sameStrings,
+    );
     const defaultOutputTokens = effectiveField(
       override?.defaultOutputTokens,
       live.defaultOutputTokens,
@@ -259,7 +265,7 @@ export class ModelCapabilityRegistry {
         defaultOutputTokens,
         maxOutputTokens.value,
       ),
-      profile: { chatOutputTokenField, supportedParameters },
+      profile: { chatOutputTokenField, supportedParameters, reasoningEfforts },
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
@@ -294,6 +300,12 @@ export function capabilitySnapshotFromCatalog(
       UNKNOWN_DECLARATIONS.supportedParameters,
       sameStrings,
     );
+    const reasoningEfforts = effectiveField(
+      undefined,
+      model.capabilities.reasoningEfforts,
+      UNKNOWN_DECLARATIONS.reasoningEfforts,
+      sameStrings,
+    );
     return deepFreeze({
       accountId: account.accountId,
       modelId: model.id,
@@ -309,7 +321,7 @@ export function capabilitySnapshotFromCatalog(
       maxInputTokens,
       maxOutputTokens,
       defaultOutputTokens: resolveDefaultOutputTokens(defaultConfiguration, maxOutputTokens.value),
-      profile: { chatOutputTokenField, supportedParameters },
+      profile: { chatOutputTokenField, supportedParameters, reasoningEfforts },
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,

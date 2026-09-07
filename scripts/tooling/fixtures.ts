@@ -783,6 +783,12 @@ function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveMode
         conflict: false,
         liveState: "value",
       },
+      reasoningEfforts: {
+        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        source: "live",
+        conflict: false,
+        liveState: "value",
+      },
     },
     revision: {
       credentialGeneration: 0,
@@ -999,6 +1005,12 @@ function fixtureCapability(
           "reasoning.effort",
           "output_config.effort",
         ],
+        source: "builtin",
+        conflict: false,
+        liveState: "missing",
+      },
+      reasoningEfforts: {
+        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
         source: "builtin",
         conflict: false,
         liveState: "missing",

@@ -1319,7 +1319,7 @@ function encodeChatRequest(
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
   validateConditionalTargetParameters(request, context.capability, "chat");
-  const reasoning = supportsTargetParameter(context.capability, ["reasoning_effort"])
+  const reasoning = supportsTargetReasoning(context.capability, ["reasoning_effort"], request.reasoning)
     ? request.reasoning
     : undefined;
   const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
@@ -1357,7 +1357,11 @@ function encodeResponsesRequest(
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
   validateConditionalTargetParameters(request, context.capability, "responses");
-  const reasoning = supportsTargetParameter(context.capability, ["reasoning", "reasoning.effort"])
+  const reasoning = supportsTargetReasoning(
+    context.capability,
+    ["reasoning", "reasoning.effort"],
+    request.reasoning,
+  )
     ? request.reasoning
     : undefined;
   const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
@@ -1406,9 +1410,10 @@ function encodeMessagesRequest(
   if (request.outputFormat?.kind === "json_object") {
     unsupported("REQ-TARGET-M-JSON-OBJECT");
   }
-  const reasoningSupported = supportsTargetParameter(
+  const reasoningSupported = supportsTargetReasoning(
     context.capability,
     ["output_config.effort", "output_config"],
+    request.reasoning,
   );
   const targetReasoning = !reasoningSupported || request.reasoning?.effort === "none"
     ? undefined
@@ -1446,6 +1451,18 @@ function supportsTargetParameter(
 ): boolean {
   const supported = capability.profile.supportedParameters.value;
   return keys.some((key) => supported?.includes(key) === true);
+}
+
+function supportsTargetReasoning(
+  capability: Readonly<EffectiveModelCapabilitySnapshot>,
+  parameterKeys: readonly string[],
+  reasoning: SemanticReasoning | undefined,
+): boolean {
+  if (!supportsTargetParameter(capability, parameterKeys)) {
+    return false;
+  }
+  return reasoning?.effort === undefined
+    || capability.profile.reasoningEfforts.value?.includes(reasoning.effort) === true;
 }
 
 function validateConditionalTargetParameters(

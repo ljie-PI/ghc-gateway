@@ -633,6 +633,30 @@ describe("shared conversion request codecs", () => {
     expect(JSON.stringify(decoded(converted.bytes))).not.toContain("effort");
   });
 
+  it("degrades an unsupported reasoning effort tier even when the target accepts the parameter", () => {
+    const base = capability(["chat"]);
+    const lowOnly = {
+      ...base,
+      profile: {
+        ...base.profile,
+        reasoningEfforts: {
+          value: ["low"] as const,
+          source: "live" as const,
+          conflict: false,
+          liveState: "value" as const,
+        },
+      },
+    };
+    const converted = prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      thinking: { type: "adaptive" },
+    }), "target", lowOnly);
+    expect(converted.degradations).toContain("reasoning.presentation_omitted");
+    expect(decoded(converted.bytes)).not.toHaveProperty("reasoning_effort");
+  });
+
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {
     const converted = prepareConvertedRequest("responses", "chat", body({
       model: "source",
@@ -1398,6 +1422,12 @@ function capability(
           "reasoning.effort",
           "output_config.effort",
         ],
+        source: "live",
+        conflict: false,
+        liveState: "value",
+      },
+      reasoningEfforts: {
+        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
         source: "live",
         conflict: false,
         liveState: "value",

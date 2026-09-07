@@ -1039,6 +1039,7 @@ function model(id: string, supportedEndpoints: string[]) {
         "reasoning.effort",
         "output_config.effort",
       ],
+      supported_reasoning_efforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
     },
   };
 }
