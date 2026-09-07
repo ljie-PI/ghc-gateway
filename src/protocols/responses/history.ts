@@ -197,6 +197,7 @@ interface StateRow {
 
 export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistoryAdmin {
   private readonly statements = new Map<string, SqliteStatement>();
+  private readonly recentReceiptCleanup = new Map<string, number>();
   private readonly nowMs: () => number;
   private ttlMs: number;
   private readonly maxResponses: number;
@@ -344,6 +345,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   ): Promise<void> {
     throwIfAborted(signal);
     this.mutateIfChanged(() => this.upsertReceipt(receipt));
+    this.rememberReceiptCleanup(receipt.accountId, receipt.responseId);
     throwIfAborted(signal);
   }
 
@@ -378,11 +380,15 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       && sameOwnership(existing, ownership)
     ) {
       const nowMs = this.nowMs();
+      const cleanupKey = receiptCleanupKey(ownership.accountId, responseId);
+      const cleanupValidUntil = this.recentReceiptCleanup.get(cleanupKey);
+      this.recentReceiptCleanup.delete(cleanupKey);
+      const canSkipExpiry = cleanupValidUntil !== undefined && nowMs < cleanupValidUntil;
       let unavailableAfterCleanup = false;
       let ownershipChanged = false;
       const transaction = this.database.transaction(() => {
-        const receiptsExpired = this.expireReceipts(nowMs);
-        const legacyExpired = this.expireLegacy(nowMs);
+        const receiptsExpired = canSkipExpiry ? false : this.expireReceipts(nowMs);
+        const legacyExpired = canSkipExpiry ? false : this.expireLegacy(nowMs);
         const current = this.readReceipt(ownership.accountId, responseId);
         unavailableAfterCleanup = current === undefined
           || current.checkpoint_state === "expired"
@@ -442,6 +448,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
 
   setTtlDays(ttlDays: number): void {
     this.ttlMs = ttlDays * DAY_MS;
+    this.recentReceiptCleanup.clear();
   }
 
   inspect(): ResponsesHistoryInspection {
@@ -481,6 +488,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   clear(expectedRevision: number): ResponsesHistoryInspection {
+    this.recentReceiptCleanup.clear();
     const clear = this.database.transaction(() => {
       const state = this.readState();
       if (state.revision !== expectedRevision) {
@@ -504,6 +512,11 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   }
 
   clearAccount(accountId: string): void {
+    for (const key of this.recentReceiptCleanup.keys()) {
+      if (key.startsWith(`${accountId}\u0000`)) {
+        this.recentReceiptCleanup.delete(key);
+      }
+    }
     const account = requireNonEmpty(accountId, "accountId");
     this.mutateIfChanged(() => {
       const result = this.database.prepare(
@@ -836,6 +849,33 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     }
     return statement;
   }
+
+  private rememberReceiptCleanup(accountId: string, responseId: string): void {
+    const row = this.statement(
+      `SELECT MIN(expires_at_ms) AS expires_at_ms
+       FROM (
+         SELECT created_at_ms + ? AS expires_at_ms
+         FROM response_route_receipts
+         WHERE checkpoint_state <> 'expired'
+         UNION ALL
+         SELECT created_at_ms + ? AS expires_at_ms
+         FROM responses
+       )`,
+    ).get(this.ttlMs, this.ttlMs) as { expires_at_ms: number | null };
+    const key = receiptCleanupKey(accountId, responseId);
+    this.recentReceiptCleanup.set(key, row.expires_at_ms ?? Number.POSITIVE_INFINITY);
+    while (this.recentReceiptCleanup.size > this.maxReceipts) {
+      const oldest = this.recentReceiptCleanup.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      this.recentReceiptCleanup.delete(oldest);
+    }
+  }
+}
+
+function receiptCleanupKey(accountId: string, responseId: string): string {
+  return `${accountId}\u0000${responseId}`;
 }
 
 function extractRecordableCalls(responseId: string, output: readonly WireJson[] | WireJson): readonly StoredCall[] {
