@@ -1422,6 +1422,9 @@ function splitMessagesInstructions(request: Readonly<SemanticRequest>): {
   readonly instructions: readonly SemanticContent[];
   readonly items: readonly SemanticRequestItem[];
 } {
+  if (request.items.some((item) => item.type === "message" && item.role === "developer")) {
+    unsupported("REQ-TARGET-M-DEVELOPER-AUTHORITY");
+  }
   const instructions = [...request.instructions];
   let index = 0;
   for (; index < request.items.length; index += 1) {

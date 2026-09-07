@@ -863,6 +863,26 @@ describe("shared conversion request codecs", () => {
     }), "target", capability(["messages"]))).toThrow();
   });
 
+  it("rejects developer authority promotion on Chat and Responses to Messages conversions", () => {
+    expect(() => prepareConvertedRequest("chat", "messages", body({
+      model: "source",
+      messages: [
+        { role: "system", content: "system rule" },
+        { role: "developer", content: "developer rule" },
+        { role: "user", content: "question" },
+      ],
+    }), "target", capability(["messages"]))).toThrow();
+
+    expect(() => prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      input: [
+        { type: "message", role: "system", content: [{ type: "input_text", text: "system rule" }] },
+        { type: "message", role: "developer", content: [{ type: "input_text", text: "developer rule" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "question" }] },
+      ],
+    }), "target", capability(["messages"]))).toThrow();
+  });
+
   it.each(["chat", "messages"] as const)(
     "rejects a new tool round before every prior parallel call has a result for %s",
     (target) => {
