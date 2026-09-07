@@ -136,14 +136,18 @@ function validateSemanticBindings(request: Readonly<SemanticRequest>): void {
   const calls = new Set<string>();
   const results = new Set<string>();
   const openCalls = new Set<string>();
+  let resultsStarted = false;
   for (const item of request.items) {
     if (item.type === "message") {
-      if (openCalls.size > 0 && item.role !== "assistant") {
+      if (openCalls.size > 0 && (item.role !== "assistant" || resultsStarted)) {
         throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-ORDER");
       }
       continue;
     }
     if (item.type === "tool_call") {
+      if (openCalls.size > 0 && resultsStarted) {
+        throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-ORDER");
+      }
       if (calls.has(item.callId)) {
         throw new ConversionContractError("invalid_request", "REQ-TOOL-DUPLICATE-CALL-ID");
       }
@@ -157,6 +161,7 @@ function validateSemanticBindings(request: Readonly<SemanticRequest>): void {
       }
       results.add(item.callId);
       openCalls.delete(item.callId);
+      resultsStarted = openCalls.size > 0;
     }
   }
   if (openCalls.size > 0) {

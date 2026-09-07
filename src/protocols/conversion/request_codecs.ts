@@ -521,6 +521,9 @@ function decodeMessagesToolResult(
     degradations.add("cache.control_omitted");
   }
   const rawContent = oneMember(value, "content", "REQ-M-TOOL-RESULT-CONTENT");
+  if (rawContent !== undefined && typeof rawContent !== "string" && !isWireJsonArray(rawContent)) {
+    invalid("REQ-M-TOOL-RESULT-CONTENT");
+  }
   return {
     type: "tool_result",
     callId: requiredString(

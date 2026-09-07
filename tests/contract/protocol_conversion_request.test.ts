@@ -219,6 +219,34 @@ describe("shared conversion request codecs", () => {
     },
   );
 
+  it.each(["chat", "responses"] as const)(
+    "rejects object-shaped Messages tool result content before converting to %s",
+    (target) => {
+      expect(() => prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }],
+          },
+          {
+            role: "user",
+            content: [{
+              type: "tool_result",
+              tool_use_id: "call_1",
+              content: {
+                type: "image",
+                source: { type: "base64", media_type: "image/png", data: "QUJD" },
+                unsupported_core_constraint: null,
+              },
+            }],
+          },
+        ],
+        max_tokens: 8,
+      }), "target", capability([target]))).toThrow();
+    },
+  );
+
   it("accepts Messages structured output without a source name using the fixed response name", () => {
     const converted = prepareConvertedRequest("messages", "responses", body({
       model: "source",
@@ -495,6 +523,40 @@ describe("shared conversion request codecs", () => {
         { type: "message", role: "user", content: [{ type: "input_text", text: "unrelated" }] },
       ],
     }), "target", capability(["messages"]))).toThrow();
+  });
+
+  it.each(["chat", "messages"] as const)(
+    "rejects a new tool round before every prior parallel call has a result for %s",
+    (target) => {
+      expect(() => prepareConvertedRequest("responses", target, body({
+        model: "source",
+        input: [
+          { type: "function_call", call_id: "call_a", name: "lookup", arguments: "{}" },
+          { type: "function_call", call_id: "call_b", name: "lookup", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_a", output: "a" },
+          { type: "function_call", call_id: "call_c", name: "lookup", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_b", output: "b" },
+          { type: "function_call_output", call_id: "call_c", output: "c" },
+        ],
+      }), "target", capability([target]))).toThrow();
+    },
+  );
+
+  it("rejects assistant content inserted after only part of a parallel Chat tool round", () => {
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: [
+        { type: "function_call", call_id: "call_a", name: "lookup", arguments: "{}" },
+        { type: "function_call", call_id: "call_b", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_a", output: "a" },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "next" }],
+        },
+        { type: "function_call_output", call_id: "call_b", output: "b" },
+      ],
+    }), "target", capability(["chat"]))).toThrow();
   });
 
   it("preserves a valid Messages text/tool/text round followed by its bound result", () => {

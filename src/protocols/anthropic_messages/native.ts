@@ -313,7 +313,11 @@ class NativeMessagesObserver {
     if (!isWireJsonObject(payload)) {
       return;
     }
-    const type = stringMember(payload, "type");
+    const types = memberValues(payload, "type");
+    if (types.length > 1) {
+      invalid();
+    }
+    const type = typeof types[0] === "string" ? types[0] : undefined;
     if (type === "error") {
       this.semantic = true;
       throw new GatewayFailureError({
@@ -347,11 +351,6 @@ class NativeMessagesObserver {
       cacheWriteTokens: optionalIntegerMember(value, "cache_creation_input_tokens"),
     });
   }
-}
-
-function stringMember(object: WireJsonObject, key: string): string | undefined {
-  const value = memberValues(object, key)[0];
-  return typeof value === "string" ? value : undefined;
 }
 
 function objectMember(object: WireJsonObject | undefined, key: string): WireJsonObject | undefined {

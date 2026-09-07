@@ -279,6 +279,7 @@ async function* decodeChatStream(
           const argumentsJson = stringMember(fn, "arguments");
           if (
             index < 0
+            || finalToolArguments.has(index)
             || id === undefined
             || id.length === 0
             || name === undefined
@@ -326,6 +327,11 @@ async function* decodeChatStream(
           tools.set(index, tool);
           finalToolArguments.set(index, argumentsJson);
         }
+        for (const index of tools.keys()) {
+          if (!finalToolArguments.has(index)) {
+            invalid();
+          }
+        }
         yield* startReadyTools();
         for (const [index, argumentsJson] of [...finalToolArguments.entries()].sort(([left], [right]) => left - right)) {
           const tool = tools.get(index);
@@ -335,6 +341,8 @@ async function* decodeChatStream(
           tool.done = true;
           yield { kind: "tool_done", key: `chat:${index}`, argumentsJson };
         }
+      } else if (tools.size > 0) {
+        invalid();
       }
     }
     const finish = singleMember(choice, "finish_reason");

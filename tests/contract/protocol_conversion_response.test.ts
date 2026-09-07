@@ -536,6 +536,22 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("rejects a final Chat snapshot that omits a previously observed tool call", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_a\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[]},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("holds later Responses text behind an earlier unfinished Messages tool block", async () => {
     const response = {
       id: "resp_order",
@@ -575,6 +591,50 @@ describe("shared conversion response codecs", () => {
     ].join("");
     const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
     expect(text.indexOf("\"id\": \"call_1\"")).toBeLessThan(text.indexOf("\"text\": \"after\""));
+  });
+
+  it("holds later Responses messages until earlier message content is reconciled for Messages", async () => {
+    const first = {
+      id: "msg_first",
+      type: "message",
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text: "FIRST", annotations: [] }],
+    };
+    const second = {
+      id: "msg_second",
+      type: "message",
+      status: "completed",
+      role: "assistant",
+      content: [{ type: "output_text", text: "SECOND", annotations: [] }],
+    };
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { ...first, status: "in_progress", content: [] },
+      }),
+      responseEvent(1, "response.output_item.added", {
+        output_index: 1,
+        item: { ...second, status: "in_progress", content: [] },
+      }),
+      responseEvent(2, "response.output_text.delta", {
+        item_id: "msg_second",
+        output_index: 1,
+        content_index: 0,
+        delta: "SECOND",
+      }),
+      responseEvent(3, "response.completed", {
+        response: {
+          id: "resp_messages",
+          object: "response",
+          status: "completed",
+          output: [first, second],
+          usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+        },
+      }),
+    ].join("");
+    const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
+    expect(text.indexOf("\"text\": \"FIRST\"")).toBeLessThan(text.indexOf("\"text\": \"SECOND\""));
   });
 
   it("preserves Chat text after a buffered tool and emits refusal text once", async () => {
@@ -1418,6 +1478,63 @@ describe("shared conversion response codecs", () => {
       },
       onTerminal: () => undefined,
     })).rejects.toThrow();
+  });
+
+  it("rejects duplicate native Messages type discriminators before forwarding diagnostics", async () => {
+    async function* upstream(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_duplicate_type",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "native",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }));
+      yield encoder.encode(
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"type\":\"error\",\"error\":{\"message\":\"synthetic-sensitive-diagnostic\"}}\n\n",
+      );
+    }
+    const signal = new AbortController().signal;
+    const response = await createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: upstream(),
+        async cancel() {},
+      },
+      scope: {
+        requestId: "req_native_duplicate_type",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native_duplicate_type",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    });
+    const reader = response.body?.getReader();
+    if (reader === undefined) {
+      throw new Error("missing response body");
+    }
+    let delivered = "";
+    await expect((async () => {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          return;
+        }
+        delivered += decoder.decode(next.value, { stream: true });
+      }
+    })()).rejects.toThrow();
+    expect(delivered).not.toContain("synthetic-sensitive-diagnostic");
   });
 });
 

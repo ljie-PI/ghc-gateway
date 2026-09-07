@@ -67,6 +67,7 @@ export async function* convertProtocolStream(
     }
     if (event.kind === "message_start") {
       ledger.startMessage(event.key);
+      yield* emitter.messageStart(event.key);
       continue;
     }
     if (event.kind === "text_delta") {
@@ -137,6 +138,7 @@ export async function* convertProtocolStream(
 
 interface StreamEmitter {
   start(): Iterable<ConvertedStreamEmission>;
+  messageStart(key: string): Iterable<ConvertedStreamEmission>;
   textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
   refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
   toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission>;
@@ -171,6 +173,8 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *start(): Iterable<ConvertedStreamEmission> {}
+
+  *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
   *textDelta(_key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
     yield this.chunk(wireObject([
@@ -265,6 +269,7 @@ class MessagesEmitter implements StreamEmitter {
   private activeText: { readonly key: string; readonly index: number } | undefined;
   private bufferedBytes = 0;
   private bufferAfterTool = false;
+  private firstMessageKey: string | undefined;
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly tools = new Map<string, {
     readonly callId: string;
@@ -298,16 +303,25 @@ class MessagesEmitter implements StreamEmitter {
     });
   }
 
-  *textDelta(key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.bufferAfterTool) {
+  messageStart(key: string): Iterable<ConvertedStreamEmission> {
+    this.firstMessageKey ??= key;
+    return [];
+  }
+
+  *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
+    const messageKey = orderKey ?? key;
+    this.firstMessageKey ??= messageKey;
+    if (this.bufferAfterTool || messageKey !== this.firstMessageKey) {
       return;
     }
     yield* this.emitLiveText(key, delta);
     this.recordStreamed(key, "text", delta);
   }
 
-  *refusalDelta(key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.bufferAfterTool) {
+  *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
+    const messageKey = orderKey ?? key;
+    this.firstMessageKey ??= messageKey;
+    if (this.bufferAfterTool || messageKey !== this.firstMessageKey) {
       return;
     }
     yield* this.emitLiveText(`refusal:${key}`, delta);
@@ -495,6 +509,8 @@ class ResponsesEmitter implements StreamEmitter {
     yield this.responseEvent("response.created", "in_progress", []);
     yield this.responseEvent("response.in_progress", "in_progress", []);
   }
+
+  *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const message = this.ensureMessage(orderKey ?? key);
