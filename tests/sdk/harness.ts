@@ -85,10 +85,10 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
     async fetch() {
       return {
         data: [
-          { id: CHAT_MODEL, name: "SDK Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
-          { id: REASONING_MODEL, name: "SDK Reasoning", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
-          { id: NATIVE_RESPONSES_MODEL, name: "SDK Responses", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/responses"], max_input_tokens: 128_000, max_output_tokens: 16_384 } },
-          { id: MESSAGES_MODEL, name: "SDK Messages", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/messages"], max_input_tokens: 128_000, max_output_tokens: 16_384, default_output_tokens: 4_096 } },
+          { id: CHAT_MODEL, name: "SDK Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], supported_parameters: ["temperature", "top_p", "response_format", "reasoning_effort"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
+          { id: REASONING_MODEL, name: "SDK Reasoning", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/chat/completions"], supported_parameters: ["temperature", "top_p", "response_format", "reasoning_effort"], max_input_tokens: 128_000, max_output_tokens: 16_384, chat_output_token_field: "max_tokens" } },
+          { id: NATIVE_RESPONSES_MODEL, name: "SDK Responses", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/responses"], supported_parameters: ["temperature", "top_p", "response_format", "reasoning"], max_input_tokens: 128_000, max_output_tokens: 16_384 } },
+          { id: MESSAGES_MODEL, name: "SDK Messages", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/v1/messages"], supported_parameters: ["temperature", "top_p", "output_config.format", "output_config.effort"], max_input_tokens: 128_000, max_output_tokens: 16_384, default_output_tokens: 4_096 } },
         ],
       };
     },

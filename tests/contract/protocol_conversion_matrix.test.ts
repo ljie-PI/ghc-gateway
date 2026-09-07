@@ -1028,6 +1028,17 @@ function model(id: string, supportedEndpoints: string[]) {
       max_output_tokens: 16_384,
       default_output_tokens: 4_096,
       chat_output_token_field: "max_tokens",
+      supported_parameters: [
+        "temperature",
+        "top_p",
+        "response_format",
+        "text.format",
+        "output_config.format",
+        "reasoning_effort",
+        "reasoning",
+        "reasoning.effort",
+        "output_config.effort",
+      ],
     },
   };
 }

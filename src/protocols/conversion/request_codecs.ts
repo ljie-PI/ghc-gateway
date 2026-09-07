@@ -1319,6 +1319,12 @@ function encodeChatRequest(
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
   validateConditionalTargetParameters(request, context.capability, "chat");
+  const reasoning = supportsTargetParameter(context.capability, ["reasoning_effort"])
+    ? request.reasoning
+    : undefined;
+  const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
+    ? ["reasoning.presentation_omitted"]
+    : [];
   const messages = encodeChatMessages(request);
   const budget = request.source === "messages"
     ? outputBudget(request.maxOutputTokens, context.capability)
@@ -1340,10 +1346,10 @@ function encodeChatRequest(
     ["tool_choice", encodeChatToolChoice(request.toolChoice)],
     ["parallel_tool_calls", request.parallelToolCalls],
     ["response_format", encodeChatOutputFormat(request.outputFormat)],
-    ["reasoning_effort", request.reasoning?.effort],
+    ["reasoning_effort", reasoning?.effort],
     ["metadata", request.metadata],
   ]);
-  return encodedRequest(request, body);
+  return encodedRequest(request, body, reasoningDegradations);
 }
 
 function encodeResponsesRequest(
@@ -1351,6 +1357,12 @@ function encodeResponsesRequest(
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
   validateConditionalTargetParameters(request, context.capability, "responses");
+  const reasoning = supportsTargetParameter(context.capability, ["reasoning", "reasoning.effort"])
+    ? request.reasoning
+    : undefined;
+  const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
+    ? ["reasoning.presentation_omitted"]
+    : [];
   if (request.stop !== undefined) {
     unsupported("REQ-TARGET-R-STOP");
   }
@@ -1368,12 +1380,12 @@ function encodeResponsesRequest(
     ["text", request.outputFormat === undefined
       ? undefined
       : wireObject([["format", encodeResponsesOutputFormat(request.outputFormat)]])],
-    ["reasoning", request.reasoning?.effort === undefined
+    ["reasoning", reasoning?.effort === undefined
       ? undefined
-      : wireObject([["effort", request.reasoning.effort]])],
+      : wireObject([["effort", reasoning.effort]])],
     ["metadata", request.metadata],
   ]);
-  return encodedRequest(request, body);
+  return encodedRequest(request, body, reasoningDegradations);
 }
 
 function encodeMessagesRequest(
@@ -1394,7 +1406,11 @@ function encodeMessagesRequest(
   if (request.outputFormat?.kind === "json_object") {
     unsupported("REQ-TARGET-M-JSON-OBJECT");
   }
-  const targetReasoning = request.reasoning?.effort === "none"
+  const reasoningSupported = supportsTargetParameter(
+    context.capability,
+    ["output_config.effort", "output_config"],
+  );
+  const targetReasoning = !reasoningSupported || request.reasoning?.effort === "none"
     ? undefined
     : request.reasoning?.effort === "minimal"
       ? { effort: "low" as const }
@@ -1402,6 +1418,9 @@ function encodeMessagesRequest(
   const targetDegradations: ConversionDegradationRule[] = request.reasoning?.effort === "minimal"
     ? ["reasoning.budget_coarsened"]
     : [];
+  if (request.reasoning !== undefined && !reasoningSupported) {
+    targetDegradations.push("reasoning.presentation_omitted");
+  }
   const budget = outputBudget(request.maxOutputTokens, context.capability);
   const split = splitMessagesInstructions(request);
   const body = wireObject([
@@ -1419,6 +1438,14 @@ function encodeMessagesRequest(
     ["metadata", request.metadata],
   ]);
   return encodedRequest(request, body, targetDegradations);
+}
+
+function supportsTargetParameter(
+  capability: Readonly<EffectiveModelCapabilitySnapshot>,
+  keys: readonly string[],
+): boolean {
+  const supported = capability.profile.supportedParameters.value;
+  return keys.some((key) => supported?.includes(key) === true);
 }
 
 function validateConditionalTargetParameters(

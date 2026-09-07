@@ -610,6 +610,29 @@ describe("shared conversion request codecs", () => {
     }), "target", unknown)).toThrow();
   });
 
+  it.each([
+    ["chat", "responses", { model: "source", messages: [{ role: "user", content: "hi" }], reasoning_effort: "high" }],
+    ["messages", "chat", { model: "source", messages: [{ role: "user", content: "hi" }], max_tokens: 8, output_config: { effort: "high" } }],
+  ] as const)("degrades unsupported optional reasoning for %s to %s", (source, target, request) => {
+    const base = capability([target]);
+    const unsupportedReasoning = {
+      ...base,
+      profile: {
+        ...base.profile,
+        supportedParameters: {
+          value: [],
+          source: "live" as const,
+          conflict: false,
+          liveState: "value" as const,
+        },
+      },
+    };
+    const converted = prepareConvertedRequest(source, target, body(request), "target", unsupportedReasoning);
+    expect(converted.degradations).toContain("reasoning.presentation_omitted");
+    expect(JSON.stringify(decoded(converted.bytes))).not.toContain("reasoning");
+    expect(JSON.stringify(decoded(converted.bytes))).not.toContain("effort");
+  });
+
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {
     const converted = prepareConvertedRequest("responses", "chat", body({
       model: "source",
@@ -1370,6 +1393,10 @@ function capability(
           "response_format",
           "text.format",
           "output_config.format",
+          "reasoning_effort",
+          "reasoning",
+          "reasoning.effort",
+          "output_config.effort",
         ],
         source: "live",
         conflict: false,
