@@ -68,6 +68,45 @@ describe("protocol conversion matrix", () => {
   });
 
   it.each([
+    ["/v1/chat/completions", {
+      model: "native-messages",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          description: "Return the amount in EUR, not USD.",
+          schema: { type: "object" },
+          strict: true,
+        },
+      },
+    }],
+    ["/v1/responses", {
+      model: "native-messages",
+      input: "hi",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          description: "Return the amount in EUR, not USD.",
+          schema: { type: "object" },
+          strict: true,
+        },
+      },
+    }],
+  ] as const)("rejects unrepresentable Messages output descriptions before inference on %s", async (path, request) => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest(path, request));
+      expect(response.status).toBe(422);
+      await response.text();
+      expect(harness.backend.captured).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it.each([
     [{
       tools: [
         { type: "custom", name: "render", format: { type: "text" } },

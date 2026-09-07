@@ -103,6 +103,38 @@ describe("shared conversion request codecs", () => {
     });
   });
 
+  it.each([
+    ["chat", {
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "answer",
+          description: "Return the amount in EUR, not USD.",
+          schema: { type: "object" },
+          strict: true,
+        },
+      },
+    }],
+    ["responses", {
+      model: "source",
+      input: "hi",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          description: "Return the amount in EUR, not USD.",
+          schema: { type: "object" },
+          strict: true,
+        },
+      },
+    }],
+  ] as const)("rejects %s structured-output descriptions that Messages cannot represent", (source, request) => {
+    expect(() => prepareConvertedRequest(source, "messages", body(request), "target", capability(["messages"])))
+      .toThrow();
+  });
+
   it("maps Messages to Responses and records only finite content-free degradation IDs", () => {
     const converted = prepareConvertedRequest("messages", "responses", body({
       model: "source",

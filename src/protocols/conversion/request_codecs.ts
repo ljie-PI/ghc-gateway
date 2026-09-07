@@ -1410,6 +1410,9 @@ function encodeMessagesRequest(
   if (request.outputFormat?.kind === "json_object") {
     unsupported("REQ-TARGET-M-JSON-OBJECT");
   }
+  if (request.outputFormat?.kind === "json_schema" && request.outputFormat.description !== undefined) {
+    unsupported("REQ-TARGET-M-FORMAT-DESCRIPTION");
+  }
   const reasoningSupported = supportsTargetReasoning(
     context.capability,
     ["output_config.effort", "output_config"],
