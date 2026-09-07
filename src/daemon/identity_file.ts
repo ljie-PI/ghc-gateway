@@ -574,7 +574,10 @@ function isAlreadyExists(error: unknown): boolean {
 }
 
 function defaultRunCommand(file: string, args: readonly string[]): string {
-  return execFileSync(file, [...args], { encoding: "utf8", windowsHide: true });
+  const resolved = process.platform === "win32" && (file === "whoami" || file === "icacls")
+    ? path.join(process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows", "System32", `${file}.exe`)
+    : file;
+  return execFileSync(resolved, [...args], { encoding: "utf8", windowsHide: true });
 }
 
 function currentWindowsIdentity(runCommand: (file: string, args: readonly string[]) => string): {

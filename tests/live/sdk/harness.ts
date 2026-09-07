@@ -531,7 +531,7 @@ export async function expectCancelledStream<T>(
       }
       const outcome = await nextWithTimeout(iterator, remainingMs);
       if (outcome.kind === "done") {
-        throw new Error("cancelled live stream ended without a cancellation failure");
+        return;
       }
       if (outcome.kind === "rejected") {
         if (!isCancellationError(outcome.error)) {

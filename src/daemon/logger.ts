@@ -278,8 +278,17 @@ function assertWindowsAcl(target: string): void {
   }
 }
 
+function windowsCommandPath(command: string): string {
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
+    return path.join(systemRoot, "System32", `${command}.exe`);
+  }
+  return command;
+}
+
 function currentWindowsIdentity(): { readonly name: string; readonly sid: string } {
-  const identity = execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], {
+  const whoami = windowsCommandPath("whoami");
+  const identity = execFileSync(whoami, ["/user", "/fo", "csv", "/nh"], {
     encoding: "utf8",
     windowsHide: true,
   }).trim();
