@@ -711,6 +711,46 @@ describe("shared conversion response codecs", () => {
   );
 
   it.each(["chat", "messages"] as const)(
+    "orders an earlier terminal-only Responses item before an observed later item for %s",
+    async (target) => {
+      const first = {
+        id: "msg_terminal_first",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "FIRST", annotations: [] }],
+      };
+      const second = {
+        id: "msg_observed_second",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "SECOND", annotations: [] }],
+      };
+      const source = [
+        responseEvent(0, "response.output_item.added", {
+          output_index: 1,
+          item: { ...second, status: "in_progress", content: [] },
+        }),
+        responseEvent(1, "response.output_text.delta", {
+          item_id: "msg_observed_second", output_index: 1, content_index: 0, delta: "SECOND",
+        }),
+        responseEvent(2, "response.completed", {
+          response: {
+            id: "resp_terminal_order",
+            object: "response",
+            status: "completed",
+            output: [first, second],
+            usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+          },
+        }),
+      ].join("");
+      const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
+      expect(text.indexOf("FIRST")).toBeLessThan(text.indexOf("SECOND"));
+    },
+  );
+
+  it.each(["chat", "messages"] as const)(
     "preserves Responses content-part order when a later part streams first for %s",
     async (target) => {
       const message = {
@@ -805,6 +845,50 @@ describe("shared conversion response codecs", () => {
       }).rejects.toThrow();
     },
   );
+
+  it("rejects contradictory Responses content-part and terminal snapshots", async () => {
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "msg_conflict",
+          type: "message",
+          status: "in_progress",
+          role: "assistant",
+          content: [],
+        },
+      }),
+      responseEvent(1, "response.content_part.done", {
+        item_id: "msg_conflict",
+        output_index: 0,
+        content_index: 0,
+        part: { type: "output_text", text: "ORIGINAL", annotations: [] },
+      }),
+      responseEvent(2, "response.completed", {
+        response: {
+          id: "resp_content_conflict",
+          object: "response",
+          status: "completed",
+          output: [{
+            id: "msg_conflict",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "REPLACEMENT", annotations: [] }],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
 
   it("preserves Chat text after a buffered tool and emits refusal text once", async () => {
     const source = [

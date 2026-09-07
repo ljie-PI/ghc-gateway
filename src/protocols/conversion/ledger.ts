@@ -121,7 +121,7 @@ export class SemanticItemLedger {
 
   items(status: "completed" | "incomplete"): readonly SemanticResponseItem[] {
     const items: SemanticResponseItem[] = [];
-    for (const entry of this.order) {
+    for (const entry of [...this.order].sort(compareResponseItemKeys)) {
       if (entry.kind === "message") {
         const message = this.messages.get(entry.key);
         if (message === undefined) {
@@ -208,6 +208,18 @@ export class SemanticItemLedger {
     }
     return part;
   }
+}
+
+function compareResponseItemKeys(
+  left: { readonly key: string },
+  right: { readonly key: string },
+): number {
+  const leftMatch = /^responses:(\d+)(?::|$)/u.exec(left.key);
+  const rightMatch = /^responses:(\d+)(?::|$)/u.exec(right.key);
+  if (leftMatch?.[1] === undefined || rightMatch?.[1] === undefined) {
+    return 0;
+  }
+  return Number.parseInt(leftMatch[1], 10) - Number.parseInt(rightMatch[1], 10);
 }
 
 function compareMessagePartKeys(left: string, right: string): number {

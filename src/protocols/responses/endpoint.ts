@@ -26,7 +26,7 @@ import {
   nextWithDeadline,
   withByteIdleDeadlines,
 } from "../../gateway/stream_execution.js";
-import { duplicateMemberNames, isWireJsonArray, isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
+import { duplicateMemberNames, isWireJsonArray, isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonArray, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { ChatRequest } from "../chat_completions/types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
@@ -818,13 +818,7 @@ function validateExtendedResponsesRequest(
       continue;
     }
     if (type === "namespace") {
-      assertExtendedToolKeys(tool, new Set(["type", "name", "description", "tools", "children"]));
-      assertExtendedToolName(tool);
-      const namespace = memberValue(tool, "name") as string;
-      const children = memberValue(tool, "tools") ?? memberValue(tool, "children");
-      if (!isWireJsonArray(children) || children.items.length === 0) {
-        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-      }
+      const { namespace, children } = validateExtendedNamespaceTool(tool);
       for (const child of children.items) {
         if (!isWireJsonObject(child) || memberValue(child, "type") !== "function") {
           throw new GatewayFailureError({
@@ -1049,10 +1043,7 @@ function countExtendedDiscoveredTools(input: WireJson | undefined): number {
         validateExtendedCustomTool(tool);
         count += 1;
       } else if (type === "namespace") {
-        const children = memberValue(tool, "tools") ?? memberValue(tool, "children");
-        if (!isWireJsonArray(children) || children.items.length === 0) {
-          throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-        }
+        const { children } = validateExtendedNamespaceTool(tool);
         for (const child of children.items) {
           if (!isWireJsonObject(child) || memberValue(child, "type") !== "function") {
             throw new GatewayFailureError({
@@ -1145,6 +1136,30 @@ function validateExtendedFunctionTool(tool: WireJsonObject): WireJsonObject {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
   return shape;
+}
+
+function validateExtendedNamespaceTool(
+  tool: WireJsonObject,
+): { readonly namespace: string; readonly children: WireJsonArray } {
+  if (duplicateMemberNames(tool).length > 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  assertExtendedToolKeys(tool, new Set(["type", "name", "description", "tools", "children"]));
+  assertExtendedToolName(tool);
+  const description = memberValue(tool, "description");
+  const tools = memberValue(tool, "tools");
+  const childrenValue = memberValue(tool, "children");
+  if (
+    (description !== undefined && typeof description !== "string")
+    || (tools === undefined) === (childrenValue === undefined)
+  ) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  const children = tools ?? childrenValue;
+  if (!isWireJsonArray(children) || children.items.length === 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  return { namespace: memberValue(tool, "name") as string, children };
 }
 
 function rejectExtendedInstructionReordering(input: WireJson | undefined): void {

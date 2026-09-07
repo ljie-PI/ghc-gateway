@@ -207,10 +207,10 @@ function decodeChatMessage(value: WireJson, output: SemanticRequestItem[]): void
       true,
       true,
     );
-    const refusal = optionalString(
-      oneMember(message, "refusal", "REQ-C-ASSISTANT-REFUSAL"),
-      "REQ-C-ASSISTANT-REFUSAL",
-    );
+    const refusalValue = oneMember(message, "refusal", "REQ-C-ASSISTANT-REFUSAL");
+    const refusal = refusalValue === null
+      ? undefined
+      : optionalString(refusalValue, "REQ-C-ASSISTANT-REFUSAL");
     const combined = refusal === undefined ? content : [...content, { type: "refusal", text: refusal } as const];
     if (combined.length > 0) {
       output.push({ type: "message", role: "assistant", content: combined });

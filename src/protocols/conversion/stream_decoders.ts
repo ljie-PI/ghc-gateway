@@ -747,11 +747,49 @@ async function* decodeResponsesStream(
       return;
     }
 
+    if (type === "response.content_part.added" || type === "response.content_part.done") {
+      const outputIndex = requiredOutputIndex(payload);
+      const contentIndex = integerMember(payload, "content_index");
+      const part = objectMember(payload, "part");
+      if (contentIndex === undefined || contentIndex < 0 || part === undefined) {
+        invalid();
+      }
+      observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      const partType = stringMember(part, "type");
+      if (partType === "output_text") {
+        const text = stringMember(part, "text");
+        if (text === undefined) {
+          invalid();
+        }
+        const key = `responses:${outputIndex}:${contentIndex}:text`;
+        observeContent(observedContent, budget, key, "output_text");
+        yield {
+          kind: "text_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          text,
+        };
+      } else if (partType === "refusal") {
+        const refusal = stringMember(part, "refusal");
+        if (refusal === undefined) {
+          invalid();
+        }
+        const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+        observeContent(observedContent, budget, key, "refusal");
+        yield {
+          kind: "refusal_done",
+          key,
+          orderKey: `responses:${outputIndex}:message`,
+          refusal,
+        };
+      } else {
+        invalid();
+      }
+      continue;
+    }
     if (
       type === "response.created"
       || type === "response.in_progress"
-      || type === "response.content_part.added"
-      || type === "response.content_part.done"
       || type.startsWith("response.reasoning_")
     ) {
       continue;

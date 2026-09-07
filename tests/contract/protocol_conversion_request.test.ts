@@ -299,6 +299,28 @@ describe("shared conversion request codecs", () => {
     });
   });
 
+  it.each(["messages", "responses"] as const)(
+    "accepts nullable Chat assistant refusal in a complete tool round for %s",
+    (target) => {
+      expect(() => prepareConvertedRequest("chat", target, body({
+        model: "source",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            refusal: null,
+            tool_calls: [{
+              id: "call_1",
+              type: "function",
+              function: { name: "lookup", arguments: "{}" },
+            }],
+          },
+          { role: "tool", tool_call_id: "call_1", content: "ok" },
+        ],
+      }), "target", capability([target]))).not.toThrow();
+    },
+  );
+
   it("rejects a Chat sampling value outside the Messages target range", () => {
     expect(() => prepareConvertedRequest("chat", "messages", body({
       model: "source",
