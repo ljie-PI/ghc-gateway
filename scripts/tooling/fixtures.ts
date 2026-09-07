@@ -808,7 +808,7 @@ async function expectedResponsesEndpointFixture(entry: FixtureManifestEntry): Pr
       const bridge = await fixture.gateway.fetch(responsesHttpRequest({
         model: "chat",
         input: "hi",
-        tools: [{ type: "function", name: "lookup", parameters: {} }],
+        tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
       }));
       return JSON.stringify({
         native: { status: native.status, body: await native.text() },

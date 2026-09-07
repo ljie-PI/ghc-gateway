@@ -479,6 +479,20 @@ describe("shared conversion response codecs", () => {
   });
 
   it.each(["messages", "responses"] as const)(
+    "treats repeated complete Chat tool names as idempotent for %s",
+    async (target) => {
+      const source = [
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join("");
+      const text = wireText(await collectStream("chat", target, chunks(encoder.encode(source))));
+      expect(text).toContain("lookup");
+      expect(text).not.toContain("lookuplookup");
+    },
+  );
+
+  it.each(["messages", "responses"] as const)(
     "fills delayed Chat tool identity from the final snapshot for %s",
     async (target) => {
       const source = [
@@ -709,6 +723,134 @@ describe("shared conversion response codecs", () => {
     ].join("");
     const text = wireText(await collectStream("responses", "messages", chunks(encoder.encode(source))));
     expect(text.indexOf("\"type\": \"tool_use\"")).toBeLessThan(text.indexOf("\"text\": \"AFTER\""));
+  });
+
+  it("starts a queued Responses tool incrementally once the Messages frontier reaches it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    async function* source(): AsyncIterable<Uint8Array> {
+      yield encoder.encode([
+        responseEvent(0, "response.output_item.added", {
+          output_index: 0,
+          item: {
+            id: "msg_before_tool",
+            type: "message",
+            status: "in_progress",
+            role: "assistant",
+            content: [],
+          },
+        }),
+        responseEvent(1, "response.output_text.delta", {
+          item_id: "msg_before_tool", output_index: 0, content_index: 0, delta: "before",
+        }),
+        responseEvent(2, "response.output_item.added", {
+          output_index: 1,
+          item: {
+            id: "fc_queued",
+            type: "function_call",
+            call_id: "call_queued",
+            name: "lookup",
+            arguments: "",
+            status: "in_progress",
+          },
+        }),
+        responseEvent(3, "response.function_call_arguments.delta", {
+          item_id: "fc_queued", output_index: 1, delta: "{\"q\":",
+        }),
+        responseEvent(4, "response.output_item.done", {
+          output_index: 0,
+          item: {
+            id: "msg_before_tool",
+            type: "message",
+            status: "completed",
+            role: "assistant",
+            content: [{ type: "output_text", text: "before", annotations: [] }],
+          },
+        }),
+      ].join(""));
+      await gate;
+      yield encoder.encode([
+        responseEvent(5, "response.function_call_arguments.delta", {
+          item_id: "fc_queued", output_index: 1, delta: "1}",
+        }),
+        responseEvent(6, "response.output_item.done", {
+          output_index: 1,
+          item: {
+            id: "fc_queued",
+            type: "function_call",
+            call_id: "call_queued",
+            name: "lookup",
+            arguments: "{\"q\":1}",
+            status: "completed",
+          },
+        }),
+        responseEvent(7, "response.completed", {
+          response: {
+            id: "resp_queued_tool",
+            object: "response",
+            status: "completed",
+            output: [
+              {
+                id: "msg_before_tool",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "before", annotations: [] }],
+              },
+              {
+                id: "fc_queued",
+                type: "function_call",
+                call_id: "call_queued",
+                name: "lookup",
+                arguments: "{\"q\":1}",
+                status: "completed",
+              },
+            ],
+            usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+          },
+        }),
+      ].join(""));
+    }
+    const iterator = convertProtocolStream(
+      source(),
+      streamContext("responses", "messages"),
+    )[Symbol.asyncIterator]();
+    let prefix = "";
+    try {
+      for (let index = 0; index < 20 && !prefix.includes("{\\\"q\\\":"); index += 1) {
+        const next = await Promise.race([
+          iterator.next(),
+          new Promise<never>((_, reject) => setTimeout(
+            () => reject(new Error("queued Messages tool did not resume incrementally")),
+            500,
+          )),
+        ]);
+        if (next.done) {
+          break;
+        }
+        if (next.value.kind === "wire") {
+          prefix += decoder.decode(next.value.bytes);
+        }
+      }
+      expect(prefix).toContain("{\\\"q\\\":");
+      expect(prefix).not.toContain("message_stop");
+    } finally {
+      release();
+    }
+    let suffix = "";
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) {
+        break;
+      }
+      if (next.value.kind === "wire") {
+        suffix += decoder.decode(next.value.bytes);
+      }
+    }
+    expect(suffix).toContain("1}");
+    expect(suffix).toContain("message_stop");
   });
 
   it("holds later Responses messages until earlier message content is reconciled for Messages", async () => {
@@ -1123,6 +1265,58 @@ describe("shared conversion response codecs", () => {
       }).rejects.toThrow();
     },
   );
+
+  it("rejects malformed completed Responses tools even when the response is incomplete", async () => {
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: {
+          id: "fc_malformed",
+          type: "function_call",
+          call_id: "call_malformed",
+          name: "lookup",
+          arguments: "",
+          status: "in_progress",
+        },
+      }),
+      responseEvent(1, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "fc_malformed",
+          type: "function_call",
+          call_id: "call_malformed",
+          name: "lookup",
+          arguments: "{\"a\":",
+          status: "completed",
+        },
+      }),
+      responseEvent(2, "response.incomplete", {
+        response: {
+          id: "resp_malformed",
+          object: "response",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [{
+            id: "fc_malformed",
+            type: "function_call",
+            call_id: "call_malformed",
+            name: "lookup",
+            arguments: "{\"a\":",
+            status: "completed",
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "messages"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
 
   it.each(["chat", "messages"] as const)(
     "rejects terminal growth of an item after its done snapshot advanced %s delivery",

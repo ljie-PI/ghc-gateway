@@ -125,7 +125,7 @@ export async function* convertProtocolStream(
       continue;
     }
     if (event.kind === "tool_done") {
-      const suffix = ledger.finishTool(event.key, event.argumentsJson);
+      const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
       if (suffix.length > 0) {
         yield* emitter.toolArgumentsDelta(event.key, suffix);
       }
@@ -494,6 +494,8 @@ class MessagesEmitter implements StreamEmitter {
     readonly name: string;
     argumentsJson: string;
     done: boolean;
+    streamIndex?: number | undefined;
+    closed: boolean;
   }>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
@@ -576,10 +578,14 @@ class MessagesEmitter implements StreamEmitter {
       invalid();
     }
     this.bufferAfterTool = true;
-    this.tools.set(key, { callId, name, argumentsJson: "", done: false });
+    const tool = { callId, name, argumentsJson: "", done: false, closed: false };
+    this.tools.set(key, tool);
+    if (this.context.source === "responses" && this.responseFrontier.allowsItem(key)) {
+      yield* this.emitTool(key, tool);
+    }
   }
 
-  toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
+  *toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
     const tool = this.tools.get(key);
     if (tool === undefined || tool.done) {
       invalid();
@@ -589,7 +595,13 @@ class MessagesEmitter implements StreamEmitter {
       invalid();
     }
     tool.argumentsJson += delta;
-    return [];
+    if (this.context.source === "responses" && tool.streamIndex !== undefined) {
+      yield this.event({
+        type: "content_block_delta",
+        index: tool.streamIndex,
+        delta: { type: "input_json_delta", partial_json: delta },
+      });
+    }
   }
 
   *toolDone(key: string, argumentsJson: string): Iterable<ConvertedStreamEmission> {
@@ -602,6 +614,14 @@ class MessagesEmitter implements StreamEmitter {
       invalid();
     }
     tool.done = true;
+    if (
+      this.context.source === "responses"
+      && tool.streamIndex !== undefined
+      && !tool.closed
+    ) {
+      tool.closed = true;
+      yield this.event({ type: "content_block_stop", index: tool.streamIndex });
+    }
   }
 
   *finish(
@@ -670,20 +690,7 @@ class MessagesEmitter implements StreamEmitter {
       if (item.key !== undefined && this.emittedResponseTools.has(item.key)) {
         continue;
       }
-      const index = this.nextIndex++;
-      yield this.event({
-        type: "content_block_start",
-        index,
-        content_block: { type: "tool_use", id: tool.callId, name: tool.name, input: {} },
-      });
-      if (item.argumentsJson.length > 0) {
-        yield this.event({
-          type: "content_block_delta",
-          index,
-          delta: { type: "input_json_delta", partial_json: item.argumentsJson },
-        });
-      }
-      yield this.event({ type: "content_block_stop", index });
+      yield* this.emitTool(item.key ?? `tool:${this.nextIndex}`, tool);
     }
   }
 
@@ -735,9 +742,8 @@ class MessagesEmitter implements StreamEmitter {
     for (;;) {
       const toolKey = `responses:${this.responseFrontier.currentItemIndex()}`;
       const tool = this.tools.get(toolKey);
-      if (tool?.done === true && !this.emittedResponseTools.has(toolKey)) {
-        yield* this.emitTool(tool);
-        this.emittedResponseTools.add(toolKey);
+      if (tool !== undefined && !this.emittedResponseTools.has(toolKey)) {
+        yield* this.emitTool(toolKey, tool);
       }
       const ready = [...this.pendingContent.entries()].find(([key, pending]) => (
         this.responseFrontier.allowsContent(key, pending.orderKey)
@@ -761,12 +767,20 @@ class MessagesEmitter implements StreamEmitter {
     }
   }
 
-  private *emitTool(tool: {
+  private *emitTool(key: string, tool: {
     readonly callId: string;
     readonly name: string;
     readonly argumentsJson: string;
+    streamIndex?: number | undefined;
+    readonly done: boolean;
+    closed: boolean;
   }): Iterable<ConvertedStreamEmission> {
+    if (tool.streamIndex !== undefined) {
+      return;
+    }
     const index = this.nextIndex++;
+    tool.streamIndex = index;
+    this.emittedResponseTools.add(key);
     yield this.event({
       type: "content_block_start",
       index,
@@ -779,7 +793,10 @@ class MessagesEmitter implements StreamEmitter {
         delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
       });
     }
-    yield this.event({ type: "content_block_stop", index });
+    if (tool.done && !tool.closed) {
+      tool.closed = true;
+      yield this.event({ type: "content_block_stop", index });
+    }
   }
 
   private event(value: Record<string, unknown>): ConvertedStreamEmission {

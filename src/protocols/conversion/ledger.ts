@@ -129,13 +129,16 @@ export class SemanticItemLedger {
     tool.argumentsJson += delta;
   }
 
-  finishTool(key: string, snapshot?: string): string {
+  finishTool(key: string, snapshot?: string, completed = false): string {
     const tool = this.tools.get(key);
     if (tool === undefined) {
       invalid();
     }
     if (tool.done) {
       if (snapshot === undefined || snapshot === tool.argumentsJson) {
+        if (completed) {
+          validateArguments(tool.argumentsJson);
+        }
         return "";
       }
       invalid();
@@ -148,6 +151,9 @@ export class SemanticItemLedger {
       suffix = snapshot.slice(tool.argumentsJson.length);
       this.reserve(suffix);
       tool.argumentsJson = snapshot;
+    }
+    if (completed) {
+      validateArguments(tool.argumentsJson);
     }
     tool.done = true;
     return suffix;

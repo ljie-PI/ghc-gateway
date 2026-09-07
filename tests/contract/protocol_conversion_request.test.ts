@@ -915,7 +915,7 @@ describe("shared conversion request codecs", () => {
 
   it("keeps shallow media extraction independent of unrelated deep business data", () => {
     let business: unknown = "leaf";
-    for (let depth = 0; depth < 40; depth += 1) {
+    for (let depth = 0; depth < 70; depth += 1) {
       business = { next: business };
     }
     const converted = decoded(prepareConvertedRequest("messages", "chat", body({

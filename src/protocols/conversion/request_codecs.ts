@@ -771,7 +771,10 @@ function decodeToolResultContent(
       let parsed: WireJson | undefined;
       try {
         const bytes = new TextEncoder().encode(trimmed);
-        parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 64 });
+        parsed = parseWireJson(bytes, {
+          maxBytes: bytes.byteLength,
+          maxDepth: Math.min(Math.max(bytes.byteLength, 64), 4096),
+        });
       } catch {
         // A non-protocol JSON-looking string remains ordinary tool text.
       }
@@ -852,7 +855,10 @@ function decodeToolResultContent(
         let parsed: WireJson;
         try {
           const bytes = new TextEncoder().encode(trimmed);
-          parsed = parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 64 });
+          parsed = parseWireJson(bytes, {
+            maxBytes: Math.max(bytes.byteLength, 1),
+            maxDepth: Math.min(Math.max(bytes.byteLength, 64), 4096),
+          });
         } catch {
           return { value, media: [] };
         }

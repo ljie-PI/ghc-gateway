@@ -103,7 +103,11 @@ async function* decodeChatStream(
           continue;
         }
         tool.done = true;
-        yield { kind: "tool_done", key: `chat:${index}` };
+        yield {
+          kind: "tool_done",
+          key: `chat:${index}`,
+          completed: true,
+        };
       }
       yield {
         kind: "terminal",
@@ -189,11 +193,19 @@ async function* decodeChatStream(
           const fn = objectMember(value, "function");
           const nameDelta = stringMember(fn, "name");
           if (nameDelta !== undefined) {
-            if (tool.started && nameDelta.length > 0) {
-              invalid();
+            if (tool.started) {
+              if (nameDelta.length > 0 && nameDelta !== tool.name) {
+                invalid();
+              }
+            } else if (nameDelta === tool.name) {
+              // Repeated complete metadata is idempotent.
+            } else if (nameDelta.startsWith(tool.name)) {
+              budget.reserve(nameDelta.slice(tool.name.length));
+              tool.name = nameDelta;
+            } else {
+              budget.reserve(nameDelta);
+              tool.name += nameDelta;
             }
-            budget.reserve(nameDelta);
-            tool.name += nameDelta;
           }
           const argumentsDelta = stringMember(fn, "arguments");
           if (argumentsDelta !== undefined && argumentsDelta.length > 0) {
@@ -406,16 +418,16 @@ async function* decodeMessagesStream(
       budget.reserveEntry();
       const blockType = stringMember(block, "type");
       if (blockType === "text") {
-        blocks.set(index, { kind: "text", closed: false });
         const text = stringMember(block, "text");
-        if (text !== undefined) {
-          yield { kind: "text_done", key: `messages:${index}:text`, text };
+        blocks.set(index, { kind: "text", closed: false, sawContent: text !== undefined && text.length > 0 });
+        if (text !== undefined && text.length > 0) {
+          yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
         }
       } else if (blockType === "refusal") {
-        blocks.set(index, { kind: "refusal", closed: false });
         const refusal = stringMember(block, "refusal") ?? stringMember(block, "text");
-        if (refusal !== undefined) {
-          yield { kind: "refusal_done", key: `messages:${index}:refusal`, refusal };
+        blocks.set(index, { kind: "refusal", closed: false, sawContent: refusal !== undefined && refusal.length > 0 });
+        if (refusal !== undefined && refusal.length > 0) {
+          yield { kind: "refusal_delta", key: `messages:${index}:refusal`, delta: refusal };
         }
       } else if (blockType === "tool_use") {
         const callId = stringMember(block, "id");
@@ -460,12 +472,16 @@ async function* decodeMessagesStream(
       }
       const deltaType = stringMember(delta, "type");
       if (block.kind === "text" && deltaType === "text_delta") {
-        yield { kind: "text_delta", key: `messages:${index}:text`, delta: stringMember(delta, "text") ?? "" };
+        const text = stringMember(delta, "text") ?? "";
+        block.sawContent ||= text.length > 0;
+        yield { kind: "text_delta", key: `messages:${index}:text`, delta: text };
       } else if (block.kind === "refusal" && (deltaType === "refusal_delta" || deltaType === "text_delta")) {
+        const refusal = stringMember(delta, "refusal") ?? stringMember(delta, "text") ?? "";
+        block.sawContent ||= refusal.length > 0;
         yield {
           kind: "refusal_delta",
           key: `messages:${index}:refusal`,
-          delta: stringMember(delta, "refusal") ?? stringMember(delta, "text") ?? "",
+          delta: refusal,
         };
       } else if (block.kind === "tool" && deltaType === "input_json_delta" && block.key !== undefined) {
         if (!block.sawArgumentsDelta && block.initialArguments !== undefined) {
@@ -503,8 +519,11 @@ async function* decodeMessagesStream(
           budget.release(block.initialArguments);
           block.initialArguments = undefined;
         }
-        yield { kind: "tool_done", key: block.key };
+        yield { kind: "tool_done", key: block.key, completed: true };
       } else if (block.kind === "text") {
+        if (!block.sawContent) {
+          yield { kind: "text_done", key: `messages:${index}:text`, text: "" };
+        }
         yield {
           kind: "content_done",
           key: `messages:${index}:text`,
@@ -512,6 +531,9 @@ async function* decodeMessagesStream(
           contentIndex: 0,
         };
       } else if (block.kind === "refusal") {
+        if (!block.sawContent) {
+          yield { kind: "refusal_done", key: `messages:${index}:refusal`, refusal: "" };
+        }
         yield {
           kind: "content_done",
           key: `messages:${index}:refusal`,
@@ -1054,6 +1076,10 @@ function* finalItemEvents(
     const finalCallId = requiredStreamString(item, "call_id");
     const finalName = requiredStreamString(item, "name");
     const finalArguments = requiredStreamString(item, "arguments", true);
+    const status = requiredStreamString(item, "status");
+    if (status !== "completed" && status !== "incomplete" && status !== "in_progress") {
+      invalid();
+    }
     let identity = toolsByIndex.get(outputIndex);
     if (identity === undefined) {
       identity = {
@@ -1079,7 +1105,12 @@ function* finalItemEvents(
         invalid();
       }
     }
-    yield { kind: "tool_done", key: identity.key, argumentsJson: finalArguments };
+    yield {
+      kind: "tool_done",
+      key: identity.key,
+      argumentsJson: finalArguments,
+      completed: status === "completed",
+    };
     return;
   }
 
@@ -1097,7 +1128,8 @@ interface ResponseToolIdentity {
 }
 
 type MessageBlockState =
-  | { readonly kind: "text" | "refusal" | "ignored"; closed: boolean }
+  | { readonly kind: "text" | "refusal"; closed: boolean; sawContent: boolean }
+  | { readonly kind: "ignored"; closed: boolean }
   | {
     readonly kind: "tool";
     readonly key: string;

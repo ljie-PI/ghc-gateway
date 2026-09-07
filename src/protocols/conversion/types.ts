@@ -211,7 +211,12 @@ export type SemanticStreamEvent =
     readonly name: string;
   }
   | { readonly kind: "tool_arguments_delta"; readonly key: string; readonly delta: string }
-  | { readonly kind: "tool_done"; readonly key: string; readonly argumentsJson?: string | undefined }
+  | {
+    readonly kind: "tool_done";
+    readonly key: string;
+    readonly argumentsJson?: string | undefined;
+    readonly completed?: boolean | undefined;
+  }
   | { readonly kind: "usage"; readonly usage: SemanticUsage }
   | {
     readonly kind: "terminal";
