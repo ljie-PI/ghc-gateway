@@ -169,10 +169,12 @@ export class LiveCallLedger {
       if (inferenceRoute !== undefined && response.ok) {
         const observed = response.headers.get(UPSTREAM_PROTOCOL_HEADER);
         if (!isInferenceProtocol(observed) || observed !== inferenceRoute.target) {
+          await cancelResponseBody(response);
           throw new Error("live inference response did not prove its expected upstream protocol");
         }
         const prior = this.observedUpstream.get(inferenceRoute.key);
         if (prior !== undefined && prior !== observed) {
+          await cancelResponseBody(response);
           throw new Error("live inference route changed upstream protocol within one matrix cell");
         }
         this.observedUpstream.set(inferenceRoute.key, observed);
@@ -774,6 +776,25 @@ async function returnWithTimeout<T>(
       Promise.resolve(iterator.return()).then(() => undefined, () => undefined),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  if (response.body === null) {
+    return;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      response.body.cancel().then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 1_000);
       }),
     ]);
   } finally {

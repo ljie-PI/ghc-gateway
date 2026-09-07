@@ -141,7 +141,13 @@ describe("live SDK acceptance harness", () => {
   });
 
   it("rejects a successful response that does not prove the expected upstream protocol", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, {
       status: 200,
       headers: { "x-ghcg-upstream-protocol": "chat" },
     })));
@@ -151,6 +157,7 @@ describe("live SDK acceptance harness", () => {
       await guarded("http://127.0.0.1:31400/v1/responses", { method: "POST" });
     })).rejects.toThrow(/prove its expected upstream protocol/u);
     expect(ledger.snapshot().observedUpstream).toEqual({});
+    expect(cancelled).toBe(true);
   });
 
   it("waits past an in-flight value until an aborted stream reaches a terminal state", async () => {
