@@ -10,55 +10,87 @@ export async function* decodeSseRecords(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
 ): AsyncIterable<SseRecord> {
-  let pending = "";
-  let pendingBytes = 0;
-  let scanIndex = 0;
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
   const encoder = new TextEncoder();
-  try {
-    for await (const chunk of bytes) {
-      pendingBytes += chunk.byteLength;
-      pending += decoder.decode(chunk, { stream: true });
-      for (;;) {
-        const extracted = takeSseRecord(pending, false, scanIndex);
-        if (extracted === undefined) {
-          if (pendingBytes > eventLimitBytes) {
-            throw new ChatSseError("event_too_large", "SSE event exceeds limit");
-          }
-          scanIndex = Math.max(0, pending.length - 2);
-          break;
-        }
-        const consumedBytes = encoder.encode(extracted.consumed).byteLength;
-        if (consumedBytes > eventLimitBytes) {
-          throw new ChatSseError("event_too_large", "SSE event exceeds limit");
-        }
-        pending = extracted.rest;
-        pendingBytes = pending.length === 0 ? 0 : Math.max(0, pendingBytes - consumedBytes);
-        scanIndex = 0;
-        const parsed = parseRecord(normalizeSseNewlines(extracted.raw));
-        if (parsed !== undefined) {
-          yield parsed;
-        }
+  const line = new FragmentAccumulator();
+  let recordLines: string[] = [];
+  let recordBytes = 0;
+  let pendingCr = false;
+  const ready: SseRecord[] = [];
 
+  const reserve = (value: string): void => {
+    recordBytes += encoder.encode(value).byteLength;
+    if (recordBytes > eventLimitBytes) {
+      throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+    }
+  };
+  const finishLine = (): void => {
+    const value = line.take();
+    if (value.length > 0) {
+      recordLines.push(value);
+      return;
+    }
+    const parsed = parseRecordLines(recordLines);
+    recordLines = [];
+    recordBytes = 0;
+    if (parsed !== undefined) {
+      ready.push(parsed);
+    }
+  };
+  const consume = (value: string): void => {
+    let start = 0;
+    if (pendingCr) {
+      pendingCr = false;
+      if (value.startsWith("\n")) {
+        reserve("\r\n");
+        finishLine();
+        start = 1;
+      } else {
+        reserve("\r");
+        finishLine();
       }
     }
-    pending += decoder.decode();
-    for (;;) {
-      const extracted = takeSseRecord(pending, true, scanIndex);
-      if (extracted === undefined) {
+    for (let index = start; index < value.length; index += 1) {
+      const character = value[index];
+      if (character !== "\n" && character !== "\r") {
+        continue;
+      }
+      const content = value.slice(start, index);
+      line.append(content);
+      reserve(content);
+      if (character === "\r" && index + 1 >= value.length) {
+        pendingCr = true;
+        start = value.length;
         break;
       }
-      const consumedBytes = encoder.encode(extracted.consumed).byteLength;
-      if (consumedBytes > eventLimitBytes) {
-        throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+      if (character === "\r" && value[index + 1] === "\n") {
+        reserve("\r\n");
+        index += 1;
+      } else {
+        reserve(character);
       }
-      pending = extracted.rest;
-      pendingBytes = pending.length === 0 ? 0 : Math.max(0, pendingBytes - consumedBytes);
-      scanIndex = 0;
-      const parsed = parseRecord(normalizeSseNewlines(extracted.raw));
-      if (parsed !== undefined) {
-        yield parsed;
+      finishLine();
+      start = index + 1;
+    }
+    const trailing = value.slice(start);
+    line.append(trailing);
+    reserve(trailing);
+  };
+  try {
+    for await (const chunk of bytes) {
+      consume(decoder.decode(chunk, { stream: true }));
+      while (ready.length > 0) {
+        yield ready.shift() as SseRecord;
       }
+    }
+    consume(decoder.decode());
+    if (pendingCr) {
+      pendingCr = false;
+      reserve("\r");
+      finishLine();
+    }
+    while (ready.length > 0) {
+      yield ready.shift() as SseRecord;
     }
   } catch (error: unknown) {
     if (error instanceof GatewayFailureError || error instanceof ChatSseError) {
@@ -69,12 +101,40 @@ export async function* decodeSseRecords(
     }
     throw error;
   }
-  if (pending.trim().length > 0) {
+  if (recordLines.some((value) => value.trim().length > 0) || line.peek().trim().length > 0) {
     throw new GatewayFailureError({
       kind: "upstream_stream_truncated",
       source: "parser",
       phase: "stream",
     });
+  }
+
+}
+
+class FragmentAccumulator {
+  private readonly chunks: string[] = [];
+  private fragments: string[] = [];
+
+  append(value: string): void {
+    if (value.length === 0) {
+      return;
+    }
+    this.fragments.push(value);
+    if (this.fragments.length >= 1_024) {
+      this.chunks.push(this.fragments.join(""));
+      this.fragments = [];
+    }
+  }
+
+  peek(): string {
+    return [...this.chunks, ...this.fragments].join("");
+  }
+
+  take(): string {
+    const value = this.peek();
+    this.chunks.length = 0;
+    this.fragments = [];
+    return value;
   }
 }
 
@@ -115,14 +175,10 @@ function lineBreakLength(value: string, index: number, final: boolean): number {
   return value[index + 1] === "\n" ? 2 : 1;
 }
 
-function normalizeSseNewlines(value: string): string {
-  return value.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n");
-}
-
-function parseRecord(raw: string): SseRecord | undefined {
+function parseRecordLines(lines: readonly string[]): SseRecord | undefined {
   let eventName: string | undefined;
   const data: string[] = [];
-  for (const line of raw.split("\n")) {
+  for (const line of lines) {
     if (line.length === 0 || line.startsWith(":")) {
       continue;
     }
