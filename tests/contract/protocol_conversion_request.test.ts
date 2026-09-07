@@ -265,10 +265,56 @@ describe("shared conversion request codecs", () => {
           type: "json_schema",
           name: "response",
           schema: { type: "object" },
+          strict: true,
         },
       },
     });
   });
+
+  it.each(["chat", "responses"] as const)(
+    "preserves the guaranteed Messages JSON-schema constraint when converting to %s",
+    (target) => {
+      const converted = decoded(prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 8,
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: { type: "object", required: ["value"], properties: { value: { type: "string" } } },
+          },
+        },
+      }), "target", capability([target])).bytes);
+      if (target === "chat") {
+        expect(converted.response_format).toMatchObject({
+          type: "json_schema",
+          json_schema: { strict: true },
+        });
+        return;
+      }
+      expect(converted.text).toMatchObject({
+        format: { type: "json_schema", strict: true },
+      });
+    },
+  );
+
+  it.each(["chat", "responses"] as const)(
+    "rejects an explicit false Messages JSON-schema strictness for %s",
+    (target) => {
+      expect(() => prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: 8,
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: { type: "object" },
+            strict: false,
+          },
+        },
+      }), "target", capability([target]))).toThrow();
+    },
+  );
 
   it("accepts Chat assistant tool history with omitted optional content", () => {
     const converted = prepareConvertedRequest("chat", "responses", body({
@@ -664,6 +710,65 @@ describe("shared conversion request codecs", () => {
       capability(["chat"]),
     ).bytes));
     expect(chat).toContain("[cc-switch:tool-result-error]");
+  });
+
+  it("extracts nested JSON-encoded Responses tool-result images on the approved content path", () => {
+    const converted = decoded(prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      input: [
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: {
+            content: JSON.stringify({
+              type: "input_image",
+              image_url: "data:image/png;base64,QUJD",
+            }),
+          },
+        },
+      ],
+    }), "target", capability(["messages"])).bytes);
+    expect(converted.messages).toMatchObject([
+      {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1" }],
+      },
+      {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "call_1",
+          content: [
+            { type: "text" },
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: "QUJD" },
+            },
+          ],
+        }],
+      },
+    ]);
+  });
+
+  it("rejects unknown fields in nested JSON-encoded tool-result media", () => {
+    expect(() => prepareConvertedRequest("responses", "messages", body({
+      model: "source",
+      input: [
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: {
+            content: JSON.stringify({
+              type: "input_image",
+              image_url: "data:image/png;base64,QUJD",
+              unsupported_core_constraint: null,
+            }),
+          },
+        },
+      ],
+    }), "target", capability(["messages"]))).toThrow();
   });
 
   it("coarsens minimal reasoning to a supported Messages effort", () => {

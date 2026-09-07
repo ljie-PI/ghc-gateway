@@ -767,9 +767,14 @@ function decodeToolResultContent(
       return [imageContent(trimmed, undefined, "REQ-MEDIA-DATA-URL")];
     }
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      let parsed: WireJson | undefined;
       try {
         const bytes = new TextEncoder().encode(trimmed);
-        const parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 32 });
+        parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 32 });
+      } catch {
+        // A non-protocol JSON-looking string remains ordinary tool text.
+      }
+      if (parsed !== undefined) {
         const extracted = extractEmbeddedToolMedia(parsed);
         if (extracted.media.length > 0) {
           return [
@@ -780,8 +785,6 @@ function decodeToolResultContent(
             ...extracted.media,
           ];
         }
-      } catch {
-        // A non-protocol JSON-looking string remains ordinary tool text.
       }
     }
     return [{ type: "text", text: value }];
@@ -816,6 +819,26 @@ function decodeToolResultContent(
     depth = 0,
   ): { readonly value: WireJson; readonly media: readonly SemanticImage[] } {
     if (depth > 32) {
+      return { value, media: [] };
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+        let parsed: WireJson;
+        try {
+          const bytes = new TextEncoder().encode(trimmed);
+          parsed = parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 32 });
+        } catch {
+          return { value, media: [] };
+        }
+        const extracted = extractEmbeddedToolMedia(parsed, depth + 1);
+        if (extracted.media.length > 0) {
+          return {
+            value: new TextDecoder().decode(serializeWireJson(extracted.value)),
+            media: extracted.media,
+          };
+        }
+      }
       return { value, media: [] };
     }
     if (isWireJsonArray(value)) {
@@ -1098,12 +1121,15 @@ function decodeMessagesOutputFormat(value: WireJson | undefined): SemanticOutput
     "REQ-M-FORMAT-DESCRIPTION",
   );
   const strict = optionalBoolean(oneMember(object, "strict", "REQ-M-FORMAT-STRICT"), "REQ-M-FORMAT-STRICT");
+  if (strict === false) {
+    unsupported("REQ-M-FORMAT-STRICT");
+  }
   return {
     kind: "json_schema",
     name: optionalString(oneMember(object, "name", "REQ-M-FORMAT-NAME"), "REQ-M-FORMAT-NAME") ?? "response",
     ...(description === undefined ? {} : { description }),
     schema: requiredObject(oneMember(object, "schema", "REQ-M-FORMAT-SCHEMA"), "REQ-M-FORMAT-SCHEMA"),
-    ...(strict === undefined ? {} : { strict }),
+    strict: true,
   };
 }
 

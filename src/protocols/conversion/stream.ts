@@ -164,18 +164,19 @@ function createEmitter(context: Readonly<StreamConversionContext>): StreamEmitte
 class ChatEmitter implements StreamEmitter {
   private readonly id: string;
   private readonly created: number;
-  private readonly bufferResponses: boolean;
+  private readonly sourceResponses: boolean;
   private roleSent = false;
   private readonly toolIndexes = new Map<string, number>();
+  private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `chatcmpl_${context.createUuid()}`;
     this.created = context.nowUnixSeconds();
-    this.bufferResponses = context.source === "responses";
+    this.sourceResponses = context.source === "responses";
   }
 
   *start(): Iterable<ConvertedStreamEmission> {
-    if (this.bufferResponses) {
+    if (this.sourceResponses) {
       yield this.chunk(wireObject([["role", "assistant"]]));
       this.roleSent = true;
     }
@@ -183,8 +184,8 @@ class ChatEmitter implements StreamEmitter {
 
   *messageStart(_key: string): Iterable<ConvertedStreamEmission> {}
 
-  *textDelta(_key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.bufferResponses) {
+  *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
+    if (this.sourceResponses && !isPrimaryResponsesContent(key, orderKey)) {
       return;
     }
     yield this.chunk(wireObject([
@@ -192,10 +193,13 @@ class ChatEmitter implements StreamEmitter {
       ["content", delta],
     ]));
     this.roleSent = true;
+    if (this.sourceResponses) {
+      this.recordStreamed(key, "text", delta);
+    }
   }
 
-  *refusalDelta(_key: string, delta: string, _orderKey?: string): Iterable<ConvertedStreamEmission> {
-    if (this.bufferResponses) {
+  *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
+    if (this.sourceResponses && !isPrimaryResponsesContent(key, orderKey)) {
       return;
     }
     yield this.chunk(wireObject([
@@ -203,10 +207,13 @@ class ChatEmitter implements StreamEmitter {
       ["refusal", delta],
     ]));
     this.roleSent = true;
+    if (this.sourceResponses) {
+      this.recordStreamed(key, "refusal", delta);
+    }
   }
 
   *toolStart(key: string, callId: string, name: string): Iterable<ConvertedStreamEmission> {
-    if (this.bufferResponses) {
+    if (this.sourceResponses && !isPrimaryResponsesItem(key)) {
       return;
     }
     const index = this.toolIndexes.size;
@@ -224,11 +231,11 @@ class ChatEmitter implements StreamEmitter {
   }
 
   *toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    if (this.bufferResponses) {
-      return;
-    }
     const index = this.toolIndexes.get(key);
     if (index === undefined) {
+      if (this.sourceResponses) {
+        return;
+      }
       invalid();
     }
     yield this.chunk(wireObject([
@@ -246,8 +253,8 @@ class ChatEmitter implements StreamEmitter {
     usage: Readonly<SemanticUsage>,
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
-    if (this.bufferResponses) {
-      yield* this.emitBufferedItems(items);
+    if (this.sourceResponses) {
+      yield* this.emitBufferedResponseItems(items);
     }
     if (!this.roleSent) {
       yield this.chunk(wireObject([["role", "assistant"], ["content", ""]]));
@@ -268,14 +275,30 @@ class ChatEmitter implements StreamEmitter {
     yield { kind: "wire", bytes: encodeOpenAiChatDone() };
   }
 
-  private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
+  private *emitBufferedResponseItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
       if (item.type === "message") {
-        for (const part of item.content) {
+        for (let partIndex = 0; partIndex < item.content.length; partIndex += 1) {
+          const part = item.content[partIndex];
+          if (part === undefined) {
+            continue;
+          }
+          const key = item.contentKeys?.[partIndex] ?? item.key ?? "";
+          const streamed = this.streamedContent.get(key)?.[part.type] ?? "";
+          if (!part.text.startsWith(streamed)) {
+            invalid();
+          }
+          const remaining = part.text.slice(streamed.length);
+          if (remaining.length === 0) {
+            continue;
+          }
           yield this.chunk(wireObject([
-            [part.type === "refusal" ? "refusal" : "content", part.text],
+            [part.type === "refusal" ? "refusal" : "content", remaining],
           ]));
         }
+        continue;
+      }
+      if (item.key !== undefined && this.toolIndexes.has(item.key)) {
         continue;
       }
       const index = this.toolIndexes.size;
@@ -289,6 +312,12 @@ class ChatEmitter implements StreamEmitter {
         ])])],
       ]));
     }
+  }
+
+  private recordStreamed(key: string, kind: "text" | "refusal", delta: string): void {
+    const current = this.streamedContent.get(key) ?? { text: "", refusal: "" };
+    current[kind] += delta;
+    this.streamedContent.set(key, current);
   }
 
   private chunk(delta: ReturnType<typeof wireObject>, finish?: string): ConvertedStreamEmission {
@@ -357,7 +386,11 @@ class MessagesEmitter implements StreamEmitter {
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const messageKey = orderKey ?? key;
     this.firstMessageKey ??= messageKey;
-    if (this.context.source === "responses" || this.bufferAfterTool || messageKey !== this.firstMessageKey) {
+    if (
+      (this.context.source === "responses" && !isPrimaryResponsesContent(key, orderKey))
+      || this.bufferAfterTool
+      || messageKey !== this.firstMessageKey
+    ) {
       return;
     }
     yield* this.emitLiveText(key, delta);
@@ -367,7 +400,11 @@ class MessagesEmitter implements StreamEmitter {
   *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const messageKey = orderKey ?? key;
     this.firstMessageKey ??= messageKey;
-    if (this.context.source === "responses" || this.bufferAfterTool || messageKey !== this.firstMessageKey) {
+    if (
+      (this.context.source === "responses" && !isPrimaryResponsesContent(key, orderKey))
+      || this.bufferAfterTool
+      || messageKey !== this.firstMessageKey
+    ) {
       return;
     }
     yield* this.emitLiveText(`refusal:${key}`, delta);
@@ -798,6 +835,14 @@ class ResponsesEmitter implements StreamEmitter {
   private event(value: ReturnType<typeof wireObject>): ConvertedStreamEmission {
     return { kind: "wire", bytes: encodeResponsesSseEvent(value) };
   }
+}
+
+function isPrimaryResponsesContent(key: string, orderKey: string | undefined): boolean {
+  return orderKey === "responses:0:message" && /^responses:0:0:/u.test(key);
+}
+
+function isPrimaryResponsesItem(key: string): boolean {
+  return key === "responses:0";
 }
 
 function responseOutput(

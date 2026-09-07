@@ -700,13 +700,103 @@ describe("shared conversion response codecs", () => {
       ].join("");
       const text = wireText(await collectStream("responses", target, chunks(encoder.encode(source))));
       const firstPosition = target === "chat"
-        ? text.indexOf("\"content\":\"AB\"")
-        : text.indexOf("\"text\": \"AB\"");
+        ? text.indexOf("\"content\":\"A\"")
+        : text.indexOf("\"text\": \"A\"");
+      const suffixPosition = target === "chat"
+        ? text.indexOf("\"content\":\"B\"")
+        : text.indexOf("\"text\": \"B\"");
       const secondPosition = target === "chat"
         ? text.indexOf("\"content\":\"C\"")
         : text.indexOf("\"text\": \"C\"");
       expect(firstPosition).toBeGreaterThanOrEqual(0);
-      expect(secondPosition).toBeGreaterThan(firstPosition);
+      expect(suffixPosition).toBeGreaterThan(firstPosition);
+      expect(secondPosition).toBeGreaterThan(suffixPosition);
+    },
+  );
+
+  it.each(["chat", "messages"] as const)(
+    "streams the established primary Responses content prefix incrementally to %s",
+    async (target) => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      async function* source(): AsyncIterable<Uint8Array> {
+        yield encoder.encode([
+          responseEvent(0, "response.output_item.added", {
+            output_index: 0,
+            item: {
+              id: "msg_incremental",
+              type: "message",
+              status: "in_progress",
+              role: "assistant",
+              content: [],
+            },
+          }),
+          responseEvent(1, "response.output_text.delta", {
+            item_id: "msg_incremental",
+            output_index: 0,
+            content_index: 0,
+            delta: "A",
+          }),
+        ].join(""));
+        await gate;
+        yield encoder.encode([
+          responseEvent(2, "response.output_text.delta", {
+            item_id: "msg_incremental",
+            output_index: 0,
+            content_index: 0,
+            delta: "B",
+          }),
+          responseEvent(3, "response.completed", {
+            response: {
+              id: "resp_incremental",
+              object: "response",
+              status: "completed",
+              output: [{
+                id: "msg_incremental",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "AB", annotations: [] }],
+              }],
+              usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+            },
+          }),
+        ].join(""));
+      }
+      const iterator = convertProtocolStream(
+        source(),
+        streamContext("responses", target),
+      )[Symbol.asyncIterator]();
+      let prefix = "";
+      try {
+        for (let index = 0; index < 8 && !prefix.includes("A"); index += 1) {
+          const next = await Promise.race([
+            iterator.next(),
+            new Promise<never>((_, reject) => setTimeout(
+              () => reject(new Error("primary Responses prefix was not emitted incrementally")),
+              500,
+            )),
+          ]);
+          if (next.done) {
+            break;
+          }
+          if (next.value.kind === "wire") {
+            prefix += decoder.decode(next.value.bytes);
+          }
+        }
+        expect(prefix).toContain("A");
+        expect(prefix).not.toContain("response.completed");
+      } finally {
+        release();
+      }
+      for (;;) {
+        const next = await iterator.next();
+        if (next.done) {
+          break;
+        }
+      }
     },
   );
 
@@ -1775,6 +1865,62 @@ describe("shared conversion response codecs", () => {
         config: defaultRuntimeConfigSnapshot(),
         attempt: createRequestAttempt({
           requestId: "req_native_duplicate_type",
+          protocol: "anthropic",
+          abortedErrorCount: 1,
+        }),
+      },
+      onTerminal: () => undefined,
+    });
+    const reader = response.body?.getReader();
+    if (reader === undefined) {
+      throw new Error("missing response body");
+    }
+    let delivered = "";
+    await expect((async () => {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          return;
+        }
+        delivered += decoder.decode(next.value, { stream: true });
+      }
+    })()).rejects.toThrow();
+    expect(delivered).not.toContain("synthetic-sensitive-diagnostic");
+  });
+
+  it("fails closed on unparseable native Messages data before forwarding diagnostics", async () => {
+    const nested = `${"[".repeat(65)}"synthetic-sensitive-diagnostic"${"]".repeat(65)}`;
+    async function* upstream(): AsyncIterable<Uint8Array> {
+      yield encoder.encode(messageEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: "msg_unparseable_error",
+          type: "message",
+          role: "assistant",
+          content: [],
+          model: "native",
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      }));
+      yield encoder.encode(`event: message_delta\ndata: {"type":"error","error":${nested}}\n\n`);
+    }
+    const signal = new AbortController().signal;
+    const response = await createNativeMessagesStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: upstream(),
+        async cancel() {},
+      },
+      scope: {
+        requestId: "req_native_unparseable",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({
+          requestId: "req_native_unparseable",
           protocol: "anthropic",
           abortedErrorCount: 1,
         }),

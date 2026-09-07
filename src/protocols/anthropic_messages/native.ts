@@ -312,10 +312,10 @@ class NativeMessagesObserver {
       const bytes = new TextEncoder().encode(data);
       payload = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 });
     } catch {
-      return;
+      invalid();
     }
     if (!isWireJsonObject(payload)) {
-      return;
+      invalid();
     }
     const types = memberValues(payload, "type");
     if (types.length > 1) {
