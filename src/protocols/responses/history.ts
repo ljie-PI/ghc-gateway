@@ -388,6 +388,21 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       if (!canSkipExpiry || checkpointState === "complete") {
         this.recentReceiptCleanup.delete(cleanupKey);
       }
+      if (
+        canSkipExpiry
+        && checkpointState === "complete"
+        && existing.checkpoint_state === "partial"
+        && (calls.length === 0 || callRowsEqual(this.readCallRows(ownership.accountId, responseId), calls))
+      ) {
+        // The durable calls and Admin-visible counts are unchanged; only promote the receipt atomically.
+        this.statement(
+          `UPDATE response_route_receipts
+           SET checkpoint_state = 'complete'
+           WHERE account_id = ? AND response_id = ? AND checkpoint_state = 'partial'`,
+        ).run(ownership.accountId, responseId);
+        throwIfAborted(signal);
+        return;
+      }
       let unavailableAfterCleanup = false;
       let ownershipChanged = false;
       const transaction = this.database.transaction(() => {
