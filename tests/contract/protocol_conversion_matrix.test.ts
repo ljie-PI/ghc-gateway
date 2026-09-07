@@ -212,7 +212,7 @@ describe("protocol conversion matrix", () => {
       const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as {
         tools: Array<{ function: { name: string; strict?: boolean } }>;
       };
-      expect(request.tools.find((tool) => tool.function.name === "strict_lookup")?.function.strict).toBeUndefined();
+      expect(request.tools.find((tool) => tool.function.name === "strict_lookup")?.function.strict).toBe(true);
       expect(request.tools.find((tool) => tool.function.name !== "strict_lookup"
         && tool.function.name !== "render")?.function.strict).toBe(true);
     } finally {
@@ -220,7 +220,7 @@ describe("protocol conversion matrix", () => {
     }
   });
 
-  it("preserves omitted Responses auto strictness on the extended Chat route", async () => {
+  it("rejects ambiguous Responses auto strictness on the extended Chat route", async () => {
     const harness = await matrixGateway();
     try {
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
@@ -238,13 +238,9 @@ describe("protocol conversion matrix", () => {
           { type: "custom", name: "render", format: { type: "text" } },
         ],
       }));
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(422);
       await response.text();
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
-      const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as {
-        tools: Array<{ function: { name: string; strict?: boolean } }>;
-      };
-      expect(request.tools.find((tool) => tool.function.name === "ambiguous")?.function.strict).toBeUndefined();
+      expect(harness.backend.captured).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -259,7 +255,11 @@ describe("protocol conversion matrix", () => {
         tools: [{
           type: "namespace",
           name: "ns",
-          tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+          tools: [{
+            type: "function",
+            name: "lookup",
+            parameters: { type: "object", properties: {}, additionalProperties: false },
+          }],
         }],
       }));
       const firstBody = await first.json() as {
@@ -280,7 +280,11 @@ describe("protocol conversion matrix", () => {
         tools: [{
           type: "namespace",
           name: "ns",
-          tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+          tools: [{
+            type: "function",
+            name: "lookup",
+            parameters: { type: "object", properties: {}, additionalProperties: false },
+          }],
         }],
       }));
       expect(second.status).toBe(200);
@@ -403,7 +407,7 @@ describe("protocol conversion matrix", () => {
             tools: [{
               type: "function",
               name: "lookup",
-              parameters: { type: "object" },
+              parameters: { type: "object", properties: {}, additionalProperties: false },
             }],
           },
           {

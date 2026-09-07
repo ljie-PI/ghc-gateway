@@ -771,7 +771,7 @@ function decodeToolResultContent(
       let parsed: WireJson | undefined;
       try {
         const bytes = new TextEncoder().encode(trimmed);
-        parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 32 });
+        parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 64 });
       } catch {
         // A non-protocol JSON-looking string remains ordinary tool text.
       }
@@ -852,7 +852,7 @@ function decodeToolResultContent(
         let parsed: WireJson;
         try {
           const bytes = new TextEncoder().encode(trimmed);
-          parsed = parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 32 });
+          parsed = parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 64 });
         } catch {
           return { value, media: [] };
         }
@@ -1033,7 +1033,13 @@ function decodeResponsesTools(value: WireJson | undefined): readonly SemanticToo
       unsupported("REQ-R-TOOL-TYPE");
     }
     const decoded = semanticTool(tool, "parameters", "REQ-R-TOOL");
-    return decoded;
+    if (decoded.strict !== undefined) {
+      return decoded;
+    }
+    if (!isOpenAiStrictSchemaCompatible(decoded.parameters)) {
+      unsupported("REQ-R-TOOL-STRICT-AUTO");
+    }
+    return { ...decoded, strict: true };
   });
 }
 

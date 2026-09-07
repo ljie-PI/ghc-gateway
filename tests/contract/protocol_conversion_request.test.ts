@@ -397,15 +397,11 @@ describe("shared conversion request codecs", () => {
     }), "target", capability(["responses"])).bytes);
     expect(chatToResponses.tools).toMatchObject([{ type: "function", name: "lookup", strict: false }]);
 
-    const responsesToChat = decoded(prepareConvertedRequest("responses", "chat", body({
+    expect(() => prepareConvertedRequest("responses", "chat", body({
       model: "source",
       input: "hi",
       tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
-    }), "target", capability(["chat"])).bytes);
-    expect(responsesToChat).toMatchObject({
-      tools: [{ type: "function", function: { name: "lookup" } }],
-    });
-    expect(JSON.stringify(responsesToChat)).not.toContain("\"strict\"");
+    }), "target", capability(["chat"]))).toThrow();
 
     const strictCompatible = decoded(prepareConvertedRequest("responses", "chat", body({
       model: "source",
@@ -481,7 +477,7 @@ describe("shared conversion request codecs", () => {
         { type: "function_call_output", call_id: "call_1", output: "ok" },
       ],
       max_output_tokens: 24,
-      tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
       tool_choice: { type: "function", name: "lookup" },
       parallel_tool_calls: false,
       reasoning: { effort: "low", summary: "auto", encrypted_content: "opaque" },
@@ -915,6 +911,35 @@ describe("shared conversion request codecs", () => {
         ],
       },
     ]);
+  });
+
+  it("keeps shallow media extraction independent of unrelated deep business data", () => {
+    let business: unknown = "leaf";
+    for (let depth = 0; depth < 40; depth += 1) {
+      business = { next: business };
+    }
+    const converted = decoded(prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: JSON.stringify({
+              business,
+              content: [{
+                type: "image_url",
+                image_url: { url: "data:image/png;base64,QUJD" },
+              }],
+            }),
+          }],
+        },
+      ],
+      max_tokens: 8,
+    }), "target", capability(["chat"])).bytes);
+    expect(JSON.stringify(converted)).toContain("data:image/png;base64,QUJD");
   });
 
   it("coarsens minimal reasoning to a supported Messages effort", () => {

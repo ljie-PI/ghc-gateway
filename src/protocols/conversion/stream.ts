@@ -188,6 +188,11 @@ class ChatEmitter implements StreamEmitter {
   private roleSent = false;
   private readonly toolIndexes = new Map<string, number>();
   private readonly streamedToolArguments = new Map<string, string>();
+  private readonly pendingTools = new Map<string, {
+    readonly callId: string;
+    readonly name: string;
+    argumentsJson: string;
+  }>();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly pendingContent = new Map<string, {
     readonly orderKey: string;
@@ -195,7 +200,6 @@ class ChatEmitter implements StreamEmitter {
     delta: string;
   }>();
   private readonly responseFrontier = new ResponseEmissionFrontier();
-  private responseDeliveryBlocked = false;
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `chatcmpl_${context.createUuid()}`;
@@ -224,7 +228,7 @@ class ChatEmitter implements StreamEmitter {
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     if (this.sourceResponses) {
-      if (this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)) {
+      if (!this.responseFrontier.allowsContent(key, orderKey)) {
         this.queueContent(key, orderKey, "text", delta);
         return;
       }
@@ -241,7 +245,7 @@ class ChatEmitter implements StreamEmitter {
 
   *refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     if (this.sourceResponses) {
-      if (this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)) {
+      if (!this.responseFrontier.allowsContent(key, orderKey)) {
         this.queueContent(key, orderKey, "refusal", delta);
         return;
       }
@@ -258,28 +262,18 @@ class ChatEmitter implements StreamEmitter {
 
   *toolStart(key: string, callId: string, name: string): Iterable<ConvertedStreamEmission> {
     if (this.sourceResponses) {
-      if (this.responseDeliveryBlocked || !this.responseFrontier.allowsItem(key)) {
-        this.responseDeliveryBlocked = true;
+      if (!this.responseFrontier.allowsItem(key)) {
+        this.pendingTools.set(key, { callId, name, argumentsJson: "" });
         return;
       }
     }
-    const index = this.toolIndexes.size;
-    this.toolIndexes.set(key, index);
-    this.streamedToolArguments.set(key, "");
-    yield this.chunk(wireObject([
-      ...(!this.roleSent ? [["role", "assistant"] as const] : []),
-      ["tool_calls", wireArray([wireObject([
-        ["index", wireNumber(index)],
-        ["id", callId],
-        ["type", "function"],
-        ["function", wireObject([["name", name], ["arguments", ""]])],
-      ])])],
-    ]));
-    this.roleSent = true;
+    yield* this.emitToolStart(key, callId, name);
   }
 
   *toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
-    if (this.sourceResponses && this.responseDeliveryBlocked) {
+    const pending = this.pendingTools.get(key);
+    if (pending !== undefined) {
+      pending.argumentsJson += delta;
       return;
     }
     const index = this.toolIndexes.get(key);
@@ -406,10 +400,18 @@ class ChatEmitter implements StreamEmitter {
   }
 
   private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
-    if (this.responseDeliveryBlocked) {
-      return;
-    }
     for (;;) {
+      const readyTool = [...this.pendingTools.entries()].find(([key]) => (
+        this.responseFrontier.allowsItem(key)
+      ));
+      if (readyTool !== undefined) {
+        const [key, tool] = readyTool;
+        this.pendingTools.delete(key);
+        yield* this.emitToolStart(key, tool.callId, tool.name);
+        if (tool.argumentsJson.length > 0) {
+          yield* this.toolArgumentsDelta(key, tool.argumentsJson);
+        }
+      }
       const ready = [...this.pendingContent.entries()].find(([key, pending]) => (
         this.responseFrontier.allowsContent(key, pending.orderKey)
       ));
@@ -432,6 +434,26 @@ class ChatEmitter implements StreamEmitter {
       }
       return;
     }
+  }
+
+  private *emitToolStart(
+    key: string,
+    callId: string,
+    name: string,
+  ): Iterable<ConvertedStreamEmission> {
+    const index = this.toolIndexes.size;
+    this.toolIndexes.set(key, index);
+    this.streamedToolArguments.set(key, "");
+    yield this.chunk(wireObject([
+      ...(!this.roleSent ? [["role", "assistant"] as const] : []),
+      ["tool_calls", wireArray([wireObject([
+        ["index", wireNumber(index)],
+        ["id", callId],
+        ["type", "function"],
+        ["function", wireObject([["name", name], ["arguments", ""]])],
+      ])])],
+    ]));
+    this.roleSent = true;
   }
 
   private chunk(delta: ReturnType<typeof wireObject>, finish?: string): ConvertedStreamEmission {
@@ -460,7 +482,7 @@ class MessagesEmitter implements StreamEmitter {
   private bufferAfterTool = false;
   private firstMessageKey: string | undefined;
   private readonly responseFrontier = new ResponseEmissionFrontier();
-  private responseDeliveryBlocked = false;
+  private readonly emittedResponseTools = new Set<string>();
   private readonly pendingContent = new Map<string, {
     readonly orderKey: string;
     readonly kind: "text" | "refusal";
@@ -519,7 +541,7 @@ class MessagesEmitter implements StreamEmitter {
     this.firstMessageKey ??= messageKey;
     if (
       this.context.source === "responses"
-        ? this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)
+        ? !this.responseFrontier.allowsContent(key, orderKey)
         : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
       if (this.context.source === "responses") {
@@ -536,7 +558,7 @@ class MessagesEmitter implements StreamEmitter {
     this.firstMessageKey ??= messageKey;
     if (
       this.context.source === "responses"
-        ? this.responseDeliveryBlocked || !this.responseFrontier.allowsContent(key, orderKey)
+        ? !this.responseFrontier.allowsContent(key, orderKey)
         : this.bufferAfterTool || messageKey !== this.firstMessageKey
     ) {
       if (this.context.source === "responses") {
@@ -554,9 +576,6 @@ class MessagesEmitter implements StreamEmitter {
       invalid();
     }
     this.bufferAfterTool = true;
-    if (this.context.source === "responses") {
-      this.responseDeliveryBlocked = true;
-    }
     this.tools.set(key, { callId, name, argumentsJson: "", done: false });
   }
 
@@ -648,6 +667,9 @@ class MessagesEmitter implements StreamEmitter {
       if (tool === undefined) {
         invalid();
       }
+      if (item.key !== undefined && this.emittedResponseTools.has(item.key)) {
+        continue;
+      }
       const index = this.nextIndex++;
       yield this.event({
         type: "content_block_start",
@@ -710,10 +732,13 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
-    if (this.responseDeliveryBlocked) {
-      return;
-    }
     for (;;) {
+      const toolKey = `responses:${this.responseFrontier.currentItemIndex()}`;
+      const tool = this.tools.get(toolKey);
+      if (tool?.done === true && !this.emittedResponseTools.has(toolKey)) {
+        yield* this.emitTool(tool);
+        this.emittedResponseTools.add(toolKey);
+      }
       const ready = [...this.pendingContent.entries()].find(([key, pending]) => (
         this.responseFrontier.allowsContent(key, pending.orderKey)
       ));
@@ -734,6 +759,27 @@ class MessagesEmitter implements StreamEmitter {
       }
       return;
     }
+  }
+
+  private *emitTool(tool: {
+    readonly callId: string;
+    readonly name: string;
+    readonly argumentsJson: string;
+  }): Iterable<ConvertedStreamEmission> {
+    const index = this.nextIndex++;
+    yield this.event({
+      type: "content_block_start",
+      index,
+      content_block: { type: "tool_use", id: tool.callId, name: tool.name, input: {} },
+    });
+    if (tool.argumentsJson.length > 0) {
+      yield this.event({
+        type: "content_block_delta",
+        index,
+        delta: { type: "input_json_delta", partial_json: tool.argumentsJson },
+      });
+    }
+    yield this.event({ type: "content_block_stop", index });
   }
 
   private event(value: Record<string, unknown>): ConvertedStreamEmission {
@@ -1083,6 +1129,10 @@ class ResponseEmissionFrontier {
 
   currentItemOrderKey(): string {
     return `responses:${this.item}:message`;
+  }
+
+  currentItemIndex(): number {
+    return this.item;
   }
 }
 

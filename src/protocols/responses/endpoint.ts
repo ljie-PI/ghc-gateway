@@ -18,6 +18,7 @@ import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_a
 import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt, type AttemptUsage, type RequestAttempt } from "../../gateway/request_attempt.js";
 import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
+import { isOpenAiStrictSchemaCompatible } from "../conversion/strict_schema.js";
 import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
   boundedCleanup,
@@ -1134,6 +1135,9 @@ function validateExtendedFunctionTool(tool: WireJsonObject): WireJsonObject {
     || (strict !== undefined && typeof strict !== "boolean")
   ) {
     throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  if (strict === undefined && !isOpenAiStrictSchemaCompatible(parameters)) {
+    throw new GatewayFailureError({ kind: "unsupported_semantics", source: "converter", phase: "convert" });
   }
   return shape;
 }

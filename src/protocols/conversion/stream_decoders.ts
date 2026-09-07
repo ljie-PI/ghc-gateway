@@ -196,7 +196,7 @@ async function* decodeChatStream(
             tool.name += nameDelta;
           }
           const argumentsDelta = stringMember(fn, "arguments");
-          if (argumentsDelta !== undefined) {
+          if (argumentsDelta !== undefined && argumentsDelta.length > 0) {
             budget.reserve(argumentsDelta);
             tool.pendingArguments += argumentsDelta;
             tool.argumentsSeen = true;
