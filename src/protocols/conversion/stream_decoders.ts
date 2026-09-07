@@ -172,7 +172,11 @@ async function* decodeChatStream(
       if ((reasoning !== undefined && reasoning.length > 0) || (thinkingBlocks?.items.length ?? 0) > 0) {
         yield { kind: "semantic_progress" };
       }
-      const content = stringMember(delta, "content");
+      const contentValue = singleMember(delta, "content");
+      if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
+        invalid();
+      }
+      const content = typeof contentValue === "string" ? contentValue : undefined;
       if (content !== undefined && content.length > 0) {
         budget.reserve(content);
         chatText += content;
@@ -183,7 +187,11 @@ async function* decodeChatStream(
           yield event;
         }
       }
-      const refusal = stringMember(delta, "refusal");
+      const refusalValue = singleMember(delta, "refusal");
+      if (refusalValue !== undefined && refusalValue !== null && typeof refusalValue !== "string") {
+        invalid();
+      }
+      const refusal = typeof refusalValue === "string" ? refusalValue : undefined;
       if (refusal !== undefined && refusal.length > 0) {
         budget.reserve(refusal);
         chatRefusal += refusal;
@@ -194,7 +202,11 @@ async function* decodeChatStream(
           yield event;
         }
       }
-      const calls = arrayMember(delta, "tool_calls");
+      const callsValue = singleMember(delta, "tool_calls");
+      if (callsValue !== undefined && callsValue !== null && !isWireJsonArray(callsValue)) {
+        invalid();
+      }
+      const calls = isWireJsonArray(callsValue) ? callsValue : undefined;
       if (calls !== undefined) {
         for (let position = 0; position < calls.items.length; position += 1) {
           const value = calls.items[position];
@@ -401,6 +413,9 @@ async function* decodeChatStream(
     const finish = singleMember(choice, "finish_reason");
     if (finish !== undefined && finish !== null) {
       pendingFinish = chatFinish(finish);
+      if (pendingFinish === "tool_calls" && tools.size === 0) {
+        invalid();
+      }
       if (pendingFinish === "length" || pendingFinish === "content_filter") {
         yield* startIdentifiedTools();
       } else {

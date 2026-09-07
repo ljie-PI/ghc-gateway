@@ -293,6 +293,20 @@ describe("shared conversion response codecs", () => {
     expect(text).not.toContain("helhello");
   });
 
+  it.each([
+    "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
+    "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":{\"invalid\":true}},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+  ])("rejects malformed Chat streams instead of returning empty success", async (source) => {
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("chat", "responses"),
+      )) {
+        void _emission;
+      }
+    }).rejects.toThrow();
+  });
+
   it("keeps Messages tool blocks in source order when completion arrives out of order", async () => {
     const response = {
       id: "resp_tools",
