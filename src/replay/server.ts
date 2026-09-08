@@ -7,6 +7,7 @@ export interface ReplayServerOptions {
   readonly port?: number; // default 31488
   readonly corpusDir: string;
   readonly exchanges: readonly ReplayExchangeRecord[];
+  readonly faultMode?: "disconnect_early" | "stall_first_byte" | undefined;
 }
 
 export interface ReplayReceipt {
@@ -23,11 +24,13 @@ export class MockCopilotReplayServer {
   private readonly exchanges: readonly ReplayExchangeRecord[];
   private server: Server | undefined;
   private readonly receipts: ReplayReceipt[] = [];
+  public faultMode: "disconnect_early" | "stall_first_byte" | undefined;
 
   constructor(options: ReplayServerOptions) {
     this.port = options.port ?? 31488;
     this.corpusDir = options.corpusDir;
     this.exchanges = options.exchanges;
+    this.faultMode = options.faultMode;
   }
 
   get recordedReceipts(): readonly ReplayReceipt[] {
@@ -215,6 +218,21 @@ export class MockCopilotReplayServer {
     } else {
       headers["content-type"] = headers["content-type"] ?? "application/json; charset=utf-8";
       headers["content-length"] = String(bodyBytes.byteLength);
+    }
+
+    // Handle fault injection
+    if (this.faultMode === "stall_first_byte") {
+      // Don't send headers or body, let client/gateway time out
+      return;
+    }
+
+    if (this.faultMode === "disconnect_early") {
+      res.writeHead(match.response.status, headers);
+      if (match.response.stream) {
+        res.write(bodyBytes.subarray(0, Math.min(20, bodyBytes.byteLength)));
+      }
+      res.destroy();
+      return;
     }
 
     res.writeHead(match.response.status, headers);
