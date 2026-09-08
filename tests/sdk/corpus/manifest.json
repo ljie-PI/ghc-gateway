@@ -364,5 +364,194 @@
     "downstreamExpectation": {
       "expectedOutput": "Vergil"
     }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.chat.tool-call.nonstream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T06:50:00Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": "What is the weather in Tokyo?" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "chat/tool-call.nonstream.json",
+      "bodySha256": "1de987d9bc87bfe9476aa0270f5bef9de79a1420ba744e1326f7061bf66c8a3d",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedToolCall": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Tokyo\"}"
+      }
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.chat.tool-result.nonstream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T06:50:01Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "tool" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "chat/tool-result.nonstream.json",
+      "bodySha256": "121bac089b0b9ec41d2c707bef9e6fa551908f082b246c177433c70063bd9854",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "sunny"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.responses.tool-call.nonstream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T06:50:02Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": "What is the weather in Tokyo?"
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "responses/tool-call.nonstream.json",
+      "bodySha256": "b1f86dda3834dcf6475f0f6f2772d02c5156d4b0720a8993565720aad48f4bc5",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedToolCall": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Tokyo\"}"
+      }
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.responses.tool-result.nonstream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T06:50:03Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": [{ "type": "function_call_output" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "responses/tool-result.nonstream.json",
+      "bodySha256": "f96a20ede85dc9f24a0231e12bdc1c480171974f779002c6cc38b7b3f29960b7",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "sunny"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.tool-call.nonstream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T06:50:04Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": "What is the weather in Tokyo?" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "messages/tool-call.nonstream.json",
+      "bodySha256": "2ea6dd273c2cd18b210595e9797d9a7af90040c9268b930fd18ba22c522061e4",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedToolCall": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Tokyo\"}"
+      }
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.tool-result.nonstream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T06:50:05Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": [{ "type": "tool_result" }] }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "messages/tool-result.nonstream.json",
+      "bodySha256": "d1d26bee64e16000d5c03b2f78b53be2b80cc5a954bad09731d3882fb12bed93",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "sunny"
+    }
   }
 ]

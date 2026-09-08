@@ -148,9 +148,19 @@ export class MockCopilotReplayServer {
       if (ex.request.path !== pathname) return false;
       if (ex.logicalModel !== requestedModel && ex.upstreamModel !== requestedModel) return false;
       if (ex.response.stream !== isStream) return false;
+      const rawText = rawBody.toString("utf8");
       const requiresVision = ex.caseId.includes(".image.");
-      const hasVision = rawBody.toString("utf8").includes("image");
+      const hasVision = rawText.includes("image");
       if (requiresVision !== hasVision) return false;
+
+      const requiresToolResult = ex.caseId.includes(".tool-result.");
+      const hasToolResult = rawText.includes("function_call_output") || rawText.includes("tool_result") || rawText.includes("\"role\":\"tool\"");
+      if (requiresToolResult !== hasToolResult) return false;
+
+      const requiresToolCall = ex.caseId.includes(".tool-call.");
+      const hasToolCall = !hasToolResult && (rawText.includes("tools") || rawText.includes("get_weather"));
+      if (requiresToolCall !== hasToolCall) return false;
+
       return true;
     });
 
