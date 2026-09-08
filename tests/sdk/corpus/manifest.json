@@ -646,6 +646,36 @@
   },
   {
     "version": 1,
+    "caseId": "replay.responses.parallel-tools.nonstream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T07:35:00Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": "Get weather for Tokyo and Paris simultaneously using get_weather twice."
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "responses/parallel-tools.nonstream.json",
+      "bodySha256": "dbf928adb053e4e3b0fa13574737cca7cba77efe11c98a5ea2c0fd41d8349631",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "toolCallsCount": 2
+    }
+  },
+  {
+    "version": 1,
     "caseId": "replay.messages.parallel-tools.nonstream",
     "family": "replay",
     "sourceProtocol": "messages",
