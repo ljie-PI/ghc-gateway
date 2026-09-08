@@ -62,6 +62,67 @@
   },
   {
     "version": 1,
+    "caseId": "replay.chat.image.nonstream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T06:25:00Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": [{ "type": "image_url" }] }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "chat/image.nonstream.json",
+      "bodySha256": "d7944bb18c9938c21e83f0eb6891340919dfa7fafe7e759b76b77431d2eb9e4c",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "Vergil"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.chat.image.stream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T06:25:01Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": [{ "type": "image_url" }] }],
+        "stream": true
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "text/event-stream; charset=utf-8"
+      },
+      "bodyFile": "chat/image.stream.txt",
+      "bodySha256": "6e66d23f4df1b6c0898c574f2927678b9b6db1a8f051d454aac996d648bd61a9",
+      "stream": true
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "Vergil"
+    }
+  },
+  {
+    "version": 1,
     "caseId": "replay.responses.plain-text.nonstream",
     "family": "replay",
     "sourceProtocol": "responses",
@@ -123,6 +184,67 @@
   },
   {
     "version": 1,
+    "caseId": "replay.responses.image.nonstream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T06:25:02Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": [{ "type": "input_image" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "responses/image.nonstream.json",
+      "bodySha256": "ecbb601893eb6c97212b6a52fe67b86c811d71d58006662112bb0c6a869ad30e",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "Vergil"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.responses.image.stream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T06:25:03Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": [{ "type": "input_image" }],
+        "stream": true
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "text/event-stream; charset=utf-8"
+      },
+      "bodyFile": "responses/image.stream.txt",
+      "bodySha256": "fefa385f3690041e6ff6462a9b50b8575ed3db60eb8b5ea9379d442da1131811",
+      "stream": true
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "Vergil"
+    }
+  },
+  {
+    "version": 1,
     "caseId": "replay.messages.plain-text.nonstream",
     "family": "replay",
     "sourceProtocol": "messages",
@@ -180,6 +302,67 @@
     },
     "downstreamExpectation": {
       "expectedOutput": "pong"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.image.nonstream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T06:25:04Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": [{ "type": "image" }] }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "messages/image.nonstream.json",
+      "bodySha256": "6c82364096bf7182c00f363a7fc07c091cc4e0990254d896a1ac46ecc608210c",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "Vergil"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.image.stream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T06:25:05Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": [{ "type": "image" }] }],
+        "stream": true
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "text/event-stream; charset=utf-8"
+      },
+      "bodyFile": "messages/image.stream.txt",
+      "bodySha256": "906e081c2fe6344c6bab6711ffd0100f8283129d65945420daa8d2cbeaae69e6",
+      "stream": true
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "Vergil"
     }
   }
 ]
