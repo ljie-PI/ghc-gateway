@@ -148,6 +148,9 @@ export class MockCopilotReplayServer {
       if (ex.request.path !== pathname) return false;
       if (ex.logicalModel !== requestedModel && ex.upstreamModel !== requestedModel) return false;
       if (ex.response.stream !== isStream) return false;
+      const requiresVision = ex.caseId.includes(".image.");
+      const hasVision = rawBody.toString("utf8").includes("image");
+      if (requiresVision !== hasVision) return false;
       return true;
     });
 
