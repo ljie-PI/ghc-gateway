@@ -120,5 +120,66 @@
     "downstreamExpectation": {
       "expectedOutput": "pong"
     }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.plain-text.nonstream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T05:35:00Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": "sdk-messages-nonstream" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "messages/plain-text.nonstream.json",
+      "bodySha256": "fd9a74e72c50545646bcd4bd75bca25bb68b0a4485675ad216507edecd5a239d",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "pong"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.plain-text.stream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T05:35:01Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": "sdk-messages-stream" }],
+        "stream": true
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "text/event-stream; charset=utf-8"
+      },
+      "bodyFile": "messages/plain-text.stream.txt",
+      "bodySha256": "c4ada559077e14e413057c7a467abe013a904268a36fefc344c72f1651cc0254",
+      "stream": true
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "pong"
+    }
   }
 ]
