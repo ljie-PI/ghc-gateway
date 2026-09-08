@@ -2,7 +2,6 @@
   "extends": "./tsconfig.test.json",
   "include": [
     "tests/sdk/**/*.ts",
-    "tests/live/sdk/**/*.ts",
     "vitest.sdk.config.ts"
   ],
   "exclude": [
