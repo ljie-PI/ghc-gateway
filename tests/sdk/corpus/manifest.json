@@ -1,0 +1,63 @@
+[
+  {
+    "version": 1,
+    "caseId": "replay.chat.plain-text.nonstream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T04:48:33Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": "sdk-chat-nonstream" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "chat/plain-text.nonstream.json",
+      "bodySha256": "3be419673110cbeb2c277904bf01202c5d73361e600cab3104a1daaf1ee59ec5",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "pong"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.chat.plain-text.stream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T04:48:34Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": "sdk-chat-stream" }],
+        "stream": true
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "text/event-stream; charset=utf-8"
+      },
+      "bodyFile": "chat/plain-text.stream.txt",
+      "bodySha256": "cfa291480bc575b50793f4d7bfdc96c07282c48ae9b3b2ad42f4caa86a8c4fb8",
+      "stream": true
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "pong"
+    }
+  }
+]
