@@ -155,12 +155,17 @@ export class MockCopilotReplayServer {
       const isPlainImage = ex.caseId.includes(".image.");
       const isToolResult = ex.caseId.includes(".tool-result.");
       const isToolCall = ex.caseId.includes(".tool-call.");
+      const isReasoning = ex.caseId.includes(".reasoning-effort.");
 
       const hasVision = rawText.includes("image");
       const hasToolResult = rawText.includes("function_call_output") || rawText.includes("tool_result") || rawText.includes("\"role\":\"tool\"");
       const hasTools = rawText.includes("tools") || rawText.includes("get_weather");
       const hasParallel = rawText.includes("Paris") || rawText.includes("twice") || rawText.includes("simultaneously");
+      const hasReasoning = rawText.includes("quantum") || rawText.includes("reasoning_effort") || rawText.includes("output_config");
 
+      if (isReasoning) {
+        return hasReasoning;
+      }
       if (isMixed) {
         return hasVision && hasTools && !hasToolResult;
       }
@@ -178,7 +183,7 @@ export class MockCopilotReplayServer {
       }
 
       // Plain text case
-      return !hasVision && !hasTools && !hasToolResult;
+      return !hasVision && !hasTools && !hasToolResult && !hasReasoning;
     });
 
     if (!match) {
