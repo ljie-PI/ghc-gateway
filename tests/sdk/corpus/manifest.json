@@ -59,5 +59,66 @@
     "downstreamExpectation": {
       "expectedOutput": "pong"
     }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.responses.plain-text.nonstream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T05:22:00Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": "sdk-responses-nonstream"
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "responses/plain-text.nonstream.json",
+      "bodySha256": "53839aca5585eac4fb5ee27a0c8f7a552ac6626207209810a043fef3156529a2",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "pong"
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.responses.plain-text.stream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T05:22:01Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": "sdk-responses-stream",
+        "stream": true
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "text/event-stream; charset=utf-8"
+      },
+      "bodyFile": "responses/plain-text.stream.txt",
+      "bodySha256": "6818b5a590e1817fa3b2c8036e705e20ea9b6f8e5195cb4d93f4aa26576cbb45",
+      "stream": true
+    },
+    "downstreamExpectation": {
+      "expectedOutput": "pong"
+    }
   }
 ]
