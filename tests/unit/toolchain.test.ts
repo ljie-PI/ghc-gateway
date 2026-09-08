@@ -58,7 +58,6 @@ describe("package entrypoints and toolchain", () => {
       "lint",
       "test",
       "test:sdk",
-      "test:live:sdk",
       "e2e",
       "fixtures:verify",
       "fixtures:generate",
@@ -77,7 +76,7 @@ describe("package entrypoints and toolchain", () => {
     expect(pkg.scripts.prepack).toBe("npm run build");
     expect(pkg.scripts.test).not.toContain("sdk");
     expect(pkg.scripts.e2e).not.toContain("sdk");
-    for (const script of ["test:sdk", "test:live:sdk", "typecheck:sdk"]) {
+    for (const script of ["test:sdk", "typecheck:sdk"]) {
       const command = pkg.scripts[script];
       expect(command, script).toBeTypeOf("string");
       if (command === undefined) {
@@ -114,11 +113,6 @@ describe("package entrypoints and toolchain", () => {
     await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
       windowsHide: true,
       env: { ...process.env, GHC_GATEWAY_SDK_TESTS: "" },
-    })).rejects.toMatchObject({ code: 2 });
-
-    await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_LIVE_TESTS"], {
-      windowsHide: true,
-      env: { ...process.env, GHC_GATEWAY_LIVE_TESTS: "" },
     })).rejects.toMatchObject({ code: 2 });
 
     await expect(execFileAsync(process.execPath, [...command, "GHC_GATEWAY_SDK_TESTS"], {
@@ -164,7 +158,7 @@ describe("package entrypoints and toolchain", () => {
       .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()).toEqual(["tooling"]);
     expect((await readdir("tests", { withFileTypes: true }))
       .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()).toEqual([
-      "contract", "e2e", "fixtures", "integration", "live", "performance", "sdk", "unit",
+      "contract", "e2e", "fixtures", "integration", "performance", "sdk", "unit",
     ]);
     for (const current of [
       "scripts/tooling/bootstrap.mjs",

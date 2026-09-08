@@ -1,17 +1,16 @@
 import { defineConfig } from "vitest/config";
 
-const live = process.env.GHC_GATEWAY_LIVE_TESTS === "1";
 const offline = process.env.GHC_GATEWAY_SDK_TESTS === "1";
 
-if (live && offline) {
-  throw new Error("set exactly one of GHC_GATEWAY_LIVE_TESTS=1 or GHC_GATEWAY_SDK_TESTS=1");
+if (!offline) {
+  throw new Error("GHC_GATEWAY_SDK_TESTS=1 is required for official SDK tests");
 }
 
 export default defineConfig({
   test: {
-    name: live ? "live-sdk" : "offline-sdk",
-    include: [live ? "tests/live/sdk/**/*.sdk.test.ts" : "tests/sdk/**/*.sdk.test.ts"],
-    exclude: ["node_modules/**", live ? "tests/sdk/**" : "tests/live/**"],
+    name: "offline-sdk",
+    include: ["tests/sdk/**/*.sdk.test.ts"],
+    exclude: ["node_modules/**"],
     globals: true,
     fileParallelism: false,
     testTimeout: 120_000,

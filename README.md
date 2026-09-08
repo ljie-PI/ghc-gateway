@@ -307,48 +307,13 @@ npm run bench -- full --repeat 3
 npm run pack
 ```
 
-Automated tests are offline and use scripted GitHub/Copilot remotes. Official-client suites are manual release evidence and require explicit opt-in:
+Automated tests are offline and use scripted GitHub/Copilot remotes or recorded loopback HTTP replay. Official-client suites are manual release evidence and require explicit opt-in:
 
 ```bash
 GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 ```
 
-The live suite can contact real GitHub Copilot and must not be run as part of normal development or CI. Build first, then inspect the exact managed process and account without changing the default account:
-
-```bash
-node dist/src/cli/main.js --json status
-node dist/src/cli/main.js --json accounts list
-```
-
-Set `GHC_GATEWAY_LIVE_ACCOUNT_ID` to the current default account and configure every matrix route explicitly. The suite refuses a different active account rather than switching the default. The route prefixes are:
-
-| Downstream → upstream | Prefix |
-| --- | --- |
-| Chat → Chat | `GHC_GATEWAY_LIVE_C_TO_C` |
-| Chat → Messages | `GHC_GATEWAY_LIVE_C_TO_M` |
-| Chat → Responses | `GHC_GATEWAY_LIVE_C_TO_R` |
-| Messages → Chat | `GHC_GATEWAY_LIVE_M_TO_C` |
-| Messages → Messages | `GHC_GATEWAY_LIVE_M_TO_M` |
-| Messages → Responses | `GHC_GATEWAY_LIVE_M_TO_R` |
-| Responses → Chat | `GHC_GATEWAY_LIVE_R_TO_C` |
-| Responses → Messages | `GHC_GATEWAY_LIVE_R_TO_M` |
-| Responses → Responses | `GHC_GATEWAY_LIVE_R_TO_R` |
-
-For each prefix, set exactly one selection:
-
-- `<PREFIX>_MODEL=<model-id>` requires that route to complete successfully.
-- `<PREFIX>_UNSUPPORTED_MODEL=<model-id>` plus `<PREFIX>_UNSUPPORTED_STATUS=403|404` performs one explicit entitlement check for that matrix cell and records the rejection.
-- `<PREFIX>_UNAVAILABLE=catalog_not_declared` records a gap only when the current capability catalog contains no enabled model that would select that route.
-
-`GHC_GATEWAY_LIVE_BASE_URL` defaults to `http://127.0.0.1:31400`. Set `GHC_GATEWAY_LIVE_DATA_DIR` when the managed daemon uses a non-default data directory. The suite verifies process identity and the selected account through the freshly built CLI, obtains one one-use Admin bootstrap entirely in memory to read the current capability declarations, and requires bounded successful logout without printing its token, cookie, or CSRF value. It never changes the default account, disables SDK retries, runs sequentially, uses 30-second request and Admin-operation timeouts with 64-token output budgets, and permits at most 12 inference calls plus two SDK model-list requests. Each successful inference must return the expected `x-ghcg-upstream-protocol` evidence header. The suite emits content-free JSON route statuses and an exact call ledger.
-
-Example invocation after all route variables are set:
-
-```bash
-GHC_GATEWAY_LIVE_TESTS=1 npm run test:live:sdk -- --reporter=verbose
-```
-
-Unavailable or rejected combinations are evidence gaps, not passing routes. Record the emitted route statuses, HTTP status-only rejection evidence, call ledger, and restored gateway state in the release pull request without prompts, responses, credentials, or upstream error bodies.
+The replay suite exercises the production gateway against a local mock Copilot HTTP server on `127.0.0.1:31488` using real recorded and verified upstream exchanges. Official client SDK tests run strictly offline without outbound network access.
 
 ## License
 
