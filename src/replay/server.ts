@@ -149,19 +149,36 @@ export class MockCopilotReplayServer {
       if (ex.logicalModel !== requestedModel && ex.upstreamModel !== requestedModel) return false;
       if (ex.response.stream !== isStream) return false;
       const rawText = rawBody.toString("utf8");
-      const requiresVision = ex.caseId.includes(".image.");
+
+      const isMixed = ex.caseId.includes(".mixed-image-tool.");
+      const isParallel = ex.caseId.includes(".parallel-tools.");
+      const isPlainImage = ex.caseId.includes(".image.");
+      const isToolResult = ex.caseId.includes(".tool-result.");
+      const isToolCall = ex.caseId.includes(".tool-call.");
+
       const hasVision = rawText.includes("image");
-      if (requiresVision !== hasVision) return false;
-
-      const requiresToolResult = ex.caseId.includes(".tool-result.");
       const hasToolResult = rawText.includes("function_call_output") || rawText.includes("tool_result") || rawText.includes("\"role\":\"tool\"");
-      if (requiresToolResult !== hasToolResult) return false;
+      const hasTools = rawText.includes("tools") || rawText.includes("get_weather");
+      const hasParallel = rawText.includes("Paris") || rawText.includes("twice") || rawText.includes("simultaneously");
 
-      const requiresToolCall = ex.caseId.includes(".tool-call.");
-      const hasToolCall = !hasToolResult && (rawText.includes("tools") || rawText.includes("get_weather"));
-      if (requiresToolCall !== hasToolCall) return false;
+      if (isMixed) {
+        return hasVision && hasTools && !hasToolResult;
+      }
+      if (isParallel) {
+        return hasParallel && hasTools && !hasToolResult;
+      }
+      if (isPlainImage) {
+        return hasVision && !hasTools;
+      }
+      if (isToolResult) {
+        return hasToolResult;
+      }
+      if (isToolCall) {
+        return hasTools && !hasToolResult && !hasVision && !hasParallel;
+      }
 
-      return true;
+      // Plain text case
+      return !hasVision && !hasTools && !hasToolResult;
     });
 
     if (!match) {

@@ -553,5 +553,155 @@
     "downstreamExpectation": {
       "expectedOutput": "sunny"
     }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.chat.parallel-tools.nonstream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T07:15:00Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": "Get weather for Tokyo and Paris simultaneously using get_weather twice." }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "chat/parallel-tools.nonstream.json",
+      "bodySha256": "10d154a5b8a0d88f52135bb9ade14ee052be270ab4b979a61d35eb303008546a",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "toolCallsCount": 2
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.chat.mixed-image-tool.nonstream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T07:15:01Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": [{ "type": "image_url" }] }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "chat/mixed-image-tool.nonstream.json",
+      "bodySha256": "ac71d87e9e3891205b85a87437d9111473ae07728168b6c0c37bab24724fc8df",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "toolCallsCount": 1
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.responses.mixed-image-tool.nonstream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T07:15:02Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": [{ "type": "input_image" }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "responses/mixed-image-tool.nonstream.json",
+      "bodySha256": "115c98a48a4242ee1bf94f4bcbb6b798f87d7af0df540e9250a39b0362ad216a",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "toolCallsCount": 1
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.parallel-tools.nonstream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T07:15:03Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": "Get weather for Tokyo and Paris simultaneously using get_weather twice." }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "messages/parallel-tools.nonstream.json",
+      "bodySha256": "34eb1c2650074fe16bfd4d844b8891d941ca8061ed75e9912b3c8de3d76de9f1",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "toolCallsCount": 2
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.mixed-image-tool.nonstream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T07:15:04Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": [{ "type": "image" }] }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "messages/mixed-image-tool.nonstream.json",
+      "bodySha256": "c4eddbd4243d141f482f38930ac4dd935022329f8a571e7dcde42e0f34970ce0",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "toolCallsCount": 1
+    }
   }
 ]
