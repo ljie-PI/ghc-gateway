@@ -1,0 +1,22 @@
+{
+  "id": "msg_01X9Z8Y7W6V5U4T3S2R1Q0P9_REASON",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-4-20250514",
+  "content": [
+    {
+      "type": "thinking",
+      "thinking": "Quantum particles share state."
+    },
+    {
+      "type": "text",
+      "text": "Entangled particles instantly mirror each other."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 15,
+    "output_tokens": 20
+  }
+}

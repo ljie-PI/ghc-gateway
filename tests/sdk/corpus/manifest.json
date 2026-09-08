@@ -733,5 +733,95 @@
     "downstreamExpectation": {
       "toolCallsCount": 1
     }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.chat.reasoning-effort.nonstream",
+    "family": "replay",
+    "sourceProtocol": "chat",
+    "targetProtocol": "chat",
+    "logicalModel": "gemini-3.5-flash",
+    "upstreamModel": "gemini-3.5-flash",
+    "capturedAt": "2026-09-08T07:45:00Z",
+    "request": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "bodyJson": {
+        "model": "gemini-3.5-flash",
+        "messages": [{ "role": "user", "content": "Explain quantum entanglement in 20 words." }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "chat/reasoning-effort.nonstream.json",
+      "bodySha256": "c47c088c9ea0aeb95811416770b0ce55b2b7075c66e68a50f7a72adde615228c",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "hasUsage": true
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.responses.reasoning-effort.nonstream",
+    "family": "replay",
+    "sourceProtocol": "responses",
+    "targetProtocol": "responses",
+    "logicalModel": "gpt-5.5",
+    "upstreamModel": "gpt-5.5",
+    "capturedAt": "2026-09-08T07:45:01Z",
+    "request": {
+      "method": "POST",
+      "path": "/responses",
+      "bodyJson": {
+        "model": "gpt-5.5",
+        "input": "Explain quantum entanglement in 20 words."
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "responses/reasoning-effort.nonstream.json",
+      "bodySha256": "c6a42bfe6038d3a5d57535429b3938351508dda13c08101e87c40dddecc7ebc1",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "hasUsage": true
+    }
+  },
+  {
+    "version": 1,
+    "caseId": "replay.messages.reasoning-effort.nonstream",
+    "family": "replay",
+    "sourceProtocol": "messages",
+    "targetProtocol": "messages",
+    "logicalModel": "claude-sonnet-4",
+    "upstreamModel": "claude-sonnet-4",
+    "capturedAt": "2026-09-08T07:45:02Z",
+    "request": {
+      "method": "POST",
+      "path": "/v1/messages",
+      "bodyJson": {
+        "model": "claude-sonnet-4",
+        "messages": [{ "role": "user", "content": "Explain quantum entanglement in 20 words." }]
+      }
+    },
+    "response": {
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "bodyFile": "messages/reasoning-effort.nonstream.json",
+      "bodySha256": "98b4b37be18fb7f8fd2d9111512eec0f573acb0b8b8e73a3f72e918600ca7387",
+      "stream": false
+    },
+    "downstreamExpectation": {
+      "hasUsage": true
+    }
   }
 ]
