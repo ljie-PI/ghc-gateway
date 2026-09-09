@@ -548,23 +548,24 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    flex: 0 0 36px;
-    width: 36px;
-    height: 36px;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
     padding: 0;
   }
 
   .copy-feedback {
     margin: 0;
-    font-size: 12px;
+    font-size: 14px;
   }
 
   .account-choice {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 152px;
-    height: 36px;
+    width: 180px;
+    max-width: 100%;
+    height: 44px;
     padding: 6px 13px;
     white-space: nowrap;
   }

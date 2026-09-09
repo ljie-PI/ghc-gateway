@@ -491,7 +491,7 @@
                             placeholder="Automatic policy"
                           />
                         </label>
-                        <label for={`chat-field-${index}`}>
+                        <label class="wide-control" for={`chat-field-${index}`}>
                           Chat output token field
                           <select id={`chat-field-${index}`} bind:value={editor.chatOutputTokenField}>
                             <option value="">Use upstream/built-in/unknown</option>
@@ -536,15 +536,19 @@
 
   .configured-model-form input,
   .configured-model-form button {
-    min-height: 40px;
+    min-height: 44px;
     padding: 8px 11px;
     line-height: 1.5;
+  }
+
+  .wide-control {
+    grid-column: 1 / -1;
   }
 
   .catalog-help {
     margin-bottom: 16px;
     color: var(--muted);
-    font-size: 12px;
+    font-size: 14px;
   }
 
   .catalog-help summary {
