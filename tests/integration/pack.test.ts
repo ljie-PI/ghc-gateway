@@ -175,6 +175,7 @@ describe("package evidence", () => {
       "@hono/node-server@2.1.1",
       "@sinclair/typebox@0.34.52",
       "hono@4.13.4",
+      "smol-toml@1.8.0",
       "undici@8.10.0",
     ]);
   });

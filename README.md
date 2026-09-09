@@ -105,7 +105,15 @@ Admin security defaults:
 - sessions invalidated when the gateway restarts
 - bounded, replayable SSE monitoring with no WebSocket or remote Admin access
 
-The five views are Overview, Accounts, Models, Configuration, and Events.
+The six views are Overview, Accounts, Models, Agents, Configuration, and Events.
+The Agents view can reversibly point this machine's global Claude Code and Codex configuration at the gateway.
+Each agent edits a Model mapping of display names to exact Copilot model IDs; the first row is the client's startup model.
+Claude Code maps its Sonnet, Opus, and Haiku roles (with an optional subagent mapping), and Codex gets a generated multi-model catalog, so Codex's own model menu can switch between the mapped models.
+**Apply changes** writes the gateway endpoint and model fields only; unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude login credentials are left untouched.
+Before the first apply, the gateway privately stores the original configuration bytes and access metadata under the Gateway process user's home directory; later applies keep that first baseline.
+**Restore** writes the original bytes back (or removes files the gateway created) only while the live files still match what the gateway last wrote; outside edits are reported as conflicts and are never overwritten.
+Apply validates mappings against the current Copilot model catalog, so a signed-in account is required; inspection and restore work without one.
+Status means configuration installed, not a tested client connection. Restart the client after applying or restoring.
 Overview shows cumulative usage for the last 24 hours, 7 days, and 28 days, using the gateway's clock
 and retained hourly Usage Buckets. These overlapping windows include only available data; shortening
 retention or clearing data cannot be undone by refreshing. Cache tokens are read + write tokens already included in input.

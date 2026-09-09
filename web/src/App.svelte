@@ -7,6 +7,7 @@
     AdminStatus,
     StreamState,
   } from "./types.js";
+  import Agents from "./views/Agents.svelte";
   import Accounts from "./views/Accounts.svelte";
   import Configuration from "./views/Configuration.svelte";
   import Events from "./views/Events.svelte";
@@ -14,7 +15,7 @@
   import Overview from "./views/Overview.svelte";
   import TerminalMark from "./TerminalMark.svelte";
 
-  const views = ["Overview", "Accounts", "Models", "Configuration", "Events"] as const;
+  const views = ["Overview", "Accounts", "Models", "Agents", "Configuration", "Events"] as const;
   type View = typeof views[number];
 
   let view: View = $state("Overview");
@@ -235,6 +236,8 @@
             <Accounts {client} {pageNumber} />
           {:else if view === "Models"}
             <Models {client} {pageNumber} />
+          {:else if view === "Agents"}
+            <Agents {client} {pageNumber} />
           {:else if view === "Configuration"}
             <Configuration {client} {pageNumber} />
           {:else}

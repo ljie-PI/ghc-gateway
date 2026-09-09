@@ -10,6 +10,7 @@ import type {
   AdminRuntimeConfig,
   AdminStatus,
 } from "../../../web/src/types.js";
+import type { AgentStatus, AgentsView } from "../../../src/agents/types.js";
 
 const NOW = "2026-09-03T12:00:00.000Z";
 export const ADMIN_FIXTURE_NOW_MS = Date.parse(NOW);
@@ -52,6 +53,9 @@ export interface AdminFixture {
     deviceNowMs: number;
     accountsDelayMs: number;
     modelDelayByAccount: Record<string, number>;
+    agents: Record<"claude" | "codex", AgentStatus>;
+    agentsCatalogRevision: string | null;
+    agentsApplyConflict: boolean;
     cancelCompletesDeviceFlow: boolean;
     streamBodies: string[];
     streamDelaysMs: number[];
@@ -136,6 +140,9 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       deviceNowMs: ADMIN_FIXTURE_NOW_MS,
       accountsDelayMs: 0,
       modelDelayByAccount: {},
+      agents: { claude: agentStatus("claude", 1), codex: agentStatus("codex", 7) },
+      agentsCatalogRevision: "c".repeat(64),
+      agentsApplyConflict: false,
       cancelCompletesDeviceFlow: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
       streamDelaysMs: [],
@@ -179,6 +186,27 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
     });
   });
   return fixture;
+}
+
+function nextAgentRevision(revision: string): string {
+  const next = ((Number.parseInt(revision[0] ?? "a", 16) + 1) % 16).toString(16);
+  return next.repeat(64);
+}
+
+function agentStatus(agent: "claude" | "codex", seed: number): AgentStatus {
+  return {
+    id: agent,
+    state: "not_managed",
+    revision: seed.toString(16).repeat(64),
+    paths: agent === "claude"
+      ? ["C:/Users/octo/.claude/settings.json"]
+      : ["C:/Users/octo/.codex/ghcg-models.json", "C:/Users/octo/.codex/config.toml"],
+    endpoint: agent === "claude" ? "http://127.0.0.1:31400" : "http://127.0.0.1:31400/v1",
+    backupAvailable: false,
+    lastAppliedAt: null,
+    mappings: [],
+    canRestore: false,
+  };
 }
 
 function modelItem(input: {
@@ -279,6 +307,47 @@ async function handle(
         latencyMaxMs: 120,
       },
     });
+  }
+  if (path === "/agents") {
+    const view: AgentsView = {
+      items: [structuredClone(fixture.state.agents.claude), structuredClone(fixture.state.agents.codex)],
+      catalogRevision: fixture.state.agentsCatalogRevision,
+      modelsAvailable: fixture.state.agentsCatalogRevision !== null,
+    };
+    return json(route, 200, view);
+  }
+  if (path === "/agents/apply" && request.method() === "POST") {
+    const body = request.postDataJSON() as { agent: "claude" | "codex"; expectedRevision: string; mappings: { displayName: string; modelId: string }[] };
+    if (fixture.state.agentsApplyConflict) return failure(route, 409, "agent_conflict");
+    const current = fixture.state.agents[body.agent];
+    if (body.expectedRevision !== current.revision) return failure(route, 409, "revision_conflict");
+    const next: AgentStatus = {
+      ...current,
+      state: "installed",
+      revision: nextAgentRevision(current.revision),
+      backupAvailable: true,
+      lastAppliedAt: NOW,
+      mappings: body.mappings,
+      canRestore: true,
+    };
+    fixture.state.agents[body.agent] = next;
+    return json(route, 200, next);
+  }
+  if (path === "/agents/restore" && request.method() === "POST") {
+    const body = request.postDataJSON() as { agent: "claude" | "codex"; expectedRevision: string };
+    const current = fixture.state.agents[body.agent];
+    if (body.expectedRevision !== current.revision) return failure(route, 409, "revision_conflict");
+    const next: AgentStatus = {
+      ...current,
+      state: "not_managed",
+      revision: nextAgentRevision(current.revision),
+      backupAvailable: false,
+      lastAppliedAt: null,
+      mappings: [],
+      canRestore: false,
+    };
+    fixture.state.agents[body.agent] = next;
+    return json(route, 200, next);
   }
   if (path === "/accounts") {
     const accounts = structuredClone(fixture.state.accounts);

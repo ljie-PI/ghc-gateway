@@ -154,6 +154,8 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
         return capabilitySnapshot(bound);
       },
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
+      isCurrent: (snapshot) => snapshot.catalogGeneration === 7
+        && snapshot.credentialGeneration === 4,
     },
     preferences: {
       get: () => preference,

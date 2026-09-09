@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { AgentError, type AgentErrorCode, type AgentsManager, type AgentsView, type AgentApplyRequest, type AgentRestoreRequest, type AgentStatus } from "../agents/types.js";
 import type { DeviceFlowCancelResult } from "../accounts/device_flow.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { BoundAccount } from "../accounts/account_directory.js";
@@ -20,7 +22,7 @@ import type { PerformanceSnapshot } from "../telemetry/performance.js";
 import { THRESHOLDS } from "../telemetry/performance.js";
 import { toIso } from "./auth.js";
 
-export type AdminErrorCode =
+export type AdminErrorCode = AgentErrorCode
   | "validation_failed"
   | "unauthenticated"
   | "forbidden"
@@ -275,6 +277,7 @@ export interface AdminCapabilityRegistry {
     }[];
   }>;
   invalidate(accountId: string): void;
+  isCurrent(snapshot: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>): boolean;
 }
 
 export interface AdminAccountCaches {
@@ -330,6 +333,7 @@ export interface AdminHistory {
 }
 
 export interface AdminApiDependencies {
+  readonly agents?: AgentsManager;
   readonly accounts: AdminAccountDirectory;
   readonly deviceFlows: AdminDeviceFlows;
   readonly registry: AdminCapabilityRegistry;
@@ -344,6 +348,7 @@ export interface AdminApiDependencies {
 
 export class AdminManagementApi {
   private readonly modelMutations = new Map<string, Promise<void>>();
+  private readonly agentMutations = new Set<string>();
 
   constructor(private readonly dependencies: Readonly<AdminApiDependencies>) {}
 
@@ -454,6 +459,70 @@ export class AdminManagementApi {
     const defaultRevision = await this.dependencies.accounts.use(accountId, expectedRevision, signal);
     signal.throwIfAborted();
     return { defaultAccountId: accountId, defaultRevision };
+  }
+
+  async agents(origin: string, signal: AbortSignal): Promise<AgentsView> {
+    signal.throwIfAborted();
+    const items = await this.requireAgents().inspect(origin);
+    try {
+      const catalog = await this.agentCatalog(signal);
+      return { items, catalogRevision: catalog.revision, modelsAvailable: true };
+    } catch (error: unknown) {
+      signal.throwIfAborted();
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      return { items, catalogRevision: null, modelsAvailable: false };
+    }
+  }
+
+  async applyAgent(request: AgentApplyRequest, origin: string, signal: AbortSignal): Promise<AgentStatus> {
+    if (this.agentMutations.has(request.agent)) throw new AgentError("agent_busy");
+    this.agentMutations.add(request.agent);
+    try {
+      const captured = await this.agentCatalog(signal);
+      if (captured.revision !== request.catalogRevision) throw new AdminApiError("revision_conflict");
+      await this.requireSameCredentialGeneration(captured.account.accountId, captured.account, signal);
+      const models = captured.catalog.models.filter((model) => model.protocols.value !== null
+        && model.protocols.value.length > 0
+        && model.defaultOutputTokens.valid
+        && (!model.protocols.value.every((protocol) => protocol === "chat") || model.profile.chatOutputTokenField.value !== null))
+        .map((model) => ({ modelId: model.modelId, maxInputTokens: model.maxInputTokens.value }));
+      return await this.requireAgents().apply(request, origin, models, () => {
+        signal.throwIfAborted();
+        if (!this.dependencies.registry.isCurrent(captured.catalog)
+          || JSON.stringify(this.dependencies.accounts.defaultState()) !== captured.defaultState
+          || this.requireActiveAccount(captured.account.accountId).revision !== captured.accountRevision) {
+          throw new AdminApiError("revision_conflict");
+        }
+      }, signal);
+    } finally { this.agentMutations.delete(request.agent); }
+  }
+
+  async restoreAgent(request: AgentRestoreRequest, origin: string, signal: AbortSignal): Promise<AgentStatus> {
+    return await this.requireAgents().restore(request, origin, signal);
+  }
+
+  private requireAgents(): AgentsManager {
+    if (this.dependencies.agents === undefined) throw new AdminApiError("not_found");
+    return this.dependencies.agents;
+  }
+
+  private async agentCatalog(signal: AbortSignal) {
+    signal.throwIfAborted();
+    const defaults = this.dependencies.accounts.defaultState();
+    const active = this.dependencies.accounts.list().filter((item) => item.state === "active");
+    // Same fallback as AccountDirectory.bindDefault: only an unambiguous account.
+    const id = defaults.defaultAccountId ?? (active.length === 1 ? active[0]!.accountId : null);
+    if (id === null) throw new AgentError("agent_models_unavailable");
+    const summary = this.requireActiveAccount(id);
+    const account = await this.dependencies.accounts.bindAccount(id, signal);
+    const catalog = await this.dependencies.registry.get(account, signal);
+    signal.throwIfAborted();
+    if (!this.dependencies.registry.isCurrent(catalog)) throw new AgentError("agent_models_unavailable");
+    const revision = createHash("sha256").update(JSON.stringify({
+      defaults, accountId: id, accountRevision: summary.revision, credentialGeneration: account.credentialGeneration,
+      catalogGeneration: catalog.catalogGeneration,
+    })).digest("hex");
+    return { catalog, account, revision, accountRevision: summary.revision, defaultState: JSON.stringify(defaults) };
   }
 
   async models(accountId: string | null, signal: AbortSignal): Promise<AdminModels> {
@@ -691,6 +760,7 @@ export function mapAdminError(error: unknown): AdminApiError {
   if (error instanceof AdminApiError) {
     return error;
   }
+  if (error instanceof AgentError) return new AdminApiError(error.code);
   if (error instanceof DOMException && error.name === "AbortError") {
     throw error;
   }
