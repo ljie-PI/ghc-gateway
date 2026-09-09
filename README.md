@@ -307,13 +307,13 @@ npm run bench -- full --repeat 3
 npm run pack
 ```
 
-Automated tests are offline and use scripted GitHub/Copilot remotes or recorded loopback HTTP replay. Official-client suites are manual release evidence and require explicit opt-in:
+Automated tests are offline and use scripted GitHub/Copilot remotes or fixed-response loopback HTTP replay. Official-client suites are manual release evidence and require explicit opt-in:
 
 ```bash
 GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 ```
 
-The replay suite exercises the production gateway against a local mock Copilot HTTP server on `127.0.0.1:31488` using real recorded and verified upstream exchanges. Official client SDK tests run strictly offline without outbound network access.
+The replay suite exercises the production gateway against a local mock Copilot HTTP server on `127.0.0.1:31488` using fixed response fixtures with byte-integrity checks. Official client SDK tests run strictly offline without outbound network access.
 
 ### Explicit Upstream Capture
 

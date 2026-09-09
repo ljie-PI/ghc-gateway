@@ -32,7 +32,6 @@ export interface ResponsesBridgeRequestContext {
   readonly toolContext: RequestToolContext;
   readonly reasoningConfig: ReasoningConfig | null;
   readonly upstreamHost?: string;
-  readonly upstreamPath?: string;
   readonly promptCacheRouting?: "enabled" | "disabled" | "auto";
   readonly clientSessionId?: string;
   readonly chatOutputTokenField?: ChatOutputTokenField | null;
@@ -708,10 +707,7 @@ function defaultPromptCacheAllowed(context: Readonly<ResponsesBridgeRequestConte
   if (context.promptCacheRouting !== undefined && context.promptCacheRouting !== "auto") {
     return false;
   }
-  if (context.upstreamHost === "api.openai.com") {
-    return true;
-  }
-  return context.upstreamHost === "api.kimi.com" && (context.upstreamPath === "/coding" || context.upstreamPath?.startsWith("/coding/") === true);
+  return context.upstreamHost === "api.openai.com";
 }
 
 function chatRole(item: WireJsonObject): string {

@@ -1,166 +1,84 @@
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
+import type Anthropic from "@anthropic-ai/sdk";
+import type OpenAI from "openai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  CHAT_MODEL,
-  MESSAGES_MODEL,
-  NATIVE_RESPONSES_MODEL,
-  type ReplaySdkHarness,
-  startReplaySdkHarness,
-} from "./replay_harness.js";
+  createSdkClients, executeChat, executeMessages, executeResponses, REPLAY_TARGETS, SDK_PROTOCOLS,
+  type SdkClients, type SdkProtocol,
+} from "./client.js";
+import { expectReasoningResult, expectUsage, matchesTextRequest, readExpectedExchangeResult } from "./replay_expectations.js";
+import { type ReplaySdkHarness, startReplaySdkHarness } from "./replay_harness.js";
 
-describe("nine-cell matrix constraints, reasoning & usage execution via Mock Copilot Replay", () => {
+const prompt = "Explain quantum entanglement in 20 words.";
+
+describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", () => {
   let harness: ReplaySdkHarness;
-  let openai: OpenAI;
-  let anthropic: Anthropic;
+  let clients: SdkClients;
 
   beforeAll(async () => {
     harness = await startReplaySdkHarness();
-    openai = new OpenAI({
-      apiKey: "local-gateway",
-      baseURL: harness.openAiBaseUrl,
-      fetch: harness.fetch,
-      maxRetries: 0,
-    });
-    anthropic = new Anthropic({
-      apiKey: "local-gateway",
-      baseURL: harness.baseUrl,
-      fetch: harness.fetch,
-      maxRetries: 0,
+    clients = createSdkClients(harness);
+  });
+  afterAll(async () => { await harness.close(); });
+
+  describe.each(SDK_PROTOCOLS)("%s downstream", (downstream) => {
+    it.each(REPLAY_TARGETS)("$protocol upstream preserves native reasoning or approved converted omission", async (target) => {
+      const exchangeId = `replay.${target.protocol}.reasoning-effort.nonstream`;
+      const exchange = harness.corpus.exchanges.find((candidate) => candidate.caseId === exchangeId)!;
+      const expected = await readExpectedExchangeResult(exchange);
+      harness.replayServer.selectScenario({
+        id: `${downstream}.${target.protocol}.reasoning`,
+        steps: [{ exchangeId, matchesRequest: (body) => matchesTextRequest(body, target.protocol, { prompt }, undefined) }],
+      });
+      try {
+        const result = await executeReasoning(downstream, target.model);
+        expect(expected.text.length).toBeGreaterThan(0);
+        expect(result.text === expected.text, "all captured answer text remains separate from reasoning").toBe(true);
+        // The immutable legacy Chat fixture is truncated. Preserve that fact, never call it completed.
+        const terminal = (target.protocol === "chat"
+          ? { chat: "length", messages: "max_tokens", responses: "incomplete" }
+          : { chat: "stop", messages: "end_turn", responses: "completed" })[downstream];
+        expect(result.terminal === terminal, "native or converted fixture terminal outcome").toBe(true);
+        if (target.protocol === "chat" && downstream === "responses") {
+          expect((result.response as OpenAI.Responses.Response).incomplete_details?.reason === "max_output_tokens", "truncation reason is preserved").toBe(true);
+        }
+        expectUsage(result.response.usage, downstream, expected);
+        expectReasoningResult(result, expected, downstream);
+
+        // Inspect official parsed objects, not just request options or reasoning-token counters.
+        if (downstream === target.protocol) {
+          if (downstream === "messages") {
+            const thinking = (result.response as Anthropic.Message).content.find((block) => block.type === "thinking");
+            expect(thinking?.thinking.length, "fixture supplies actual public thinking").toBeGreaterThan(0);
+          } else if (downstream === "responses") {
+            // This fixture supplies opaque state, not a portable public summary. Do not fabricate one.
+            const reasoning = (result.response as OpenAI.Responses.Response).output.filter((item) => item.type === "reasoning");
+            expect(reasoning.length).toBe(1);
+            expect(reasoning[0]?.summary.length).toBe(0);
+            expect(reasoning[0]?.content?.length).toBe(0);
+            expect(typeof reasoning[0]?.encrypted_content).toBe("string");
+            expect(reasoning[0]?.encrypted_content?.length).toBeGreaterThan(0);
+          } else {
+            const message = (result.response as OpenAI.ChatCompletion).choices[0]!.message as unknown as { reasoning_text?: string; reasoning_opaque?: string };
+            expect(message.reasoning_text?.length, "Chat fixture supplies public reasoning").toBeGreaterThan(0);
+            expect(message.reasoning_opaque?.length, "Chat fixture also supplies native opaque state").toBeGreaterThan(0);
+          }
+        }
+        harness.replayServer.finishScenario();
+      } finally { harness.replayServer.abortScenario(); }
     });
   });
 
-  afterAll(async () => {
-    await harness.close();
-  });
-
-  describe("Chat Downstream Constraints & Usage", () => {
-    it("C -> C with reasoning_effort and usage observation", async () => {
-      const resp = await openai.chat.completions.create({
-        model: CHAT_MODEL,
-        messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }],
-        reasoning_effort: "low",
-      });
-      expect(resp.choices[0]?.message.content?.length).toBeGreaterThan(0);
-      expect(resp.usage).toBeDefined();
-      expect(resp.usage?.prompt_tokens).toBeGreaterThan(0);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
-    });
-
-    it("C -> R with reasoning_effort and usage observation", async () => {
-      const resp = await openai.chat.completions.create({
-        model: NATIVE_RESPONSES_MODEL,
-        messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }],
-        reasoning_effort: "low",
-      });
-      expect(resp.choices[0]?.message.content?.length).toBeGreaterThan(0);
-      expect(resp.usage).toBeDefined();
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
-    });
-
-    it("C -> M with reasoning_effort and usage observation", async () => {
-      const resp = await openai.chat.completions.create({
-        model: MESSAGES_MODEL,
-        messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }],
-        reasoning_effort: "low",
-      });
-      expect(resp.choices[0]?.message.content?.length).toBeGreaterThan(0);
-      expect(resp.usage).toBeDefined();
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
-    });
-  });
-
-  describe("Messages Downstream Constraints & Usage", () => {
-    it("M -> C with output_config effort and usage observation", async () => {
-      const resp = await anthropic.messages.create({
-        model: CHAT_MODEL,
-        max_tokens: 64,
-        messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }],
-        output_config: { effort: "low" },
-      });
-      expect(resp.content[0]?.type).toBe("text");
-      expect(resp.usage.input_tokens).toBeGreaterThan(0);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
-    });
-
-    it("M -> R with output_config effort and usage observation", async () => {
-      const resp = await anthropic.messages.create({
-        model: NATIVE_RESPONSES_MODEL,
-        max_tokens: 64,
-        messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }],
-        output_config: { effort: "low" },
-      });
-      expect(resp.content[0]?.type).toBe("text");
-      expect(resp.usage.input_tokens).toBeGreaterThan(0);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
-    });
-
-    it("M -> M with output_config effort and usage observation", async () => {
-      const resp = await anthropic.messages.create({
-        model: MESSAGES_MODEL,
-        max_tokens: 64,
-        messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }],
-        output_config: { effort: "low" },
-      });
-      expect(resp.content.length).toBeGreaterThan(0);
-      expect(resp.usage.input_tokens).toBeGreaterThan(0);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
-    });
-  });
-
-  describe("Responses Downstream Constraints & Usage", () => {
-    it("R -> C with reasoning.effort and usage observation", async () => {
-      const resp = await openai.responses.create({
-        model: CHAT_MODEL,
-        input: "Explain quantum entanglement in 20 words.",
-        reasoning: { effort: "low" },
-        max_output_tokens: 64,
-      });
-      expect(resp.output_text?.length).toBeGreaterThan(0);
-      expect(resp.usage?.input_tokens).toBeGreaterThan(0);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
-    });
-
-    it("R -> R with reasoning.effort and usage observation", async () => {
-      const resp = await openai.responses.create({
-        model: NATIVE_RESPONSES_MODEL,
-        input: "Explain quantum entanglement in 20 words.",
-        reasoning: { effort: "low" },
-        max_output_tokens: 64,
-      });
-      expect(resp.output_text?.length).toBeGreaterThan(0);
-      expect(resp.usage?.input_tokens).toBeGreaterThan(0);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
-    });
-
-    it("R -> M with reasoning.effort and usage observation", async () => {
-      const resp = await openai.responses.create({
-        model: MESSAGES_MODEL,
-        input: "Explain quantum entanglement in 20 words.",
-        reasoning: { effort: "low" },
-        max_output_tokens: 64,
-      });
-      expect(resp.output_text?.length).toBeGreaterThan(0);
-      expect(resp.usage?.input_tokens).toBeGreaterThan(0);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.reasoning-effort.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
-    });
-  });
+  function executeReasoning(downstream: SdkProtocol, model: string) {
+    switch (downstream) {
+    case "chat": return executeChat(clients.openai, {
+      model, messages: [{ role: "user", content: prompt }], reasoning_effort: "low",
+    }, "nonstream");
+    case "messages": return executeMessages(clients.anthropic, {
+      model, max_tokens: 64, messages: [{ role: "user", content: prompt }], output_config: { effort: "low" },
+    }, "nonstream");
+    case "responses": return executeResponses(clients.openai, {
+      model, input: prompt, reasoning: { effort: "low" }, max_output_tokens: 64,
+    }, "nonstream");
+    }
+  }
 });
