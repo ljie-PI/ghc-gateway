@@ -339,10 +339,6 @@ tr.current-row > td:last-child { padding-right: 12px; }
 .config-grid .range { grid-column: 2; font-size: 10px; }
 .sticky-save { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 18px; border-top: 1px solid var(--line); }
 .sticky-save p { margin: 0; color: var(--muted); font-size: 11px; }
-.history-summary { margin-bottom: 26px; }
-.history-summary .fact-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.history-copy { padding: 22px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.history-copy p:last-child { margin-bottom: 0; color: var(--muted); }
 
 .live-badge { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .event-list { margin: 0; padding: 0; list-style: none; }
@@ -439,7 +435,7 @@ tr.current-row > td:last-child { padding-right: 12px; }
   .page-head { display: block; }
   .page-head > button, .page-head > .revision, .page-head > .live-badge { margin-top: 18px; }
   .page-head p:last-child { font-size: 12px; }
-  .fact-strip, .stat-row, .history-summary .fact-strip { grid-template-columns: 1fr; }
+  .fact-strip, .stat-row { grid-template-columns: 1fr; }
   .fact-strip > div, .stat-row > div { border-right: 0; border-bottom: 1px solid var(--line); padding: 12px 16px; }
   .fact-strip > div:last-child, .stat-row > div:last-child { border-bottom: 0; }
   .fact-strip span { display: inline; margin-right: 10px; }

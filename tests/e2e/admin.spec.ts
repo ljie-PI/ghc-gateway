@@ -406,23 +406,6 @@ test("config-revision-and-security-rejection", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText("security check rejected");
 });
 
-test("responses-history-inspect-and-clear", async ({ page }) => {
-  const fixture = await openAdmin(page);
-  await page.getByRole("button", { name: "Responses History" }).click();
-  await expect(page.getByRole("heading", { name: "Responses History", exact: true })).toBeFocused();
-  await expect(page.getByText("12 / 512", { exact: true })).toBeVisible();
-  await expect(page.getByText("not a list of replies", { exact: false })).toBeVisible();
-  fixture.state.conflictHistory = true;
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Clear history" }).click();
-  await expect(page.getByRole("alert")).toContainText("changed elsewhere");
-  await expect(page.getByText("12 / 512", { exact: true })).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Clear history" }).click();
-  await expect(page.getByRole("heading", { name: "Responses state is empty" })).toBeVisible();
-  await expect(page.getByText("Responses history and route ownership state cleared.")).toBeVisible();
-});
-
 test("events-and-degraded-recovery", async ({ page }) => {
   const fixture = await installAdminFixture(page);
   fixture.state.events = Array.from({ length: 520 }, (_, index) => operationalEvent(index + 1));
@@ -538,7 +521,7 @@ test("responsive shell centers the right column and contains long content", asyn
   await expect(menu).toBeFocused();
   await expect(sidebar).toHaveAttribute("aria-hidden", "true");
 
-  for (const view of ["Accounts", "Models", "Configuration", "Responses History", "Events", "Overview"]) {
+  for (const view of ["Accounts", "Models", "Configuration", "Events", "Overview"]) {
     await menu.click();
     await expect(sidebar).toHaveAttribute("aria-hidden", "false");
     await page.getByRole("button", { name: view }).click();
@@ -549,7 +532,7 @@ test("responsive shell centers the right column and contains long content", asyn
   for (const width of [900, 1600, 2560, 3440]) {
     await page.setViewportSize({ width, height: 1000 });
     await expect(sidebar).not.toHaveAttribute("aria-hidden", "true");
-    for (const view of ["Overview", "Accounts", "Models", "Configuration", "Responses History", "Events"]) {
+    for (const view of ["Overview", "Accounts", "Models", "Configuration", "Events"]) {
       await page.getByRole("button", { name: view }).click();
       await expect(page.getByRole("heading", { name: view, exact: true })).toBeFocused();
       const gaps = await page.evaluate(() => {

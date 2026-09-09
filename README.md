@@ -1,6 +1,6 @@
 # GHC Gateway
 
-GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages APIs. It runs as one Node.js process and includes a local Admin UI for account, model, runtime configuration, history, usage, and operational-event management.
+GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages APIs. It runs as one Node.js process and includes a local Admin UI for account, model, runtime configuration, usage, and operational-event management.
 
 ## Requirements
 
@@ -105,7 +105,8 @@ Admin security defaults:
 - sessions invalidated when the gateway restarts
 - bounded, replayable SSE monitoring with no WebSocket or remote Admin access
 
-The six views are Overview, Accounts, Models, Configuration, Responses History, and Events.
+The five views are Overview, Accounts, Models, Configuration, and Events.
+Responses History is managed by the backend independently of the Admin UI; there is no dedicated history page.
 The Accounts view checks an active device authorization automatically at GitHub's required interval. Keep that
 view open until it reports completion; closing or leaving it stops browser polling, and no device code or token is
 stored in browser storage.
@@ -216,7 +217,7 @@ The default data directory is `~/.ghc-gateway` and contains:
 
 Credentials and daemon identity use protected atomic files. Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors.
 
-Responses History stores only minimal bridge tool checkpoints, at most 512 responses, with a seven-day default TTL. Separate content-free route receipts bind observed response IDs to the account, resolved model, trusted upstream origin, native or converted protocol owner, conversion version, and checkpoint state. Receipts are independently bounded at 2048 and do not consume the Admin tool-history count.
+Responses History stores only minimal bridge tool checkpoints, at most 512 responses, with a seven-day default TTL. Separate content-free route receipts bind observed response IDs to the account, resolved model, trusted upstream origin, native or converted protocol owner, conversion version, and checkpoint state. Receipts are independently bounded at 2048 and do not consume the 512-checkpoint limit.
 
 Known continuations keep their original compatible route under the currently bound account; the gateway never switches accounts to follow a response ID. Untracked native IDs are passed through only on a direct native Responses route so the upstream can authorize them. If bounded cleanup or account removal has discarded exact ownership evidence, untracked continuation fails closed until Responses History is explicitly cleared. Legacy unscoped history remains visible as unowned data after migration and cannot be used for new continuation; start a new conversation instead.
 

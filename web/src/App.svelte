@@ -12,10 +12,9 @@
   import Events from "./views/Events.svelte";
   import Models from "./views/Models.svelte";
   import Overview from "./views/Overview.svelte";
-  import ResponsesHistory from "./views/ResponsesHistory.svelte";
   import TerminalMark from "./TerminalMark.svelte";
 
-  const views = ["Overview", "Accounts", "Models", "Configuration", "Responses History", "Events"] as const;
+  const views = ["Overview", "Accounts", "Models", "Configuration", "Events"] as const;
   type View = typeof views[number];
 
   let view: View = $state("Overview");
@@ -238,8 +237,6 @@
             <Models {client} {pageNumber} />
           {:else if view === "Configuration"}
             <Configuration {client} {pageNumber} />
-          {:else if view === "Responses History"}
-            <ResponsesHistory {client} {pageNumber} />
           {:else}
             <Events {client} {liveEvents} {resetVersion} {streamState} {pageNumber} />
           {/if}
