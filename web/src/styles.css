@@ -247,8 +247,9 @@ th:last-child, td:last-child { padding-right: 0; }
 .account-table { min-width: 780px; }
 .model-table { min-width: 980px; }
 tr.current-row { background: var(--soft); }
-tr.current-row > td:first-child { padding-left: 12px; border-left: 2px solid var(--ink); }
-tr.current-row > td:last-child { padding-right: 12px; }
+tr.current-row > td:first-child, .account-table tr > td:first-child { padding-left: 12px; border-left: 2px solid var(--ink); }
+tr.current-row > td:last-child, .account-table tr > td:last-child { padding-right: 12px; }
+.account-table tr:not(.current-row) > td:first-child { border-left-color: transparent; }
 .identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .avatar {
   display: grid;
@@ -395,11 +396,11 @@ tr.current-row > td:last-child { padding-right: 12px; }
     letter-spacing: .5px;
     text-transform: uppercase;
   }
-  .account-table tr.current-row > td:first-child {
+  .account-table tr > td:first-child {
     padding-left: 10px;
     border-left: 2px solid var(--ink);
   }
-  .account-table tr.current-row > td:not(:first-child) { padding-left: 12px; }
+  .account-table tr > td:not(:first-child) { padding-left: 12px; }
   .account-table .row-actions { justify-content: flex-start; }
 }
 

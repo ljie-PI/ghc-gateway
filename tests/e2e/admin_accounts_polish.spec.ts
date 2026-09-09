@@ -35,6 +35,40 @@ async function expectNoConnectionBanner(page: Page): Promise<void> {
     .toHaveCount(0);
 }
 
+for (const width of [1440, 1100, 390, 320]) {
+  test(`Accounts row contents align before and after selection at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const fixture = await openAccounts(page);
+    await connectSecondAccount(page, fixture);
+    const rows = page.locator(".account-table tbody > tr");
+    await expect(rows).toHaveCount(2);
+    const positions = () => rows.evaluateAll((elements) => elements.map((row) => {
+      const left = row.getBoundingClientRect().left;
+      const selectors = [".avatar", ".identity strong", ".identity small", "[data-label='Authorization'] .badge", ".account-choice", ".remove-account"];
+      const coordinates = selectors.map((selector) => row.querySelector(selector)!.getBoundingClientRect().left - left);
+      const range = document.createRange();
+      range.selectNodeContents(row.querySelector("[data-label='Authenticated']")!);
+      return [...coordinates, range.getBoundingClientRect().left - left];
+    }));
+    const before = await positions();
+    for (const [index, x] of before[0]!.entries()) {
+      expect(Math.abs(x - before[1]![index]!), `column content ${index} is aligned`).toBeLessThanOrEqual(1);
+    }
+    await expect(page.locator(".account-table tr:not(.current-row) > td:first-child"))
+      .toHaveCSS("border-left-color", "rgba(0, 0, 0, 0)");
+    await expect(page.locator(".account-table tr.current-row > td:first-child"))
+      .toHaveCSS("border-left-color", "rgb(38, 119, 72)");
+    await page.getByRole("button", { name: "Use this account", exact: true }).click();
+    await expect(rows.nth(1).getByRole("button", { name: "In use", exact: true })).toBeDisabled();
+    const after = await positions();
+    for (const [index, x] of after[0]!.entries()) {
+      expect(Math.abs(x - after[1]![index]!), `column content ${index} remains aligned`).toBeLessThanOrEqual(1);
+      expect(Math.abs(x - before[0]![index]!), `selection does not move column content ${index}`).toBeLessThanOrEqual(1);
+    }
+    await page.locator(".account-table").screenshot({ path: testInfo.outputPath(`account-row-alignment-${width}.png`) });
+  });
+}
+
 for (const width of [1440, 390]) {
   test(`Accounts heading and equal-sized selection controls at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
