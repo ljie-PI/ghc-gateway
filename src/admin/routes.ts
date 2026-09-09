@@ -71,6 +71,11 @@ const RuntimeConfigUpdateSchema = Type.Object({
   config: RuntimeConfigSchema,
 }, { additionalProperties: false });
 
+const USAGE_WINDOWS_MS = new Map([
+  ["24h", 86_400_000],
+  ["7d", 7 * 86_400_000],
+  ["28d", 28 * 86_400_000],
+]);
 const PROTOCOLS = new Set(["openai_chat", "openai_responses_unknown", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]);
 const OUTCOMES = new Set(["success", "client_error", "authentication_error", "overloaded", "upstream_error", "timeout", "aborted", "internal_error"]);
 const EVENT_KINDS = new Set([
@@ -456,7 +461,7 @@ const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([
   route("GET", "/admin/api/v1/auth/session", "session"),
   route("POST", "/admin/api/v1/auth/logout", "logout", false, true),
   route("GET", "/admin/api/v1/status", "status"),
-  route("GET", "/admin/api/v1/usage", "usage", false, false, ["from", "to", "limit", "cursor", "accountId", "protocol", "resolvedModel", "outcome"]),
+  route("GET", "/admin/api/v1/usage", "usage", false, false, ["window", "from", "to", "limit", "cursor", "accountId", "protocol", "resolvedModel", "outcome"]),
   route("GET", "/admin/api/v1/accounts", "accounts"),
   route("POST", "/admin/api/v1/device-flows", "deviceStart", true, true),
   route("PUT", "/admin/api/v1/accounts/default", "accountDefault", true, true),
@@ -615,7 +620,12 @@ function optionalQuery(url: URL, key: string): string | null {
 }
 
 function parseUsageQuery(url: URL, now: number): AdminUsageQuery {
-  const fromMs = parseUtc(url, "from") ?? now - 86_400_000;
+  const window = optionalQuery(url, "window");
+  const windowMs = window === null ? 86_400_000 : USAGE_WINDOWS_MS.get(window);
+  if (windowMs === undefined || (window !== null && (url.searchParams.has("from") || url.searchParams.has("to")))) {
+    throw new AdminApiError("validation_failed");
+  }
+  const fromMs = parseUtc(url, "from") ?? now - windowMs;
   const toMs = parseUtc(url, "to") ?? now;
   if (fromMs >= toMs || fromMs < now - 90 * 86_400_000 || toMs > now) {
     throw new AdminApiError("validation_failed");
