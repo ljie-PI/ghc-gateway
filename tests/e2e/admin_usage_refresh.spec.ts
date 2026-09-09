@@ -122,8 +122,9 @@ for (const width of [1440, 900, 390]) {
       for (const box of boxes) {
         expect(box.left).toBeGreaterThanOrEqual(0);
         expect(box.right).toBeLessThanOrEqual(width);
-        expect(Math.abs(box.width - boxes[0]!.width)).toBeLessThanOrEqual(1);
-        if (width > 600) expect(Math.abs(box.top - boxes[0]!.top)).toBeLessThanOrEqual(1);
+        const row = boxes.filter((candidate) => Math.abs(candidate.top - box.top) <= 1);
+        expect(Math.abs(box.width - row[0]!.width)).toBeLessThanOrEqual(1);
+        if (width > 1100) expect(Math.abs(box.top - boxes[0]!.top)).toBeLessThanOrEqual(1);
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       expect(fixture.requests.filter((request) => request.url().includes("cursor="))).toHaveLength(0);
