@@ -87,19 +87,22 @@ export const UNKNOWN_DECLARATIONS: DeclaredModelCapabilities = Object.freeze({
 });
 
 export function parseLiveModelCapabilities(record: Readonly<Record<string, unknown>>): DeclaredModelCapabilities {
+  const explicitInputTokens = parseLocations(record, [
+    ["max_input_tokens"],
+    ["model_info", "max_input_tokens"],
+    ["capabilities", "max_input_tokens"],
+    ["capabilities", "limits", "max_prompt_tokens"],
+  ], parsePositiveInteger);
   return Object.freeze({
     protocols: parseLocations(record, [
       ["supported_endpoints"],
       ["model_info", "supported_endpoints"],
       ["capabilities", "supported_endpoints"],
     ], parseEndpointProtocols),
-    maxInputTokens: parseLocations(record, [
-      ["max_input_tokens"],
-      ["model_info", "max_input_tokens"],
-      ["capabilities", "max_input_tokens"],
-      ["capabilities", "limits", "max_prompt_tokens"],
-      ["capabilities", "limits", "max_context_window_tokens"],
-    ], parsePositiveInteger),
+    // Context windows are a fallback, not an alias of explicit input/prompt limits.
+    maxInputTokens: explicitInputTokens.state === "missing"
+      ? parseLocations(record, [["capabilities", "limits", "max_context_window_tokens"]], parsePositiveInteger)
+      : explicitInputTokens,
     maxOutputTokens: parseLocations(record, [
       ["max_output_tokens"],
       ["model_info", "max_output_tokens"],

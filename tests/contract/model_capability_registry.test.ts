@@ -145,6 +145,88 @@ describe("model capability registry", () => {
     expect(capability(snapshot, "empty").protocols).toMatchObject({ value: [], source: "live" });
   });
 
+  it("preserves input precedence, malformed declarations, and account-scoped overrides independently of output", async () => {
+    const builtins: BuiltinModelCapabilityLookup = {
+      get: () => ({
+        revision: "input-limits-test",
+        capabilities: parseLiveModelCapabilities({
+          max_input_tokens: 64_000,
+          max_output_tokens: 4096,
+          default_output_tokens: 2048,
+          supported_endpoints: ["/chat/completions"],
+        }),
+      }),
+    };
+    const inputModel = (id: string, limits: Readonly<Record<string, unknown>>) => ({
+      ...model(id, {
+        supported_endpoints: ["/responses"],
+        max_output_tokens: 16_000,
+        default_output_tokens: 8000,
+      }),
+      capabilities: { limits },
+    });
+    const harness = await createHarness({
+      "github.com/1": [
+        inputModel("explicit", { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 }),
+        inputModel("context-only", { max_context_window_tokens: 144_000 }),
+        inputModel("missing", {}),
+        inputModel("malformed", { max_prompt_tokens: null, max_context_window_tokens: 144_000 }),
+        inputModel("malformed-context", { max_context_window_tokens: null }),
+        { ...inputModel("conflicting", { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 }), max_input_tokens: 32_000 },
+      ],
+      "github.com/2": [inputModel("explicit", { max_prompt_tokens: 32_000, max_context_window_tokens: 144_000 })],
+    }, builtins);
+    try {
+      const initial = await harness.registry.get(harness.account1, signal);
+      expect(initial.models.map(({ modelId, maxInputTokens }) => ({ modelId, ...maxInputTokens }))).toEqual([
+        { modelId: "explicit", value: 128_000, source: "live", conflict: true, liveState: "value" },
+        { modelId: "context-only", value: 144_000, source: "live", conflict: true, liveState: "value" },
+        { modelId: "missing", value: 64_000, source: "builtin", conflict: false, liveState: "missing" },
+        { modelId: "malformed", value: null, source: "unknown", conflict: false, liveState: "malformed" },
+        { modelId: "malformed-context", value: null, source: "unknown", conflict: false, liveState: "malformed" },
+        { modelId: "conflicting", value: null, source: "unknown", conflict: false, liveState: "malformed" },
+      ]);
+      for (const item of initial.models) {
+        expect(item).toMatchObject({
+          protocols: { value: ["responses"], source: "live", conflict: true },
+          maxOutputTokens: { value: 16_000, source: "live", conflict: true },
+          defaultOutputTokens: { effective: 8000, source: "live", valid: true },
+        });
+      }
+      harness.overrides.set(harness.account1.accountId, "explicit", { enabled: true, maxInputTokens: 96_000 }, 0);
+      harness.overrides.set(harness.account1.accountId, "malformed", { enabled: true, maxInputTokens: 96_000 }, 1);
+      const overridden = await harness.registry.get(harness.account1, signal);
+      expect(capability(overridden, "explicit").maxInputTokens).toEqual({
+        value: 96_000, source: "admin_override", conflict: true, liveState: "value",
+      });
+      expect(capability(overridden, "malformed").maxInputTokens).toEqual({
+        value: 96_000, source: "admin_override", conflict: false, liveState: "malformed",
+      });
+      for (const item of overridden.models) {
+        const before = capability(initial, item.modelId);
+        expect(item.protocols).toEqual(before.protocols);
+        expect(item.maxOutputTokens).toEqual(before.maxOutputTokens);
+        expect(item.defaultOutputTokens).toEqual(before.defaultOutputTokens);
+        expect(item.profile).toEqual(before.profile);
+      }
+      expect(capability(initial, "explicit").maxInputTokens.value).toBe(128_000);
+      expect(Object.isFrozen(capability(initial, "explicit").maxInputTokens)).toBe(true);
+      const otherAccount = await harness.registry.get(harness.account2, signal);
+      expect(capability(otherAccount, "explicit").maxInputTokens).toEqual({
+        value: 32_000, source: "live", conflict: true, liveState: "value",
+      });
+      expect(otherAccount.capabilityRevision).toBe(0);
+
+      harness.overrides.reset(harness.account1.accountId, "explicit", 2);
+      harness.overrides.reset(harness.account1.accountId, "malformed", 3);
+      const reset = await harness.registry.get(harness.account1, signal);
+      expect(reset.models.map((item) => item.maxInputTokens)).toEqual(initial.models.map((item) => item.maxInputTokens));
+    } finally {
+      await harness.registry.close();
+      harness.database.close();
+    }
+  });
+
   it("isolates same model IDs by account and exposes configured-only models only when explicitly enabled", async () => {
     const harness = await createHarness({
       "github.com/1": [model("same", { supported_endpoints: ["/chat/completions"] })],

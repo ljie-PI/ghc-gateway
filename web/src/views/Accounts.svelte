@@ -14,6 +14,7 @@
   let failure = $state("");
   let copying = $state(false);
   let copyFeedback = $state("");
+  let copyFeedbackRevision = 0;
   let pollState: "idle" | "waiting" | "checking" | "retrying" = $state("idle");
   let hostInput: HTMLInputElement | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -54,6 +55,13 @@
     } finally {
       if (requestGeneration === loadGeneration) loading = false;
     }
+  }
+
+  async function refresh(): Promise<void> {
+    message = "";
+    copyFeedback = "";
+    copyFeedbackRevision += 1;
+    await load();
   }
 
   async function start(): Promise<void> {
@@ -263,6 +271,7 @@
     const activeFlow = flow;
     if (activeFlow === null || copying || Date.now() >= Date.parse(activeFlow.expiresAt)) return;
     const generation = pollGeneration;
+    const feedbackRevision = copyFeedbackRevision;
     copying = true;
     copyFeedback = "";
     let feedback: string;
@@ -274,7 +283,9 @@
     }
     if (generation !== pollGeneration || flow?.flowId !== activeFlow.flowId) return;
     copying = false;
-    if (Date.now() < Date.parse(activeFlow.expiresAt)) copyFeedback = feedback;
+    if (feedbackRevision === copyFeedbackRevision && Date.now() < Date.parse(activeFlow.expiresAt)) {
+      copyFeedback = feedback;
+    }
   }
 
   function isAbort(error: unknown): boolean {
@@ -322,7 +333,7 @@
     <h1 tabindex="-1">Accounts</h1>
     <p>Connect GitHub.com or GHES and choose the identity used by new gateway requests.</p>
   </div>
-  <button onclick={() => void load()}>Refresh</button>
+  <button onclick={() => void refresh()}>Refresh</button>
 </header>
 
 {#if message}
