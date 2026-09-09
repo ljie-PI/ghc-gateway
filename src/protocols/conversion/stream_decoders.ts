@@ -19,7 +19,7 @@ import type {
   SemanticUsage,
 } from "./types.js";
 import { decodeSseRecords } from "./sse.js";
-import { mergeMessagesUsage } from "./usage.js";
+import { chatUsageFromCounters, mergeChatUsageCounters, mergeMessagesUsage, type ChatUsageCounters } from "./usage.js";
 
 export function decodeProtocolStream(
   source: InferenceProtocol,
@@ -54,7 +54,7 @@ async function* decodeChatStream(
   }>();
   let nextToolToStart = 0;
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
-  let observedUsage = emptyUsage();
+  let observedUsage: ChatUsageCounters = {};
   let chatText = "";
   let chatRefusal = "";
   let toolObserved = false;
@@ -161,8 +161,8 @@ async function* decodeChatStream(
     }
     const usage = nullableObjectMember(payload, "usage");
     if (usage !== undefined) {
-      observedUsage = chatUsage(usage, observedUsage);
-      yield { kind: "usage", usage: observedUsage };
+      observedUsage = mergeChatUsageCounters(observedUsage, chatUsage(usage));
+      yield { kind: "usage", usage: chatUsageFromCounters(observedUsage) };
     }
     const choices = arrayMember(payload, "choices");
     if (choices === undefined || choices.items.length === 0) {
@@ -770,10 +770,25 @@ async function* decodeResponsesStream(
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const toolsByIndex = new Map<number, ResponseToolIdentity>();
+  const toolItemIndexes = new Map<string, number>();
+  const observeToolItemId = (outputIndex: number, value: WireJson | undefined): void => {
+    if (value === undefined) return;
+    if (typeof value !== "string" || value.length === 0) invalid();
+    const existing = toolItemIndexes.get(value);
+    if (existing !== undefined) {
+      if (existing !== outputIndex) invalid();
+      return;
+    }
+    // Provider item IDs can change between events, but cannot belong to two calls.
+    budget.reserveEntry();
+    budget.reserve(value);
+    toolItemIndexes.set(value, outputIndex);
+  };
   const observedOutputIndexes = new Set<number>();
   const observedOutputTypes = new Map<number, string>();
   const observedOutputStatuses = new Map<number, string>();
   const observedContent = new Map<string, "output_text" | "refusal">();
+  let observedUsage = emptyUsage();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
     if (record.data === "[DONE]") {
@@ -828,9 +843,7 @@ async function* decodeResponsesStream(
         toolsByIndex.set(outputIndex, identity);
         budget.reserve(callId);
         budget.reserve(name);
-        if (identity.itemId !== undefined) {
-          budget.reserve(identity.itemId);
-        }
+        observeToolItemId(outputIndex, identity.itemId);
         yield {
           kind: "tool_start",
           key,
@@ -934,6 +947,8 @@ async function* decodeResponsesStream(
         invalid();
       }
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observeToolItemId(outputIndex, singleMember(payload, "item_id"));
+      validateResponseToolMetadata(payload, identity);
       const delta = singleMember(payload, "delta");
       if (typeof delta !== "string") {
         invalid();
@@ -948,9 +963,10 @@ async function* decodeResponsesStream(
         invalid();
       }
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+      observeToolItemId(outputIndex, singleMember(payload, "item_id"));
+      validateResponseToolMetadata(payload, identity);
       const argumentsJson = singleMember(payload, "arguments");
-      const name = singleMember(payload, "name");
-      if (typeof argumentsJson !== "string" || typeof name !== "string" || name !== identity.name) {
+      if (typeof argumentsJson !== "string") {
         invalid();
       }
       yield { kind: "tool_done", key: identity.key, argumentsJson };
@@ -993,7 +1009,7 @@ async function* decodeResponsesStream(
       if (itemType === "reasoning" && hasSubstantiveReasoning(item)) {
         yield { kind: "semantic_progress" };
       }
-      yield* finalItemEvents(item, outputIndex, toolsByIndex);
+      yield* finalItemEvents(item, outputIndex, toolsByIndex, observeToolItemId);
       yield { kind: "item_done", outputIndex, itemType };
       continue;
     }
@@ -1018,10 +1034,11 @@ async function* decodeResponsesStream(
         });
       }
 
-      yield* finalResponseEvents(response, toolsByIndex);
+      yield* finalResponseEvents(response, toolsByIndex, observeToolItemId);
       const usage = objectMember(response, "usage");
       if (usage !== undefined) {
-        yield { kind: "usage", usage: responsesUsage(usage) };
+        observedUsage = responsesUsage(usage, observedUsage);
+        yield { kind: "usage", usage: observedUsage };
       }
       const incompleteReason = type === "response.incomplete"
         ? stringMember(objectMember(response, "incomplete_details"), "reason")
@@ -1092,6 +1109,12 @@ async function* decodeResponsesStream(
       type === "response.created"
       || type === "response.in_progress"
     ) {
+      const response = objectMember(payload, "response");
+      const usage = response === undefined ? undefined : nullableObjectMember(response, "usage");
+      if (usage !== undefined) {
+        observedUsage = responsesUsage(usage, observedUsage);
+        yield { kind: "usage", usage: observedUsage };
+      }
       continue;
     }
     if (type.startsWith("response.reasoning_")) {
@@ -1434,6 +1457,7 @@ function subtractMagnitude(left: string, right: string): string {
 function* finalResponseEvents(
   response: WireJsonObject,
   toolsByIndex: Map<number, ResponseToolIdentity>,
+  observeToolItemId: (outputIndex: number, value: WireJson | undefined) => void,
 ): Iterable<SemanticStreamEvent> {
   const output = arrayMember(response, "output");
   if (output === undefined) {
@@ -1444,7 +1468,7 @@ function* finalResponseEvents(
     if (!isWireJsonObject(item)) {
       invalid();
     }
-    yield* finalItemEvents(item, index, toolsByIndex);
+    yield* finalItemEvents(item, index, toolsByIndex, observeToolItemId);
   }
 }
 
@@ -1452,6 +1476,7 @@ function* finalItemEvents(
   item: WireJsonObject,
   outputIndex: number,
   toolsByIndex: Map<number, ResponseToolIdentity>,
+  observeToolItemId: (outputIndex: number, value: WireJson | undefined) => void,
 ): Iterable<SemanticStreamEvent> {
   const type = stringMember(item, "type");
   if (type === "message") {
@@ -1467,6 +1492,7 @@ function* finalItemEvents(
     if (status !== "completed" && status !== "incomplete" && status !== "in_progress") {
       invalid();
     }
+    observeToolItemId(outputIndex, finalItemId);
     let identity = toolsByIndex.get(outputIndex);
     if (identity === undefined) {
       identity = {
@@ -1484,10 +1510,10 @@ function* finalItemEvents(
         name: finalName,
       };
     } else {
+      // The output index and stable call metadata identify the tool, not the opaque item ID.
       if (
         finalCallId !== identity.callId
         || finalName !== identity.name
-        || (identity.itemId !== undefined && finalItemId !== identity.itemId)
       ) {
         invalid();
       }
@@ -1565,6 +1591,15 @@ function* messageContentEvents(
     } else {
       invalid();
     }
+  }
+}
+
+function validateResponseToolMetadata(payload: WireJsonObject, identity: ResponseToolIdentity): void {
+  // Argument events may omit stable metadata; any explicit value must agree with the indexed call.
+  const callId = singleMember(payload, "call_id");
+  const name = singleMember(payload, "name");
+  if ((callId !== undefined && callId !== identity.callId) || (name !== undefined && name !== identity.name)) {
+    invalid();
   }
 }
 
@@ -1650,20 +1685,21 @@ function messagesFinish(value: string): SemanticResponse["finishReason"] {
   invalid();
 }
 
-function chatUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
+function chatUsage(value: WireJsonObject): ChatUsageCounters {
   const promptDetails = objectMember(value, "prompt_tokens_details");
   const completionDetails = objectMember(value, "completion_tokens_details");
+  const detailedReasoningTokens = optionalNonnegativeIntegerMember(completionDetails, "reasoning_tokens");
   return {
-    inputTokens: optionalNonnegativeIntegerMember(value, "prompt_tokens") ?? current.inputTokens,
-    outputTokens: optionalNonnegativeIntegerMember(value, "completion_tokens") ?? current.outputTokens,
+    promptTokens: optionalNonnegativeIntegerMember(value, "prompt_tokens"),
+    completionTokens: optionalNonnegativeIntegerMember(value, "completion_tokens"),
+    detailedReasoningTokens,
+    separateReasoningTokens: detailedReasoningTokens === undefined
+      ? optionalNonnegativeIntegerMember(value, "reasoning_tokens")
+      : undefined,
     cacheReadTokens: optionalNonnegativeIntegerMember(promptDetails, "cached_tokens")
-      ?? optionalNonnegativeIntegerMember(value, "cache_read_input_tokens")
-      ?? current.cacheReadTokens,
+      ?? optionalNonnegativeIntegerMember(value, "cache_read_input_tokens"),
     cacheWriteTokens: optionalNonnegativeIntegerMember(promptDetails, "cache_write_tokens")
-      ?? optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens")
-      ?? current.cacheWriteTokens,
-    reasoningTokens: optionalNonnegativeIntegerMember(completionDetails, "reasoning_tokens")
-      ?? current.reasoningTokens,
+      ?? optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens"),
   };
 }
 
@@ -1676,15 +1712,15 @@ function messagesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>):
   });
 }
 
-function responsesUsage(value: WireJsonObject): SemanticUsage {
+function responsesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
   const inputDetails = objectMember(value, "input_tokens_details");
   const outputDetails = objectMember(value, "output_tokens_details");
   return {
-    inputTokens: nonnegativeIntegerMember(value, "input_tokens"),
-    outputTokens: nonnegativeIntegerMember(value, "output_tokens"),
-    cacheReadTokens: nonnegativeIntegerMember(inputDetails, "cached_tokens"),
-    cacheWriteTokens: nonnegativeIntegerMember(inputDetails, "cache_write_tokens"),
-    reasoningTokens: nonnegativeIntegerMember(outputDetails, "reasoning_tokens"),
+    inputTokens: optionalNonnegativeIntegerMember(value, "input_tokens") ?? current.inputTokens,
+    outputTokens: optionalNonnegativeIntegerMember(value, "output_tokens") ?? current.outputTokens,
+    cacheReadTokens: optionalNonnegativeIntegerMember(inputDetails, "cached_tokens") ?? current.cacheReadTokens,
+    cacheWriteTokens: optionalNonnegativeIntegerMember(inputDetails, "cache_write_tokens") ?? current.cacheWriteTokens,
+    reasoningTokens: optionalNonnegativeIntegerMember(outputDetails, "reasoning_tokens") ?? current.reasoningTokens,
   };
 }
 
@@ -1766,10 +1802,6 @@ function integerMember(object: WireJsonObject, key: string): number | undefined 
     invalid();
   }
   return parsed;
-}
-
-function nonnegativeIntegerMember(object: WireJsonObject | undefined, key: string): number {
-  return optionalNonnegativeIntegerMember(object, key) ?? 0;
 }
 
 function optionalNonnegativeIntegerMember(

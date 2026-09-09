@@ -165,6 +165,63 @@ describe("shared conversion response codecs", () => {
     });
   });
 
+  it("counts provider top-level Chat reasoning tokens as separate billed output", () => {
+    const converted = convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "chat_reasoning",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "answer" },
+        finish_reason: "stop",
+      }],
+      usage: {
+        prompt_tokens: 5,
+        completion_tokens: 7,
+        reasoning_tokens: 13,
+        total_tokens: 25,
+      },
+    })), context("chat", "responses"));
+
+    expect(decoded(converted.bytes)).toMatchObject({
+      usage: {
+        input_tokens: 5,
+        output_tokens: 20,
+        total_tokens: 25,
+        output_tokens_details: { reasoning_tokens: 13 },
+      },
+    });
+    expect(converted.observations.usage).toMatchObject({
+      inputTokens: 5,
+      outputTokens: 20,
+      reasoningTokens: 13,
+    });
+  });
+
+  it("gives nested Chat reasoning usage precedence consistently in buffered and streaming conversion", async () => {
+    const usage = {
+      prompt_tokens: 5,
+      completion_tokens: 7,
+      reasoning_tokens: 13,
+      completion_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 12,
+    };
+    const buffered = convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "chat_reasoning_precedence",
+      choices: [{ index: 0, message: { role: "assistant", content: "answer" }, finish_reason: "stop" }],
+      usage,
+    })), context("chat", "responses"));
+    expect(buffered.observations.usage).toMatchObject({ outputTokens: 7, reasoningTokens: 0 });
+
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+      `data: ${JSON.stringify({ id: "x", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage })}\n\n`,
+      "data: [DONE]\n\n",
+    ].join("");
+    const streamed = await collectStream("chat", "responses", chunks(encoder.encode(source)));
+    expect(streamed.filter((item) => item.kind === "usage").at(-1)).toMatchObject({
+      usage: { outputTokens: 7, reasoningTokens: 0 },
+    });
+  });
+
   it("maps a Messages refusal to a restricted Responses result", () => {
     const converted = convertBufferedResponse(encoder.encode(JSON.stringify({
       id: "msg_refusal",
@@ -229,6 +286,49 @@ describe("shared conversion response codecs", () => {
 
     await expect(collectStream("chat", "messages", chunks(encoder.encode(source)))).rejects.toThrow();
   });
+
+  it("streams provider top-level Chat reasoning tokens without losing them from output totals", async () => {
+    const source = [
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"reasoning_tokens\":13,\"total_tokens\":25}}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const emissions = await collectStream("chat", "responses", chunks(encoder.encode(source)));
+    expect(emissions.filter((item) => item.kind === "usage").at(-1)).toMatchObject({
+      usage: { inputTokens: 5, outputTokens: 20, reasoningTokens: 13 },
+    });
+    expect(wireText(emissions)).toContain("\"output_tokens\":20");
+    expect(wireText(emissions)).toContain("\"total_tokens\":25");
+  });
+
+  it("reassembles interleaved fragmented Chat arguments for two nested tool calls", async () => {
+    const tokyo = "{\"location\":{\"city\":\"Tokyo\",\"country_code\":\"JP\"},\"start_hour\":15,\"fields\":[\"temperature_c\",\"wind_speed_kph\"]}";
+    const paris = "{\"location\":{\"city\":\"Paris\",\"country_code\":\"FR\"},\"start_hour\":15,\"fields\":[\"temperature_c\",\"wind_speed_kph\"]}";
+    const source = [
+      chatSse({ choices: [{ index: 0, delta: { tool_calls: [
+        { index: 0, id: "call_tokyo", type: "function", function: { name: "forecast", arguments: tokyo.slice(0, 25) } },
+        { index: 1, id: "call_paris", type: "function", function: { name: "forecast", arguments: paris.slice(0, 22) } },
+      ] }, finish_reason: null }] }),
+      chatSse({ choices: [{ index: 0, delta: { tool_calls: [
+        { index: 1, function: { arguments: paris.slice(22, 71) } },
+        { index: 0, function: { arguments: tokyo.slice(25, 74) } },
+      ] }, finish_reason: null }] }),
+      chatSse({ choices: [{ index: 0, delta: { tool_calls: [
+        { index: 0, function: { arguments: tokyo.slice(74) } },
+        { index: 1, function: { arguments: paris.slice(71) } },
+      ] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 10, completion_tokens: 20 } }),
+      "data: [DONE]\n\n",
+    ].join("");
+
+    const text = wireText(await collectStream("chat", "responses", splitEveryByte(encoder.encode(source))));
+    expect(text).toContain("call_tokyo");
+    expect(text).toContain("call_paris");
+    expect(text).toContain("Tokyo");
+    expect(text).toContain("Paris");
+    expect(text.match(/response\.function_call_arguments\.delta/gu)?.length).toBeGreaterThanOrEqual(6);
+    expect(text.match(/event: response\.completed/gu)).toHaveLength(1);
+  });
+
 
   it("streams parallel same-name Messages tools to monotonic Responses events across UTF-8/CRLF splits", async () => {
     const source = [
@@ -2631,6 +2731,105 @@ describe("shared conversion response codecs", () => {
     expect(text.match(/event: message_stop/gu)).toHaveLength(1);
   });
 
+
+  describe.each(["chat", "messages"] as const)("Responses tool identity conversion to %s", (target) => {
+    it.each([
+      { renameIds: true, omitName: false },
+      { renameIds: false, omitName: true },
+      { renameIds: true, omitName: true },
+    ])("accepts opaque item IDs / optional arguments-done name: %j", async (options) => {
+      const fixture = responseToolIdentityFixture(options);
+      fixture.delta[0]!.call_id = "call_a";
+      fixture.delta[0]!.name = "lookup";
+      const emissions = await collectStream("responses", target, splitEveryByte(encoder.encode(fixture.wire())));
+      const text = wireText(emissions);
+      const payloads = text.split("\n").filter((line) => line.startsWith("data: {")).map((line) => JSON.parse(line.slice(6)) as {
+        type?: string;
+        content_block?: { type: string; id: string; name: string };
+        delta?: { partial_json?: string };
+        choices?: Array<{ delta: { tool_calls?: Array<{ id?: string; function: { name?: string; arguments: string } }> } }>;
+      });
+      if (target === "chat") {
+        const calls = payloads.flatMap((value) => value.choices?.[0]?.delta.tool_calls ?? []);
+        expect(calls.filter((call) => call.id !== undefined).map((call) => [call.id, call.function.name])).toEqual([
+          ["call_a", "lookup"], ["call_b", "lookup"],
+        ]);
+        expect(calls.map((call) => call.function.arguments).filter(Boolean)).toEqual(["{\"q\":\"a\"}", "{\"q\":\"b\"}"]);
+        expect(text.match(/data: \[DONE\]/gu)).toHaveLength(1);
+      } else {
+        expect(payloads.flatMap((value) => value.content_block?.type === "tool_use" ? [value.content_block] : [])).toMatchObject([
+          { id: "call_a", name: "lookup" }, { id: "call_b", name: "lookup" },
+        ]);
+        expect(payloads.flatMap((value) => value.delta?.partial_json ? [value.delta.partial_json] : [])).toEqual(["{\"q\":\"a\"}", "{\"q\":\"b\"}"]);
+        expect(text.match(/event: message_stop/gu)).toHaveLength(1);
+      }
+      expect(emissions.filter((value) => value.kind === "terminal")).toEqual([{ kind: "terminal", terminal: "completed" }]);
+    });
+
+    it.each(["added", "delta", "argumentsDone", "itemDone"] as const)("rejects missing, malformed, or wrong %s output indexes", async (stage) => {
+      for (const index of [undefined, -1, 0.5, "0", 3, 1]) {
+        const fixture = responseToolIdentityFixture({ renameIds: true, omitName: true });
+        const event = fixture[stage][0]!;
+        if (index === undefined) delete event.output_index;
+        else event.output_index = index;
+        await expect(collectStream("responses", target, chunks(encoder.encode(fixture.wire())))).rejects.toThrow();
+      }
+    });
+
+    it.each(["itemDone", "final"] as const)("rejects changed stable identity and conflicting final arguments at %s", async (stage) => {
+      for (const [field, value] of [["call_id", "call_changed"], ["name", "changed"], ["arguments", "{\"q\":\"conflict\"}"]] as const) {
+        const fixture = responseToolIdentityFixture({ renameIds: true, omitName: true });
+        const item = stage === "final" ? fixture.output[0]! : fixture.itemDone[0]!.item as Record<string, unknown>;
+        item[field] = value;
+        await expect(collectStream("responses", target, chunks(encoder.encode(fixture.wire())))).rejects.toThrow();
+      }
+    });
+
+    it.each(["delta", "argumentsDone"] as const)("rejects malformed or conflicting explicit %s metadata", async (stage) => {
+      for (const value of [null, 17, "", "changed"]) {
+        const fixture = responseToolIdentityFixture({ renameIds: true, omitName: true });
+        fixture[stage][0]!.name = value;
+        await expect(collectStream("responses", target, chunks(encoder.encode(fixture.wire())))).rejects.toThrow();
+      }
+      const fixture = responseToolIdentityFixture({ renameIds: true, omitName: true });
+      fixture[stage][0]!.call_id = "call_b";
+      await expect(collectStream("responses", target, chunks(encoder.encode(fixture.wire())))).rejects.toThrow();
+    });
+
+    it.each(["added", "delta", "argumentsDone", "itemDone", "final"] as const)("rejects duplicate or cross-tool opaque IDs at %s", async (stage) => {
+      const fixture = responseToolIdentityFixture({ renameIds: true, omitName: true });
+      // Reusing any earlier alias belonging to the other call is contradictory evidence.
+      if (stage === "final") fixture.output[1]!.id = "added_a";
+      else if (stage === "added" || stage === "itemDone") (fixture[stage][1]!.item as Record<string, unknown>).id = "added_a";
+      else fixture[stage][1]!.item_id = "delta_a";
+      await expect(collectStream("responses", target, chunks(encoder.encode(fixture.wire())))).rejects.toThrow();
+    });
+
+    it("bounds opaque item alias tracking without charging repeated IDs again", async () => {
+      for (const distinct of [false, true]) {
+        const fixture = responseToolIdentityFixture({ renameIds: true, omitName: true });
+        // Empty deltas isolate alias metadata from argument accumulation.
+        fixture.delta.splice(1, 0, ...Array.from({ length: 40 }, (_, index) => ({
+          output_index: 0, item_id: distinct ? `alias_${index}` : "delta_a", delta: "",
+        })));
+        const collect = async () => {
+          for await (const event of convertProtocolStream(chunks(encoder.encode(fixture.wire())), {
+            ...streamContext("responses", target), accumulatorBytes: 2048,
+          })) void event;
+        };
+        if (distinct) await expect(collect()).rejects.toThrow();
+        else await expect(collect()).resolves.toBeUndefined();
+      }
+    });
+
+    it("rejects duplicate stable call identity despite distinct opaque IDs", async () => {
+      const fixture = responseToolIdentityFixture({ renameIds: true, omitName: true });
+      for (const event of [fixture.added[1]!, fixture.itemDone[1]!]) (event.item as Record<string, unknown>).call_id = "call_a";
+      fixture.output[1]!.call_id = "call_a";
+      await expect(collectStream("responses", target, chunks(encoder.encode(fixture.wire())))).rejects.toThrow();
+    });
+  });
+
   it("rejects conflicting Responses tool identity snapshots", async () => {
     const source = [
       responseEvent(0, "response.output_item.added", {
@@ -4158,6 +4357,40 @@ describe("shared conversion response codecs", () => {
   });
 });
 
+function responseToolIdentityFixture(options: { renameIds: boolean; omitName: boolean }) {
+  const itemId = (stage: string, suffix: string) => `${options.renameIds ? stage : "added"}_${suffix}`;
+  const output: Array<Record<string, unknown>> = ["a", "b"].map((suffix) => ({
+    id: itemId("final", suffix), type: "function_call", call_id: `call_${suffix}`,
+    name: "lookup", arguments: JSON.stringify({ q: suffix }), status: "completed",
+  }));
+  const added: Array<Record<string, unknown>> = output.map((item, index) => ({
+    output_index: index, item: { ...item, id: itemId("added", index === 0 ? "a" : "b"), arguments: "", status: "in_progress" },
+  }));
+  const delta: Array<Record<string, unknown>> = output.map((item, index) => ({
+    output_index: index, item_id: itemId("delta", index === 0 ? "a" : "b"), delta: item.arguments,
+  }));
+  const argumentsDone: Array<Record<string, unknown>> = output.map((item, index) => ({
+    output_index: index, item_id: itemId("arguments", index === 0 ? "a" : "b"), arguments: item.arguments,
+    ...(options.omitName ? {} : { name: item.name }),
+  }));
+  const itemDone: Array<Record<string, unknown>> = output.map((item, index) => ({
+    output_index: index, item: { ...item, id: itemId("done", index === 0 ? "a" : "b") },
+  }));
+  return {
+    added, delta, argumentsDone, itemDone, output,
+    wire: () => [
+      ...added.map((payload) => ({ type: "response.output_item.added", payload })),
+      ...delta.map((payload) => ({ type: "response.function_call_arguments.delta", payload })),
+      ...argumentsDone.map((payload) => ({ type: "response.function_call_arguments.done", payload })),
+      ...itemDone.map((payload) => ({ type: "response.output_item.done", payload })),
+      { type: "response.completed", payload: { response: {
+        id: "resp_identity", object: "response", status: "completed", output,
+        usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+      } } },
+    ].map(({ type, payload }, index) => responseEvent(index, type, payload)).join(""),
+  };
+}
+
 function context(source: InferenceProtocol, target: InferenceProtocol) {
   return {
     source,
@@ -4202,6 +4435,10 @@ function wireText(emissions: readonly ConvertedStreamEmission[]): string {
 
 function decoded(bytes: Uint8Array): Record<string, unknown> {
   return JSON.parse(decoder.decode(bytes)) as Record<string, unknown>;
+}
+
+function chatSse(payload: Readonly<Record<string, unknown>>): string {
+  return `data: ${JSON.stringify(payload)}\n\n`;
 }
 
 function messageEvent(type: string, payload: Readonly<Record<string, unknown>>): string {

@@ -1,18 +1,1 @@
-{
-  "id": "msg_01X9Z8Y7W6V5U4T3S2R1Q0P9",
-  "type": "message",
-  "role": "assistant",
-  "model": "claude-sonnet-4-20250514",
-  "content": [
-    {
-      "type": "text",
-      "text": "pong"
-    }
-  ],
-  "stop_reason": "end_turn",
-  "stop_sequence": null,
-  "usage": {
-    "input_tokens": 10,
-    "output_tokens": 5
-  }
-}
+{"id":"msg_ZiRpCXnQuZCTBLZhVQWbWYrk","type":"message","role":"assistant","content":[{"type":"text","text":"**Purpose**\n\nProduction HTTP gateways sit between untrusted clients and constrained backends, so they must bound every phase of request handling. Separate connection, first-byte, idle-stream, and total-request timeouts partition risk: the connection timeout limits TCP/TLS establishment, the first-byte timeout caps backend queueing and processing latency before response headers, the idle-stream timeout applies to gaps between body or streaming chunks, and the total-request timeout bounds end-to-end work. This layering keeps slowloris-style trickle attacks, stalled origins, and oversized uploads from exhausting sockets, threads, memory, or downstream dependencies. It also gives operators precise signals about whether failures are network setup, backend saturation, client behavior, or pathological end-to-end latency.\n\n**Failure modes**\n\nWithout distinct limits, one slow phase contaminates the whole system. A missing connection timeout lets half-open TLS handshakes accumulate. A missing first-byte timeout lets requests sit behind a wedged database while workers hold sockets. A missing idle-stream timeout lets a client dribble a multipart body for hours or lets a streaming response stall after headers, pinning buffers and pool slots. A missing total-request timeout lets retries, redirects, and long polling run unbounded. Cancellation propagation is essential: when any limit fires, the gateway must abort the downstream request, release the pooled connection, and close or drain the upstream socket so the backend stops doing useless work. Connection-pool cleanup must be explicit—returning a poisoned or half-closed connection to the pool spreads corruption to unrelated requests. Partial streaming responses need special care: the gateway may have already sent headers and some body bytes, so it should truncate gracefully, log the partial state, and avoid retrying non-idempotent requests.\n\n**Operational guidance**\n\nSet connection timeouts low enough to shed abuse but above legitimate WAN latency. Set first-byte timeouts from backend p99 queue plus processing time, with tighter budgets for interactive APIs. Set idle-stream timeouts below proxy and load-balancer idle limits so the gateway detects silence first. Set total-request timeouts from product SLOs and payload expectations, allowing longer only for known export or upload routes. Emit metrics per timeout class, propagate context cancellation to backends, and close pooled connections on timeout rather than returning them blindly.\n\nOperational rule: enforce all four timeouts, propagate cancellation immediately, and never return a timed-out connection to the pool."}],"model":"claude-sonnet-4-20250514","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":94,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":481,"service_tier":"standard","inference_geo":"not_available"}}

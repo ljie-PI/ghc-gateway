@@ -315,6 +315,27 @@ GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 
 The replay suite exercises the production gateway against a local mock Copilot HTTP server on `127.0.0.1:31488` using real recorded and verified upstream exchanges. Official client SDK tests run strictly offline without outbound network access.
 
+### Explicit Upstream Capture
+
+Recording is a manual, potentially billable operation, never part of tests, build, fixtures, packaging or CI. Preview without account access or inference:
+
+```sh
+node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts
+```
+
+After separately authorizing account access and live inference, record with the existing Bound Account (default data directory/account, or explicit `--data-dir PATH --account ID`). Stop any gateway using that data directory first. Generate migrations once in a fresh source checkout before execution with `node scripts/tooling/bootstrap.mjs scripts/tooling/generate_migrations.ts`.
+
+```sh
+node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts --execute --model gemini-3.5-flash --scenario all --mode both
+node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts --execute --model gpt-5.5 --scenario all --mode both
+```
+
+Configured native targets are `gemini-3.5-flash` (Chat), `gpt-5.5` (Responses), and `claude-sonnet-4` (Messages). There is no provider selection, model substitution or protocol retry. Claude uses the same recorder but has only local synthetic HTTP validation; live Claude recording requires separate authorization.
+
+Select `--scenario long-text|image|parallel-tools|five-turn|all` and `--mode nonstream|stream|both`. The fixed reference image is `tests/sdk/images/vergil.jpg`; five-turn requests retain the original image and actual assistant/tool history. `all` with `both` makes at most 16 sequential requests per model. Limits are 20 minutes per run (reducible with `--total-timeout-ms`), three minutes per request, 30 seconds stream idle, and 8 MiB per response. Output budgets include reasoning headroom; truncated, refused or incomplete responses fail validation rather than being accepted or retried.
+
+Every successful run publishes raw request/response bytes and a content-free digest/terminal/tool/usage manifest under a new `ghcg-capture-*/capture` directory in the OS temporary directory. No output path override or automatic corpus promotion is supported. All exchanges must validate before publication; failure removes the run's unpublished temporary files. Stdout contains only the plan or sanitized evidence, never payloads, credentials or upstream diagnostics. Capture files themselves contain scenario content: keep them private and outside commits, and remove them when no longer needed. Existing capture artifacts and replay corpus files are never rewritten.
+
 ## License
 
 [MIT](LICENSE)

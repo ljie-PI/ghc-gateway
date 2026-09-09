@@ -264,7 +264,8 @@ function readStream(body: WireJsonObject): boolean {
 
 function attemptUsage(value: Readonly<SemanticUsage>) {
   return {
-    inputTokens: Math.max(0, value.inputTokens - value.cacheReadTokens - value.cacheWriteTokens),
+    // Usage Buckets use inclusive input; only Messages wire subtracts cache subsets.
+    inputTokens: value.inputTokens,
     outputTokens: value.outputTokens,
     cacheTokens: value.cacheReadTokens + value.cacheWriteTokens,
   };

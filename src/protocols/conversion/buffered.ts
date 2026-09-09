@@ -21,6 +21,7 @@ import type {
 } from "./types.js";
 import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
+import { chatUsageFromCounters } from "./usage.js";
 
 export interface BufferedConversionContext {
   readonly source: InferenceProtocol;
@@ -555,15 +556,19 @@ function chatUsage(value: WireJsonObject | undefined): SemanticUsage {
   }
   const promptDetails = objectMember(value, "prompt_tokens_details");
   const completionDetails = objectMember(value, "completion_tokens_details");
-  return {
-    inputTokens: nonnegativeIntegerMember(value, "prompt_tokens"),
-    outputTokens: nonnegativeIntegerMember(value, "completion_tokens"),
-    cacheReadTokens: nonnegativeIntegerMember(promptDetails, "cached_tokens")
-      || nonnegativeIntegerMember(value, "cache_read_input_tokens"),
-    cacheWriteTokens: nonnegativeIntegerMember(promptDetails, "cache_write_tokens")
-      || nonnegativeIntegerMember(value, "cache_creation_input_tokens"),
-    reasoningTokens: nonnegativeIntegerMember(completionDetails, "reasoning_tokens"),
-  };
+  const detailedReasoningTokens = optionalNonnegativeIntegerMember(completionDetails, "reasoning_tokens");
+  return chatUsageFromCounters({
+    promptTokens: optionalNonnegativeIntegerMember(value, "prompt_tokens"),
+    completionTokens: optionalNonnegativeIntegerMember(value, "completion_tokens"),
+    detailedReasoningTokens,
+    separateReasoningTokens: detailedReasoningTokens === undefined
+      ? optionalNonnegativeIntegerMember(value, "reasoning_tokens")
+      : undefined,
+    cacheReadTokens: optionalNonnegativeIntegerMember(promptDetails, "cached_tokens")
+      ?? optionalNonnegativeIntegerMember(value, "cache_read_input_tokens"),
+    cacheWriteTokens: optionalNonnegativeIntegerMember(promptDetails, "cache_write_tokens")
+      ?? optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens"),
+  });
 }
 
 function messagesUsage(value: WireJsonObject | undefined): SemanticUsage {
@@ -759,12 +764,16 @@ function arrayMember(object: WireJsonObject, key: string) {
 }
 
 function nonnegativeIntegerMember(object: WireJsonObject | undefined, key: string): number {
+  return optionalNonnegativeIntegerMember(object, key) ?? 0;
+}
+
+function optionalNonnegativeIntegerMember(object: WireJsonObject | undefined, key: string): number | undefined {
   if (object === undefined) {
-    return 0;
+    return undefined;
   }
   const value = singleMember(object, key);
   if (value === undefined) {
-    return 0;
+    return undefined;
   }
   if (!isWireJsonNumber(value)) {
     upstreamInvalid();

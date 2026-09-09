@@ -1438,18 +1438,22 @@ function retryAfterHeader(status: number, headers: Headers): string | undefined 
 type UsageTokens = AttemptUsage;
 
 function responsesUsage(payload: WireJsonObject): UsageTokens {
-  const observed = responsesUsageObservation(payload);
-  return {
-    inputTokens: observed.inputTokens ?? 0,
-    outputTokens: observed.outputTokens ?? 0,
-    cacheTokens: observed.cacheTokens ?? 0,
-  };
+  return responsesUsageNumbers(responsesUsageObservation(payload));
 }
 
 interface UsageObservation {
   readonly inputTokens?: number;
   readonly outputTokens?: number;
-  readonly cacheTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+}
+
+function responsesUsageNumbers(observation: UsageObservation): UsageTokens {
+  return {
+    inputTokens: observation.inputTokens ?? 0,
+    outputTokens: observation.outputTokens ?? 0,
+    cacheTokens: (observation.cacheReadTokens ?? 0) + (observation.cacheWriteTokens ?? 0),
+  };
 }
 
 function responsesUsageObservation(payload: WireJsonObject): UsageObservation {
@@ -1457,11 +1461,13 @@ function responsesUsageObservation(payload: WireJsonObject): UsageObservation {
   const details = objectMember(usage, "input_tokens_details");
   const inputTokens = observedInteger(memberValue(usage, "input_tokens"));
   const outputTokens = observedInteger(memberValue(usage, "output_tokens"));
-  const cacheTokens = observedInteger(memberValue(details, "cached_tokens"));
+  const cacheReadTokens = observedInteger(memberValue(details, "cached_tokens"));
+  const cacheWriteTokens = observedInteger(memberValue(details, "cache_write_tokens"));
   return {
     ...(inputTokens === undefined ? {} : { inputTokens }),
     ...(outputTokens === undefined ? {} : { outputTokens }),
-    ...(cacheTokens === undefined ? {} : { cacheTokens }),
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
   };
 }
 
@@ -1479,24 +1485,10 @@ function createNativeStreamObservation(usage: RequestAttempt): { readonly observ
   return {
     observe(event) {
       const observed = responsesUsageObservation(event);
-      observation = {
-        ...((observed.inputTokens ?? observation.inputTokens) === undefined
-          ? {}
-          : { inputTokens: observed.inputTokens ?? observation.inputTokens }),
-        ...((observed.outputTokens ?? observation.outputTokens) === undefined
-          ? {}
-          : { outputTokens: observed.outputTokens ?? observation.outputTokens }),
-        ...((observed.cacheTokens ?? observation.cacheTokens) === undefined
-          ? {}
-          : { cacheTokens: observed.cacheTokens ?? observation.cacheTokens }),
-      };
+      observation = { ...observation, ...observed };
       const type = memberValue(event, "type");
       if (type === "response.completed" || type === "response.incomplete" || type === "response.failed" || type === "error") {
-        usage.finish(nativeOutcome(event), {
-          inputTokens: observation.inputTokens ?? 0,
-          outputTokens: observation.outputTokens ?? 0,
-          cacheTokens: observation.cacheTokens ?? 0,
-        });
+        usage.finish(nativeOutcome(event), responsesUsageNumbers(observation));
       }
     },
   };

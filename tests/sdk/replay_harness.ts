@@ -17,8 +17,8 @@ import { migration as responsesContinuationMigration } from "../../src/persisten
 import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
 import { bootstrapGateway } from "../../src/main.js";
-import { MockCopilotReplayServer, type ReplayReceipt } from "../../src/replay/server.js";
-import type { ReplayExchangeRecord } from "../../src/replay/types.js";
+import { MockCopilotReplayServer, parseReplayManifest, type ReplayReceipt } from "../../src/replay/server.js";
+import type { ReplayScenarioManifest } from "../../src/replay/types.js";
 
 export const SDK_TEST_GUARD = "GHC_GATEWAY_SDK_TESTS";
 export const REPLAY_SERVER_PORT = 31488;
@@ -34,6 +34,8 @@ export interface ReplaySdkHarness {
   readonly openAiBaseUrl: string;
   readonly fetch: typeof globalThis.fetch;
   readonly replayServer: MockCopilotReplayServer;
+  /** Shared upstream response sets; compose selected steps with independent validators. */
+  readonly corpus: ReplayScenarioManifest;
   readonly receipts: readonly ReplayReceipt[];
   close(): Promise<void>;
 }
@@ -52,12 +54,12 @@ export async function startReplaySdkHarness(options: {
   const manifestPath = options.manifestPath ?? path.resolve("tests/sdk/corpus/manifest.json");
   const corpusDir = path.dirname(manifestPath);
   const manifestRaw = await readFile(manifestPath, "utf8");
-  const exchanges = JSON.parse(manifestRaw) as readonly ReplayExchangeRecord[];
+  const corpus = parseReplayManifest(JSON.parse(manifestRaw));
 
   const replayServer = new MockCopilotReplayServer({
     port: REPLAY_SERVER_PORT,
     corpusDir,
-    exchanges,
+    exchanges: corpus.exchanges,
   });
   await replayServer.start();
 
@@ -152,6 +154,7 @@ export async function startReplaySdkHarness(options: {
     openAiBaseUrl: `${baseUrl}/v1`,
     fetch: loopbackOnlyFetch(baseUrl),
     replayServer,
+    corpus,
     get receipts() {
       return replayServer.recordedReceipts;
     },

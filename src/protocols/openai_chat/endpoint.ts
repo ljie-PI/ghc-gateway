@@ -49,6 +49,7 @@ import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
 import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
+import { chatUsageFromCounters, mergeChatUsageCounters, type ChatUsageCounters } from "../conversion/usage.js";
 
 export interface OpenAiChatRouteDependencies {
   readonly directory: AccountDirectory;
@@ -587,7 +588,7 @@ function openAiChatStreamResponse(input: {
 }): Response {
   const pending = [...input.firstFrames];
   let closed = false;
-  let usage: ChatUsageObservation = {};
+  let usage: ChatUsageCounters = {};
   const closeFrames = async (): Promise<void> => {
     if (closed) {
       await input.cleanupUpstream();
@@ -608,7 +609,7 @@ function openAiChatStreamResponse(input: {
         const frame = pending.shift() ?? await nextFrame(input.frames, input.signal);
         if (frame.kind === "chunk") {
           measure(input.dependencies.performanceObserver, "event", () => {
-            usage = mergeUsageObservation(usage, usageObservationFromPayload(frame.chunk.payload));
+            usage = mergeChatUsageCounters(usage, usageObservationFromPayload(frame.chunk.payload));
             input.usage.observeUsage(usageNumbers(usage));
             controller.enqueue(encodeOpenAiChatSseChunk(frame.chunk.payload));
           });
@@ -648,13 +649,7 @@ function openAiChatStreamResponse(input: {
   });
 }
 
-interface ChatUsageObservation {
-  readonly promptTokens?: number;
-  readonly completionTokens?: number;
-  readonly cachedTokens?: number;
-}
-
-function usageObservationFromPayload(value: WireJson): ChatUsageObservation {
+function usageObservationFromPayload(value: WireJson): ChatUsageCounters {
   if (!isWireJsonObject(value)) {
     return {};
   }
@@ -665,16 +660,24 @@ function usageObservationFromPayload(value: WireJson): ChatUsageObservation {
   if (!isWireJsonObject(usage)) {
     return {};
   }
-  const promptTokens = nonnegativeInteger(singleMemberValue(usage, "prompt_tokens"));
-  const completionTokens = nonnegativeInteger(singleMemberValue(usage, "completion_tokens"));
   const details = singleMemberValue(usage, "prompt_tokens_details");
-  const cachedTokens = isWireJsonObject(details) && memberValues(details, "cached_tokens").length === 1
-    ? nonnegativeInteger(singleMemberValue(details, "cached_tokens"))
+  const completionDetails = singleMemberValue(usage, "completion_tokens_details");
+  const detailedReasoningTokens = isWireJsonObject(completionDetails)
+    ? nonnegativeInteger(singleMemberValue(completionDetails, "reasoning_tokens"))
     : undefined;
   return {
-    ...(promptTokens === undefined ? {} : { promptTokens }),
-    ...(completionTokens === undefined ? {} : { completionTokens }),
-    ...(cachedTokens === undefined ? {} : { cachedTokens }),
+    promptTokens: nonnegativeInteger(singleMemberValue(usage, "prompt_tokens")),
+    completionTokens: nonnegativeInteger(singleMemberValue(usage, "completion_tokens")),
+    detailedReasoningTokens,
+    separateReasoningTokens: detailedReasoningTokens === undefined
+      ? nonnegativeInteger(singleMemberValue(usage, "reasoning_tokens"))
+      : undefined,
+    cacheReadTokens: (isWireJsonObject(details)
+      ? nonnegativeInteger(singleMemberValue(details, "cached_tokens"))
+      : undefined) ?? nonnegativeInteger(singleMemberValue(usage, "cache_read_input_tokens")),
+    cacheWriteTokens: (isWireJsonObject(details)
+      ? nonnegativeInteger(singleMemberValue(details, "cache_write_tokens"))
+      : undefined) ?? nonnegativeInteger(singleMemberValue(usage, "cache_creation_input_tokens")),
   };
 }
 
@@ -694,20 +697,8 @@ function nonnegativeInteger(value: WireJson | undefined): number | undefined {
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
-function mergeUsageObservation(left: ChatUsageObservation, right: ChatUsageObservation): ChatUsageObservation {
-  return {
-    ...((right.promptTokens ?? left.promptTokens) === undefined ? {} : { promptTokens: right.promptTokens ?? left.promptTokens }),
-    ...((right.completionTokens ?? left.completionTokens) === undefined ? {} : { completionTokens: right.completionTokens ?? left.completionTokens }),
-    ...((right.cachedTokens ?? left.cachedTokens) === undefined ? {} : { cachedTokens: right.cachedTokens ?? left.cachedTokens }),
-  };
-}
-
-function usageNumbers(observation: ChatUsageObservation): Pick<UsageUpdate, "inputTokens" | "outputTokens" | "cacheTokens"> {
-  return {
-    inputTokens: observation.promptTokens ?? 0,
-    outputTokens: observation.completionTokens ?? 0,
-    cacheTokens: observation.cachedTokens ?? 0,
-  };
+function usageNumbers(observation: ChatUsageCounters): Pick<UsageUpdate, "inputTokens" | "outputTokens" | "cacheTokens"> {
+  return attemptUsage(chatUsageFromCounters(observation));
 }
 
 function measure<T>(
