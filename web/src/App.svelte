@@ -12,10 +12,9 @@
   import Events from "./views/Events.svelte";
   import Models from "./views/Models.svelte";
   import Overview from "./views/Overview.svelte";
-  import ResponsesHistory from "./views/ResponsesHistory.svelte";
   import TerminalMark from "./TerminalMark.svelte";
 
-  const views = ["Overview", "Accounts", "Models", "Configuration", "Responses History", "Events"] as const;
+  const views = ["Overview", "Accounts", "Models", "Configuration", "Events"] as const;
   type View = typeof views[number];
 
   let view: View = $state("Overview");
@@ -194,7 +193,7 @@
             aria-current={view === item ? "page" : undefined}
             onclick={() => void navigate(item)}
           >
-            <span class="nav-index">[{String(index + 1).padStart(2, "0")}]</span>
+            <span class="nav-index" aria-hidden="true">[{String(index + 1).padStart(2, "0")}]</span>
             <span>{item}</span>
           </button>
         {/each}
@@ -213,6 +212,7 @@
               })
             : "-"}
         </time>
+        <button class="text-button" onclick={logout}>End session</button>
       </div>
     </aside>
     {#if navOpen}
@@ -220,26 +220,14 @@
     {/if}
     <div class="main-column" data-layout-region="main-column">
       <div class="content-frame" data-layout-region="content-frame">
-        <header class="utility-bar">
-          <div class="utility-location">
-            <button
-              class="mobile-menu"
-              aria-label="Open navigation"
-              aria-expanded={navOpen}
-              aria-controls="admin-navigation"
-              bind:this={menuButton}
-              onclick={() => void openNavigation()}
-            >[=]</button>
-            <span>ADMIN / {view.toUpperCase()}</span>
-          </div>
-          <div class="utility-actions">
-            <span class="desktop-stream stream-state" aria-live="polite">
-              <span class:reconnecting={streamState !== "live"} class="status-dot"></span>
-              {streamState}
-            </span>
-            <button class="text-button" onclick={logout}>End session</button>
-          </div>
-        </header>
+        <button
+          class="mobile-menu"
+          aria-label="Open navigation"
+          aria-expanded={navOpen}
+          aria-controls="admin-navigation"
+          bind:this={menuButton}
+          onclick={() => void openNavigation()}
+        >[=]</button>
         <main id="admin-content" class="workspace" bind:this={workspace}>
           {#if view === "Overview"}
             <Overview {client} {liveStatus} {pageNumber} />
@@ -249,16 +237,10 @@
             <Models {client} {pageNumber} />
           {:else if view === "Configuration"}
             <Configuration {client} {pageNumber} />
-          {:else if view === "Responses History"}
-            <ResponsesHistory {client} {pageNumber} />
           {:else}
             <Events {client} {liveEvents} {resetVersion} {streamState} {pageNumber} />
           {/if}
         </main>
-        <footer class="footer-note">
-          <span>ghc-gateway / local administration</span>
-          <span>Loopback only · content-free operations</span>
-        </footer>
       </div>
     </div>
   </div>

@@ -75,7 +75,7 @@
   <div>
     <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Events</h1>
-    <p>Persisted diagnostics joined with the bounded live SSE feed.</p>
+    <p>Gateway lifecycle, account, error, and performance events. No prompt or response bodies.</p>
   </div>
   <div class="live-badge" aria-live="polite">
     <span class:reconnecting={streamState !== "live"} class="status-dot"></span>

@@ -88,14 +88,12 @@
     const generation = ++requestGeneration;
     busy = "refresh";
     failure = "";
+    message = "";
     try {
       const refreshed = await client.refreshModels(targetAccountId);
       if (!isCurrentRequest(generation, targetAccountId)) return;
       data = refreshed;
       syncEditors();
-      message = data.preferredModel?.validity === "invalid"
-        ? "Catalog refreshed. Your previous preference is no longer available."
-        : "Catalog refreshed.";
     } catch (error: unknown) {
       if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
@@ -239,13 +237,33 @@
   function isCurrentRequest(generation: number, targetAccountId: string): boolean {
     return requestGeneration === generation && accountId === targetAccountId;
   }
+
+  function sourceLabel(source: ModelItem["defaultOutputTokens"]["source"]): string {
+    switch (source) {
+      case "live": return "Upstream";
+      case "admin_override": return "Admin override";
+      case "builtin": return "Built-in";
+      case "known_ceiling": return "Known ceiling policy";
+      case "unknown_fallback": return "Unknown ceiling fallback";
+      default: return "Unknown";
+    }
+  }
+
+  function declarationLabel(state: ModelItem["protocolsLiveState"]): string {
+    switch (state) {
+      case "value": return "Present";
+      case "missing": return "Missing";
+      case "malformed": return "Malformed";
+      default: return "Unknown";
+    }
+  }
 </script>
 
 <header class="page-head">
   <div>
     <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Models</h1>
-    <p>Inspect real capability provenance and explicitly configure each account's catalog.</p>
+    <p>Inspect the account catalog and native interface metadata, or configure explicit overrides.</p>
   </div>
   <button class="primary" onclick={refresh} disabled={!accountId || busy === "refresh"}>
     {busy === "refresh" ? "Refreshing..." : "Refresh catalog"}
@@ -267,9 +285,16 @@
 </section>
 
 {#if data}
-  <section class="toolbar" aria-label="Add configured model">
+  <section class="toolbar configured-model-form" aria-label="Add configured model">
     <label for="configured-model-id">Model ID</label>
-    <input id="configured-model-id" bind:value={newModelId} maxlength="128" placeholder="exact-model-id" />
+    <input
+      id="configured-model-id"
+      bind:value={newModelId}
+      maxlength="128"
+      placeholder="Exact model ID"
+      autocapitalize="none"
+      spellcheck={false}
+    />
     <button onclick={addConfiguredModel} disabled={!newModelId || busy === "add"}>
       {busy === "add" ? "Adding..." : "Add configured model"}
     </button>
@@ -306,14 +331,21 @@
       <h2 id="model-directory-title"><span class="section-number">[01]</span>Model directory</h2>
       <span class="badge">{data.items.length} models</span>
     </div>
+    <details class="catalog-help" id="model-catalog-help">
+      <summary>About sources and token limits</summary>
+      <p>Discovered means the model is in the upstream catalog; Configured means an Admin override exists.</p>
+      <p>Protocols identifies the source of native interface metadata: Upstream, Admin override, Built-in, or Unknown.
+        These are metadata, not live inference validation or proof of account entitlement.</p>
+      <p>Token limits apply to each request, not account quota.</p>
+    </details>
     <div class="table-scroll">
-      <table class="model-table">
+      <table class="model-table" aria-describedby="model-catalog-help">
         <thead>
           <tr>
             <th>Model</th>
             <th>Native interfaces</th>
             <th>Source</th>
-            <th>Limits</th>
+            <th>Per-request token limits</th>
             <th>Preference</th>
           </tr>
         </thead>
@@ -344,20 +376,21 @@
               </td>
               <td>
                 <div class="model-source">
-                  <div class="tag-group">
-                    {#if model.discovered}<span class="badge">Discovered</span>{/if}
-                    {#if model.configured}
-                      <span class="badge" class:warning={!model.verified}>
-                        {model.verified ? "Configured override" : "Configured / unverified"}
-                      </span>
-                    {/if}
-                  </div>
-                  <small class="muted">{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""}</small>
+                  {#if model.discovered}<span class="badge">Discovered</span>{/if}
+                  {#if model.configured}
+                    <span class="badge" class:warning={!model.verified}>
+                      {model.verified ? "Configured override" : "Configured / unverified"}
+                    </span>
+                  {/if}
+                  <span class="badge">Protocols: {sourceLabel(model.protocolsSource)}</span>
+                  {#if model.protocolsConflict}<span class="badge warning">Protocol conflict</span>{/if}
                 </div>
               </td>
               <td>
-                <span>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} in</span><br />
-                <span>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} out</span>
+                <div class="model-limits">
+                  <span>Max input: {model.maxInputTokens?.toLocaleString() ?? "Unknown"}</span>
+                  <span>Max output: {model.maxOutputTokens?.toLocaleString() ?? "Unknown"}</span>
+                </div>
               </td>
               <td>
                 <div class="row-actions">
@@ -390,11 +423,11 @@
                         </dd>
                       </div>
                       <div><dt>Native HTTP protocols</dt><dd>{model.protocols?.join(", ") || (model.protocols === null ? "Unknown" : "None")}</dd></div>
-                      <div><dt>Protocol provenance</dt><dd>{model.protocolsSource}{model.protocolsConflict ? " · conflict" : ""} · live {model.protocolsLiveState}</dd></div>
-                      <div><dt>Input window</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {model.maxInputTokensSource}{model.maxInputTokensConflict ? " · conflict" : ""} · live {model.maxInputTokensLiveState}</dd></div>
-                      <div><dt>Output window</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} · {model.maxOutputTokensSource}{model.maxOutputTokensConflict ? " · conflict" : ""} · live {model.maxOutputTokensLiveState}</dd></div>
-                      <div><dt>Default output</dt><dd>{model.defaultOutputTokens.effective.toLocaleString()} · {model.defaultOutputTokens.source}{model.defaultOutputTokens.conflict ? " · conflict" : ""}{model.defaultOutputTokens.valid ? "" : " · invalid for current ceiling"} · live {model.defaultOutputTokens.liveState}</dd></div>
-                      <div><dt>Chat budget field</dt><dd>{model.chatOutputTokenField ?? "Unknown"} · {model.chatOutputTokenFieldSource}{model.chatOutputTokenFieldConflict ? " · conflict" : ""} · live {model.chatOutputTokenFieldLiveState}</dd></div>
+                      <div><dt>Protocol metadata source</dt><dd>{sourceLabel(model.protocolsSource)}{model.protocolsConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.protocolsLiveState)}</dd></div>
+                      <div><dt>Max input tokens per request</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {sourceLabel(model.maxInputTokensSource)}{model.maxInputTokensConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.maxInputTokensLiveState)}</dd></div>
+                      <div><dt>Max output tokens per request</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} · {sourceLabel(model.maxOutputTokensSource)}{model.maxOutputTokensConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.maxOutputTokensLiveState)}</dd></div>
+                      <div><dt>Default output</dt><dd>{model.defaultOutputTokens.effective.toLocaleString()} · {sourceLabel(model.defaultOutputTokens.source)}{model.defaultOutputTokens.conflict ? " · Conflict" : ""}{model.defaultOutputTokens.valid ? "" : " · Invalid for current ceiling"} · Upstream declaration: {declarationLabel(model.defaultOutputTokens.liveState)}</dd></div>
+                      <div><dt>Chat budget field</dt><dd>{model.chatOutputTokenField ?? "Unknown"} · {sourceLabel(model.chatOutputTokenFieldSource)}{model.chatOutputTokenFieldConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.chatOutputTokenFieldLiveState)}</dd></div>
                       <div><dt>Built-in revision</dt><dd>{model.builtinRevision ?? "None"}</dd></div>
                     </dl>
 
@@ -433,7 +466,7 @@
                             min="1"
                             value={editor.maxInputTokens ?? ""}
                             oninput={(event) => { editor.maxInputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
-                            placeholder="use live/builtin"
+                            placeholder="Use upstream/built-in"
                           />
                         </label>
                         <label for={`output-limit-${index}`}>
@@ -444,7 +477,7 @@
                             min="1"
                             value={editor.maxOutputTokens ?? ""}
                             oninput={(event) => { editor.maxOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
-                            placeholder="use live/builtin"
+                            placeholder="Use upstream/built-in"
                           />
                         </label>
                         <label for={`default-output-${index}`}>
@@ -455,13 +488,13 @@
                             min="1"
                             value={editor.defaultOutputTokens ?? ""}
                             oninput={(event) => { editor.defaultOutputTokens = event.currentTarget.value === "" ? null : event.currentTarget.valueAsNumber; }}
-                            placeholder="automatic policy"
+                            placeholder="Automatic policy"
                           />
                         </label>
                         <label for={`chat-field-${index}`}>
                           Chat output token field
                           <select id={`chat-field-${index}`} bind:value={editor.chatOutputTokenField}>
-                            <option value="">Use live/builtin/unknown</option>
+                            <option value="">Use upstream/built-in/unknown</option>
                             <option value="max_tokens">max_tokens</option>
                             <option value="max_completion_tokens">max_completion_tokens</option>
                           </select>
@@ -488,3 +521,67 @@
     </div>
   </section>
 {/if}
+
+<style>
+  .configured-model-form {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 260px) max-content;
+    align-items: center;
+    justify-content: start;
+  }
+
+  .configured-model-form label {
+    margin-bottom: 0;
+  }
+
+  .configured-model-form input,
+  .configured-model-form button {
+    min-height: 40px;
+    padding: 8px 11px;
+    line-height: 1.5;
+  }
+
+  .catalog-help {
+    margin-bottom: 16px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .catalog-help summary {
+    cursor: pointer;
+  }
+
+  .catalog-help[open] summary {
+    margin-bottom: 8px;
+  }
+
+  .catalog-help p {
+    margin-bottom: 6px;
+  }
+
+  .model-source {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+
+  .model-source .badge {
+    flex-shrink: 0;
+    text-transform: none;
+  }
+
+  .model-limits {
+    display: grid;
+    gap: 4px;
+    white-space: nowrap;
+  }
+
+  @media (max-width: 600px) {
+    .configured-model-form {
+      grid-template-columns: minmax(0, 1fr);
+      justify-content: stretch;
+    }
+  }
+</style>

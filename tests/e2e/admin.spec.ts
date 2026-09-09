@@ -102,7 +102,8 @@ test("github-and-ghes-account-lifecycle", async ({ page }) => {
   await expect.poll(() => devicePollRequests(fixture).length).toBe(1);
   await advanceDeviceClock(page, fixture, 10_000);
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Account in use is @octo");
+  await expect(page.getByRole("row").filter({ hasText: "Octo Admin" }).getByRole("button", { name: "In use" })).toBeDisabled();
+  await expect(page.locator(".notice").filter({ hasText: "Account in use" })).toHaveCount(0);
   expect(fixture.state.accounts.defaultAccountId).toBe("github:1");
   fixture.state.conflictAccount = true;
   await page.getByRole("button", { name: "Use this account" }).click();
@@ -125,8 +126,8 @@ test("github-and-ghes-account-lifecycle", async ({ page }) => {
     .filter({ hasText: "Enterprise Admin" })
     .getByRole("button", { name: "Remove" })
     .click();
-  await expect(page.getByRole("row").filter({ hasText: "Enterprise Admin" }).getByText("removed"))
-    .toBeVisible();
+  await expect(page.getByRole("row").filter({ hasText: "Enterprise Admin" })).toHaveCount(0);
+  expect(fixture.state.accounts.items.find((account) => account.accountId === "ghes:2")?.state).toBe("removed");
 });
 
 test("device-flow disposal and terminal failures clean up polling", async ({ page }) => {
@@ -273,7 +274,8 @@ test("device-flow expiry reconciles a raced completion", async ({ page }) => {
   await expect.poll(() => devicePollRequests(fixture).length).toBe(1);
   await advanceDeviceClock(page, fixture, 595_000);
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
-  await expect(page.getByRole("status")).toContainText("Connected @enterprise");
+  await expect(page.locator(".notice").filter({ hasText: "Connected @enterprise" })).toHaveCount(0);
+  await expect(page.getByRole("row").filter({ hasText: "Octo Admin" }).getByRole("button", { name: "In use" })).toBeDisabled();
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
@@ -404,22 +406,6 @@ test("config-revision-and-security-rejection", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText("security check rejected");
 });
 
-test("responses-history-inspect-and-clear", async ({ page }) => {
-  const fixture = await openAdmin(page);
-  await page.getByRole("button", { name: "Responses History" }).click();
-  await expect(page.getByRole("heading", { name: "Responses History", exact: true })).toBeFocused();
-  await expect(page.getByText("12 / 512", { exact: true })).toBeVisible();
-  fixture.state.conflictHistory = true;
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Clear history" }).click();
-  await expect(page.getByRole("alert")).toContainText("changed elsewhere");
-  await expect(page.getByText("12 / 512", { exact: true })).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "Clear history" }).click();
-  await expect(page.getByRole("heading", { name: "Responses state is empty" })).toBeVisible();
-  await expect(page.getByText("Responses history and route ownership state cleared.")).toBeVisible();
-});
-
 test("events-and-degraded-recovery", async ({ page }) => {
   const fixture = await installAdminFixture(page);
   fixture.state.events = Array.from({ length: 520 }, (_, index) => operationalEvent(index + 1));
@@ -442,11 +428,12 @@ test("events-and-degraded-recovery", async ({ page }) => {
   ];
 
   await page.goto("/admin/#bootstrap_token=event-secret");
-  await expect(page.getByRole("banner").getByText("connecting", { exact: true })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Primary navigation" }).getByText("connecting", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Gateway is degraded" })).toBeVisible();
-  await expect(page.getByRole("banner").getByText("live", { exact: true })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Primary navigation" }).getByText("live", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Events" }).click();
   await expect(page.getByRole("heading", { name: "Events", exact: true })).toBeFocused();
+  await expect(page.getByText("No prompt or response bodies.", { exact: false })).toBeVisible();
   await expect(page.getByRole("main").getByText("reconnecting", { exact: true })).toBeVisible();
   await expect.poll(() => fixture.streamRequestHeaders.length).toBeGreaterThanOrEqual(2);
   expect(fixture.streamRequestHeaders[1]?.["last-event-id"]).toBe("521");
@@ -534,7 +521,7 @@ test("responsive shell centers the right column and contains long content", asyn
   await expect(menu).toBeFocused();
   await expect(sidebar).toHaveAttribute("aria-hidden", "true");
 
-  for (const view of ["Accounts", "Models", "Configuration", "Responses History", "Events", "Overview"]) {
+  for (const view of ["Accounts", "Models", "Configuration", "Events", "Overview"]) {
     await menu.click();
     await expect(sidebar).toHaveAttribute("aria-hidden", "false");
     await page.getByRole("button", { name: view }).click();
@@ -545,7 +532,7 @@ test("responsive shell centers the right column and contains long content", asyn
   for (const width of [900, 1600, 2560, 3440]) {
     await page.setViewportSize({ width, height: 1000 });
     await expect(sidebar).not.toHaveAttribute("aria-hidden", "true");
-    for (const view of ["Overview", "Accounts", "Models", "Configuration", "Responses History", "Events"]) {
+    for (const view of ["Overview", "Accounts", "Models", "Configuration", "Events"]) {
       await page.getByRole("button", { name: view }).click();
       await expect(page.getByRole("heading", { name: view, exact: true })).toBeFocused();
       const gaps = await page.evaluate(() => {
