@@ -44,7 +44,7 @@
   <div>
     <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Responses History</h1>
-    <p>Inspect bounded bridge checkpoints without exposing response content.</p>
+    <p>Continuation checkpoints and routing state, not a list of replies. Response bodies are not displayed.</p>
   </div>
   <button class="danger" onclick={clear} disabled={(!data?.count && !data?.receiptCount && !data?.untrackedContinuationBlocked) || clearing}>
     {clearing ? "Clearing..." : "Clear history"}

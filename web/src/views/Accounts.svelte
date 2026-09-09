@@ -5,12 +5,15 @@
 
   let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
   let data: AdminAccounts | null = $state(null);
+  const visibleAccounts = $derived.by(() => data?.items.filter((account) => account.state !== "removed") ?? []);
   let host = $state("github.com");
   let flow: DeviceFlow | null = $state(null);
   let loading = $state(true);
   let busy = $state("");
   let message = $state("");
   let failure = $state("");
+  let copying = $state(false);
+  let copyFeedback = $state("");
   let pollState: "idle" | "waiting" | "checking" | "retrying" = $state("idle");
   let hostInput: HTMLInputElement | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -69,9 +72,7 @@
         const canceled = await client.cancelDeviceFlow(replacedFlowId, controller.signal);
         if (generation !== pollGeneration) return;
         if (canceled.state === "complete") {
-          const refreshed = await load();
-          if (generation !== pollGeneration) return;
-          reportConnected(canceled.account, refreshed);
+          await load(false, generation);
           return;
         }
       }
@@ -124,9 +125,8 @@
       if (result.state === "complete") {
         clearFlow();
         const completionGeneration = pollGeneration;
-        const refreshed = await load(false, completionGeneration);
-        if (completionGeneration !== pollGeneration) return;
-        reportConnected(result.account, refreshed);
+        message = "";
+        await load(false, completionGeneration);
         return;
       }
       finishFlow(generation, "Authorization expired. Start a new login.");
@@ -159,9 +159,8 @@
       if (result.state === "complete") {
         clearFlow();
         const completionGeneration = pollGeneration;
-        const refreshed = await load(false, completionGeneration);
-        if (completionGeneration !== pollGeneration) return;
-        reportConnected(result.account, refreshed);
+        message = "";
+        await load(false, completionGeneration);
       } else if (result.state === "pending") {
         pollIntervalSeconds = result.pollIntervalSeconds;
         nextPollAtMs = Date.parse(result.nextPollAt);
@@ -213,10 +212,10 @@
     if (canceledFlowId === undefined) return;
     try {
       const canceled = await client.cancelDeviceFlow(canceledFlowId);
+      if (cancellationGeneration !== pollGeneration) return;
       if (canceled.state === "complete") {
-        const refreshed = await load();
-        if (cancellationGeneration !== pollGeneration) return;
-        reportConnected(canceled.account, refreshed);
+        message = "";
+        await load(false, cancellationGeneration);
       }
     } catch (error: unknown) {
       if (cancellationGeneration !== pollGeneration) return;
@@ -233,6 +232,8 @@
 
   function stopPolling(): void {
     pollGeneration += 1;
+    copying = false;
+    copyFeedback = "";
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = null;
     if (expiryTimer !== null) clearTimeout(expiryTimer);
@@ -250,6 +251,7 @@
   function dispose(): void {
     const disposedFlowId = flow?.flowId;
     stopPolling();
+    loadGeneration += 1;
     if (disposedFlowId !== undefined) {
       void client.cancelDeviceFlow(disposedFlowId).catch(() => {
         console.warn("Could not cancel device authorization during view disposal.");
@@ -257,30 +259,22 @@
     }
   }
 
-  function connectedMessage(
-    account: NonNullable<AdminAccounts["items"][number]>,
-    refreshed: AdminAccounts | null,
-  ): string {
-    const identity = account.login === null ? account.numericUserId : `@${account.login}`;
-    if (refreshed === null) {
-      return `Connected ${identity}. Refresh accounts to confirm which account is in use.`;
+  async function copyCode(): Promise<void> {
+    const activeFlow = flow;
+    if (activeFlow === null || copying || Date.now() >= Date.parse(activeFlow.expiresAt)) return;
+    const generation = pollGeneration;
+    copying = true;
+    copyFeedback = "";
+    let feedback: string;
+    try {
+      await navigator.clipboard.writeText(activeFlow.userCode);
+      feedback = "Code copied.";
+    } catch {
+      feedback = "Could not copy. Select and copy the code manually.";
     }
-    if (refreshed.defaultAccountId === account.accountId) {
-      return `Connected ${identity}; it is in use for new requests.`;
-    }
-    const currentDefault = refreshed.items.find((item) => item.accountId === refreshed.defaultAccountId);
-    const defaultIdentity = currentDefault?.login ?? currentDefault?.numericUserId;
-    return defaultIdentity === undefined
-      ? `Connected ${identity}. No account is currently selected.`
-      : `Connected ${identity}. Account in use is ${currentDefault?.login === null ? defaultIdentity : `@${defaultIdentity}`}.`;
-  }
-
-  function reportConnected(
-    account: NonNullable<AdminAccounts["items"][number]>,
-    refreshed: AdminAccounts | null,
-  ): void {
-    failure = "";
-    message = connectedMessage(account, refreshed);
+    if (generation !== pollGeneration || flow?.flowId !== activeFlow.flowId) return;
+    copying = false;
+    if (Date.now() < Date.parse(activeFlow.expiresAt)) copyFeedback = feedback;
   }
 
   function isAbort(error: unknown): boolean {
@@ -293,7 +287,6 @@
     failure = "";
     try {
       await client.useAccount(id, data.defaultRevision);
-      message = "Account is now in use for new requests.";
       await load();
     } catch (error: unknown) {
       failure = errorMessage(error);
@@ -308,7 +301,10 @@
     busy = id;
     failure = "";
     try {
-      await client.removeAccount(id, revision);
+      const removed = await client.removeAccount(id, revision);
+      if (data) {
+        data = { ...data, items: data.items.map((account) => account.accountId === id ? removed : account) };
+      }
       message = "Account removed.";
       await load();
     } catch (error: unknown) {
@@ -337,7 +333,7 @@
 {/if}
 
 <section class="connect-panel">
-  <div class="device-actions">
+  <div class="device-heading">
     <p class="eyebrow">DEVICE AUTHORIZATION</p>
     <h2>Connect an account</h2>
   </div>
@@ -363,7 +359,25 @@
     <div>
       <p class="eyebrow">ONE-TIME CODE</p>
       <h2 id="device-title">Continue in GitHub</h2>
-      <code>{flow.userCode}</code>
+      <div class="device-code">
+        <code>{flow.userCode}</code>
+        <button
+          class="copy-code"
+          type="button"
+          aria-label="Copy device code"
+          title="Copy device code"
+          disabled={copying}
+          onclick={() => void copyCode()}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <rect x="9" y="2" width="6" height="4" rx="1" />
+            <path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3" />
+          </svg>
+        </button>
+      </div>
+      {#if copyFeedback}
+        <p class="copy-feedback" role="status">{copyFeedback}</p>
+      {/if}
       <p>
         {pollState === "checking"
           ? "Checking GitHub now..."
@@ -387,7 +401,7 @@
 
 {#if loading}
   <p class="loading-line" aria-busy="true">Loading accounts...</p>
-{:else if data?.items.length === 0}
+{:else if data && visibleAccounts.length === 0}
   <section class="empty">
     <span>00</span>
     <h2>No accounts connected</h2>
@@ -395,7 +409,7 @@
   </section>
 {:else if data}
   {@const defaultAccountId = data.defaultAccountId}
-  {@const selected = data.items.find((account) => account.accountId === defaultAccountId)}
+  {@const selected = visibleAccounts.find((account) => account.accountId === defaultAccountId)}
   <div class="fact-strip" aria-label="Account selection summary">
     <div>
       <span>Selected identity</span>
@@ -426,7 +440,7 @@
           </tr>
         </thead>
         <tbody>
-          {#each data.items as account (account.accountId)}
+          {#each visibleAccounts as account (account.accountId)}
             <tr
               class:current-row={defaultAccountId === account.accountId}
               class:muted-row={account.state !== "active"}
@@ -450,10 +464,10 @@
               <td data-label="Authenticated">{account.authenticatedAt ? new Date(account.authenticatedAt).toLocaleString() : "Not active"}</td>
               <td data-label="Request identity">
                 {#if defaultAccountId === account.accountId}
-                  <span class="badge strong">In use</span>
+                  <button class="account-choice in-use" disabled>In use</button>
                 {:else if account.state === "active"}
                   <button
-                    class="primary"
+                    class="primary account-choice"
                     onclick={() => useAccount(account.accountId)}
                     disabled={busy !== ""}
                   >{busy === account.accountId ? "Switching..." : "Use this account"}</button>
@@ -463,26 +477,17 @@
               </td>
               <td data-label="Actions">
                 <div class="row-actions">
-                  {#if account.state !== "removed"}
-                    <button
-                      class="danger-text"
-                      onclick={() => remove(account.accountId, account.revision)}
-                      disabled={busy !== ""}
-                    >{busy === account.accountId ? "Working..." : "Remove"}</button>
-                  {/if}
+                  <button
+                    class="remove-account"
+                    onclick={() => remove(account.accountId, account.revision)}
+                    disabled={busy !== ""}
+                  >{busy === account.accountId ? "Working..." : "Remove"}</button>
                 </div>
               </td>
             </tr>
           {/each}
         </tbody>
       </table>
-    </div>
-    <div class="hint-line">
-      <span aria-hidden="true">[i]</span>
-      <p>
-        Use this account changes the identity for new requests. Requests already running keep their
-        bound account. Connected accounts are not rotated automatically after errors or rate limits.
-      </p>
     </div>
     {#if data.defaultAccountId === null}
       <p class="notice warning" role="status">
@@ -504,3 +509,77 @@
     </div>
   </section>
 {/if}
+
+<style>
+  .device-heading {
+    display: grid;
+    gap: 4px;
+    align-content: start;
+  }
+
+  .device-heading .eyebrow,
+  .device-heading h2 {
+    margin: 0;
+  }
+
+  .device-code {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .device-code code {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .copy-code {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 36px;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+  }
+
+  .copy-feedback {
+    margin: 0;
+    font-size: 12px;
+  }
+
+  .account-choice {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 152px;
+    height: 36px;
+    padding: 6px 13px;
+    white-space: nowrap;
+  }
+
+  .account-choice.in-use:disabled {
+    background: var(--green);
+    border-color: var(--green);
+    color: var(--canvas);
+  }
+
+  .account-table tr.current-row {
+    background: color-mix(in srgb, var(--green) 8%, var(--canvas));
+  }
+
+  .account-table tr.current-row > td:first-child {
+    border-left-color: var(--green);
+  }
+
+  .remove-account {
+    background: var(--red);
+    border-color: var(--red);
+    color: var(--canvas);
+  }
+
+  .remove-account:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--red) 85%, black);
+    border-color: var(--red);
+  }
+</style>
