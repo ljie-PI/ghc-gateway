@@ -279,6 +279,67 @@ describe("Responses bridge request conversion", () => {
     expect(json(converted)).not.toHaveProperty("prompt_cache_key");
   });
 
+  describe("prompt cache routing", () => {
+    it.each([
+      { host: "api.openai.com", automatic: true },
+      { host: "api.githubcopilot.com", automatic: false },
+      { host: "upstream.example.test", automatic: false },
+      { host: "api.openai.com.example.test", automatic: false },
+      { host: undefined, automatic: false },
+    ])("preserves automatic and configured routing for $host", ({ host, automatic }) => {
+      const request = requestFromJson(JSON.stringify({
+        model: "gpt",
+        input: "hi",
+        prompt_cache_key: "  cache-key  ",
+      }));
+      for (const routing of [undefined, "auto", "enabled", "disabled"] as const) {
+        const converted = convertResponsesRequest(request, {
+          resolvedModel: "gpt",
+          toolContext: buildRequestToolContext(request),
+          reasoningConfig: null,
+          ...(host === undefined ? {} : { upstreamHost: host }),
+          ...(routing === undefined ? {} : { promptCacheRouting: routing }),
+          clientSessionId: "session-key",
+        });
+        const expectedKey = routing === "enabled" || (routing !== "disabled" && automatic)
+          ? ",\"prompt_cache_key\":\"cache-key\""
+          : "";
+        expect(new TextDecoder().decode(serializeWireJson(converted))).toBe(
+          `{"model":"gpt","messages":[{"role":"user","content":"hi"}]${expectedKey}}`,
+        );
+      }
+    });
+
+    it.each([
+      { explicit: "  request-key  ", session: "  session-key  ", expected: "request-key" },
+      { explicit: "request-key", session: undefined, expected: "request-key" },
+      { explicit: undefined, session: "  session-key  ", expected: "session-key" },
+      { explicit: "", session: "  session-key  ", expected: "session-key" },
+      { explicit: " \t ", session: "  session-key  ", expected: "session-key" },
+      { explicit: " \t ", session: " \t ", expected: undefined },
+      { explicit: undefined, session: undefined, expected: undefined },
+    ])("selects a nonempty key from $explicit and $session", ({ explicit, session, expected }) => {
+      const request = requestFromJson(JSON.stringify({
+        model: "gpt",
+        input: "hi",
+        ...(explicit === undefined ? {} : { prompt_cache_key: explicit }),
+      }));
+      const converted = convertResponsesRequest(request, {
+        resolvedModel: "gpt",
+        toolContext: buildRequestToolContext(request),
+        reasoningConfig: null,
+        upstreamHost: "upstream.example.test",
+        promptCacheRouting: "enabled",
+        ...(session === undefined ? {} : { clientSessionId: session }),
+      });
+      expect(json(converted)).toEqual({
+        model: "gpt",
+        messages: [{ role: "user", content: "hi" }],
+        ...(expected === undefined ? {} : { prompt_cache_key: expected }),
+      });
+    });
+  });
+
   it("classifies a missing Chat token dialect as unavailable capability", () => {
     const request = requestFromJson("{\"model\":\"chat\",\"input\":\"hi\",\"max_output_tokens\":9}");
     expect(() => convertResponsesRequest(request, {
