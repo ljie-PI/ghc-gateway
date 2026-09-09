@@ -1,18 +1,1620 @@
-event: message_start
-data: {"type":"message_start","message":{"id":"msg_01X9Z8Y7W6V5U4T3S2R1Q0P9","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}
+event:message_start
+data:{"type":"message_start","message":{"id":"msg_pRlpowXnRNe9i0uaPWbRP4Ts","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":94,"output_tokens":0,"service_tier":"standard","inference_geo":"not_available"}}}
 
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+event:content_block_start
+data:{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
 
-event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"pong"}}
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
 
-event: content_block_stop
-data: {"type":"content_block_stop","index":0}
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Purpose"}}
 
-event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**\n\n"}}
 
-event: message_stop
-data: {"type":"message_stop"}
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" production"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" HTTP"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gateway"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" terminates"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" client"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connections"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" fans"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" requests"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" upstream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" services"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" so"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" it"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" must"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" bound"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" every"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" phase"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" of"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" lifecycle"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" independently"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" govern"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" TCP"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" establishment"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" TLS"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" handshake"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ensuring"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gateway"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" never"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" waits"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" indefinitely"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" for"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" slow"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" malicious"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" client"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" complete"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" initial"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" handshake"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" First"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-byte"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" measure"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" interval"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" between"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sending"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" receiving"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" initial"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" response"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" headers"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" from"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" upstream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" catching"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" stalled"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" dead"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"locked"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" services"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" before"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" they"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" consume"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" worker"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" threads"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Idle"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-stream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" apply"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" periods"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" of"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" in"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"activity"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" during"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" streaming"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" transfers"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" where"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" data"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" flows"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" intermitt"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ently"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" without"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" them"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" client"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" could"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hold"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" open"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" indefinitely"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" by"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" drib"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"bling"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" bytes"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" slowly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Total"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cap"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" entire"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" end"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-end"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" duration"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" guaranteeing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" that"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" even"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" active"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" progressing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" requests"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" eventually"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" terminate"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Together"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" these"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" create"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" defense"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-in"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-depth"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" each"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeout"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" covers"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" distinct"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" window"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" where"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" resources"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"—"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"file"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" descriptors"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" memory"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" buffers"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" thread"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" pool"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" slots"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"—"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"remain"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" allocated"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n\n"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Failure"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" modes"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**\n\n"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Without"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" distinct"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gateways"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" face"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" distinct"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" failure"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" modes"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" that"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" single"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" limit"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cannot"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" prevent"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Slow"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lor"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"is"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" attacks"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" exploit"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" phases"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" by"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sending"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" partial"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" requests"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" at"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" intervals"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" below"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" typical"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" read"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" exhausting"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" capacity"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Up"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"stream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" services"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" may"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" accept"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" but"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" deadlock"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" before"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" responding"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" without"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" first"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-byte"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeout"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gateway"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" workers"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" block"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" forever"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" causing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cascading"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" thread"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" starvation"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" During"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" streaming"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" clients"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" upstream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"s"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" may"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" pause"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" mid"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-transfer"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" an"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" idle"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-stream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeout"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" detects"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" this"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" whereas"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" total"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeout"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" would"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" prematurely"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" kill"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" legitimate"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" long"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-running"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" downloads"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Conversely"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" relying"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" only"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" on"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" idle"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" permits"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" infinitely"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" running"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" requests"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" that"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" constantly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" trick"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"le"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" data"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Cancellation"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" propagation"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" is"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" critical"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" when"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" any"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeout"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" fires"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gateway"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" must"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" abort"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" upstream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" release"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" downstream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" client"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" socket"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" not"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" merely"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" stop"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" local"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" processing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-p"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ool"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cleanup"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" must"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" actively"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ev"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ict"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" closed"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timed"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-out"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sockets"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" otherwise"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" half"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-open"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connections"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" leak"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" subsequent"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" requests"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" inherit"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" broken"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" transports"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" triggering"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" spor"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"adic"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"502"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" errors"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n\n"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Operational"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" guidance"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**\n\n"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Configure"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" aggressively"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ("}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"seconds"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"),"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" first"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-byte"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" moderately"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ("}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"t"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ens"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" of"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" seconds"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"),"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" idle"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-stream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" tightly"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ("}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"minutes"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"),"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" total"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-request"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" generously"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ("}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"minutes"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hours"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" depending"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" on"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" streaming"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" needs"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":")."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Always"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" propagate"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cancellation"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" signals"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" upstream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"s"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" via"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" HTTP"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"/"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"2"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" RST"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"_STREAM"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" close"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ensuring"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" backend"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" resources"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" are"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" released"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Implement"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-p"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ool"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" re"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"aping"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" with"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" periodic"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" swe"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"eps"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" validation"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" remove"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" stale"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sockets"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" For"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" partial"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" streaming"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" responses"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" ensure"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" apply"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" inter"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-byte"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gaps"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" rather"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" than"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" aggregate"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" duration"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" allowing"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" large"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" file"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" transfers"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" complete"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Never"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" attempt"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" replace"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" these"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" with"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" single"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeout"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" short"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" total"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" limit"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" breaks"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" legitimate"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" streaming"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" while"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" long"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" one"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" permits"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" resource"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" exhaustion"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" during"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" setup"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" idle"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" phases"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n\n"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Operational"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" rule"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":**"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Always"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" enforce"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" tier"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ed"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" timeouts"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"—"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"connection"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" first"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-byte"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" idle"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-stream"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" total"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"—"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"because"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" each"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" protects"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" against"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" distinct"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" resource"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-ex"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"haust"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ion"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" failure"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" that"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" no"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" single"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" limit"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" can"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" safely"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" prevent"}}
+
+event:content_block_delta
+data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+
+event:content_block_stop
+data:{"type":"content_block_stop","index":0}
+
+event:message_delta
+data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":94,"output_tokens":545}}
+
+event:message_stop
+data:{"type":"message_stop"}
 

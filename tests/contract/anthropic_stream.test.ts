@@ -102,10 +102,12 @@ describe("Anthropic stream lifecycle", () => {
       expect(text).not.toContain("signature_delta");
       expect(text.match(/event: message_stop/gu)).toHaveLength(1);
       expect(text).toContain("\"cache_read_input_tokens\": 2");
+      expect(text).toContain("\"input_tokens\": 8");
       expect(usageUpdates).toMatchObject([{
         protocol: "anthropic",
         outcome: "success",
-        inputTokens: 8,
+        // Chat prompt 10 already includes cache-read 2; Messages wire remains 8.
+        inputTokens: 10,
         outputTokens: 4,
         cacheTokens: 2,
       }]);

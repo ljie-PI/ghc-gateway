@@ -6,6 +6,7 @@ import {
   type ReplaySdkHarness,
   startReplaySdkHarness,
 } from "./replay_harness.js";
+import { LONG_TEXT_PROMPT } from "./scenarios.js";
 
 describe("replay HTTP fault injection & stream cancellation acceptance", () => {
   let harness: ReplaySdkHarness;
@@ -29,7 +30,7 @@ describe("replay HTTP fault injection & stream cancellation acceptance", () => {
     it("cancels Chat streaming and tears down cleanly without emitting completed event", async () => {
       const stream = await client.chat.completions.create({
         model: CHAT_MODEL,
-        messages: [{ role: "user", content: "sdk-chat-stream" }],
+        messages: [{ role: "user", content: LONG_TEXT_PROMPT }],
         stream: true,
       });
 
@@ -50,7 +51,7 @@ describe("replay HTTP fault injection & stream cancellation acceptance", () => {
     it("cancels Responses streaming and tears down cleanly", async () => {
       const stream = await client.responses.create({
         model: NATIVE_RESPONSES_MODEL,
-        input: "sdk-responses-stream",
+        input: LONG_TEXT_PROMPT,
         stream: true,
       });
 
@@ -74,7 +75,7 @@ describe("replay HTTP fault injection & stream cancellation acceptance", () => {
       try {
         await client.chat.completions.create({
           model: CHAT_MODEL,
-          messages: [{ role: "user", content: "sdk-chat-nonstream" }],
+          messages: [{ role: "user", content: LONG_TEXT_PROMPT }],
         });
         expect.unreachable("should have thrown 502");
       } catch (err: unknown) {
@@ -88,7 +89,7 @@ describe("replay HTTP fault injection & stream cancellation acceptance", () => {
       try {
         await client.chat.completions.create({
           model: "unmapped-model",
-          messages: [{ role: "user", content: "sdk-chat-nonstream" }],
+          messages: [{ role: "user", content: LONG_TEXT_PROMPT }],
         });
         expect.unreachable("should have thrown error");
       } catch (err: unknown) {

@@ -90,6 +90,27 @@ describe("package entrypoints and toolchain", () => {
     }
   });
 
+  it("keeps recording explicit, content-free and absent from ordinary automation", async () => {
+    const pkg = await readPackageJson();
+    expect(Object.values(pkg.scripts).join("\n")).not.toMatch(/capture_upstream|capture_recorder|--execute/u);
+    const command = ["scripts/tooling/bootstrap.mjs", "scripts/tooling/capture_upstream.ts"];
+    const plan = await execFileAsync(process.execPath, command, {
+      windowsHide: true,
+      env: { ...process.env, GHC_GATEWAY_CI_NETWORK_GUARD: "1" },
+    });
+    expect(JSON.parse(plan.stdout)).toMatchObject({ executed: false, requests: 16, model: "gemini-3.5-flash", protocol: "chat" });
+    expect(plan.stderr).toBe("");
+    for (const args of [
+      ["--model", "private-prompt-marker"],
+      ["--execute", "--out", "private-prompt-marker"],
+      ["--no-dry-run"],
+      ["--execute", "--protocol", "messages"],
+    ]) {
+      await expect(execFileAsync(process.execPath, [...command, ...args], { windowsHide: true }))
+        .rejects.toMatchObject({ code: 1, stdout: "", stderr: expect.stringMatching(/^\{"error":"capture_(?:failed|invalid_options)"\}\r?\n$/u) });
+    }
+  });
+
   it("requires Node.js 24.20.0 or newer", () => {
     expect(currentNodeMajor()).toBeGreaterThanOrEqual(24);
     for (const version of ["22.20.0", "24.0.0", "24.19.9"]) {
