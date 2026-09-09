@@ -77,7 +77,8 @@ for (const width of [1440, 1100, 900, 851, 850, 601, 600, 390, 320]) {
       await expect(title).toBeFocused();
       expect(await title.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(32);
       if (view === "Overview") {
-        await expect(page.locator(".stat-row")).toBeVisible();
+        await expect(page.locator(".stat-row")).toHaveCount(3);
+        for (const row of await page.locator(".stat-row").all()) await expect(row).toBeVisible();
         await expect(page.locator(".hero-metrics article > strong").first()).toHaveCSS("font-size", "32px");
         await expect(page.locator(".stat-row strong").first()).toHaveCSS("font-size", "20px");
       }

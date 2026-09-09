@@ -8,23 +8,54 @@
     liveStatus,
     pageNumber,
   }: { client: AdminClient; liveStatus: AdminStatus | null; pageNumber: string } = $props();
+  const windows = [
+    { key: "24h", label: "Last 24 hours" },
+    { key: "7d", label: "Last 7 days" },
+    { key: "28d", label: "Last 28 days" },
+  ] as const;
   let status: AdminStatus | null = $state(null);
-  let usage: AdminUsagePage | null = $state(null);
+  let usage: { label: string; totals: AdminUsagePage["totals"] }[] | null = $state(null);
   let loading = $state(true);
   let failure = $state("");
   let current = $derived(liveStatus ?? status);
 
-  onMount(load);
+  let loadAbort: AbortController | null = null;
+  let disposed = false;
+
+  onMount(() => {
+    void load();
+    return () => {
+      disposed = true;
+      loadAbort?.abort();
+    };
+  });
 
   async function load(): Promise<void> {
+    if (loadAbort !== null || disposed) return;
+    const controller = new AbortController();
+    loadAbort = controller;
     loading = true;
     failure = "";
+    const requests = [
+      client.status(controller.signal),
+      ...windows.map(async (window) => ({
+        label: window.label,
+        totals: (await client.usage(window.key, controller.signal)).totals,
+      })),
+    ] as const;
     try {
-      [status, usage] = await Promise.all([client.status(), client.usage()]);
+      const [loadedStatus, ...loadedUsage] = await Promise.all(requests);
+      if (!disposed) {
+        status = loadedStatus;
+        usage = loadedUsage;
+      }
     } catch (error: unknown) {
-      failure = errorMessage(error);
+      controller.abort();
+      await Promise.allSettled(requests);
+      if (!disposed) failure = errorMessage(error);
     } finally {
-      loading = false;
+      loadAbort = null;
+      if (!disposed) loading = false;
     }
   }
 
@@ -37,7 +68,7 @@
     <h1 tabindex="-1">Overview</h1>
     <p>Health, usage, performance and bounded storage from the running gateway.</p>
   </div>
-  <button onclick={load}>Refresh</button>
+  <button class="primary" onclick={load} disabled={loading}>Refresh</button>
 </header>
 
 {#if loading}
@@ -77,15 +108,20 @@
   <section class="section">
     <div class="section-heading">
       <h2><span class="section-number">[01]</span>Usage ledger</h2>
-      <span class="chip">Last 24 hours</span>
     </div>
-    <div class="stat-row">
-      <div><span>Requests</span><strong>{number(usage.totals.requestCount)}</strong></div>
-      <div><span>Errors</span><strong>{number(usage.totals.errorCount)}</strong></div>
-      <div><span>Input tokens</span><strong>{number(usage.totals.inputTokens)}</strong></div>
-      <div><span>Output tokens</span><strong>{number(usage.totals.outputTokens)}</strong></div>
-      <div><span title="Cache read + write tokens, already included in input tokens">Cache tokens</span><strong>{number(usage.totals.cacheTokens)}</strong></div>
-    </div>
+    <p class="usage-note">Only retained hourly usage buckets are included.</p>
+    {#each usage as window (window.label)}
+      <section class="usage-window" aria-label={window.label}>
+        <h3>{window.label}</h3>
+        <div class="stat-row">
+          <div><span>Requests</span><strong>{number(window.totals.requestCount)}</strong></div>
+          <div><span>Errors</span><strong>{number(window.totals.errorCount)}</strong></div>
+          <div><span>Input tokens</span><strong>{number(window.totals.inputTokens)}</strong></div>
+          <div><span>Output tokens</span><strong>{number(window.totals.outputTokens)}</strong></div>
+          <div><span title="Cache read + write tokens, already included in input tokens">Cache tokens</span><strong>{number(window.totals.cacheTokens)}</strong></div>
+        </div>
+      </section>
+    {/each}
   </section>
   <section class="split-panels section">
     <article>
@@ -113,3 +149,8 @@
     </article>
   </section>
 {/if}
+
+<style>
+  .usage-note { color: var(--muted); font-size: 13px; }
+  .usage-window + .usage-window { margin-top: 24px; }
+</style>

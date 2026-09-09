@@ -284,7 +284,7 @@ test("model-refresh-invalidates-preference", async ({ page }) => {
   await page.getByRole("button", { name: "Models" }).click();
   await expect(page.getByRole("heading", { name: "Models", exact: true })).toBeFocused();
   await expect(page.getByText("gpt-alpha", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Refresh catalog" }).click();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toBeVisible();
   fixture.state.conflictModel = true;
   await page.getByRole("button", { name: "Set preferred" }).click();

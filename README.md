@@ -106,6 +106,12 @@ Admin security defaults:
 - bounded, replayable SSE monitoring with no WebSocket or remote Admin access
 
 The five views are Overview, Accounts, Models, Configuration, and Events.
+Overview shows cumulative usage for the last 24 hours, 7 days, and 28 days, using the gateway's clock
+and retained hourly Usage Buckets. These overlapping windows include only available data; shortening
+retention or clearing data cannot be undone by refreshing. Cache tokens are read + write tokens already included in input.
+Refresh reloads Overview statistics or the Accounts list; Accounts also clears old transient feedback.
+Feedback does not have a timed auto-dismiss. Models Refresh fetches a new account catalog; its generation
+and credential numbers are internal versions, and fetched is the last successful catalog-fetch time.
 Responses History is managed by the backend independently of the Admin UI; there is no dedicated history page.
 The Accounts view checks an active device authorization automatically at GitHub's required interval. Keep that
 view open until it reports completion; closing or leaving it stops browser polling, and no device code or token is

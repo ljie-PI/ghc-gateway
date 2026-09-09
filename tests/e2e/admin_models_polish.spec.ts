@@ -16,6 +16,50 @@ async function openModels(page: Page, configure?: (fixture: AdminFixture) => voi
   return fixture;
 }
 
+for (const width of [1440, 1100, 390, 320]) {
+  test(`Models account diagnostics align or wrap without clipping at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openModels(page);
+    const toolbar = page.locator(".toolbar").first();
+    const label = (await toolbar.locator("label").boundingBox())!;
+    const metadata = toolbar.locator(".subtle");
+    await expect(metadata).toContainText("Generation 1 · credential 1 · fetched");
+    const box = (await metadata.boundingBox())!;
+    if (width === 1440) {
+      expect(Math.abs(label.y + label.height / 2 - box.y - box.height / 2)).toBeLessThanOrEqual(1);
+    }
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(width);
+    expect(await metadata.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await toolbar.screenshot({ path: testInfo.outputPath(`model-account-toolbar-${width}.png`) });
+  });
+}
+
+test("Models hides the previous account diagnostics while the next catalog loads", async ({ page }) => {
+  const fixture = await openModels(page, (fixture) => {
+    const first = fixture.state.accounts.items[0]!;
+    fixture.state.accounts = { ...fixture.state.accounts, items: [first, {
+      ...first, accountId: "ghes:2", host: "github.example.test", login: "enterprise", displayName: "Enterprise Admin",
+    }] };
+  });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(/\/models\?accountId=ghes%3A2$/u, async (route) => {
+    await pending;
+    await route.fulfill({ json: { data: { ...fixture.state.models,
+      accountId: "ghes:2", catalogGeneration: 9, credentialGeneration: 4,
+    } } });
+  });
+  const metadata = page.locator(".toolbar").first().locator(".subtle");
+  try {
+    await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
+    await expect(page.getByText("Loading model catalog...", { exact: true })).toBeVisible();
+    await expect(metadata).toHaveCount(0);
+  } finally { release(); }
+  await expect(metadata).toContainText("Generation 9 · credential 4 · fetched");
+});
+
 function metadataCases(fixture: AdminFixture): void {
   const base = fixture.state.models.items[0]!;
   fixture.state.models = {
@@ -196,7 +240,7 @@ test("models refresh clears stale success, stays quiet on success, and retains e
   const fixture = await openModels(page);
   await page.locator("tbody[data-model-id=\"claude-beta\"]").getByRole("button", { name: "Set preferred" }).click();
   await expect(page.getByRole("status")).toHaveText("claude-beta is now preferred.");
-  const refresh = page.getByRole("button", { name: "Refresh catalog" });
+  const refresh = page.getByRole("button", { name: "Refresh", exact: true });
   await page.route("**/admin/api/v1/models/refresh", async (route) => {
     await route.fulfill({ status: 200, json: { data: fixture.state.models } });
   }, { times: 1 });
