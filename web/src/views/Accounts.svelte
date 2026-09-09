@@ -333,7 +333,7 @@
     <h1 tabindex="-1">Accounts</h1>
     <p>Connect GitHub.com or GHES and choose the identity used by new gateway requests.</p>
   </div>
-  <button onclick={() => void refresh()}>Refresh</button>
+  <button class="primary" onclick={() => void refresh()}>Refresh</button>
 </header>
 
 {#if message}

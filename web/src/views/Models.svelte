@@ -266,19 +266,19 @@
     <p>Inspect the account catalog and native interface metadata, or configure explicit overrides.</p>
   </div>
   <button class="primary" onclick={refresh} disabled={!accountId || busy === "refresh"}>
-    {busy === "refresh" ? "Refreshing..." : "Refresh catalog"}
+    {busy === "refresh" ? "Refreshing..." : "Refresh"}
   </button>
 </header>
 
-<section class="toolbar">
+<section class="toolbar account-toolbar">
   <label for="model-account">Account</label>
   <select id="model-account" bind:value={accountId} onchange={() => void load()}>
     {#each accounts?.items.filter((account) => account.state === "active") ?? [] as account (account.accountId)}
       <option value={account.accountId}>{account.login ?? account.host} · {account.host}</option>
     {/each}
   </select>
-  {#if data}
-    <span class="subtle">
+  {#if data && data.accountId === accountId}
+    <span class="subtle" title="Catalog cache version, account credential version and last successful catalog fetch time.">
       Generation {data.catalogGeneration} · credential {data.credentialGeneration} · fetched {new Date(data.fetchedAt).toLocaleString()}
     </span>
   {/if}
@@ -523,6 +523,9 @@
 {/if}
 
 <style>
+  .account-toolbar { align-items: center; }
+  .account-toolbar label { margin-bottom: 0; }
+
   .configured-model-form {
     display: grid;
     grid-template-columns: max-content minmax(0, 260px) max-content;

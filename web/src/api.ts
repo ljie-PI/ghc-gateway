@@ -45,8 +45,15 @@ export class AdminClient {
     return session;
   }
 
-  status(): Promise<AdminStatus> { return this.request("/status"); }
-  usage(): Promise<AdminUsagePage> { return this.request("/usage?limit=100"); }
+  status(signal?: AbortSignal): Promise<AdminStatus> {
+    return this.request("/status", signal === undefined ? undefined : { signal });
+  }
+  usage(window?: "24h" | "7d" | "28d", signal?: AbortSignal): Promise<AdminUsagePage> {
+    return this.request(
+      window === undefined ? "/usage?limit=100" : `/usage?limit=1&window=${window}`,
+      signal === undefined ? undefined : { signal },
+    );
+  }
   accounts(): Promise<AdminAccounts> { return this.request("/accounts"); }
   models(accountId?: string): Promise<AdminModels> {
     return this.request(`/models${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`);
