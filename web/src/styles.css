@@ -309,30 +309,14 @@ tr.current-row > td:last-child, .account-table tr > td:last-child { padding-righ
 .model-summary strong, .model-summary code { display: block; }
 .model-summary code { color: var(--muted); font-size: 13px; }
 .tag-group { display: flex; flex-wrap: wrap; gap: 5px; }
-.model-editor-row td { padding: 0 0 18px; }
-.model-editor { padding: 18px 20px; border: 1px solid var(--line); border-top: 0; background: var(--soft); }
-.model-editor summary { width: max-content; cursor: pointer; font-weight: 700; }
-.capability-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; margin-top: 16px; }
+.model-details-row td { padding: 0 0 18px; }
+.model-details { padding: 18px 20px; border: 1px solid var(--line); border-top: 0; background: var(--soft); }
+.model-details summary { width: max-content; cursor: pointer; font-weight: 700; }
+.capability-grid { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 16px; }
 .capability-grid dl { margin: 0; }
 .capability-grid dl div { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(0, 1.2fr); gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
 .capability-grid dt { color: var(--muted); }
 .capability-grid dd { margin: 0; overflow-wrap: anywhere; }
-.override-form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 18px;
-  align-content: start;
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.override-form > label { display: grid; gap: 5px; }
-.override-form > label.check { display: flex; align-items: center; gap: 8px; }
-.protocol-fieldset { grid-column: 1 / -1; margin: 0; padding: 12px; border: 1px solid var(--line); }
-.protocol-fieldset label { margin-right: 16px; }
-.model-actions { display: flex; flex-wrap: wrap; gap: 7px; grid-column: 1 / -1; }
-
 .config-form { display: grid; gap: 24px; }
 .config-form fieldset { margin: 0; padding: 18px 20px; border: 1px solid var(--line); }
 .config-form legend { padding: 0 8px; font-size: 14px; font-weight: 700; text-transform: uppercase; }
@@ -444,7 +428,7 @@ tr.current-row > td:last-child, .account-table tr > td:last-child { padding-righ
   .fact-strip > div:last-child { border-bottom: 0; }
   .fact-strip span { display: inline; margin-right: 10px; }
   .fact-strip strong { font-size: 16px; }
-  .split-panels, .two-columns, .config-grid, .override-form { grid-template-columns: 1fr; }
+  .split-panels, .two-columns, .config-grid { grid-template-columns: 1fr; }
   .metric-list li { grid-template-columns: minmax(0, 1fr) auto; }
   .metric-list small { grid-column: 1 / -1; }
   .inline-form, .device-flow { align-items: stretch; flex-direction: column; }
@@ -454,7 +438,6 @@ tr.current-row > td:last-child, .account-table tr > td:last-child { padding-righ
   .config-grid label { grid-template-columns: 1fr; }
   .config-grid .range { grid-column: 1; }
   .capability-grid dl div { grid-template-columns: 1fr; gap: 2px; }
-  .protocol-fieldset, .model-actions { grid-column: 1; }
   .event-row { grid-template-columns: 80px minmax(0, 1fr); gap: 8px 12px; }
   .event-row details { grid-column: 1 / -1; }
   .event-id { text-align: right; }

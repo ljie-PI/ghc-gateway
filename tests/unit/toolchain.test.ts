@@ -191,7 +191,7 @@ describe("package entrypoints and toolchain", () => {
     const productionText = `${await readFile("package.json", "utf8")}\n${await Promise.all(
       sourceFiles.filter((file) => file.endsWith(".ts")).map((file) => readFile(path.join("src", file), "utf8")),
     )}`;
-    expect(productionText).not.toMatch(/ghcp-ollama|ghcp-gateway|ghcpo-server|GHCPO_|\.ghcpo/u);
+    expect(productionText).not.toMatch(/ghcp-gateway|ghcpo-server|GHCPO_|\.ghcpo/u);
   });
 
   it("preloads the CI network guard without contacting external hosts", async () => {

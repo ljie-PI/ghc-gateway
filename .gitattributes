@@ -1,5 +1,4 @@
 * text=auto eol=lf
 tests/fixtures/**/*.expected.txt whitespace=-blank-at-eof
 tests/fixtures/copilot-transport/sse/done.input.txt whitespace=-blank-at-eof
-tests/fixtures/ollama/stream/success.input.txt whitespace=-blank-at-eof
 tests/fixtures/openai-chat/stream/done.input.txt whitespace=-blank-at-eof

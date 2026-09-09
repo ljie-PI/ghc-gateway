@@ -11,7 +11,6 @@ import { HttpCopilotModelsSource } from "./copilot/models_source.js";
 import { CopilotModelCatalog, type CopilotModelsSource } from "./copilot/model_catalog.js";
 import { productionBuiltinModelCapabilities } from "./copilot/model_metadata.js";
 import { ModelCapabilityRegistry } from "./copilot/capability_registry.js";
-import { SqliteModelCapabilityOverrides } from "./copilot/capability_overrides.js";
 import { HttpCopilotBackend } from "./copilot/transport.js";
 import type { CopilotBackend } from "./copilot/backend.js";
 import { getValidToken } from "./copilot/token_refresh.js";
@@ -163,7 +162,6 @@ export async function createProductionApplicationContext(
   });
   const runtime = new RuntimeConfigStore(database);
   const snapshot = runtime.seedIfEmpty(env);
-  const overrides = new SqliteModelCapabilityOverrides(database);
   const history = new SqliteResponsesHistory(database, {
     ttlDays: snapshot.history.ttlDays,
     accountIsActive: (accountId) => {
@@ -179,7 +177,6 @@ export async function createProductionApplicationContext(
     Date.now,
     snapshot.accounts.maxAuthenticated,
     (accountId) => {
-      overrides.clearAccount(accountId);
       history.clearAccount(accountId);
     },
   );
@@ -195,7 +192,7 @@ export async function createProductionApplicationContext(
     return { token, endpoint };
   });
   const catalog = new CopilotModelCatalog(modelsSource);
-  const registry = new ModelCapabilityRegistry(catalog, overrides, productionBuiltinModelCapabilities);
+  const registry = new ModelCapabilityRegistry(catalog, productionBuiltinModelCapabilities);
   const copilot = new HttpCopilotBackend({
     credentials,
     refreshCopilotToken,
@@ -331,7 +328,6 @@ export async function composeProductionDaemonGateway(
       registry,
       preferences: application.directory.preferences,
       preferredModels: new PreferredModelManager(application.directory.preferences),
-      capabilityOverrides: registry.overrides,
       runtimeConfig: {
         read: () => ({ revision: runtime.readRevision(), config: runtime.readSnapshot() }),
         updateAndApply: updateRuntimeConfig,

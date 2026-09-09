@@ -3,7 +3,6 @@ import type { AdminModuleDependencies } from "../../src/admin/routes.js";
 import type { AdminMonitorEvent, AdminTelemetry } from "../../src/telemetry/admin.js";
 import type { AdminModule, Gateway } from "../../src/gateway/create_gateway.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
-import type { ModelCapabilityOverrideValue } from "../../src/copilot/model_capabilities.js";
 
 const ORIGIN = "http://127.0.0.1:31400";
 
@@ -31,11 +30,6 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
   };
   let defaultRevision = 2;
   let defaultAccountId: string | null = account.accountId;
-  const capabilityOverrides = new Map<string, {
-    revision: number;
-    value: ModelCapabilityOverrideValue | null;
-  }>();
-  let capabilityRevision = 0;
   let preference: {
     readonly accountId: string;
     readonly revision: number;
@@ -45,20 +39,12 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
   } | null = null;
   const capabilitySnapshot = (
     bound: Awaited<ReturnType<NonNullable<AdminModuleDependencies["accounts"]["bindAccount"]>>>,
-    entries: ReadonlyMap<string, { revision: number; value: ModelCapabilityOverrideValue | null }>,
-    revision: number,
   ) => ({
     accountId: bound.accountId,
     credentialGeneration: bound.credentialGeneration,
     catalogGeneration: 7,
     fetchedAt: "2027-01-15T08:00:00.000Z",
-    capabilityRevision: revision,
-    models: [
-      capabilityModel("gpt-test", entries.get("gpt-test"), revision),
-      ...[...entries.entries()]
-        .filter(([modelId, stored]) => modelId !== "gpt-test" && stored.value !== null)
-        .map(([modelId, stored]) => capabilityModel(modelId, stored, revision)),
-    ],
+    models: [capabilityModel("gpt-test")],
   });
   const telemetry: AdminTelemetry = {
     async queryUsage(query, signal) {
@@ -165,27 +151,9 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       async get(bound, signal) {
         signal.throwIfAborted();
         calls.push(`catalog:${bound.accountId}`);
-        return capabilitySnapshot(bound, capabilityOverrides, capabilityRevision);
+        return capabilitySnapshot(bound);
       },
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
-      isCatalogCurrent: (snapshot) => snapshot.catalogGeneration === 7
-        && snapshot.credentialGeneration === 4,
-      previewOverride: async (account, modelId, candidate, expectedRevision, signal) => {
-        signal.throwIfAborted();
-        if (expectedRevision !== capabilityRevision) throw coded("revision_conflict");
-        if (candidate?.defaultOutputTokens !== undefined
-          && candidate.maxOutputTokens !== undefined
-          && candidate.defaultOutputTokens > candidate.maxOutputTokens) {
-          throw coded("validation_failed");
-        }
-        const preview = new Map(capabilityOverrides);
-        if (candidate === null) {
-          preview.delete(modelId);
-        } else {
-          preview.set(modelId, { revision: capabilityRevision + 1, value: structuredClone(candidate) });
-        }
-        return capabilitySnapshot(account, preview, capabilityRevision + 1);
-      },
     },
     preferences: {
       get: () => preference,
@@ -193,34 +161,17 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     preferredModels: {
       setPreferred: (accountId, modelId, expectedRevision, catalog) => {
         if (expectedRevision !== (preference?.revision ?? 0)) throw coded("revision_conflict");
-        if (!catalog.models.some((model) => model.modelId === modelId && model.visible)) throw new Error("model not in catalog");
+        if (!catalog.models.some((model) => model.modelId === modelId)) throw new Error("model not in catalog");
         preference = { accountId, revision: expectedRevision + 1, modelId, validity: "valid", catalogGeneration: catalog.catalogGeneration };
         return preference;
       },
       markInvalidIfMissing: (_accountId, catalog) => {
         calls.push("preference-invalidated");
         if (preference !== null
-          && !catalog.models.some((model) => model.modelId === preference?.modelId && model.visible)) {
+          && !catalog.models.some((model) => model.modelId === preference?.modelId)) {
           preference = { ...preference, revision: preference.revision + 1, validity: "invalid" };
         }
         return preference;
-      },
-    },
-    capabilityOverrides: {
-      set: (_accountId, modelId, candidate, expectedRevision, afterWrite) => {
-        if (capabilityRevision !== expectedRevision) throw coded("revision_conflict");
-        capabilityRevision += 1;
-        capabilityOverrides.set(modelId, {
-          revision: capabilityRevision,
-          value: structuredClone(candidate),
-        });
-        afterWrite?.();
-      },
-      reset: (_accountId, modelId, expectedRevision, afterWrite) => {
-        if (capabilityRevision !== expectedRevision) throw coded("revision_conflict");
-        capabilityRevision += 1;
-        capabilityOverrides.set(modelId, { revision: capabilityRevision, value: null });
-        afterWrite?.();
       },
     },
     runtimeConfig: {
@@ -262,25 +213,13 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
   };
 }
 
-function capabilityModel(
-  modelId: string,
-  stored?: { readonly revision: number; readonly value: ModelCapabilityOverrideValue | null },
-  capabilityRevision = 0,
-) {
-  const override = stored?.value ?? null;
-  const discovered = modelId === "gpt-test";
-  const protocols = override?.protocols ?? (discovered ? ["chat", "responses"] as const : null);
+function capabilityModel(modelId: string) {
   return {
     accountId: "github.com/42",
     modelId,
-    name: discovered ? "GPT Test" : modelId,
-    vendor: discovered ? "OpenAI" : "configured",
-    discovered,
-    configured: override !== null,
-    verified: discovered,
-    enabled: override?.enabled ?? discovered,
-    visible: override?.enabled ?? discovered,
-    protocols: { value: protocols, source: override?.protocols === undefined ? "live" as const : "admin_override" as const, conflict: false, liveState: discovered ? "value" as const : "missing" as const },
+    name: "GPT Test",
+    vendor: "OpenAI",
+    protocols: { value: ["chat", "responses"] as const, source: "live" as const, conflict: false, liveState: "value" as const },
     maxInputTokens: { value: 200_000, source: "builtin" as const, conflict: false, liveState: "missing" as const },
     maxOutputTokens: { value: 8_192, source: "builtin" as const, conflict: false, liveState: "missing" as const },
     defaultOutputTokens: {
@@ -297,8 +236,7 @@ function capabilityModel(
         liveState: "missing" as const,
       },
     },
-    revision: { overrideRevision: capabilityRevision, builtinRevision: discovered ? "test" : null },
-    override,
+    revision: { builtinRevision: "test" },
   };
 }
 

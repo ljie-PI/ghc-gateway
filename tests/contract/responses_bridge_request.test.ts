@@ -374,7 +374,6 @@ describe("Responses bridge request conversion", () => {
   function capability(modelId: string, protocols: readonly ("chat" | "responses")[]): ResolvedModel["capability"] {
     return {
       accountId: "test", modelId, name: modelId, vendor: "test",
-      discovered: true, configured: false, verified: true, enabled: true, visible: true, override: null,
       protocols: { value: protocols, source: "live", conflict: false, liveState: "value" },
       maxInputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
       maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
@@ -387,7 +386,7 @@ describe("Responses bridge request conversion", () => {
         supportedParameters: { value: [], source: "unknown", conflict: false, liveState: "missing" },
         reasoningEfforts: { value: null, source: "unknown", conflict: false, liveState: "missing" },
       },
-      revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
+      revision: { credentialGeneration: 0, catalogGeneration: 0, builtinRevision: null },
     };
   }
 });

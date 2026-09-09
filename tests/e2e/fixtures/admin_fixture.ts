@@ -91,7 +91,6 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
         credentialGeneration: 1,
         catalogGeneration: 1,
         fetchedAt: NOW,
-        capabilityRevision: 0,
         preferredModel: { revision: 1, modelId: "gpt-alpha", validity: "valid" },
         items: [
           modelItem({
@@ -188,22 +187,11 @@ function modelItem(input: {
   readonly vendor: string;
   readonly maxInputTokens: number;
   readonly maxOutputTokens: number;
-}, options: {
-  readonly discovered?: boolean;
-  readonly override?: NonNullable<AdminModels["items"][number]["override"]>;
-  readonly overrideRevision?: number;
-} = {}): AdminModels["items"][number] {
-  const discovered = options.discovered ?? true;
-  const override = options.override ?? null;
+}): AdminModels["items"][number] {
   return {
     ...input,
-    discovered,
-    configured: override !== null,
-    verified: discovered,
-    enabled: override?.enabled ?? true,
-    visible: override?.enabled ?? true,
-    protocols: override?.protocols ?? ["chat", "responses"],
-    protocolsSource: override?.protocols === undefined ? "live" : "admin_override",
+    protocols: ["chat", "responses"],
+    protocolsSource: "live",
     protocolsConflict: false,
     protocolsLiveState: "value",
     maxInputTokensSource: "builtin",
@@ -225,9 +213,7 @@ function modelItem(input: {
     chatOutputTokenFieldSource: "builtin",
     chatOutputTokenFieldConflict: false,
     chatOutputTokenFieldLiveState: "missing",
-    overrideRevision: options.overrideRevision ?? 0,
     builtinRevision: "test",
-    override,
   };
 }
 
@@ -293,54 +279,6 @@ async function handle(
         latencyMaxMs: 120,
       },
     });
-  }
-  if (path === "/models/capabilities" && request.method() === "PUT") {
-    const body = request.postDataJSON() as {
-      modelId: string;
-      capabilities: NonNullable<AdminModels["items"][number]["override"]>;
-    };
-    const existing = fixture.state.models.items.find((item) => item.id === body.modelId);
-    const nextRevision = fixture.state.models.capabilityRevision + 1;
-    const next = modelItem({
-      id: body.modelId,
-      name: existing?.name ?? body.modelId,
-      vendor: existing?.vendor ?? "configured",
-      maxInputTokens: body.capabilities.maxInputTokens ?? existing?.maxInputTokens ?? 0,
-      maxOutputTokens: body.capabilities.maxOutputTokens ?? existing?.maxOutputTokens ?? 0,
-    }, {
-      discovered: existing?.discovered ?? false,
-      override: body.capabilities,
-      overrideRevision: nextRevision,
-    });
-    fixture.state.models = {
-      ...fixture.state.models,
-      capabilityRevision: nextRevision,
-      items: existing === undefined
-        ? [...fixture.state.models.items, next]
-        : fixture.state.models.items.map((item) => item.id === body.modelId ? next : item),
-    };
-    return json(route, 200, fixture.state.models);
-  }
-  if (path === "/models/capabilities" && request.method() === "DELETE") {
-    const body = request.postDataJSON() as { modelId: string };
-    const existing = fixture.state.models.items.find((item) => item.id === body.modelId);
-    const nextRevision = fixture.state.models.capabilityRevision + 1;
-    fixture.state.models = {
-      ...fixture.state.models,
-      capabilityRevision: nextRevision,
-      items: existing?.discovered === true
-        ? fixture.state.models.items.map((item) => item.id === body.modelId
-          ? modelItem({
-            id: item.id,
-            name: item.name,
-            vendor: item.vendor,
-            maxInputTokens: item.maxInputTokens ?? 0,
-            maxOutputTokens: item.maxOutputTokens ?? 0,
-          }, { overrideRevision: nextRevision })
-          : item)
-        : fixture.state.models.items.filter((item) => item.id !== body.modelId),
-    };
-    return json(route, 200, fixture.state.models);
   }
   if (path === "/accounts") {
     const accounts = structuredClone(fixture.state.accounts);

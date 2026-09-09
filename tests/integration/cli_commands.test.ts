@@ -780,13 +780,6 @@ describe("CLI commands", () => {
       });
       try {
         for (const request of [
-          new Request("http://127.0.0.1:31400/api/version"),
-          new Request("http://127.0.0.1:31400/api/tags"),
-          new Request("http://127.0.0.1:31400/api/chat", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-          }),
           new Request("http://127.0.0.1:31400/models"),
         ]) {
           const response = await gateway.fetch(request);

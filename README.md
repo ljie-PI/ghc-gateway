@@ -83,11 +83,11 @@ ghcg models set <model-id>
 
 Preferred models are account-specific. If a catalog refresh removes a preferred model, it is marked invalid and must be explicitly reselected. The gateway never silently selects the first model.
 
-The Models Admin view shows account-scoped native HTTP capabilities for Chat, Messages, and Responses, including discovery/configuration state, source, conflicts, and revisions. It can set or reset bounded per-model overrides. An exact model ID absent from discovery may be explicitly enabled as configured/unverified; this does not prove account entitlement, and built-in model names are never exposed automatically.
+The Models Admin view shows read-only account-scoped native HTTP capabilities for Chat, Messages, and Responses, including metadata sources, conflicts, token limits, and catalog and built-in revisions. You can refresh the catalog and select a preferred model. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
 
 Unknown or malformed capability declarations remain unknown. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
 
-For conversions that require an output-token value, an explicit valid request value wins. Otherwise the model's configured default is used, followed by `min(8192, known output ceiling)` or `4096` when the ceiling is unknown. Invalid explicit request values are not replaced by a default.
+For conversions that require an output-token value, an explicit valid request value wins. Otherwise the model's upstream or built-in default is used, followed by `min(8192, known output ceiling)` or `4096` when the ceiling is unknown. Invalid explicit request values are not replaced by a default.
 
 ## Admin UI
 
@@ -132,7 +132,6 @@ All routes use the same loopback listener. Inference routes do not require a sep
 | `GET` | `/admin/*` | Admin static application |
 
 No unversioned, compact, trailing-slash, or legacy route aliases are registered.
-The retired Ollama-compatible routes `/api/chat`, `/api/tags`, and `/api/version` are not registered.
 Successful inference responses include the content-free
 `x-ghcg-upstream-protocol: chat|messages|responses` header so operators can verify the
 captured native or converted route without exposing credentials or request/response content.
@@ -231,7 +230,9 @@ Usage is content-free and retained for 90 days by default. Operational Events re
 
 ## Existing Installations
 
-The switch to Node.js built-in SQLite preserves the current `state.db` and `credentials.json` files. It requires no database reset, export/import, or reauthentication. Older, incompatible gateway data layouts and process state are not imported. No compatibility executable, environment, data-path, or runtime fallback aliases are provided.
+This release removes retired schema content and manual model capability settings. Existing databases may fail migration integrity checks; those checks remain strict, and old settings are not imported.
+
+Stop the gateway using its existing data directory before upgrading. Keep that directory intact as a private backup; do not edit its migration records or copy its database into a new directory. Start with a new, empty directory, for example `ghcg --data-dir <new-directory> serve`, then use the same `--data-dir <new-directory>` for `auth login` and subsequent management commands. Reauthenticate each account and reselect preferences and runtime settings. Do not delete the original directory or credential file as part of this process.
 
 ## Automation
 

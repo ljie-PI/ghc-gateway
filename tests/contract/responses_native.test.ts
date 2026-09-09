@@ -145,7 +145,6 @@ describe("native Responses execution", () => {
       source: "explicit",
       capability: {
         accountId: "test", modelId: "resolved", name: "resolved", vendor: "test",
-        discovered: true, configured: false, verified: true, enabled: true, visible: true, override: null,
         protocols: { value: ["responses"], source: "live", conflict: false, liveState: "value" },
         maxInputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
         maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
@@ -158,7 +157,7 @@ describe("native Responses execution", () => {
           supportedParameters: { value: null, source: "unknown", conflict: false, liveState: "missing" },
           reasoningEfforts: { value: null, source: "unknown", conflict: false, liveState: "missing" },
         },
-        revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
+        revision: { credentialGeneration: 0, catalogGeneration: 0, builtinRevision: null },
       },
     };
     const plan = planResponsesExecution(request, resolvedModel, {

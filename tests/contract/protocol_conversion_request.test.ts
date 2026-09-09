@@ -1425,12 +1425,6 @@ function capability(
     modelId: "target",
     name: "target",
     vendor: "test",
-    discovered: true,
-    configured: false,
-    verified: true,
-    enabled: true,
-    visible: true,
-    override: null,
     protocols: { value: protocols, source: "live", conflict: false, liveState: "value" },
     maxInputTokens: { value: 128_000, source: "live", conflict: false, liveState: "value" },
     maxOutputTokens: { value: maxTokens, source: maxTokens === null ? "unknown" : "live", conflict: false, liveState: maxTokens === null ? "missing" : "value" },
@@ -1468,7 +1462,6 @@ function capability(
     revision: {
       credentialGeneration: 0,
       catalogGeneration: 1,
-      overrideRevision: 0,
       builtinRevision: null,
     },
   };

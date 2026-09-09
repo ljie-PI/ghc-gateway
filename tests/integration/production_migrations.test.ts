@@ -7,7 +7,7 @@ import { createProductionApplicationContext } from "../../src/main.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { MIGRATION_MANIFEST } from "../../src/persistence/generated_migrations.js";
 
-const EXPECTED_VERSIONS = [1, 10, 20, 21, 30, 40, 41];
+const EXPECTED_VERSIONS = [1, 10, 20, 21, 30, 41];
 
 async function createStartup(): Promise<StartupConfig> {
   return {
@@ -44,14 +44,13 @@ describe("production migration manifest", () => {
       expect(rows?.map((row) => row.version)).toEqual(EXPECTED_VERSIONS);
       expect(rows?.map((row) => row.checksum)).toEqual(MIGRATION_MANIFEST.map((migration) => migration.checksum));
       expect(application.database?.prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'responses_history_state'",
-      ).get()).toEqual({ name: "responses_history_state" });
-      expect(application.database?.prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'model_capability_overrides'",
-      ).get()).toEqual({ name: "model_capability_overrides" });
-      expect(application.database?.prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'response_route_receipts'",
-      ).get()).toEqual({ name: "response_route_receipts" });
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+      ).all()).toEqual([
+        "account_model_preferences", "accounts", "gateway_preferences", "operational_events",
+        "response_calls", "response_receipt_uncertainty", "response_route_receipts", "response_scoped_calls",
+        "response_scoped_checkpoints", "responses", "responses_continuation_state", "responses_history_state",
+        "runtime_config", "schema_migrations", "telemetry_state", "usage_buckets",
+      ].map((name) => ({ name })));
     } finally {
       await application.close?.();
     }

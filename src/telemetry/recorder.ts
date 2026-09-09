@@ -12,8 +12,7 @@ export type TelemetryProtocol =
   | "openai_responses_unknown"
   | "openai_responses_native"
   | "openai_responses_bridge"
-  | "anthropic"
-  | "ollama";
+  | "anthropic";
 
 export type TelemetryOutcome =
   | "success"

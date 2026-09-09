@@ -6,7 +6,7 @@ export const migration = {
     "  utc_hour_ms INTEGER NOT NULL,",
     "  account_id TEXT NOT NULL,",
     "  protocol TEXT NOT NULL CHECK (protocol IN (",
-    "    'openai_chat', 'openai_responses_native', 'openai_responses_bridge', 'anthropic', 'ollama'",
+    "    'openai_chat', 'openai_responses_native', 'openai_responses_bridge', 'anthropic'",
     "  )),",
     "  resolved_model TEXT NOT NULL,",
     "  outcome TEXT NOT NULL CHECK (outcome IN (",
