@@ -77,14 +77,14 @@
   <section class="section">
     <div class="section-heading">
       <h2><span class="section-number">[01]</span>Usage ledger</h2>
-      <span class="chip">{usage.items.length} buckets</span>
+      <span class="chip">Last 24 hours</span>
     </div>
-    <p class="muted small">Content-free totals for the last 24 hours.</p>
     <div class="stat-row">
       <div><span>Requests</span><strong>{number(usage.totals.requestCount)}</strong></div>
       <div><span>Errors</span><strong>{number(usage.totals.errorCount)}</strong></div>
       <div><span>Input tokens</span><strong>{number(usage.totals.inputTokens)}</strong></div>
       <div><span>Output tokens</span><strong>{number(usage.totals.outputTokens)}</strong></div>
+      <div><span title="Cache read + write tokens, already included in input tokens">Cache tokens</span><strong>{number(usage.totals.cacheTokens)}</strong></div>
     </div>
   </section>
   <section class="split-panels section">

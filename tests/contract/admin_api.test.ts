@@ -4,6 +4,8 @@ import type { AdminModule } from "../../src/gateway/create_gateway.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
+import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
+import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { adminDependencies } from "./admin_test_harness.js";
 import { login } from "./admin_test_harness.js";
 
@@ -65,6 +67,60 @@ describe("Admin API", () => {
       expect((await read(harness.gateway, "/admin/api/v1/events?severity=info", session.cookie)).data).toEqual({ items: [], nextCursor: null });
     } finally {
       await harness.close();
+    }
+  });
+
+  it("serializes discovered prompt limits without conflating context windows or changing output metadata", async () => {
+    const dependencies = adminDependencies();
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return { data: [
+          { id: "explicit", limits: { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 } },
+          { id: "context-only", limits: { max_context_window_tokens: 144_000 } },
+          { id: "malformed", limits: { max_prompt_tokens: null, max_context_window_tokens: 144_000 } },
+        ].map(({ id, limits }) => ({
+          id, name: id, vendor: "test", model_picker_enabled: true,
+          capabilities: {
+            supported_endpoints: ["/responses"],
+            limits: { ...limits, max_output_tokens: 16_000 },
+            default_output_tokens: 8000,
+            chat_output_token_field: "max_completion_tokens",
+          },
+        })) };
+      },
+    }, () => new Date("2027-01-15T08:00:00Z"));
+    dependencies.registry.get = async (account, signal) => capabilitySnapshotFromCatalog(
+      account, await catalog.get(account.accountId, signal, account.credentialGeneration),
+    );
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = (await read(harness.gateway, "/admin/api/v1/models", session.cookie)).data as {
+        items: Array<Record<string, unknown>>;
+      };
+      expect(response).toMatchObject({ accountId: "github.com/42", credentialGeneration: 4, catalogGeneration: 0 });
+      expect(response.items.map((item) => ({
+        id: item.id,
+        value: item.maxInputTokens,
+        source: item.maxInputTokensSource,
+        conflict: item.maxInputTokensConflict,
+        liveState: item.maxInputTokensLiveState,
+      }))).toEqual([
+        { id: "explicit", value: 128_000, source: "live", conflict: false, liveState: "value" },
+        { id: "context-only", value: 144_000, source: "live", conflict: false, liveState: "value" },
+        { id: "malformed", value: null, source: "unknown", conflict: false, liveState: "malformed" },
+      ]);
+      for (const item of response.items) {
+        expect(item).toMatchObject({
+          protocols: ["responses"], protocolsSource: "live", protocolsLiveState: "value",
+          maxOutputTokens: 16_000, maxOutputTokensSource: "live", maxOutputTokensConflict: false, maxOutputTokensLiveState: "value",
+          defaultOutputTokens: { configured: 8000, effective: 8000, source: "live", valid: true },
+          chatOutputTokenField: "max_completion_tokens", chatOutputTokenFieldSource: "live",
+        });
+      }
+    } finally {
+      await harness.close();
+      await catalog.close();
     }
   });
 

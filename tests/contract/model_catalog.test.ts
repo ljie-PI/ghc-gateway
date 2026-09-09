@@ -92,6 +92,68 @@ describe("CAPI parse and cache", () => {
     expect(() => parseCapiModels({ data: [{ id: "x" }] })).toThrow(/invalid/u);
   });
 
+  it.each([
+    { name: "prompt and larger context window", fields: { capabilities: { limits: { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 } } }, expected: { state: "value", value: 128_000 } },
+    { name: "top-level input and context window", fields: { max_input_tokens: 128_000, capabilities: { limits: { max_context_window_tokens: 144_000 } } }, expected: { state: "value", value: 128_000 } },
+    { name: "model-info input and context window", fields: { model_info: { max_input_tokens: "128000" }, capabilities: { limits: { max_context_window_tokens: 144_000 } } }, expected: { state: "value", value: 128_000 } },
+    { name: "capabilities input and context window", fields: { capabilities: { max_input_tokens: 128_000, limits: { max_context_window_tokens: 144_000 } } }, expected: { state: "value", value: 128_000 } },
+    { name: "equal true aliases and different context window", fields: { max_input_tokens: 128_000, model_info: { max_input_tokens: "128000" }, capabilities: { max_input_tokens: 128_000, limits: { max_prompt_tokens: "128000", max_context_window_tokens: 144_000 } } }, expected: { state: "value", value: 128_000 } },
+    { name: "prompt only", fields: { capabilities: { limits: { max_prompt_tokens: 128_000 } } }, expected: { state: "value", value: 128_000 } },
+    { name: "context only", fields: { capabilities: { limits: { max_context_window_tokens: "144000" } } }, expected: { state: "value", value: 144_000 } },
+    { name: "malformed prompt and valid context", fields: { capabilities: { limits: { max_prompt_tokens: null, max_context_window_tokens: 144_000 } } }, expected: { state: "malformed" } },
+    { name: "no declarations", fields: {}, expected: { state: "missing" } },
+    { name: "empty containers", fields: { model_info: {}, capabilities: { limits: {} } }, expected: { state: "missing" } },
+  ])("parses input limits separately from context fallback: $name", ({ fields, expected }) => {
+    const [model] = parseCapiModels({ data: [{
+      id: "limits", name: "Limits", vendor: "test", model_picker_enabled: true, ...fields,
+    }] });
+    expect(model?.capabilities.maxInputTokens).toEqual(expected);
+  });
+
+  it.each([
+    { name: "top-level input", fields: (input: unknown) => ({ max_input_tokens: input, capabilities: { limits: { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 } } }) },
+    { name: "model-info input", fields: (input: unknown) => ({ model_info: { max_input_tokens: input }, capabilities: { limits: { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 } } }) },
+    { name: "capabilities input", fields: (input: unknown) => ({ capabilities: { max_input_tokens: input, limits: { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 } } }) },
+    { name: "prompt", fields: (input: unknown) => ({ max_input_tokens: 128_000, capabilities: { limits: { max_prompt_tokens: input, max_context_window_tokens: 144_000 } } }) },
+  ])("keeps conflicting or malformed true input aliases fail-closed: $name", ({ fields }) => {
+    for (const input of [64_000, undefined, null, false, 0, -1, 1.5, "", "0", "128000x", " 128000 ", Number.MAX_SAFE_INTEGER + 1, [], {}]) {
+      const [model] = parseCapiModels({ data: [{
+        id: "limits", name: "Limits", vendor: "test", model_picker_enabled: true, ...fields(input),
+      }] });
+      expect(model?.capabilities.maxInputTokens, `input: ${String(input)}`).toEqual({ state: "malformed" });
+    }
+  });
+
+  it("ignores malformed context values only when explicit input is valid", () => {
+    for (const context of [undefined, null, false, 0, -1, 1.5, "", "144000x", Number.MAX_SAFE_INTEGER + 1, [], {}]) {
+      for (const explicit of [{}, { max_prompt_tokens: 128_000 }, { max_prompt_tokens: null }]) {
+        const [model] = parseCapiModels({ data: [{
+          id: "limits", name: "Limits", vendor: "test", model_picker_enabled: true,
+          capabilities: { limits: { ...explicit, max_context_window_tokens: context } },
+        }] });
+        expect(model?.capabilities.maxInputTokens).toEqual(explicit.max_prompt_tokens === 128_000
+          ? { state: "value", value: 128_000 }
+          : { state: "malformed" });
+      }
+    }
+  });
+
+  it.each([
+    { name: "model-info", fields: (container: unknown) => ({ model_info: container, capabilities: { limits: { max_context_window_tokens: 144_000 } } }) },
+    { name: "capabilities", fields: (container: unknown) => ({ capabilities: container }) },
+    { name: "limits", fields: (container: unknown) => ({ capabilities: { limits: container } }) },
+  ])("keeps invalid input containers fail-closed even with valid input: $name", ({ fields }) => {
+    for (const container of [undefined, null, false, 128_000, "128000", []]) {
+      for (const explicit of [{}, { max_input_tokens: 128_000 }]) {
+        const [model] = parseCapiModels({ data: [{
+          id: "limits", name: "Limits", vendor: "test", model_picker_enabled: true,
+          ...explicit, ...fields(container),
+        }] });
+        expect(model?.capabilities.maxInputTokens).toEqual({ state: "malformed" });
+      }
+    }
+  });
+
   it("preserves explicit live capability fields without a global metadata map", async () => {
     const source = new HttpCopilotModelsSource(
       async () => ({ token: "token", endpoint: "https://api.githubcopilot.com" }),
@@ -102,8 +164,11 @@ describe("CAPI parse and cache", () => {
         model_picker_enabled: true,
         capabilities: {
           supported_endpoints: ["/responses", "/v1/chat/completions"],
-          max_input_tokens: "128000",
-          max_output_tokens: 64_000,
+          limits: {
+            max_prompt_tokens: "128000",
+            max_context_window_tokens: 144_000,
+            max_output_tokens: 64_000,
+          },
           chat_output_token_field: "max_completion_tokens",
         },
       }] })),
@@ -119,10 +184,20 @@ describe("CAPI parse and cache", () => {
       chatOutputTokenField: { state: "value", value: "max_completion_tokens" },
     });
     const effective = capabilitySnapshotFromCatalog(bound("github.com/1"), snapshot);
-    expect(JSON.parse(serializeOpenAiModels(effective)).data[0]).toMatchObject({
+    expect(JSON.parse(serializeOpenAiModels(effective)).data[0]).toEqual({
+      id: "native", object: "model", created: 1_677_610_602, owned_by: "openai",
       max_input_tokens: 128_000,
       max_output_tokens: 64_000,
     });
+    expect(JSON.parse(serializeAnthropicModels(effective)).data[0]).toEqual({
+      type: "model", id: "native", display_name: "native", created_at: "2023-02-28T18:56:42Z",
+      max_input_tokens: 128_000,
+      max_tokens: 64_000,
+    });
+    expect(effective.models[0]?.defaultOutputTokens).toMatchObject({
+      effective: 8192, source: "known_ceiling", valid: true,
+    });
+    await catalog.close();
   });
 
   it("does not write cache after invalidate generation change", async () => {

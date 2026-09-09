@@ -336,7 +336,7 @@
       <p>Discovered means the model is in the upstream catalog; Configured means an Admin override exists.</p>
       <p>Protocols identifies the source of native interface metadata: Upstream, Admin override, Built-in, or Unknown.
         These are metadata, not live inference validation or proof of account entitlement.</p>
-      <p>Token limits apply to each request, not account quota.</p>
+      <p>Token limits apply to each request, not account quota. The input limit may be lower than the model's full context window.</p>
     </details>
     <div class="table-scroll">
       <table class="model-table" aria-describedby="model-catalog-help">
