@@ -3,15 +3,19 @@ import { installAdminFixture, type AdminFixture } from "./fixtures/admin_fixture
 
 test.use({ locale: "en-US" });
 
+async function navigateTo(page: Page, view: "Overview" | "Models"): Promise<void> {
+  const menu = page.getByRole("button", { name: "Open navigation" });
+  if (await menu.isVisible()) await menu.click();
+  await page.getByRole("button", { name: view, exact: true }).click();
+  await expect(page.getByRole("heading", { name: view, exact: true })).toBeVisible();
+}
+
 async function openModels(page: Page, configure?: (fixture: AdminFixture) => void): Promise<AdminFixture> {
   const fixture = await installAdminFixture(page);
   configure?.(fixture);
   await page.goto("/admin/#bootstrap_token=synthetic-models-bootstrap");
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
-  const menu = page.getByRole("button", { name: "Open navigation" });
-  if (await menu.isVisible()) await menu.click();
-  await page.getByRole("button", { name: "Models", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Models", exact: true })).toBeVisible();
+  await navigateTo(page, "Models");
   await expect(page.getByRole("table")).toBeVisible();
   return fixture;
 }
@@ -33,6 +37,30 @@ for (const width of [1440, 1100, 390, 320]) {
     expect(await metadata.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await toolbar.screenshot({ path: testInfo.outputPath(`model-account-toolbar-${width}.png`) });
+  });
+}
+
+for (const width of [1440, 390, 320]) {
+  test(`Models keeps the empty Account selector width at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const fixture = await openModels(page);
+    const populated = page.getByRole("combobox", { name: "Account", exact: true });
+    const populatedBox = (await populated.boundingBox())!;
+
+    fixture.state.accounts = { ...fixture.state.accounts, defaultAccountId: null, items: [] };
+    await navigateTo(page, "Overview");
+    await navigateTo(page, "Models");
+
+    const empty = page.getByRole("combobox", { name: "Account", exact: true });
+    await expect(empty).toHaveValue("");
+    await expect(empty.getByRole("option")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "No active account", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeDisabled();
+    const emptyBox = (await empty.boundingBox())!;
+    expect(Math.abs(emptyBox.width - populatedBox.width)).toBeLessThanOrEqual(1);
+    expect(emptyBox.x).toBeGreaterThanOrEqual(0);
+    expect(emptyBox.x + emptyBox.width).toBeLessThanOrEqual(width);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   });
 }
 

@@ -262,6 +262,7 @@
 <style>
   .account-toolbar { align-items: center; }
   .account-toolbar label { margin-bottom: 0; }
+  .account-toolbar select { width: 280px; max-width: 100%; }
 
   .catalog-help {
     margin-bottom: 16px;

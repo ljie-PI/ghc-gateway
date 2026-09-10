@@ -462,7 +462,6 @@ tr.current-row > td:last-child, .account-table tr > td:last-child { padding-righ
 .agent-mapping-row { display: flex; gap: 12px; align-items: end; margin: 16px 0; flex-wrap: wrap; }
 .agent-mapping-row label { display: grid; gap: 6px; flex: 1 1 200px; min-width: 0; }
 .agent-mapping-row input { width: 100%; min-width: 0; }
-.agent-role { flex: 0 0 64px; align-self: center; }
 .agent-actions p { flex: 1 1 180px; }
 .agent-details { margin-top: 20px; }
 .agent-card summary { cursor: pointer; padding: 8px 0; }
@@ -471,6 +470,5 @@ tr.current-row > td:last-child, .account-table tr > td:last-child { padding-righ
 @media (max-width: 600px) {
   .agent-card { padding: 16px; }
   .agent-mapping-row { align-items: stretch; }
-  .agent-role { flex-basis: 100%; }
   .agent-mapping-row label { flex-basis: 100%; }
 }

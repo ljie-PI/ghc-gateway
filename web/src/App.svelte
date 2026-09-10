@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { AdminClient, errorMessage, takeBootstrapToken } from "./api.js";
+  import type { AgentStatus, AgentsView } from "../../src/agents/types.js";
   import type {
     AdminOperationalEvent,
     AdminSessionMetadata,
@@ -33,6 +34,9 @@
   let workspace: HTMLElement | null = $state(null);
   let menuButton: HTMLButtonElement | null = $state(null);
   let navigation: HTMLElement | null = $state(null);
+  let agentsSnapshot: AgentsView | null = $state(null);
+  let agentsRequest: { readonly controller: AbortController; readonly promise: Promise<AgentsView> } | null = null;
+  let agentsGeneration = 0;
   let pageNumber = $derived(String(views.indexOf(view) + 1).padStart(2, "0"));
   const client = new AdminClient(teardown);
 
@@ -104,6 +108,7 @@
   function teardown(): void {
     closeStream();
     client.clear();
+    clearAgentsSnapshot();
     session = null;
     liveStatus = null;
     liveEvents = [];
@@ -111,6 +116,45 @@
     phase = "signed-out";
     authError = "Your admin session ended. Run `ghcg admin open` to reconnect.";
     requestAnimationFrame(() => signedOutPanel?.focus());
+  }
+
+  function clearAgentsSnapshot(): void {
+    agentsGeneration += 1;
+    agentsRequest?.controller.abort();
+    agentsRequest = null;
+    agentsSnapshot = null;
+  }
+
+  function loadAgents(refresh = false): Promise<AgentsView> {
+    if (!refresh && agentsSnapshot !== null) return Promise.resolve(agentsSnapshot);
+    if (agentsRequest !== null) return agentsRequest.promise;
+    const generation = agentsGeneration;
+    const controller = new AbortController();
+    let promise: Promise<AgentsView>;
+    promise = client.agents(controller.signal).then((loaded) => {
+      if (agentsGeneration === generation) agentsSnapshot = loaded;
+      return loaded;
+    }).catch((error: unknown) => {
+      if (agentsGeneration !== generation && agentsSnapshot !== null) return agentsSnapshot;
+      throw error;
+    }).finally(() => {
+      if (agentsRequest?.promise === promise) agentsRequest = null;
+    });
+    agentsRequest = { controller, promise };
+    return promise;
+  }
+
+  function updateAgent(status: AgentStatus): void {
+    if (agentsSnapshot === null) return;
+    const snapshot = agentsSnapshot;
+    agentsGeneration += 1;
+    const staleRequest = agentsRequest;
+    agentsRequest = null;
+    staleRequest?.controller.abort();
+    agentsSnapshot = {
+      ...snapshot,
+      items: snapshot.items.map((item) => item.id === status.id ? status : item),
+    };
   }
 
   async function logout(): Promise<void> {
@@ -237,7 +281,13 @@
           {:else if view === "Models"}
             <Models {client} {pageNumber} />
           {:else if view === "Agents"}
-            <Agents {client} {pageNumber} />
+            <Agents
+              {client}
+              {pageNumber}
+              data={agentsSnapshot}
+              onload={loadAgents}
+              onchanged={updateAgent}
+            />
           {:else if view === "Configuration"}
             <Configuration {client} {pageNumber} />
           {:else}

@@ -56,6 +56,8 @@ export interface AdminFixture {
     agents: Record<"claude" | "codex", AgentStatus>;
     agentsCatalogRevision: string | null;
     agentsApplyConflict: boolean;
+    agentsDelayMs: number;
+    failAgents: boolean;
     cancelCompletesDeviceFlow: boolean;
     streamBodies: string[];
     streamDelaysMs: number[];
@@ -143,6 +145,8 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       agents: { claude: agentStatus("claude", 1), codex: agentStatus("codex", 7) },
       agentsCatalogRevision: "c".repeat(64),
       agentsApplyConflict: false,
+      agentsDelayMs: 0,
+      failAgents: false,
       cancelCompletesDeviceFlow: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
       streamDelaysMs: [],
@@ -309,11 +313,15 @@ async function handle(
     });
   }
   if (path === "/agents") {
+    if (fixture.state.failAgents) return failure(route, 500, "internal_error");
     const view: AgentsView = {
       items: [structuredClone(fixture.state.agents.claude), structuredClone(fixture.state.agents.codex)],
       catalogRevision: fixture.state.agentsCatalogRevision,
       modelsAvailable: fixture.state.agentsCatalogRevision !== null,
     };
+    if (fixture.state.agentsDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, fixture.state.agentsDelayMs));
+    }
     return json(route, 200, view);
   }
   if (path === "/agents/apply" && request.method() === "POST") {

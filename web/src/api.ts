@@ -59,7 +59,9 @@ export class AdminClient {
   models(accountId?: string): Promise<AdminModels> {
     return this.request(`/models${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`);
   }
-  agents(): Promise<AgentsView> { return this.request("/agents"); }
+  agents(signal?: AbortSignal): Promise<AgentsView> {
+    return this.request("/agents", signal === undefined ? undefined : { signal });
+  }
   applyAgent(value: AgentApplyRequest): Promise<AgentStatus> { return this.mutate("/agents/apply", "POST", value); }
   restoreAgent(value: AgentRestoreRequest): Promise<AgentStatus> { return this.mutate("/agents/restore", "POST", value); }
   config(): Promise<AdminRuntimeConfig> { return this.request("/config"); }
