@@ -226,12 +226,61 @@ describe("DaemonController lifecycle", () => {
     expect(fixture.removed).toEqual([FIRST]);
   });
 
-  it("forces after at most 10 seconds including status, stop, probes, and delays", async () => {
+  it("starts the graceful stop window after the initial running inspection", async () => {
     const fixture = harness({ identity: FIRST });
+    let stopSentAt: number | undefined;
+    fixture.controlRequest = async (identity, method) => {
+      if (method === "GET") {
+        fixture.elapsedMs += 3_500;
+      } else {
+        stopSentAt = fixture.elapsedMs;
+      }
+      return method === "GET"
+        ? { state: "running", instance: instanceOf(identity) }
+        : { instance: instanceOf(identity) };
+    };
+    fixture.processIdentityOverride = async (pid) => {
+      if (stopSentAt !== undefined && fixture.elapsedMs - stopSentAt >= 6_600) {
+        return null;
+      }
+      return fixture.processes.get(pid) ?? null;
+    };
+
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped" });
+    expect(stopSentAt).toBe(3_500);
+    expect(fixture.elapsedMs).toBe(10_100);
+    expect(fixture.terminate).not.toHaveBeenCalled();
+    expect(fixture.removed).toEqual([FIRST]);
+  });
+
+  it("continues to verified force cleanup when the final graceful process probe reaches its deadline", async () => {
+    const fixture = harness({ identity: FIRST });
+    let stopRequested = false;
+    fixture.controlRequest = async (identity, method) => {
+      if (method === "POST") stopRequested = true;
+      return method === "GET"
+        ? { state: "running", instance: instanceOf(identity) }
+        : { instance: instanceOf(identity) };
+    };
+    fixture.processIdentityOverride = async (pid) => {
+      if (stopRequested) fixture.elapsedMs += 9_950;
+      return fixture.processes.get(pid) ?? null;
+    };
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped" });
+    expect(fixture.terminate).toHaveBeenCalledWith(FIRST);
+    expect(fixture.removed).toEqual([FIRST]);
+  });
+
+  it("forces after the post-stop grace window when the process keeps running", async () => {
+    const fixture = harness({ identity: FIRST });
+    let stopSentAt = 0;
     let terminatedAt = Number.POSITIVE_INFINITY;
     let controlCalls = 0;
     fixture.controlRequest = async (identity, method) => {
       fixture.elapsedMs += controlCalls === 0 ? 2_000 : 3_000;
+      if (method === "POST") stopSentAt = fixture.elapsedMs;
       controlCalls += 1;
       return method === "GET"
         ? { state: "running", instance: instanceOf(identity) }
@@ -247,7 +296,9 @@ describe("DaemonController lifecycle", () => {
     };
 
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped" });
-    expect(terminatedAt).toBeLessThanOrEqual(10_000);
+    expect(stopSentAt).toBe(5_050);
+    expect(terminatedAt - stopSentAt).toBeGreaterThanOrEqual(9_900);
+    expect(terminatedAt - stopSentAt).toBeLessThanOrEqual(10_000);
     expect(fixture.terminate).toHaveBeenCalledOnce();
   });
 
