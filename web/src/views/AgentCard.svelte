@@ -34,6 +34,10 @@
       : (status.id === "claude" ? ["Sonnet", "Opus", "Haiku"] : [""]).map((displayName) => ({ displayName, modelId: "" }));
     baseline = JSON.stringify(drafts);
   }
+  function mappingName(index: number): string {
+    if (status.id === "codex") return `Model ${index + 1}`;
+    return index === 3 ? "Subagent" : ["Sonnet", "Opus", "Haiku"][index] ?? `Mapping ${index + 1}`;
+  }
   function setRow(index: number, key: keyof AgentMapping, value: string): void {
     drafts = drafts.map((row, i) => i === index ? { ...row, [key]: value } : row);
     notice = "";
@@ -73,16 +77,15 @@
   <form onsubmit={(event) => { event.preventDefault(); void mutate(false); }}>
     <fieldset disabled={busy}>
       <legend>Model mapping</legend>
-      <p class="muted" id={`${status.id}-mapping-help`}>The first row is the startup model. Display names are labels; Copilot model IDs are sent unchanged.</p>
+      <p class="muted" id={`${status.id}-mapping-help`}>{status.id === "claude" ? "Rows are ordered Sonnet, Opus, Haiku. " : ""}The first row is the startup model. Display names are labels; Copilot model IDs are sent unchanged.</p>
       {#each drafts as row, index (index)}
         {#if index < 3 || status.id === "codex"}
           <div class="agent-mapping-row">
-            {#if status.id === "claude"}<strong class="agent-role">{["Sonnet", "Opus", "Haiku"][index]}</strong>{/if}
-            <label>Display name
+            <label><span><span class="visually-hidden">{mappingName(index)} </span>Display name</span>
               <input type="text" value={row.displayName} maxlength="80" required aria-describedby={`${status.id}-mapping-help`}
                 oninput={(event) => setRow(index, "displayName", event.currentTarget.value)} />
             </label>
-            <label>Copilot model ID
+            <label><span><span class="visually-hidden">{mappingName(index)} </span>Copilot model ID</span>
               <input type="text" value={row.modelId} maxlength="128" required spellcheck="false" autocomplete="off"
                 oninput={(event) => setRow(index, "modelId", event.currentTarget.value)} />
             </label>
@@ -97,11 +100,11 @@
       {:else}
         <details>
           <summary>Additional settings</summary>
+          <p class="muted">Optional model Claude Code uses for delegated subagent work. If omitted, Claude Code uses its own defaults.</p>
           {#if drafts[3]}
             <div class="agent-mapping-row">
-              <strong class="agent-role">Subagent</strong>
-              <label>Display name<input type="text" value={drafts[3].displayName} maxlength="80" required oninput={(event) => setRow(3, "displayName", event.currentTarget.value)} /></label>
-              <label>Copilot model ID<input type="text" value={drafts[3].modelId} maxlength="128" required oninput={(event) => setRow(3, "modelId", event.currentTarget.value)} /></label>
+              <label><span><span class="visually-hidden">Subagent </span>Display name</span><input type="text" value={drafts[3].displayName} maxlength="80" required oninput={(event) => setRow(3, "displayName", event.currentTarget.value)} /></label>
+              <label><span><span class="visually-hidden">Subagent </span>Copilot model ID</span><input type="text" value={drafts[3].modelId} maxlength="128" required oninput={(event) => setRow(3, "modelId", event.currentTarget.value)} /></label>
               <button type="button" onclick={() => drafts = drafts.slice(0, 3)}>Remove subagent mapping</button>
             </div>
           {:else}
@@ -112,7 +115,7 @@
     </fieldset>
     <div class="agent-actions">
       <p aria-live="polite">{dirty ? "Unapplied changes" : "No unapplied changes"}</p>
-      <button class="primary" disabled={busy || !dirty || !valid || !applyAllowed || catalogRevision === null}>Apply changes</button>
+      <button class="primary" type="submit" disabled={busy || !dirty || !valid || !applyAllowed || catalogRevision === null}>Apply changes</button>
       <button type="button" disabled={busy || !status.canRestore} onclick={() => void mutate(true)}>Restore</button>
     </div>
   </form>
