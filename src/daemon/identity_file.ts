@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { InvalidWindowsIdentityError, WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
 import { captureProcessStartIdentity } from "./process_identity.js";
 
 export interface DaemonIdentity {
@@ -86,6 +87,7 @@ export class DaemonIdentityFile {
   private readonly lockPath: string;
   private readonly platform: NodeJS.Platform;
   private readonly runCommand: (file: string, args: readonly string[]) => string;
+  private readonly windowsAcl: WindowsAcl;
   private readonly processIdentity: (pid: number) => Promise<string | null>;
 
   constructor(directory: string, options: DaemonIdentityFileOptions = {}) {
@@ -94,6 +96,7 @@ export class DaemonIdentityFile {
     this.lockPath = path.join(this.directory, "daemon.lock");
     this.platform = options.platform ?? process.platform;
     this.runCommand = options.runCommand ?? defaultRunCommand;
+    this.windowsAcl = new WindowsAcl(this.runCommand);
     this.processIdentity = options.processIdentity ?? captureProcessStartIdentity;
   }
 
@@ -388,26 +391,30 @@ export class DaemonIdentityFile {
   }
 
   private restrictWindowsAcl(target: string, directory: boolean): void {
-    const current = currentWindowsIdentity(this.runCommand);
-    const grant = directory ? `*${current.sid}:(OI)(CI)(F)` : `*${current.sid}:(F)`;
-    this.runCommand("icacls", [target, "/setowner", `*${current.sid}`]);
-    this.runCommand("icacls", [target, "/inheritance:r", "/grant:r", grant]);
-    for (const identity of windowsAclIdentities(target, this.runCommand)) {
-      if (!isCurrentWindowsIdentity(identity, current)) {
-        this.runCommand("icacls", [target, "/remove:g", identity]);
-      }
-    }
+    const current = this.currentWindowsIdentity();
+    this.windowsAcl.restrict(target, directory, { setOwner: true, currentIdentity: current });
   }
 
   private assertWindowsAcl(target: string): void {
-    const current = currentWindowsIdentity(this.runCommand);
+    const current = this.currentWindowsIdentity();
     const owner = windowsOwner(target, this.runCommand);
-    if (!isCurrentWindowsIdentity(owner, current)) {
+    if (!this.windowsAcl.isCurrentIdentity(owner, current)) {
       throw new DaemonIdentityFileError("unsafe_owner", "daemon path must be owned by the current user");
     }
-    const identities = windowsAclIdentities(target, this.runCommand);
-    if (identities.length !== 1 || !isCurrentWindowsIdentity(identities[0] ?? "", current)) {
+    const identities = this.windowsAcl.identities(target);
+    if (identities.length !== 1 || !this.windowsAcl.isCurrentIdentity(identities[0] ?? "", current)) {
       throw new DaemonIdentityFileError("unsafe_permissions", "daemon ACL must be restricted to the current user");
+    }
+  }
+
+  private currentWindowsIdentity() {
+    try {
+      return this.windowsAcl.currentIdentity();
+    } catch (error: unknown) {
+      if (error instanceof InvalidWindowsIdentityError) {
+        throw new DaemonIdentityFileError("unsafe_owner", "unable to resolve current Windows identity");
+      }
+      throw error;
     }
   }
 
@@ -575,41 +582,9 @@ function isAlreadyExists(error: unknown): boolean {
 
 function defaultRunCommand(file: string, args: readonly string[]): string {
   const resolved = process.platform === "win32" && (file === "whoami" || file === "icacls")
-    ? path.join(process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows", "System32", `${file}.exe`)
+    ? windowsCommandPath(file)
     : file;
   return execFileSync(resolved, [...args], { encoding: "utf8", windowsHide: true });
-}
-
-function currentWindowsIdentity(runCommand: (file: string, args: readonly string[]) => string): {
-  readonly name: string;
-  readonly sid: string;
-} {
-  const output = runCommand("whoami", ["/user", "/fo", "csv", "/nh"]).trim();
-  const match = /^"([^"]+)","([^"]+)"$/u.exec(output);
-  if (match === null || match[1] === undefined || match[2] === undefined) {
-    throw new DaemonIdentityFileError("unsafe_owner", "unable to resolve current Windows identity");
-  }
-  return { name: match[1].toLowerCase(), sid: match[2].toLowerCase() };
-}
-
-function windowsAclIdentities(
-  target: string,
-  runCommand: (file: string, args: readonly string[]) => string,
-): readonly string[] {
-  const output = runCommand("icacls", [target]);
-  const identities: string[] = [];
-  for (const rawLine of output.split(/\r?\n/u)) {
-    const line = rawLine.trim();
-    if (line.length === 0 || line.startsWith("Successfully processed") || line.startsWith("Failed processing")) {
-      continue;
-    }
-    const entry = rawLine.startsWith(target) ? rawLine.slice(target.length).trim() : line;
-    const separator = entry.indexOf(":(");
-    if (separator > 0) {
-      identities.push(entry.slice(0, separator));
-    }
-  }
-  return identities;
 }
 
 function windowsOwner(
@@ -626,14 +601,6 @@ function windowsOwner(
     throw new DaemonIdentityFileError("unsafe_owner", "unable to resolve daemon path owner");
   }
   return owner;
-}
-
-function isCurrentWindowsIdentity(
-  identity: string,
-  current: { readonly name: string; readonly sid: string },
-): boolean {
-  const normalized = identity.toLowerCase();
-  return normalized === current.name || normalized === current.sid;
 }
 
 function powerShellLiteral(value: string): string {

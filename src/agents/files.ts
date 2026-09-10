@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
+import { WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
 import { AgentError } from "./types.js";
 
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -99,7 +100,7 @@ export async function privateDirectory(target: string): Promise<void> {
   if (exists(target)) { await assertPrivate(target, true); return; }
   fs.mkdirSync(target, { mode: 0o700 });
   if (process.platform === "win32") {
-    restrictWindowsAcl(target, true);
+    agentWindowsAcl(() => WINDOWS_ACL.restrict(target, true));
   }
   await assertPrivate(target, true);
 }
@@ -109,16 +110,13 @@ export async function assertPrivate(target: string, directory: boolean): Promise
   if (directory ? !stat.isDirectory() : !stat.isFile()) throw new AgentError("agent_unsafe_path");
   if (process.platform !== "win32") {
     if (stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) throw new AgentError("agent_unsafe_path");
-  } else {
-    const identities = windowsAclIdentities(target);
-    if (identities.length !== 1 || !isCurrentWindowsIdentity(identities[0] ?? "")) {
-      throw new AgentError("agent_unsafe_path");
-    }
+  } else if (!agentWindowsAcl(() => WINDOWS_ACL.isCurrentUserOnly(target))) {
+    throw new AgentError("agent_unsafe_path");
   }
 }
 export async function protect(target: string): Promise<void> {
   if (process.platform === "win32") {
-    restrictWindowsAcl(target, false);
+    agentWindowsAcl(() => WINDOWS_ACL.restrict(target, false));
   } else fs.chmodSync(target, 0o600);
 }
 export async function writeExclusive(target: string, image: FileImage, privateOnly = false): Promise<void> {
@@ -157,65 +155,19 @@ async function windowsAcl(target: string): Promise<string> {
 // protected ACL through SetAccessRuleProtection demands SeSecurityPrivilege and
 // fails on already-locked files, while icacls /inheritance:r + /grant:r is
 // idempotent for the recovery files we revisit across apply/restore operations.
-const windowsIdentity = { value: null as { readonly name: string; readonly sid: string } | null };
+const WINDOWS_ACL = new WindowsAcl((file, args) => execFileSync(
+  windowsCommandPath(file, "win32", { SystemRoot: process.env.SystemRoot ?? "C:\\Windows" }),
+  [...args],
+  { encoding: "utf8", windowsHide: true, timeout: 10000, maxBuffer: 65536 },
+), { cacheIdentity: true });
 
-function windowsCommandPath(command: string): string {
-  return path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", `${command}.exe`);
-}
-
-function currentWindowsIdentity(): { readonly name: string; readonly sid: string } {
-  if (windowsIdentity.value !== null) return windowsIdentity.value;
+function agentWindowsAcl<T>(operation: () => T): T {
   try {
-    const csv = execFileSync(windowsCommandPath("whoami"), ["/user", "/fo", "csv", "/nh"], {
-      encoding: "utf8", windowsHide: true, timeout: 10000,
-    }).trim();
-    const match = /^"([^"]+)","([^"]+)"$/u.exec(csv);
-    if (match === null || match[1] === undefined || match[2] === undefined) throw new Error("whoami");
-    windowsIdentity.value = { name: match[1].toLowerCase(), sid: match[2].toLowerCase() };
-    return windowsIdentity.value;
+    return operation();
   } catch (error: unknown) {
     const failure = new AgentError("agent_unsafe_path");
     failure.cause = error;
     throw failure;
-  }
-}
-
-function isCurrentWindowsIdentity(identity: string): boolean {
-  const normalized = identity.toLowerCase();
-  const current = currentWindowsIdentity();
-  return normalized === current.name || normalized === current.sid;
-}
-
-function icacls(target: string, args: readonly string[]): string {
-  try {
-    return execFileSync(windowsCommandPath("icacls"), [target, ...args], {
-      encoding: "utf8", windowsHide: true, timeout: 10000, maxBuffer: 65536,
-    });
-  } catch (error: unknown) {
-    const failure = new AgentError("agent_unsafe_path");
-    failure.cause = error;
-    throw failure;
-  }
-}
-
-function windowsAclIdentities(target: string): string[] {
-  const output = icacls(target, []);
-  const identities: string[] = [];
-  for (const rawLine of output.split(/\r?\n/u)) {
-    const line = rawLine.trim();
-    if (line.length === 0 || line.startsWith("Successfully processed") || line.startsWith("Failed processing")) continue;
-    const entry = rawLine.startsWith(target) ? rawLine.slice(target.length).trim() : line;
-    const separator = entry.indexOf(":(");
-    if (separator > 0) identities.push(entry.slice(0, separator));
-  }
-  return identities;
-}
-
-function restrictWindowsAcl(target: string, directory: boolean): void {
-  const grant = directory ? `*${currentWindowsIdentity().sid}:(OI)(CI)(F)` : `*${currentWindowsIdentity().sid}:(F)`;
-  icacls(target, ["/inheritance:r", "/grant:r", grant]);
-  for (const identity of windowsAclIdentities(target)) {
-    if (!isCurrentWindowsIdentity(identity)) icacls(target, ["/remove:g", identity]);
   }
 }
 

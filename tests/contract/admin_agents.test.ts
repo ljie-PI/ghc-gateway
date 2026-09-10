@@ -196,6 +196,7 @@ describe("Admin agents API", () => {
       expect(applied.status).toBe(200);
       expect(await applied.json()).toMatchObject({ data: { id: "claude", state: "installed", canRestore: true } });
       expect(stub.calls).toContain("apply:claude:gpt-test");
+      expect(harness.dependencies.calls).toContain("agent-models");
 
       stub.failApply = "agent_conflict";
       const conflict = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
