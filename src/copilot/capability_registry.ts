@@ -97,6 +97,16 @@ export class ModelCapabilityRegistry {
     );
   }
 
+  modelsUsableForAgentMapping(
+    snapshot: Readonly<CapabilityCatalogSnapshot>,
+  ): readonly EffectiveModelCapabilitySnapshot[] {
+    return snapshot.models.filter((model) => model.protocols.value !== null
+      && model.protocols.value.length > 0
+      && model.defaultOutputTokens.valid
+      && (!model.protocols.value.every((protocol) => protocol === "chat")
+        || model.profile.chatOutputTokenField.value !== null));
+  }
+
   async close(): Promise<void> {
     await this.catalog.close();
   }

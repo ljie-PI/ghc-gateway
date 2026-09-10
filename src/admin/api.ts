@@ -278,6 +278,9 @@ export interface AdminCapabilityRegistry {
   }>;
   invalidate(accountId: string): void;
   isCurrent(snapshot: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>): boolean;
+  modelsUsableForAgentMapping(
+    snapshot: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>,
+  ): Awaited<ReturnType<AdminCapabilityRegistry["get"]>>["models"];
 }
 
 export interface AdminAccountCaches {
@@ -481,10 +484,7 @@ export class AdminManagementApi {
       const captured = await this.agentCatalog(signal);
       if (captured.revision !== request.catalogRevision) throw new AdminApiError("revision_conflict");
       await this.requireSameCredentialGeneration(captured.account.accountId, captured.account, signal);
-      const models = captured.catalog.models.filter((model) => model.protocols.value !== null
-        && model.protocols.value.length > 0
-        && model.defaultOutputTokens.valid
-        && (!model.protocols.value.every((protocol) => protocol === "chat") || model.profile.chatOutputTokenField.value !== null))
+      const models = this.dependencies.registry.modelsUsableForAgentMapping(captured.catalog)
         .map((model) => ({ modelId: model.modelId, maxInputTokens: model.maxInputTokens.value }));
       return await this.requireAgents().apply(request, origin, models, () => {
         signal.throwIfAborted();

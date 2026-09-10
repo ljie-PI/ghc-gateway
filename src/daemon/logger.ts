@@ -16,6 +16,7 @@ import {
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import type { LogLevel } from "../config/startup_config.js";
+import { WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
 import { LOG_LINE_LIMIT_BYTES, sanitizeMetadata, utf8Bytes } from "../telemetry/sanitize.js";
 
 export const LOG_FILE_BYTES = 10 * 1024 * 1024;
@@ -203,16 +204,6 @@ function appendProtected(filePath: string, value: string, windowsSecurity: Windo
   }
 }
 
-function restrictWindowsAcl(target: string, directory: boolean): void {
-  const identity = currentWindowsIdentity();
-  const grant = directory ? `*${identity.sid}:(OI)(CI)(F)` : `*${identity.sid}:(F)`;
-  const icacls = windowsCommandPath("icacls");
-  execFileSync(icacls, [target, "/inheritance:r", "/grant:r", grant], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-}
-
 function assertSafeDirectory(target: string, windowsSecurity: WindowsLogSecurity): void {
   const stat = lstatSync(target);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
@@ -258,51 +249,22 @@ function isWindowsReparsePoint(target: string): boolean {
   return output.trim() === "true";
 }
 
+const WINDOWS_ACL = new WindowsAcl((file, args) => execFileSync(
+  windowsCommandPath(file),
+  [...args],
+  { encoding: "utf8", windowsHide: true },
+));
+
 function assertWindowsAcl(target: string): void {
-  const current = currentWindowsIdentity();
-  const icacls = windowsCommandPath("icacls");
-  const output = execFileSync(icacls, [target], { encoding: "utf8", windowsHide: true });
-  const identities: string[] = [];
-  for (const rawLine of output.split(/\r?\n/u)) {
-    const line = rawLine.trim();
-    if (line.length === 0 || line.startsWith("Successfully processed") || line.startsWith("Failed processing")) {
-      continue;
-    }
-    const entry = rawLine.startsWith(target) ? rawLine.slice(target.length).trim() : line;
-    const separator = entry.indexOf(":(");
-    if (separator > 0) {
-      identities.push(entry.slice(0, separator).toLowerCase());
-    }
-  }
-  if (identities.length !== 1
-    || (identities[0] !== current.sid.toLowerCase() && identities[0] !== current.name.toLowerCase())) {
+  if (!WINDOWS_ACL.isCurrentUserOnly(target)) {
     throw new Error("log ACL must be restricted to the current user");
   }
 }
 
-function windowsCommandPath(command: string): string {
-  if (process.platform === "win32") {
-    const systemRoot = process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
-    return path.join(systemRoot, "System32", `${command}.exe`);
-  }
-  return command;
-}
-
-function currentWindowsIdentity(): { readonly name: string; readonly sid: string } {
-  const whoami = windowsCommandPath("whoami");
-  const identity = execFileSync(whoami, ["/user", "/fo", "csv", "/nh"], {
-    encoding: "utf8",
-    windowsHide: true,
-  }).trim();
-  const match = /^"([^"]+)","([^"]+)"$/u.exec(identity);
-  if (match?.[1] === undefined || match[2] === undefined) {
-    throw new Error("unable to resolve current Windows identity");
-  }
-  return { name: match[1], sid: match[2] };
-}
-
 const DEFAULT_WINDOWS_LOG_SECURITY: WindowsLogSecurity = {
-  restrict: restrictWindowsAcl,
+  restrict(target, directory) {
+    WINDOWS_ACL.restrict(target, directory, { removeOtherIdentities: false });
+  },
   assertDirectory(target) {
     if (isWindowsReparsePoint(target)) {
       throw new Error("log directory must be a regular directory");

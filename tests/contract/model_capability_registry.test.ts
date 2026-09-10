@@ -334,6 +334,35 @@ describe("model capability registry", () => {
     expect(Object.isFrozen(capability(initial, "same").revision)).toBe(true);
   });
 
+  it("selects only models whose effective capabilities are usable for agent mapping", async () => {
+    const harness = await createHarness({
+      "github.com/1": [
+        model("responses", { supported_endpoints: ["/responses"], max_output_tokens: 8000 }),
+        model("chat", {
+          supported_endpoints: ["/chat/completions"],
+          max_output_tokens: 8000,
+          chat_output_token_field: "max_tokens",
+        }),
+        model("mixed", { supported_endpoints: ["/chat/completions", "/responses"], max_output_tokens: 8000 }),
+        model("chat-without-token-field", { supported_endpoints: ["/chat/completions"], max_output_tokens: 8000 }),
+        model("empty-protocols", { supported_endpoints: [], max_output_tokens: 8000 }),
+        model("missing-protocols", { max_output_tokens: 8000 }),
+        model("invalid-output-default", {
+          supported_endpoints: ["/responses"],
+          max_output_tokens: 8000,
+          default_output_tokens: 9000,
+        }),
+      ],
+    });
+    const snapshot = await harness.registry.get(harness.account1, signal);
+
+    expect(harness.registry.modelsUsableForAgentMapping(snapshot).map((item) => item.modelId)).toEqual([
+      "responses",
+      "chat",
+      "mixed",
+    ]);
+  });
+
   it("derives bounded output defaults from declarations and ceilings", async () => {
     const harness = await createHarness({
       "github.com/1": [

@@ -156,6 +156,10 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       invalidate: (accountId) => calls.push(`invalidate:${accountId}`),
       isCurrent: (snapshot) => snapshot.catalogGeneration === 7
         && snapshot.credentialGeneration === 4,
+      modelsUsableForAgentMapping: (snapshot) => {
+        calls.push("agent-models");
+        return snapshot.models;
+      },
     },
     preferences: {
       get: () => preference,
