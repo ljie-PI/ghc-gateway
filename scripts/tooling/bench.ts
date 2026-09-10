@@ -22,6 +22,7 @@ import {
 } from "../../src/main.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { MIGRATION_MANIFEST } from "../../src/persistence/generated_migrations.js";
+import type { SqliteDatabase } from "../../src/persistence/sqlite.js";
 import type {
   NativeResponsesUpstreamRequest,
   UpstreamByteResponse,
@@ -36,6 +37,15 @@ import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 import { nearestRankP95, THRESHOLDS } from "../../src/telemetry/performance.js";
 import { assertNode24 } from "./node_version.js";
 import type { PerformanceMeasurement, ProtocolPerformanceObserver } from "../../src/telemetry/runtime.js";
+import {
+  CheckpointDiagnosticsCollector,
+  checkpointFilesystem,
+  checkpointResourceSnapshot,
+  checkpointSqliteConfiguration,
+  instrumentCheckpointDatabase,
+  type CheckpointDiagnostics,
+} from "./checkpoint_diagnostics.js";
+export type { CheckpointDiagnostics } from "./checkpoint_diagnostics.js";
 import "./ci_network_guard.js";
 
 const execFileAsync = promisify(execFile);
@@ -80,6 +90,10 @@ export interface LatencyMetricResult {
   readonly passed: boolean;
 }
 
+export interface CheckpointLatencyMetricResult extends LatencyMetricResult {
+  readonly diagnostics: CheckpointDiagnostics;
+}
+
 export interface BenchmarkEnvironment {
   readonly node: string;
   readonly platform: NodeJS.Platform;
@@ -120,7 +134,7 @@ export interface BenchmarkRunResult {
   };
   readonly buffered: LatencyMetricResult;
   readonly streamEvent: LatencyMetricResult;
-  readonly checkpoint: LatencyMetricResult;
+  readonly checkpoint: CheckpointLatencyMetricResult;
   readonly eventLoop: LatencyMetricResult;
   readonly passed: boolean;
 }
@@ -209,16 +223,31 @@ class MeasuredHistory extends SqliteResponsesHistory {
   readonly valuesMs: number[] = [];
   measuring = false;
 
+  constructor(
+    database: SqliteDatabase,
+    options: ConstructorParameters<typeof SqliteResponsesHistory>[1],
+    private readonly diagnostics: CheckpointDiagnosticsCollector,
+  ) {
+    super(database, options);
+  }
+
   override async recordCheckpoint(
     record: Readonly<ResponsesHistoryRecord>,
     ownership: Readonly<ResponsesContinuationOwnership>,
     checkpointState: "partial" | "complete",
     signal: AbortSignal,
   ): Promise<void> {
-    const started = performance.now();
-    await super.recordCheckpoint(record, ownership, checkpointState, signal);
-    if (this.measuring) {
-      this.valuesMs.push(elapsedMs(started));
+    const measurement = this.measuring ? this.diagnostics.startCheckpoint(checkpointState) : undefined;
+    const gateStartedAtMs = measurement === undefined ? undefined : performance.now();
+    try {
+      await super.recordCheckpoint(record, ownership, checkpointState, signal);
+    } catch (error: unknown) {
+      measurement?.abandon();
+      throw error;
+    }
+    if (measurement !== undefined && gateStartedAtMs !== undefined) {
+      const gateElapsedMs = elapsedMs(gateStartedAtMs);
+      this.valuesMs.push(measurement.complete(gateElapsedMs));
     }
   }
 }
@@ -262,7 +291,10 @@ class EventLoopSampler {
 interface BenchmarkRuntime {
   readonly gateway: Gateway;
   readonly backend: BenchmarkCopilotBackend;
+  readonly database: SqliteDatabase;
+  readonly databasePath: string;
   readonly history: MeasuredHistory;
+  readonly checkpointDiagnostics: CheckpointDiagnosticsCollector;
   readonly performance: BenchmarkPerformanceObserver;
   close(): Promise<void>;
 }
@@ -361,7 +393,7 @@ export async function runBenchmarkIteration(
 
     const bufferedValues = await measureBufferedRequests(runtime, workload.bufferedSamples);
     const streamEventValues = await measureStreamEvents(runtime, workload.eventSamples);
-    const checkpointValues = await measureCheckpoints(runtime, workload.checkpointStreams);
+    const checkpointMeasurement = await measureCheckpoints(runtime, workload.checkpointStreams);
     await ensureEventLoopSamples(eventLoop.valuesMs, 100);
     await eventLoop.stop();
 
@@ -370,7 +402,10 @@ export async function runBenchmarkIteration(
     const streamsPassed = streamDelta <= STABLE_DELTA_LIMIT_BYTES;
     const buffered = latencyResult(bufferedValues, THRESHOLDS.bufferedMs, LATENCY_WARMUP_REQUESTS);
     const streamEvent = latencyResult(streamEventValues, THRESHOLDS.eventMs, LATENCY_WARMUP_REQUESTS);
-    const checkpoint = latencyResult(checkpointValues, THRESHOLDS.checkpointMs, 2);
+    const checkpoint: CheckpointLatencyMetricResult = {
+      ...latencyResult(checkpointMeasurement.valuesMs, THRESHOLDS.checkpointMs, 2),
+      diagnostics: checkpointMeasurement.diagnostics,
+    };
     const eventLoopMetric = latencyResult(eventLoop.valuesMs, THRESHOLDS.eventLoopMs, 20);
     const passed = idlePassed && streamsPassed && buffered.passed && streamEvent.passed
       && checkpoint.passed && eventLoopMetric.passed;
@@ -412,6 +447,34 @@ export async function runBenchmarkIteration(
   }
 }
 
+export function benchmarkCliSummary(artifactPath: string, artifact: Readonly<BenchmarkArtifact>): object {
+  return {
+    artifactPath,
+    repeat: artifact.repeat,
+    passed: artifact.passed,
+    runs: artifact.runs.map((run) => ({
+      run: run.run,
+      idleMiB: run.idle.resident.medianBytes / MIB,
+      streamDeltaMiB: run.streams.deltaBytes / MIB,
+      bufferedP95Ms: run.buffered.p95Ms,
+      streamEventP95Ms: run.streamEvent.p95Ms,
+      checkpointP95Ms: run.checkpoint.p95Ms,
+      checkpointDiagnostics: {
+        observedCount: run.checkpoint.diagnostics.observedCount,
+        thresholdMs: run.checkpoint.diagnostics.thresholdMs,
+        thresholdExceededCount: run.checkpoint.diagnostics.thresholdExceededCount,
+        partialCount: run.checkpoint.diagnostics.states.partial.count,
+        completeCount: run.checkpoint.diagnostics.states.complete.count,
+        slowestMs: run.checkpoint.diagnostics.slowest.map((sample) => sample.elapsedMs),
+        transactionMaxMs: run.checkpoint.diagnostics.sqlite.transaction.maxMs,
+        transactionBoundaryMaxMs: run.checkpoint.diagnostics.sqlite.transactionBoundary.maxMs,
+      },
+      eventLoopP95Ms: run.eventLoop.p95Ms,
+      passed: run.passed,
+    })),
+  };
+}
+
 export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifact> {
   if (!Number.isInteger(repeat) || repeat < 1) {
     throw new Error("--repeat must be a positive integer");
@@ -447,8 +510,9 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
   const dataDir = await benchmarkDataDir("runtime-");
   const port = await availablePort();
   const nowMs = (): number => 1_700_000_000_000;
+  const databasePath = path.join(dataDir, "state.db");
   const database = openDatabase({
-    path: path.join(dataDir, "state.db"),
+    path: databasePath,
     migrations: MIGRATION_MANIFEST,
     nowMs,
   });
@@ -479,7 +543,16 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     catalog,
     { get: () => null },
   );
-  const measuredHistory = new MeasuredHistory(database, { nowMs });
+  const checkpointDiagnostics = new CheckpointDiagnosticsCollector(
+    performance.now.bind(performance),
+    8,
+    THRESHOLDS.checkpointMs,
+  );
+  const measuredHistory = new MeasuredHistory(
+    instrumentCheckpointDatabase(database, checkpointDiagnostics),
+    { nowMs },
+    checkpointDiagnostics,
+  );
   const telemetry = new TelemetryRecorder(database, nowMs);
   const performanceObserver = new BenchmarkPerformanceObserver();
   let uuid = 0;
@@ -535,7 +608,10 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     return {
       gateway,
       backend,
+      database,
+      databasePath,
       history: measuredHistory,
+      checkpointDiagnostics,
       performance: performanceObserver,
       async close() {
         await gateway?.close();
@@ -616,12 +692,16 @@ async function measureCheckpoints(
   runtime: BenchmarkRuntime,
   streamCount: number,
   warmup = true,
-): Promise<number[]> {
+): Promise<{ readonly valuesMs: readonly number[]; readonly diagnostics: CheckpointDiagnostics }> {
   runtime.backend.mode = "checkpoint";
   if (warmup) {
     await measureCheckpoints(runtime, 2, false);
   }
   runtime.history.valuesMs.length = 0;
+  runtime.checkpointDiagnostics.reset();
+  const before = checkpointResourceSnapshot();
+  const cpuStarted = process.cpuUsage();
+  const wallStarted = performance.now();
   runtime.history.measuring = true;
   try {
     for (let index = 0; index < streamCount; index += 1) {
@@ -633,10 +713,26 @@ async function measureCheckpoints(
   } finally {
     runtime.history.measuring = false;
   }
+  const wallMs = elapsedMs(wallStarted);
+  const cpu = process.cpuUsage(cpuStarted);
+  const after = checkpointResourceSnapshot();
   if (runtime.history.valuesMs.length < streamCount) {
     throw new Error(`checkpoint benchmark expected at least ${streamCount} commits, received ${runtime.history.valuesMs.length}`);
   }
-  return [...runtime.history.valuesMs];
+  return {
+    valuesMs: [...runtime.history.valuesMs],
+    diagnostics: {
+      ...runtime.checkpointDiagnostics.report(),
+      measurement: {
+        wallMs,
+        cpuUserMicros: cpu.user,
+        cpuSystemMicros: cpu.system,
+      },
+      environment: { before, after },
+      sqliteConfiguration: checkpointSqliteConfiguration(runtime.database),
+      filesystem: await checkpointFilesystem(runtime.databasePath),
+    },
+  };
 }
 
 async function runStreamExecutions(runtime: BenchmarkRuntime, count: number, abort: boolean): Promise<void> {
@@ -944,7 +1040,7 @@ async function writeCompiledWorker(workerPath: string): Promise<void> {
   });
   await mkdir(path.dirname(workerPath), { recursive: true });
   await writeFile(workerPath, output.outputText.replaceAll("../../src/", "../../../../dist/src/"), "utf8");
-  for (const name of ["ci_network_guard", "node_version"]) {
+  for (const name of ["checkpoint_diagnostics", "ci_network_guard", "node_version"]) {
     const helperSource = fileURLToPath(new URL(`./${name}.ts`, import.meta.url));
     const helperOutput = ts.transpileModule(await readFile(helperSource, "utf8"), {
       compilerOptions,
@@ -960,8 +1056,20 @@ function benchmarkEnvironment(): BenchmarkEnvironment {
     platform: process.platform,
     arch: process.arch,
     cpus: os.cpus().length,
-    npmUserAgent: process.env.npm_config_user_agent ?? null,
+    npmUserAgent: sanitizedNpmUserAgent(process.env.npm_config_user_agent),
   };
+}
+
+export function sanitizedNpmUserAgent(value: string | undefined): string | null {
+  if (value === undefined || value.length > 256) return null;
+  const allowedExact = new Set([
+    "linux", "darwin", "win32", "x64", "arm64", "ia32",
+    "workspaces/true", "workspaces/false",
+  ]);
+  const safeTokens = value.split(" ").filter((token) =>
+    allowedExact.has(token)
+      || /^(?:npm|node)\/v?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(token));
+  return safeTokens.length === 0 ? null : safeTokens.join(" ");
 }
 
 function idleLaunchArgs(workerPath: string): string[] {
@@ -1094,21 +1202,7 @@ async function main(): Promise<void> {
   await mkdir(artifactDir, { recursive: true });
   const artifactPath = path.join(artifactDir, "full-gateway.json");
   await writeFile(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
-  console.log(JSON.stringify({
-    artifactPath,
-    repeat: artifact.repeat,
-    passed: artifact.passed,
-    runs: artifact.runs.map((run) => ({
-      run: run.run,
-      idleMiB: run.idle.resident.medianBytes / MIB,
-      streamDeltaMiB: run.streams.deltaBytes / MIB,
-      bufferedP95Ms: run.buffered.p95Ms,
-      streamEventP95Ms: run.streamEvent.p95Ms,
-      checkpointP95Ms: run.checkpoint.p95Ms,
-      eventLoopP95Ms: run.eventLoop.p95Ms,
-      passed: run.passed,
-    })),
-  }));
+  console.log(JSON.stringify(benchmarkCliSummary(artifactPath, artifact)));
   if (!artifact.passed) {
     process.exitCode = 1;
   }
