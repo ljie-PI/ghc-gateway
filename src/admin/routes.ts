@@ -33,39 +33,6 @@ const PreferredModelSchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 0 }),
 }, { additionalProperties: false });
 const RefreshModelsSchema = Type.Object({ accountId: Type.String({ minLength: 1 }) }, { additionalProperties: false });
-const ModelIdSchema = Type.String({
-  minLength: 1,
-  maxLength: 128,
-  pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
-});
-const ModelCapabilitiesSchema = Type.Object({
-  accountId: Type.String({ minLength: 1 }),
-  modelId: ModelIdSchema,
-  expectedRevision: Type.Integer({ minimum: 0 }),
-  expectedCredentialGeneration: Type.Integer({ minimum: 1 }),
-  expectedCatalogGeneration: Type.Integer({ minimum: 0 }),
-  capabilities: Type.Object({
-    enabled: Type.Boolean(),
-    protocols: Type.Optional(Type.Array(
-      Type.Union([Type.Literal("chat"), Type.Literal("messages"), Type.Literal("responses")]),
-      { uniqueItems: true, maxItems: 3 },
-    )),
-    maxInputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
-    maxOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
-    defaultOutputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
-    chatOutputTokenField: Type.Optional(Type.Union([
-      Type.Literal("max_tokens"),
-      Type.Literal("max_completion_tokens"),
-    ])),
-  }, { additionalProperties: false }),
-}, { additionalProperties: false });
-const ModelCapabilitiesResetSchema = Type.Object({
-  accountId: Type.String({ minLength: 1 }),
-  modelId: ModelIdSchema,
-  expectedRevision: Type.Integer({ minimum: 0 }),
-  expectedCredentialGeneration: Type.Integer({ minimum: 1 }),
-  expectedCatalogGeneration: Type.Integer({ minimum: 0 }),
-}, { additionalProperties: false });
 const RuntimeConfigUpdateSchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 0 }),
   config: RuntimeConfigSchema,
@@ -76,7 +43,7 @@ const USAGE_WINDOWS_MS = new Map([
   ["7d", 7 * 86_400_000],
   ["28d", 28 * 86_400_000],
 ]);
-const PROTOCOLS = new Set(["openai_chat", "openai_responses_unknown", "openai_responses_native", "openai_responses_bridge", "anthropic", "ollama"]);
+const PROTOCOLS = new Set(["openai_chat", "openai_responses_unknown", "openai_responses_native", "openai_responses_bridge", "anthropic"]);
 const OUTCOMES = new Set(["success", "client_error", "authentication_error", "overloaded", "upstream_error", "timeout", "aborted", "internal_error"]);
 const EVENT_KINDS = new Set([
   "gateway_started", "gateway_stopped", "request_failed", "account_authenticated", "account_removed",
@@ -264,31 +231,6 @@ async function dispatch(
     response = success(await api.setPreferredModel(value.accountId, value.modelId, value.expectedRevision, context.signal), context.requestId);
     break;
   }
-  case "modelsCapabilitiesPut": {
-    const value = checked(ModelCapabilitiesSchema, body);
-    response = success(await api.setModelCapabilities(
-      value.accountId,
-      value.modelId,
-      value.expectedRevision,
-      value.expectedCredentialGeneration,
-      value.expectedCatalogGeneration,
-      value.capabilities,
-      context.signal,
-    ), context.requestId);
-    break;
-  }
-  case "modelsCapabilitiesDelete": {
-    const value = checked(ModelCapabilitiesResetSchema, body);
-    response = success(await api.resetModelCapabilities(
-      value.accountId,
-      value.modelId,
-      value.expectedRevision,
-      value.expectedCredentialGeneration,
-      value.expectedCatalogGeneration,
-      context.signal,
-    ), context.requestId);
-    break;
-  }
   case "configGet":
     response = success(api.runtimeConfig(), context.requestId);
     break;
@@ -413,7 +355,6 @@ class AdminDeviceFlowOwners {
 
 type RouteId = "bootstrap" | "session" | "logout" | "status" | "usage" | "accounts" | "deviceStart"
   | "devicePoll" | "deviceCancel" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
-  | "modelsCapabilitiesPut" | "modelsCapabilitiesDelete"
   | "configGet" | "configPut" | "historyGet" | "historyDelete" | "events" | "eventStream";
 
 interface MatchedRoute {
@@ -468,8 +409,6 @@ const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([
   route("GET", "/admin/api/v1/models", "models", false, false, ["accountId"]),
   route("POST", "/admin/api/v1/models/refresh", "modelsRefresh", true, true),
   route("PUT", "/admin/api/v1/models/preferred", "modelsPreferred", true, true),
-  route("PUT", "/admin/api/v1/models/capabilities", "modelsCapabilitiesPut", true, true),
-  route("DELETE", "/admin/api/v1/models/capabilities", "modelsCapabilitiesDelete", true, true),
   route("GET", "/admin/api/v1/config", "configGet"),
   route("PUT", "/admin/api/v1/config", "configPut", true, true),
   route("GET", "/admin/api/v1/history", "historyGet"),

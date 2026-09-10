@@ -54,7 +54,6 @@ describe("Responses planner", () => {
   ): EffectiveModelCapabilitySnapshot {
     return {
       accountId: "github.com/1", modelId: "model", name: "model", vendor: "github",
-      discovered: true, configured: false, verified: true, enabled: true, visible: true, override: null,
       protocols: {
         value: protocols,
         source: protocols === null ? "unknown" : "live",
@@ -72,7 +71,7 @@ describe("Responses planner", () => {
         supportedParameters: { value: [], source: "unknown", conflict: false, liveState: "missing" },
         reasoningEfforts: { value: null, source: "unknown", conflict: false, liveState: "missing" },
       },
-      revision: { credentialGeneration: 1, catalogGeneration: 1, overrideRevision: 0, builtinRevision: null },
+      revision: { credentialGeneration: 1, catalogGeneration: 1, builtinRevision: null },
     };
   }
 

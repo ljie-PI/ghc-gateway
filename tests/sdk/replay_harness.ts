@@ -7,14 +7,12 @@ import { HttpCopilotBackend } from "../../src/copilot/transport.js";
 import { HttpCopilotModelsSource } from "../../src/copilot/models_source.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
-import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
-import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
 import { bootstrapGateway } from "../../src/main.js";
 import { MockCopilotReplayServer, parseReplayManifest, type ReplayReceipt } from "../../src/replay/server.js";
@@ -75,7 +73,6 @@ export async function startReplaySdkHarness(options: {
       embedMigration(accountsMigration),
       embedMigration(responsesHistoryMigration),
       embedMigration(responsesContinuationMigration),
-      embedMigration(modelCapabilitiesMigration),
     ],
     nowMs,
   });
@@ -95,8 +92,7 @@ export async function startReplaySdkHarness(options: {
   );
   const catalog = new CopilotModelCatalog(modelsSource, () => new Date(nowMs()));
   const history = new SqliteResponsesHistory(database, { nowMs });
-  const overrides = new SqliteModelCapabilityOverrides(database, nowMs);
-  const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+  const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
 
   const copilot = new HttpCopilotBackend({
     credentials,

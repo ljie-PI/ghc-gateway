@@ -10,7 +10,6 @@ const PROTOCOLS: ReadonlySet<string> = new Set([
   "openai_responses_native",
   "openai_responses_bridge",
   "anthropic",
-  "ollama",
 ]);
 const OUTCOMES: ReadonlySet<string> = new Set([
   "success",

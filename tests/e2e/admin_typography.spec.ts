@@ -99,17 +99,18 @@ for (const width of [1440, 1100, 900, 851, 850, 601, 600, 390, 320]) {
       }
       if (view === "Models") {
         await page.getByText("About sources and token limits", { exact: true }).click();
-        await page.getByText("Capability details and override", { exact: true }).first().click();
+        await page.getByText("Capability details", { exact: true }).first().click();
         await expect(page.locator("td").first()).toHaveCSS("font-size", "14px");
-        const selectedTextFits = await page.getByLabel("Chat output token field").first().evaluate((element) => {
-          const select = element as HTMLSelectElement;
-          const style = getComputedStyle(select);
-          const context = document.createElement("canvas").getContext("2d")!;
-          context.font = style.font;
-          const available = select.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight) - 24;
-          return context.measureText(select.selectedOptions[0]?.text ?? "").width <= available;
-        });
-        expect(selectedTextFits, "default Chat budget selection remains readable without truncation").toBe(true);
+        const details = page.locator(".model-details[open]").first();
+        await expect(details.locator("input, select, textarea")).toHaveCount(0);
+        const budget = details.locator("dl > div")
+          .filter({ has: page.getByText("Chat budget field", { exact: true }) }).locator("dd");
+        await expect(budget).toBeVisible();
+        await expect(budget).toContainText("max_tokens");
+        const budgetTextFits = await budget.evaluate((element) => (
+          element.scrollWidth <= element.clientWidth + 1 && element.scrollHeight <= element.clientHeight + 1
+        ));
+        expect(budgetTextFits, "read-only Chat budget metadata remains readable without clipping").toBe(true);
       }
       if (view === "Events") await page.getByRole("list", { name: "Operational events" }).locator("summary").first().click();
       if (await page.locator("h2").count()) await expect(page.locator("h2").first()).toHaveCSS("font-size", "20px");

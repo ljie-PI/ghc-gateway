@@ -242,10 +242,10 @@ export class DaemonController {
     context: Readonly<DaemonLifecycleContext> = {},
   ): Promise<CliLifecycleResult> {
     const resolvedDataDir = path.resolve(dataDir);
-    const graceDeadline = this.dependencies.nowMs() + STOP_TIMEOUT_MS;
+    const inspectionDeadline = this.dependencies.nowMs() + STOP_TIMEOUT_MS;
     let inspection: DaemonInspection;
     try {
-      inspection = await this.inspect(resolvedDataDir, { ...context, deadlineMs: graceDeadline });
+      inspection = await this.inspect(resolvedDataDir, { ...context, deadlineMs: inspectionDeadline });
     } catch (error: unknown) {
       if (isDeadlineTimeout(error)) {
         return identityResult("unreachable", await this.readIdentityOrNull(resolvedDataDir), resolvedDataDir);
@@ -267,13 +267,14 @@ export class DaemonController {
       return identityResult("conflict", identity, resolvedDataDir);
     }
 
+    const stopRequestDeadline = this.dependencies.nowMs() + STOP_TIMEOUT_MS;
     try {
       const response = await this.runBeforeDeadline(
         () => this.dependencies.controlRequest(identity, "POST", STOP_PATH, {
           ...(context.signal === undefined ? {} : { signal: context.signal }),
-          timeoutMs: remainingMs(graceDeadline, this.dependencies.nowMs()),
+          timeoutMs: remainingMs(stopRequestDeadline, this.dependencies.nowMs()),
         }),
-        graceDeadline,
+        stopRequestDeadline,
         context.signal,
       );
       if (!validControlResponse(response, identity, false)) {
@@ -286,6 +287,7 @@ export class DaemonController {
       }
     }
 
+    const graceDeadline = this.dependencies.nowMs() + STOP_TIMEOUT_MS;
     while (this.dependencies.nowMs() < graceDeadline) {
       const remaining = remainingMs(graceDeadline, this.dependencies.nowMs());
       const delayMs = remaining <= POLL_INTERVAL_MS ? 0 : POLL_INTERVAL_MS;
@@ -301,7 +303,7 @@ export class DaemonController {
         processState = await this.readProcessIdentity(identity, context.signal, graceDeadline);
       } catch (error: unknown) {
         if (isDeadlineTimeout(error)) {
-          return identityResult("unreachable", identity, resolvedDataDir);
+          break;
         }
         throw error;
       }

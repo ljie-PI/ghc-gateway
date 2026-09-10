@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assertExactManifest,
   auditRuntimeDependencies,
+  cleanupPackTemporaryDirectory,
   inspectAdminBundle,
   type NpmPackEntry,
 } from "../../scripts/tooling/pack.js";
@@ -115,6 +116,56 @@ describe("package evidence", () => {
     }
 
     await expect(auditRuntimeDependencies(root)).rejects.toThrow("native runtime dependency is forbidden: ");
+  });
+
+  it("retries transient package cleanup locks without hiding a primary failure", async () => {
+    let attempts = 0;
+    const delays: number[] = [];
+    const warnings: string[] = [];
+    await cleanupPackTemporaryDirectory("temporary-root", new Error("daemon stop failed"), {
+      remove: async () => {
+        attempts += 1;
+        if (attempts < 3) throw Object.assign(new Error("locked"), { code: "EBUSY" });
+      },
+      delay: async (ms) => { delays.push(ms); },
+      warning: (message) => { warnings.push(message); },
+    });
+
+    expect(attempts).toBe(3);
+    expect(delays).toEqual([100, 200]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("preserves the primary package failure when cleanup stays locked", async () => {
+    const warnings: string[] = [];
+    await expect(cleanupPackTemporaryDirectory("temporary-root", new Error("daemon stop failed"), {
+      remove: async () => { throw Object.assign(new Error("locked"), { code: "EBUSY" }); },
+      delay: async () => undefined,
+      warning: (message) => { warnings.push(message); },
+    })).resolves.toBeUndefined();
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("cleanup failed");
+    expect(warnings[0]).toContain("EBUSY");
+  });
+
+  it("preserves the primary package failure when cleanup retry delay fails", async () => {
+    const warnings: string[] = [];
+    await expect(cleanupPackTemporaryDirectory("temporary-root", new Error("daemon stop failed"), {
+      remove: async () => { throw Object.assign(new Error("locked"), { code: "EBUSY" }); },
+      delay: async () => { throw Object.assign(new Error("timer failed"), { code: "ETIMER" }); },
+      warning: (message) => { warnings.push(message); },
+    })).resolves.toBeUndefined();
+
+    expect(warnings).toEqual(["package smoke cleanup failed after the primary failure: ETIMER"]);
+  });
+
+  it("reports package cleanup failure after an otherwise successful smoke", async () => {
+    await expect(cleanupPackTemporaryDirectory("temporary-root", undefined, {
+      remove: async () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); },
+      delay: async () => undefined,
+      warning: () => undefined,
+    })).rejects.toMatchObject({ code: "EACCES" });
   });
 
   it("audits installed production dependencies without including development-only native tools", async () => {

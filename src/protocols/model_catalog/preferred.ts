@@ -16,7 +16,7 @@ export class PreferredModelManager {
     expectedRevision: number,
     catalog: CapabilityCatalogSnapshot,
   ): ModelPreference {
-    if (!catalog.models.some((model) => model.modelId === modelId && model.visible)) {
+    if (!catalog.models.some((model) => model.modelId === modelId)) {
       throw new Error("model not in catalog");
     }
 
@@ -33,7 +33,7 @@ export class PreferredModelManager {
   ): ModelPreference | null {
     return this.preferences.markInvalidIfMissing(
       accountId,
-      new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
+      new Set(catalog.models.map((model) => model.modelId)),
       catalog.catalogGeneration,
       expectedRevision,
     );
@@ -49,7 +49,7 @@ export function reconcilePreferredModel(
   try {
     return preferences.markInvalidIfMissing(
       accountId,
-      new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId)),
+      new Set(catalog.models.map((model) => model.modelId)),
       catalog.catalogGeneration,
       observed?.revision ?? null,
     );

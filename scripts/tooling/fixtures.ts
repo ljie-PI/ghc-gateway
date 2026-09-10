@@ -325,7 +325,6 @@ async function expectedModelCatalogFixture(entry: FixtureManifestEntry): Promise
     catalogGeneration: input.generation,
     fetchedAt: input.fetchedAt,
     models: [],
-    capabilityRevision: 0,
   });
 }
 
@@ -745,12 +744,6 @@ function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveMode
     modelId: "fixture-target",
     name: "fixture-target",
     vendor: "fixture",
-    discovered: true,
-    configured: false,
-    verified: true,
-    enabled: true,
-    visible: true,
-    override: null,
     protocols: { value: [protocol], source: "live", conflict: false, liveState: "value" },
     maxInputTokens: { value: 128_000, source: "live", conflict: false, liveState: "value" },
     maxOutputTokens: { value: 16_384, source: "live", conflict: false, liveState: "value" },
@@ -793,7 +786,6 @@ function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveMode
     revision: {
       credentialGeneration: 0,
       catalogGeneration: 1,
-      overrideRevision: 0,
       builtinRevision: null,
     },
   };
@@ -976,12 +968,6 @@ function fixtureCapability(
     modelId,
     name: modelId,
     vendor: "fixture",
-    discovered: true,
-    configured: false,
-    verified: true,
-    enabled: true,
-    visible: true,
-    override: null,
     protocols: { value: protocols, source: protocols === null ? "unknown" : "live", conflict: false, liveState: protocols === null ? "missing" : "value" },
     maxInputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
     maxOutputTokens: { value: null, source: "unknown", conflict: false, liveState: "missing" },
@@ -1016,7 +1002,7 @@ function fixtureCapability(
         liveState: "missing",
       },
     },
-    revision: { credentialGeneration: 0, catalogGeneration: 0, overrideRevision: 0, builtinRevision: null },
+    revision: { credentialGeneration: 0, catalogGeneration: 0, builtinRevision: null },
   };
 }
 

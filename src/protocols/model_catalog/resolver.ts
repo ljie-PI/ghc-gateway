@@ -21,7 +21,7 @@ export function resolveModel(
   requested: string | undefined,
   preferred: { readonly modelId: string; readonly validity: "valid" | "invalid" } | null,
 ): ResolvedModel | ModelResolveError {
-  const ids = new Set(catalog.models.filter((model) => model.visible).map((model) => model.modelId));
+  const ids = new Set(catalog.models.map((model) => model.modelId));
   if (requested !== undefined) {
     if (requested.length === 0) {
       return { kind: "invalid_request" };
@@ -43,7 +43,7 @@ function resolved(
   source: ModelResolutionSource,
   upstreamModel: string,
 ): ResolvedModel {
-  const model = catalog.models.find((item) => item.modelId === upstreamModel && item.visible);
+  const model = catalog.models.find((item) => item.modelId === upstreamModel);
   if (model === undefined) {
     throw new Error("resolved model capability is missing");
   }

@@ -8,7 +8,6 @@ import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
-import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
 import { parseLiveModelCapabilities } from "../../src/copilot/model_capabilities.js";
 import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
@@ -18,7 +17,6 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
-import { migration as modelCapabilitiesMigration } from "../../src/persistence/migrations/040_model_capabilities.js";
 import { PreferredModelManager } from "../../src/protocols/model_catalog/preferred.js";
 import { createModelCatalogRoutes } from "../../src/protocols/model_catalog/routes.js";
 
@@ -117,13 +115,12 @@ describe("model routes errors and preferences", () => {
     }
   });
 
-  it("lists explicitly enabled configured-only models without importing builtin names", async () => {
+  it("lists only discovered models without importing builtin names", async () => {
     const database = openDatabase({
       path: ":memory:",
       migrations: [
         embedMigration(runtimeConfigMigration),
         embedMigration(accountsMigration),
-        embedMigration(modelCapabilitiesMigration),
       ],
       nowMs,
     });
@@ -144,12 +141,7 @@ describe("model routes errors and preferences", () => {
         }] };
       },
     });
-    const overrides = new SqliteModelCapabilityOverrides(database, nowMs);
-    overrides.set(account.accountId, "manual", {
-      enabled: true,
-      protocols: ["responses"],
-    }, 0);
-    const registry = new ModelCapabilityRegistry(catalog, overrides, {
+    const registry = new ModelCapabilityRegistry(catalog, {
       get(modelId) {
         return modelId === "builtin-only"
           ? {
@@ -162,7 +154,7 @@ describe("model routes errors and preferences", () => {
       },
     });
     const gateway = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:/configured-models" }),
+      startup: parseStartupConfig([], {}, { homedir: "Q:/discovered-models" }),
       runtime: defaultRuntimeConfigSnapshot(),
     }, createModelCatalogRoutes({
       directory: accounts,
@@ -172,23 +164,20 @@ describe("model routes errors and preferences", () => {
     try {
       const response = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       const body = await response.json() as {
-        data: Array<{ id: string; x_ghcg_configured?: boolean; x_ghcg_verified?: boolean }>;
+        data: Array<{ id: string }>;
       };
-      expect(body.data.map((item) => item.id)).toEqual(["discovered", "manual"]);
-      expect(body.data[1]).toMatchObject({
-        id: "manual",
-        x_ghcg_configured: true,
-        x_ghcg_verified: false,
-      });
-
+      expect(body.data.map((item) => item.id)).toEqual(["discovered"]);
+      const anthropic = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models", {
+        headers: { "anthropic-version": "2023-06-01" },
+      }));
+      expect((await anthropic.json() as { data: Array<{ id: string }> }).data.map((item) => item.id))
+        .toEqual(["discovered"]);
       const snapshot = await registry.get(account, new AbortController().signal);
-      new PreferredModelManager(accounts.preferences).setPreferred(account.accountId, "manual", 0, snapshot);
-      overrides.set(account.accountId, "manual", {
-        enabled: false,
-        protocols: ["responses"],
-      }, 1);
-      await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
-      expect(accounts.preferences.get(account.accountId)?.validity).toBe("invalid");
+      const preferences = new PreferredModelManager(accounts.preferences);
+      expect(() => preferences.setPreferred(account.accountId, "builtin-only", 0, snapshot))
+        .toThrow("model not in catalog");
+      preferences.setPreferred(account.accountId, "discovered", 0, snapshot);
+      expect(accounts.preferences.get(account.accountId)?.validity).toBe("valid");
     } finally {
       await gateway.close();
       closeDatabase(database);
@@ -201,7 +190,6 @@ describe("model routes errors and preferences", () => {
       migrations: [
         embedMigration(runtimeConfigMigration),
         embedMigration(accountsMigration),
-        embedMigration(modelCapabilitiesMigration),
       ],
       nowMs,
     });
@@ -227,8 +215,7 @@ describe("model routes errors and preferences", () => {
         }] };
       },
     });
-    const overrides = new SqliteModelCapabilityOverrides(database, nowMs);
-    const registry = new ModelCapabilityRegistry(catalog, overrides, { get: () => null });
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
     const gateway = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: "Q:/stale-models" }),
       runtime: defaultRuntimeConfigSnapshot(),
@@ -240,7 +227,6 @@ describe("model routes errors and preferences", () => {
     try {
       const listing = gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       await startedPromise;
-      overrides.set(account.accountId, "new", { enabled: true, protocols: ["responses"] }, 0);
       accounts.preferences.set(account.accountId, { modelId: "new", catalogGeneration: 1 }, 0);
       release();
       expect((await listing).status).toBe(200);
@@ -260,7 +246,6 @@ describe("model routes errors and preferences", () => {
       migrations: [
         embedMigration(runtimeConfigMigration),
         embedMigration(accountsMigration),
-        embedMigration(modelCapabilitiesMigration),
       ],
       nowMs,
     });
@@ -294,7 +279,6 @@ describe("model routes errors and preferences", () => {
     });
     const registry = new ModelCapabilityRegistry(
       catalog,
-      new SqliteModelCapabilityOverrides(database, nowMs),
       { get: () => null },
     );
     const gateway = await createGateway({

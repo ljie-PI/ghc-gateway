@@ -4,7 +4,7 @@ export type NativeModelProtocol = "chat" | "messages" | "responses";
 export type ChatOutputTokenField = "max_tokens" | "max_completion_tokens";
 export type SupportedReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type CapabilityFieldState = "missing" | "value" | "malformed";
-export type CapabilitySource = "admin_override" | "live" | "builtin" | "unknown";
+export type CapabilitySource = "live" | "builtin" | "unknown";
 
 export class ModelCapabilityUnavailableError extends Error {
   constructor() {
@@ -56,15 +56,6 @@ export interface ModelCapabilityProfile {
   readonly chatOutputTokenField: EffectiveCapabilityField<ChatOutputTokenField>;
   readonly supportedParameters: EffectiveCapabilityField<readonly string[]>;
   readonly reasoningEfforts: EffectiveCapabilityField<readonly SupportedReasoningEffort[]>;
-}
-
-export interface ModelCapabilityOverrideValue {
-  readonly enabled: boolean;
-  readonly protocols?: readonly NativeModelProtocol[];
-  readonly maxInputTokens?: number;
-  readonly maxOutputTokens?: number;
-  readonly defaultOutputTokens?: number;
-  readonly chatOutputTokenField?: ChatOutputTokenField;
 }
 
 export interface BuiltinModelCapabilities {
@@ -178,19 +169,10 @@ export function builtinCapabilitiesFromModelInfo(
 }
 
 export function effectiveField<T>(
-  overrideValue: T | undefined,
   live: DeclaredField<T>,
   builtin: DeclaredField<T>,
   equals: (left: T, right: T) => boolean = Object.is,
 ): EffectiveCapabilityField<T> {
-  if (overrideValue !== undefined) {
-    return Object.freeze({
-      value: overrideValue,
-      source: "admin_override",
-      conflict: differsFromLower(overrideValue, live, builtin, equals),
-      liveState: live.state,
-    });
-  }
   if (live.state === "value") {
     return Object.freeze({
       value: live.value as T,
@@ -368,16 +350,6 @@ function parseReasoningEfforts(input: unknown): DeclaredField<readonly Supported
     return malformed();
   }
   return value([...new Set(input as SupportedReasoningEffort[])].sort());
-}
-
-function differsFromLower<T>(
-  overrideValue: T,
-  live: DeclaredField<T>,
-  builtin: DeclaredField<T>,
-  equals: (left: T, right: T) => boolean,
-): boolean {
-  return (live.state === "value" && !equals(overrideValue, live.value as T))
-    || (live.state === "missing" && builtin.state === "value" && !equals(overrideValue, builtin.value as T));
 }
 
 function missing<T>(): DeclaredField<T> {

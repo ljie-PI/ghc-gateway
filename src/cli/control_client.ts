@@ -662,7 +662,7 @@ export function adminModelsFromCatalog(
         modelId: preferredModel.modelId,
         validity: preferredModel.validity,
       },
-    items: catalog.models.filter((model) => model.visible).map((model) => {
+    items: catalog.models.map((model) => {
       return {
         id: model.modelId,
         name: model.name,

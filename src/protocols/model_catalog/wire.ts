@@ -19,7 +19,7 @@ export function serializeOpenAiModels(
   catalog: CapabilityCatalogSnapshot,
   created = DEFAULT_MODEL_CREATED_AT_TIME,
 ): string {
-  const data = catalog.models.filter((model) => model.visible).map((model) => {
+  const data = catalog.models.map((model) => {
     const item: Record<string, unknown> = {
       id: model.modelId,
       object: "model",
@@ -32,10 +32,6 @@ export function serializeOpenAiModels(
     if (model.maxOutputTokens.value !== null) {
       item.max_output_tokens = model.maxOutputTokens.value;
     }
-    if (model.configured && !model.verified) {
-      item.x_ghcg_configured = true;
-      item.x_ghcg_verified = false;
-    }
     return item;
   });
   return JSON.stringify({ data, object: "list" });
@@ -46,8 +42,8 @@ export function serializeAnthropicModels(
   created = DEFAULT_MODEL_CREATED_AT_TIME,
 ): string {
   const createdAt = new Date(created * 1000).toISOString().replace(/\.\d+Z$/u, "Z");
-  const visible = catalog.models.filter((model) => model.visible);
-  const data = visible.map((model) => {
+  const models = catalog.models;
+  const data = models.map((model) => {
     return {
       type: "model",
       id: model.modelId,
@@ -55,13 +51,10 @@ export function serializeAnthropicModels(
       created_at: createdAt,
       max_input_tokens: model.maxInputTokens.value,
       max_tokens: model.maxOutputTokens.value,
-      ...(model.configured && !model.verified
-        ? { x_ghcg_configured: true, x_ghcg_verified: false }
-        : {}),
     };
   });
-  const first = visible[0]?.modelId ?? null;
-  const last = visible[visible.length - 1]?.modelId ?? null;
+  const first = models[0]?.modelId ?? null;
+  const last = models[models.length - 1]?.modelId ?? null;
   return JSON.stringify({
     data,
     has_more: false,

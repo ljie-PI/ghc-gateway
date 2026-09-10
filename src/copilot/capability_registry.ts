@@ -1,7 +1,5 @@
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { CatalogSnapshot, CopilotCatalogModel, CopilotModelCatalog } from "./model_catalog.js";
-import type { SqliteModelCapabilityOverrides, StoredModelCapabilityOverride } from "./capability_overrides.js";
-import { ModelCapabilityOverrideError } from "./capability_overrides.js";
 import {
   effectiveField,
   resolveDefaultOutputTokens,
@@ -12,7 +10,6 @@ import {
   type EffectiveOutputDefault,
   type ModelCapabilityProfile,
   type NativeModelProtocol,
-  type ModelCapabilityOverrideValue,
 } from "./model_capabilities.js";
 
 export interface EffectiveModelCapabilitySnapshot {
@@ -20,12 +17,6 @@ export interface EffectiveModelCapabilitySnapshot {
   readonly modelId: string;
   readonly name: string;
   readonly vendor: string;
-  readonly discovered: boolean;
-  readonly configured: boolean;
-  readonly verified: boolean;
-  readonly enabled: boolean;
-  readonly visible: boolean;
-  readonly override: ModelCapabilityOverrideValue | null;
   readonly protocols: EffectiveCapabilityField<readonly NativeModelProtocol[]>;
   readonly maxInputTokens: EffectiveCapabilityField<number>;
   readonly maxOutputTokens: EffectiveCapabilityField<number>;
@@ -34,7 +25,6 @@ export interface EffectiveModelCapabilitySnapshot {
   readonly revision: {
     readonly credentialGeneration: number;
     readonly catalogGeneration: number;
-    readonly overrideRevision: number;
     readonly builtinRevision: string | null;
   };
 }
@@ -45,7 +35,6 @@ export interface CapabilityCatalogSnapshot {
   readonly catalogGeneration: number;
   readonly fetchedAt: string;
   readonly models: readonly EffectiveModelCapabilitySnapshot[];
-  readonly capabilityRevision: number;
 }
 
 export interface CapabilitySnapshotDependencies {
@@ -88,65 +77,12 @@ export function isCapabilitySnapshotCurrent(
 export class ModelCapabilityRegistry {
   constructor(
     private readonly catalog: CopilotModelCatalog,
-    readonly overrides: SqliteModelCapabilityOverrides,
     private readonly builtins: BuiltinModelCapabilityLookup,
   ) {}
 
   async get(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<CapabilityCatalogSnapshot> {
-    const configured = this.overrides.list(account.accountId);
-    const capabilityRevision = this.overrides.revision(account.accountId);
     const catalog = await this.catalog.get(account.accountId, signal, account.credentialGeneration);
-    return this.compose(
-      account,
-      catalog,
-      configured,
-      capabilityRevision,
-    );
-  }
-
-  async previewOverride(
-    account: Readonly<BoundAccount>,
-    modelId: string,
-    candidate: Readonly<ModelCapabilityOverrideValue> | null,
-    expectedRevision: number,
-    signal: AbortSignal,
-  ): Promise<CapabilityCatalogSnapshot> {
-    const currentRevision = this.overrides.revision(account.accountId);
-    if (currentRevision !== expectedRevision) {
-      throw new ModelCapabilityOverrideError("revision_conflict");
-    }
-    const configuredBefore = this.overrides.list(account.accountId);
-    const catalog = await this.catalog.get(account.accountId, signal, account.credentialGeneration);
-    if (this.overrides.revision(account.accountId) !== currentRevision) {
-      throw new ModelCapabilityOverrideError("revision_conflict");
-    }
-    if (candidate?.defaultOutputTokens !== undefined) {
-      const model = catalog.models.find((item) => item.id === modelId);
-      const live = model?.capabilities ?? UNKNOWN_DECLARATIONS;
-      const fallback = this.builtins.get(modelId)?.capabilities ?? UNKNOWN_DECLARATIONS;
-      const ceiling = effectiveField(
-        candidate.maxOutputTokens,
-        live.maxOutputTokens,
-        fallback.maxOutputTokens,
-      ).value;
-      if (ceiling !== null && candidate.defaultOutputTokens > ceiling) {
-        throw new ModelCapabilityOverrideError("validation_failed");
-      }
-    }
-    const configured = configuredBefore
-      .filter((stored) => stored.modelId !== modelId);
-    const current = this.overrides.get(account.accountId, modelId);
-    const changesState = candidate !== null || current.value !== null;
-    const nextRevision = changesState ? currentRevision + 1 : currentRevision;
-    if (candidate !== null) {
-      configured.push({
-        accountId: account.accountId,
-        modelId,
-        revision: nextRevision,
-        value: candidate,
-      });
-    }
-    return this.compose(account, catalog, configured, nextRevision);
+    return this.compose(account, catalog);
   }
 
   invalidate(accountId: string): void {
@@ -154,11 +90,6 @@ export class ModelCapabilityRegistry {
   }
 
   isCurrent(snapshot: Readonly<CapabilityCatalogSnapshot>): boolean {
-    return this.isCatalogCurrent(snapshot)
-      && this.overrides.revision(snapshot.accountId) === snapshot.capabilityRevision;
-  }
-
-  isCatalogCurrent(snapshot: Readonly<CapabilityCatalogSnapshot>): boolean {
     return this.catalog.isCurrent(
       snapshot.accountId,
       snapshot.catalogGeneration,
@@ -173,91 +104,56 @@ export class ModelCapabilityRegistry {
   private compose(
     account: Readonly<BoundAccount>,
     catalog: Readonly<CatalogSnapshot>,
-    configured: readonly StoredModelCapabilityOverride[],
-    capabilityRevision: number,
   ): CapabilityCatalogSnapshot {
-    const overrides = new Map(configured.map((item) => [item.modelId, item]));
-    const discoveredIds = new Set(catalog.models.map((model) => model.id));
-    const models = catalog.models.map((model) => this.effective(
-      account,
-      catalog,
-      model,
-      overrides.get(model.id),
-      capabilityRevision,
-    ));
-    for (const stored of configured) {
-      if (!discoveredIds.has(stored.modelId)) {
-        models.push(this.effective(account, catalog, undefined, stored, capabilityRevision));
-      }
-    }
     return deepFreeze({
       accountId: account.accountId,
       credentialGeneration: account.credentialGeneration,
       catalogGeneration: catalog.generation,
       fetchedAt: catalog.fetchedAt,
-      models,
-      capabilityRevision,
+      models: catalog.models.map((model) => this.effective(account, catalog, model)),
     });
   }
 
   private effective(
     account: Readonly<BoundAccount>,
     catalog: Readonly<CatalogSnapshot>,
-    model: Readonly<CopilotCatalogModel> | undefined,
-    stored: Readonly<StoredModelCapabilityOverride> | undefined,
-    capabilityRevision: number,
+    model: Readonly<CopilotCatalogModel>,
   ): EffectiveModelCapabilitySnapshot {
-    const override = stored?.value ?? null;
-    const live = model?.capabilities ?? UNKNOWN_DECLARATIONS;
-    const builtin = this.builtins.get(model?.id ?? stored?.modelId ?? "");
+    const live = model.capabilities;
+    const builtin = this.builtins.get(model.id);
     const fallback = builtin?.capabilities ?? UNKNOWN_DECLARATIONS;
-    const protocols = effectiveField(override?.protocols, live.protocols, fallback.protocols, sameProtocols);
+    const protocols = effectiveField(live.protocols, fallback.protocols, sameProtocols);
     const maxInputTokens = effectiveField(
-      override?.maxInputTokens,
       live.maxInputTokens,
       fallback.maxInputTokens,
     );
     const maxOutputTokens = effectiveField(
-      override?.maxOutputTokens,
       live.maxOutputTokens,
       fallback.maxOutputTokens,
     );
     const chatOutputTokenField = effectiveField(
-      override?.chatOutputTokenField,
       live.chatOutputTokenField,
       fallback.chatOutputTokenField,
     );
     const supportedParameters = effectiveField(
-      undefined,
       live.supportedParameters,
       fallback.supportedParameters,
       sameStrings,
     );
     const reasoningEfforts = effectiveField(
-      undefined,
       live.reasoningEfforts,
       fallback.reasoningEfforts,
       sameStrings,
     );
     const defaultOutputTokens = effectiveField(
-      override?.defaultOutputTokens,
       live.defaultOutputTokens,
       fallback.defaultOutputTokens,
     );
-    const discovered = model !== undefined;
-    const configured = override !== null;
-    const enabled = override?.enabled ?? discovered;
     return deepFreeze({
       accountId: account.accountId,
-      modelId: model?.id ?? stored?.modelId ?? "",
-      name: model?.name ?? stored?.modelId ?? "",
-      vendor: model?.vendor ?? "configured",
-      discovered,
-      configured,
-      verified: discovered,
-      enabled,
-      visible: enabled && (discovered || configured),
-      override,
+      modelId: model.id,
+      name: model.name,
+      vendor: model.vendor,
       protocols,
       maxInputTokens,
       maxOutputTokens,
@@ -269,7 +165,6 @@ export class ModelCapabilityRegistry {
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
-        overrideRevision: capabilityRevision,
         builtinRevision: builtin?.revision ?? null,
       },
     });
@@ -281,27 +176,23 @@ export function capabilitySnapshotFromCatalog(
   catalog: Readonly<CatalogSnapshot>,
 ): CapabilityCatalogSnapshot {
   const models = catalog.models.map((model) => {
-    const protocols = effectiveField(undefined, model.capabilities.protocols, UNKNOWN_DECLARATIONS.protocols, sameProtocols);
-    const maxInputTokens = effectiveField(undefined, model.capabilities.maxInputTokens, UNKNOWN_DECLARATIONS.maxInputTokens);
-    const maxOutputTokens = effectiveField(undefined, model.capabilities.maxOutputTokens, UNKNOWN_DECLARATIONS.maxOutputTokens);
+    const protocols = effectiveField(model.capabilities.protocols, UNKNOWN_DECLARATIONS.protocols, sameProtocols);
+    const maxInputTokens = effectiveField(model.capabilities.maxInputTokens, UNKNOWN_DECLARATIONS.maxInputTokens);
+    const maxOutputTokens = effectiveField(model.capabilities.maxOutputTokens, UNKNOWN_DECLARATIONS.maxOutputTokens);
     const defaultConfiguration = effectiveField(
-      undefined,
       model.capabilities.defaultOutputTokens,
       UNKNOWN_DECLARATIONS.defaultOutputTokens,
     );
     const chatOutputTokenField = effectiveField(
-      undefined,
       model.capabilities.chatOutputTokenField,
       UNKNOWN_DECLARATIONS.chatOutputTokenField,
     );
     const supportedParameters = effectiveField(
-      undefined,
       model.capabilities.supportedParameters,
       UNKNOWN_DECLARATIONS.supportedParameters,
       sameStrings,
     );
     const reasoningEfforts = effectiveField(
-      undefined,
       model.capabilities.reasoningEfforts,
       UNKNOWN_DECLARATIONS.reasoningEfforts,
       sameStrings,
@@ -311,12 +202,6 @@ export function capabilitySnapshotFromCatalog(
       modelId: model.id,
       name: model.name,
       vendor: model.vendor,
-      discovered: true,
-      configured: false,
-      verified: true,
-      enabled: true,
-      visible: true,
-      override: null,
       protocols,
       maxInputTokens,
       maxOutputTokens,
@@ -325,7 +210,6 @@ export function capabilitySnapshotFromCatalog(
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,
-        overrideRevision: 0,
         builtinRevision: null,
       },
     });
@@ -336,7 +220,6 @@ export function capabilitySnapshotFromCatalog(
     catalogGeneration: catalog.generation,
     fetchedAt: catalog.fetchedAt,
     models,
-    capabilityRevision: 0,
   });
 }
 

@@ -217,11 +217,73 @@ export async function auditRuntimeDependencies(root: string): Promise<readonly s
   return [...specs].sort();
 }
 
+const PACK_CLEANUP_RETRY_DELAYS_MS = [100, 200, 400, 800, 1600] as const;
+const TRANSIENT_PACK_CLEANUP_CODES = new Set(["EBUSY", "ENOTEMPTY", "EPERM"]);
+
+export interface PackCleanupDependencies {
+  readonly remove?: (target: string) => Promise<void>;
+  readonly delay?: (ms: number) => Promise<void>;
+  readonly warning?: (message: string) => void;
+}
+
+export async function cleanupPackTemporaryDirectory(
+  target: string,
+  primaryError?: unknown,
+  dependencies: Readonly<PackCleanupDependencies> = {},
+): Promise<void> {
+  const remove = dependencies.remove ?? (async (value: string) => {
+    await rm(value, { recursive: true, force: true });
+  });
+  const delay = dependencies.delay ?? (async (ms: number) => {
+    await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  });
+  const warning = dependencies.warning ?? ((message: string) => console.error(message));
+  let lastError: unknown = new Error("package cleanup failed");
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await remove(target);
+      return;
+    } catch (error: unknown) {
+      lastError = error;
+      const retryDelay = PACK_CLEANUP_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined || !isTransientPackCleanupError(error)) {
+        break;
+      }
+      try {
+        await delay(retryDelay);
+      } catch (delayError: unknown) {
+        lastError = delayError;
+        break;
+      }
+    }
+  }
+
+  if (primaryError !== undefined) {
+    warning(`package smoke cleanup failed after the primary failure: ${packCleanupErrorDescription(lastError)}`);
+    return;
+  }
+  throw lastError;
+}
+
+function isTransientPackCleanupError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && typeof error.code === "string" && TRANSIENT_PACK_CLEANUP_CODES.has(error.code);
+}
+
+function packCleanupErrorDescription(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+  return error instanceof Error ? error.name : String(error);
+}
+
 export async function runPackSmoke(): Promise<PackSmokeResult> {
   await auditRuntimeDependencies(process.cwd());
   const temporaryParent = path.resolve("artifacts", "test-data");
   await mkdir(temporaryParent, { recursive: true });
   const temporaryRoot = await mkdtemp(path.join(temporaryParent, "ghc-gateway-pack-"));
+  let primaryError: unknown;
   try {
     if (process.platform === "win32") {
       const identity = await runCommand("whoami", ["/user", "/fo", "csv", "/nh"], temporaryRoot);
@@ -285,8 +347,11 @@ export async function runPackSmoke(): Promise<PackSmokeResult> {
     await mkdir(artifactDirectory, { recursive: true });
     await writeFile(path.join(artifactDirectory, "package-smoke.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
     return result;
+  } catch (error: unknown) {
+    primaryError = error;
+    throw error;
   } finally {
-    await rm(temporaryRoot, { recursive: true, force: true });
+    await cleanupPackTemporaryDirectory(temporaryRoot, primaryError);
   }
 }
 

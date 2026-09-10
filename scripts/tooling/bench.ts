@@ -11,7 +11,6 @@ import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import type { BoundCopilot, CopilotBackend } from "../../src/copilot/backend.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
-import { SqliteModelCapabilityOverrides } from "../../src/copilot/capability_overrides.js";
 import { RuntimeConfigStore } from "../../src/config/runtime_config.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import type { DaemonIdentity } from "../../src/daemon/identity_file.js";
@@ -478,7 +477,6 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
   const backend = new BenchmarkCopilotBackend();
   const registry = new ModelCapabilityRegistry(
     catalog,
-    new SqliteModelCapabilityOverrides(database, nowMs),
     { get: () => null },
   );
   const measuredHistory = new MeasuredHistory(database, { nowMs });
