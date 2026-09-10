@@ -1,4 +1,5 @@
 import path from "node:path";
+import { FileAgentsManager } from "./agents/manager.js";
 import { fileURLToPath } from "node:url";
 import { createAdminStaticModule } from "./admin/static.js";
 import { createAdminModule } from "./admin/routes.js";
@@ -323,6 +324,7 @@ export async function composeProductionDaemonGateway(
     };
     const uptimeMs = options.uptimeMs ?? (() => Math.max(0, Math.floor(process.uptime() * 1000)));
     const admin = createAdminModule({
+      agents: new FileAgentsManager({ env: composition.env }),
       accounts: application.directory,
       deviceFlows,
       registry,

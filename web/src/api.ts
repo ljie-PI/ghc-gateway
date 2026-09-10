@@ -1,3 +1,4 @@
+import type { AgentsView, AgentStatus, AgentApplyRequest, AgentRestoreRequest } from "../../src/agents/types.js";
 import type {
   AdminAccount,
   AdminAccounts,
@@ -58,6 +59,9 @@ export class AdminClient {
   models(accountId?: string): Promise<AdminModels> {
     return this.request(`/models${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`);
   }
+  agents(): Promise<AgentsView> { return this.request("/agents"); }
+  applyAgent(value: AgentApplyRequest): Promise<AgentStatus> { return this.mutate("/agents/apply", "POST", value); }
+  restoreAgent(value: AgentRestoreRequest): Promise<AgentStatus> { return this.mutate("/agents/restore", "POST", value); }
   config(): Promise<AdminRuntimeConfig> { return this.request("/config"); }
   history(): Promise<AdminHistorySummary> { return this.request("/history"); }
   events(cursor?: string): Promise<AdminEventPage> {
@@ -144,6 +148,12 @@ export function takeBootstrapToken(): string | null {
 
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === "agent_invalid_config") return "Unsupported or invalid client configuration. Check global configuration syntax and remove conflicting profiles or reserved providers before applying.";
+    if (error.code === "agent_models_unavailable") return "Use exact enabled Copilot model IDs with usable capabilities from Models, then refresh.";
+    if (error.code === "agent_unsafe_path") return "The configuration path or access permissions are unsafe or unsupported. No forced overwrite is available.";
+    if (error.code === "agent_recovery_required") return "Recovery is required. Refresh to inspect; keep recovery files and do not overwrite external changes.";
+    if (error.code === "agent_conflict") return "Client configuration changed outside Gateway. Refresh and reconcile those changes before applying or restoring.";
+    if (error.code === "agent_busy") return "Another agent configuration operation is running. Try again after it finishes.";
     if (error.status === 409) return "This data changed elsewhere. Refresh before trying again.";
     if (error.status === 403) return "The security check rejected this change.";
     if (error.status === 0) return "The gateway is unreachable. Check that it is still running.";

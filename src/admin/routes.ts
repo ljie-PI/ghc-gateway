@@ -33,6 +33,21 @@ const PreferredModelSchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 0 }),
 }, { additionalProperties: false });
 const RefreshModelsSchema = Type.Object({ accountId: Type.String({ minLength: 1 }) }, { additionalProperties: false });
+const ModelIdSchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+});
+const AgentIdSchema = Type.Union([Type.Literal("claude"), Type.Literal("codex")]);
+const AgentRevisionSchema = Type.String({ minLength: 64, maxLength: 64, pattern: "^[a-f0-9]{64}$" });
+const AgentApplySchema = Type.Object({
+  agent: AgentIdSchema, expectedRevision: AgentRevisionSchema, catalogRevision: AgentRevisionSchema,
+  mappings: Type.Array(Type.Object({
+    displayName: Type.String({ minLength: 1, maxLength: 80, pattern: "^[^\\u0000-\\u001f\\u007f]+$" }),
+    modelId: ModelIdSchema,
+  }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
+}, { additionalProperties: false });
+const AgentRestoreSchema = Type.Object({ agent: AgentIdSchema, expectedRevision: AgentRevisionSchema }, { additionalProperties: false });
 const RuntimeConfigUpdateSchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 0 }),
   config: RuntimeConfigSchema,
@@ -116,6 +131,7 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
         return;
       }
       closed = true;
+      dependencies.agents?.close();
       eventHub.close();
       flowOwners.close();
       auth.close();
@@ -231,6 +247,15 @@ async function dispatch(
     response = success(await api.setPreferredModel(value.accountId, value.modelId, value.expectedRevision, context.signal), context.requestId);
     break;
   }
+  case "agentsGet":
+    response = success(await api.agents(context.listenerOrigin, context.signal), context.requestId);
+    break;
+  case "agentsApply":
+    response = success(await api.applyAgent(checked(AgentApplySchema, body), context.listenerOrigin, context.signal), context.requestId);
+    break;
+  case "agentsRestore":
+    response = success(await api.restoreAgent(checked(AgentRestoreSchema, body), context.listenerOrigin, context.signal), context.requestId);
+    break;
   case "configGet":
     response = success(api.runtimeConfig(), context.requestId);
     break;
@@ -355,6 +380,7 @@ class AdminDeviceFlowOwners {
 
 type RouteId = "bootstrap" | "session" | "logout" | "status" | "usage" | "accounts" | "deviceStart"
   | "devicePoll" | "deviceCancel" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
+  | "agentsGet" | "agentsApply" | "agentsRestore"
   | "configGet" | "configPut" | "historyGet" | "historyDelete" | "events" | "eventStream";
 
 interface MatchedRoute {
@@ -406,6 +432,9 @@ const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([
   route("GET", "/admin/api/v1/accounts", "accounts"),
   route("POST", "/admin/api/v1/device-flows", "deviceStart", true, true),
   route("PUT", "/admin/api/v1/accounts/default", "accountDefault", true, true),
+  route("GET", "/admin/api/v1/agents", "agentsGet"),
+  route("POST", "/admin/api/v1/agents/apply", "agentsApply", true, true),
+  route("POST", "/admin/api/v1/agents/restore", "agentsRestore", true, true),
   route("GET", "/admin/api/v1/models", "models", false, false, ["accountId"]),
   route("POST", "/admin/api/v1/models/refresh", "modelsRefresh", true, true),
   route("PUT", "/admin/api/v1/models/preferred", "modelsPreferred", true, true),
@@ -667,6 +696,12 @@ function failure(error: AdminApiError, requestId: string): Response {
 
 function statusFor(code: AdminApiError["code"]): number {
   return {
+    agent_conflict: 409,
+    agent_recovery_required: 409,
+    agent_unsafe_path: 409,
+    agent_invalid_config: 400,
+    agent_models_unavailable: 400,
+    agent_busy: 409,
     validation_failed: 400,
     unauthenticated: 401,
     forbidden: 403,

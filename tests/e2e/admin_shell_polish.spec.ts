@@ -26,7 +26,7 @@ for (const width of [1440, 390]) {
       const menu = page.getByRole("button", { name: "Open navigation" });
       if (await menu.isVisible()) await menu.click();
       const navigation = page.getByRole("navigation");
-      await expect(navigation.getByRole("button")).toHaveCount(5);
+      await expect(navigation.getByRole("button")).toHaveCount(6);
       await expect(navigation.getByRole("button", { name: "Responses History" })).toHaveCount(0);
       await navigation.getByRole("button", { name: "Events", exact: true }).click();
       await expect(page.getByRole("heading", { name: "Events", exact: true })).toBeFocused();
