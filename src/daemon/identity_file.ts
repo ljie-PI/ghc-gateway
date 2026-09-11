@@ -1,23 +1,25 @@
-import { execFileSync } from "node:child_process";
 import {
-  chmodSync,
   closeSync,
   constants,
   fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
-  mkdirSync,
   openSync,
-  readSync,
   unlinkSync,
   writeSync,
   type Stats,
 } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { InvalidWindowsIdentityError, WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
 import { captureProcessStartIdentity } from "./process_identity.js";
+import {
+  DaemonIdentityFileError,
+  ProtectedFileSystem,
+} from "./protected_file.js";
+
+export { DaemonIdentityFileError } from "./protected_file.js";
+export type { DaemonIdentityFileErrorCode } from "./protected_file.js";
 
 export interface DaemonIdentity {
   readonly version: 1;
@@ -28,25 +30,6 @@ export interface DaemonIdentity {
   readonly controlToken: string;
   readonly port: number;
   readonly createdAt: string;
-}
-
-export type DaemonIdentityFileErrorCode =
-  | "invalid_identity"
-  | "lease_conflict"
-  | "unsafe_path"
-  | "unsafe_owner"
-  | "unsafe_permissions"
-  | "io_error";
-
-export class DaemonIdentityFileError extends Error {
-  constructor(
-    readonly code: DaemonIdentityFileErrorCode,
-    message: string,
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = "DaemonIdentityFileError";
-  }
 }
 
 export interface DaemonIdentityLease {
@@ -85,18 +68,14 @@ export class DaemonIdentityFile {
   readonly directory: string;
   readonly path: string;
   private readonly lockPath: string;
-  private readonly platform: NodeJS.Platform;
-  private readonly runCommand: (file: string, args: readonly string[]) => string;
-  private readonly windowsAcl: WindowsAcl;
+  private readonly protectedFiles: ProtectedFileSystem;
   private readonly processIdentity: (pid: number) => Promise<string | null>;
 
   constructor(directory: string, options: DaemonIdentityFileOptions = {}) {
     this.directory = path.resolve(directory);
     this.path = path.join(this.directory, "daemon.json");
     this.lockPath = path.join(this.directory, "daemon.lock");
-    this.platform = options.platform ?? process.platform;
-    this.runCommand = options.runCommand ?? defaultRunCommand;
-    this.windowsAcl = new WindowsAcl(this.runCommand);
+    this.protectedFiles = new ProtectedFileSystem(this.directory, options);
     this.processIdentity = options.processIdentity ?? captureProcessStartIdentity;
   }
 
@@ -301,133 +280,23 @@ export class DaemonIdentityFile {
   }
 
   private ensureProtectedDirectory(): void {
-    let created = false;
-    if (!pathExists(this.directory)) {
-      mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-      created = true;
-    }
-    const stat = lstatSync(this.directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || this.isWindowsReparsePoint(this.directory)) {
-      throw new DaemonIdentityFileError("unsafe_path", "daemon directory must be a regular directory");
-    }
-    this.assertOwner(stat);
-    if (this.platform === "win32") {
-      if (created) {
-        this.restrictWindowsAcl(this.directory, true);
-      }
-      this.assertWindowsAcl(this.directory);
-    } else if ((stat.mode & 0o777) !== 0o700) {
-      throw new DaemonIdentityFileError("unsafe_permissions", "daemon directory permissions must be 0700");
-    }
+    this.protectedFiles.ensureProtectedDirectory();
   }
 
   private readProtectedFile(filePath: string): string {
-    const before = this.assertProtectedRegularFile(filePath);
-    const noFollowFlag = (constants as Readonly<Record<string, number>>)["O_NOFOLLOW"] ?? 0;
-    const noFollow = constants.O_RDONLY | noFollowFlag;
-    let fd: number;
-    try {
-      fd = openSync(filePath, noFollow);
-    } catch (error: unknown) {
-      throw new DaemonIdentityFileError("unsafe_path", "unable to safely open daemon file", { cause: error });
-    }
-    try {
-      const opened = fstatSync(fd);
-      if (!opened.isFile() || !sameFile(before, opened) || opened.size > MAX_IDENTITY_BYTES) {
-        throw new DaemonIdentityFileError("unsafe_path", "daemon file changed during validation");
-      }
-      const buffer = Buffer.alloc(opened.size);
-      let offset = 0;
-      while (offset < buffer.length) {
-        const count = readSync(fd, buffer, offset, buffer.length - offset, offset);
-        if (count === 0) {
-          break;
-        }
-        offset += count;
-      }
-      if (offset !== buffer.length) {
-        throw new DaemonIdentityFileError("io_error", "unable to read complete daemon file");
-      }
-      return buffer.toString("utf8");
-    } finally {
-      closeSync(fd);
-    }
+    return this.protectedFiles.readProtectedFile(filePath, MAX_IDENTITY_BYTES);
   }
 
   private assertProtectedRegularFile(filePath: string): Stats {
-    const stat = lstatSync(filePath);
-    if (!stat.isFile() || stat.isSymbolicLink() || this.isWindowsReparsePoint(filePath)) {
-      throw new DaemonIdentityFileError("unsafe_path", "daemon path must be a regular file");
-    }
-    this.assertOwner(stat);
-    if (this.platform === "win32") {
-      this.assertWindowsAcl(filePath);
-    } else if ((stat.mode & 0o777) !== 0o600) {
-      throw new DaemonIdentityFileError("unsafe_permissions", "daemon file permissions must be 0600");
-    }
-    return stat;
-  }
-
-  private assertOwner(stat: Stats): void {
-    if (this.platform !== "win32" && typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-      throw new DaemonIdentityFileError("unsafe_owner", "daemon path must be owned by the current user");
-    }
+    return this.protectedFiles.assertProtectedRegularFile(filePath);
   }
 
   private protectFile(filePath: string): void {
-    if (this.platform === "win32") {
-      this.restrictWindowsAcl(filePath, false);
-      return;
-    }
-    chmodSync(filePath, 0o600);
-  }
-
-  private isWindowsReparsePoint(target: string): boolean {
-    if (this.platform !== "win32") {
-      return false;
-    }
-    const script = `$item = Get-Item -LiteralPath '${powerShellLiteral(target)}' -Force; if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { 'true' } else { 'false' }`;
-    return this.runCommand("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]).trim() === "true";
-  }
-
-  private restrictWindowsAcl(target: string, directory: boolean): void {
-    const current = this.currentWindowsIdentity();
-    this.windowsAcl.restrict(target, directory, { setOwner: true, currentIdentity: current });
-  }
-
-  private assertWindowsAcl(target: string): void {
-    const current = this.currentWindowsIdentity();
-    const owner = windowsOwner(target, this.runCommand);
-    if (!this.windowsAcl.isCurrentIdentity(owner, current)) {
-      throw new DaemonIdentityFileError("unsafe_owner", "daemon path must be owned by the current user");
-    }
-    const identities = this.windowsAcl.identities(target);
-    if (identities.length !== 1 || !this.windowsAcl.isCurrentIdentity(identities[0] ?? "", current)) {
-      throw new DaemonIdentityFileError("unsafe_permissions", "daemon ACL must be restricted to the current user");
-    }
-  }
-
-  private currentWindowsIdentity() {
-    try {
-      return this.windowsAcl.currentIdentity();
-    } catch (error: unknown) {
-      if (error instanceof InvalidWindowsIdentityError) {
-        throw new DaemonIdentityFileError("unsafe_owner", "unable to resolve current Windows identity");
-      }
-      throw error;
-    }
+    this.protectedFiles.protectFile(filePath);
   }
 
   private flushDirectory(): void {
-    if (this.platform === "win32") {
-      return;
-    }
-    const fd = openSync(this.directory, constants.O_RDONLY);
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
+    this.protectedFiles.flushDirectory();
   }
 }
 
@@ -578,31 +447,4 @@ function isNotFound(error: unknown): boolean {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
-}
-
-function defaultRunCommand(file: string, args: readonly string[]): string {
-  const resolved = process.platform === "win32" && (file === "whoami" || file === "icacls")
-    ? windowsCommandPath(file)
-    : file;
-  return execFileSync(resolved, [...args], { encoding: "utf8", windowsHide: true });
-}
-
-function windowsOwner(
-  target: string,
-  runCommand: (file: string, args: readonly string[]) => string,
-): string {
-  const securityModule = "$env:windir\\system32\\WindowsPowerShell\\v1.0\\Modules"
-    + "\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1";
-  const script = `Import-Module "${securityModule}"; (Get-Acl -LiteralPath '${powerShellLiteral(target)}').Owner`;
-  const owner = runCommand("powershell.exe", [
-    "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script,
-  ]).trim();
-  if (owner.length === 0) {
-    throw new DaemonIdentityFileError("unsafe_owner", "unable to resolve daemon path owner");
-  }
-  return owner;
-}
-
-function powerShellLiteral(value: string): string {
-  return value.replaceAll("'", "''");
 }

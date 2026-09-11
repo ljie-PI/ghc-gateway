@@ -14,8 +14,12 @@ import {
   type DaemonIdentity,
   type DaemonIdentityLease,
 } from "./identity_file.js";
+import { LifecycleCoordinator } from "./lifecycle_coordinator.js";
 import { JsonlLogger, StderrLogger, type DaemonLogger } from "./logger.js";
+import { DaemonOperationLeaseFile } from "./operation_lease.js";
 import { captureProcessStartIdentity, terminateProcessIfMatching } from "./process_identity.js";
+
+const productionLifecycleCoordinator = new LifecycleCoordinator(new DaemonOperationLeaseFile());
 
 export interface DaemonRuntimeComposition {
   readonly startup: StartupConfig;
@@ -56,6 +60,7 @@ export function createProductionDaemonController(
   const childEntry = options.childEntry ?? fileURLToPath(new URL("./child.js", import.meta.url));
   const execPath = options.execPath ?? process.execPath;
   return new DaemonController({
+    lifecycleCoordinator: productionLifecycleCoordinator,
     identityFile: {
       read: async (dataDir) => new DaemonIdentityFile(dataDir).read(),
       remove: async (dataDir, expected) => new DaemonIdentityFile(dataDir).remove(expected),

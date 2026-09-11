@@ -110,6 +110,26 @@ describe("DaemonController lifecycle", () => {
     expect(fixture.spawn).toHaveBeenCalledOnce();
   });
 
+  it("finishes verified child cleanup before returning interruption after spawn", async () => {
+    const fixture = harness();
+    const abort = new AbortController();
+    const blocked = deferred();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    fixture.onDelayAsync = async () => await blocked.promise;
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    const starting = fixture.controller.start(STARTUP, { signal: abort.signal });
+    await vi.waitFor(() => expect(fixture.spawn).toHaveBeenCalledOnce());
+    abort.abort();
+    blocked.resolve();
+    await expect(starting).rejects.toMatchObject({ code: "interrupted" });
+    expect(fixture.terminate).toHaveBeenCalledWith({
+      pid: FIRST.pid,
+      processStartIdentity: FIRST.processStartIdentity,
+    });
+    expect(fixture.child.unref).toHaveBeenCalledOnce();
+  });
+
   it("terminates only its process-identity-verified child after the 30 second ready deadline", async () => {
     const fixture = harness();
     fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
@@ -213,6 +233,28 @@ describe("DaemonController lifecycle", () => {
     expect(fixture.elapsedMs).toBe(100);
     expect(fixture.terminate).not.toHaveBeenCalled();
     expect(fixture.removed).toEqual([FIRST]);
+  });
+
+  it("reconciles an authenticated stop before returning interruption", async () => {
+    const fixture = harness({ identity: FIRST });
+    const abort = new AbortController();
+    const response = deferred();
+    let stopStarted = false;
+    fixture.controlRequest = async (identity, method) => {
+      if (method === "GET") return { state: "running", instance: instanceOf(identity) };
+      stopStarted = true;
+      await response.promise;
+      return { instance: instanceOf(identity) };
+    };
+    fixture.onDelay = () => fixture.processes.delete(FIRST.pid);
+
+    const stopping = fixture.controller.stop(DATA_DIR, { signal: abort.signal });
+    await vi.waitFor(() => expect(stopStarted).toBe(true));
+    abort.abort();
+    response.resolve();
+    await expect(stopping).rejects.toMatchObject({ code: "interrupted" });
+    expect(fixture.removed).toEqual([FIRST]);
+    expect(fixture.terminate).not.toHaveBeenCalled();
   });
 
   it("waits 10 seconds then uses a fresh process identity before force termination", async () => {
@@ -466,6 +508,12 @@ function harness(options: HarnessOptions = {}) {
     terminate,
     controller: new DaemonController(dependencies),
   });
+}
+
+function deferred() {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 function instanceOf(identity: Readonly<DaemonIdentity>) {

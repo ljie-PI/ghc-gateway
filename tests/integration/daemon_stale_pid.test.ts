@@ -54,6 +54,16 @@ describe("stale PID safety", () => {
     expect(fixture.terminate).not.toHaveBeenCalled();
   });
 
+  it("refuses cleanup when an authenticated stop response has a forged nonce", async () => {
+    const fixture = harness(IDENTITY.processStartIdentity);
+    fixture.controlRequest.mockImplementation(async (identity, method) => method === "GET"
+      ? { state: "running", instance: instanceOf(identity) }
+      : { instance: { ...instanceOf(identity), instanceNonce: "forged-nonce" } });
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "conflict" });
+    expect(fixture.terminate).not.toHaveBeenCalled();
+    expect(fixture.remove).not.toHaveBeenCalled();
+  });
+
   it("reports a verified live but unreachable process and never sends stop or terminate", async () => {
     const fixture = harness(IDENTITY.processStartIdentity);
     fixture.controlRequest.mockRejectedValue(new TypeError("connection refused"));
@@ -75,6 +85,18 @@ describe("stale PID safety", () => {
     });
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "conflict" });
     expect(fixture.elapsedMs).toBeLessThanOrEqual(10_000);
+    expect(fixture.terminate).not.toHaveBeenCalled();
+    expect(fixture.remove).not.toHaveBeenCalled();
+  });
+
+  it("refuses force-stop when the post-grace identity probe becomes unknown", async () => {
+    let reads = 0;
+    const fixture = harness(async () => {
+      reads += 1;
+      if (reads > 99) throw new Error("identity unavailable after grace");
+      return IDENTITY.processStartIdentity;
+    });
+    await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "conflict" });
     expect(fixture.terminate).not.toHaveBeenCalled();
     expect(fixture.remove).not.toHaveBeenCalled();
   });
