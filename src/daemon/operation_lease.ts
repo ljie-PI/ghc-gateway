@@ -64,7 +64,9 @@ export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
   ) => Promise<string | null>;
   readonly createToken?: () => string;
   readonly delay?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  readonly onInitializationPhase?: (phase: "database_prepared" | "database_published") => void;
+  readonly onInitializationPhase?: (
+    phase: "database_prepared" | "database_published",
+  ) => void | Promise<void>;
   readonly onPhase?: (phase: "os_locked" | "held_published" | "released_published" | "database_closing") => void;
 }
 
@@ -179,6 +181,7 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       `${OPERATION_DATABASE_INIT_PREFIX}${this.pid}-${Buffer.from(processStartIdentity).toString("base64url")}-${randomUUID()}`,
     );
     let fd: number | undefined;
+    let publishedOwnDatabase = false;
     try {
       fd = openSync(initPath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
       writeAllSync(fd, emptyDatabaseImage(), this.write);
@@ -188,16 +191,23 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       closeSync(fd);
       fd = undefined;
       this.validateDatabase(files, initPath);
-      this.onInitializationPhase("database_prepared");
+      const prepared = this.onInitializationPhase("database_prepared");
+      if (prepared !== undefined) await prepared;
       try {
         linkSync(initPath, databasePath);
         files.flushDirectory();
-        this.onInitializationPhase("database_published");
+        publishedOwnDatabase = true;
+        const published = this.onInitializationPhase("database_published");
+        if (published !== undefined) await published;
       } catch (error: unknown) {
         if (!isAlreadyExists(error)) throw error;
       }
       files.assertProtectedRegularFile(databasePath);
-      files.unlink(initPath);
+      if (publishedOwnDatabase) {
+        this.cleanupPublishedOwnDatabaseInitTemp(files, initPath);
+      } else {
+        files.unlink(initPath);
+      }
     } catch (error: unknown) {
       if (fd !== undefined) closeSync(fd);
       this.cleanupOwnDatabaseInitTemp(files, initPath);
@@ -220,6 +230,16 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       database?.close();
     }
     files.assertProtectedRegularFile(databasePath);
+  }
+
+  private cleanupPublishedOwnDatabaseInitTemp(files: ProtectedFileSystem, initPath: string): void {
+    try {
+      unlinkSync(initPath);
+    } catch (error: unknown) {
+      if (isNotFound(error)) return;
+      throw error;
+    }
+    files.flushDirectory();
   }
 
   private cleanupOwnDatabaseInitTemp(files: ProtectedFileSystem, initPath: string): void {
@@ -511,6 +531,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {

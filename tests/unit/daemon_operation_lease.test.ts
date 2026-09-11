@@ -67,6 +67,30 @@ describe("daemon operation lease", () => {
     expect(await initializationTemps(directory)).toEqual([]);
   });
 
+  it("accepts own published initialization temp already removed by a simultaneous initializer", async () => {
+    const directory = await temporaryDirectory();
+    const databasePublished = deferred();
+    const finishOtherCleanup = deferred();
+    const firstAcquire = operationLease({
+      createToken: () => "first-token",
+      onInitializationPhase: async (phase) => {
+        if (phase !== "database_published") return;
+        databasePublished.resolve();
+        await finishOtherCleanup.promise;
+      },
+    }).acquire(directory);
+
+    await databasePublished.promise;
+    const second = await operationLease({ createToken: () => "second-token" }).acquire(directory);
+    expect(await initializationTemps(directory)).toEqual([]);
+    second.release();
+    finishOtherCleanup.resolve();
+
+    const first = await firstAcquire;
+    expect(await initializationTemps(directory)).toEqual([]);
+    first.release();
+  });
+
   it("recovers protected initialization temps left before and after atomic database publication", async () => {
     for (const published of [false, true]) {
       const directory = await initializedDirectory();
@@ -313,6 +337,12 @@ async function initializationTemps(directory: string): Promise<string[]> {
 
 function requireRead(filePath: string): string {
   return readFileSync(filePath, "utf8");
+}
+
+function deferred() {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 function fakeWindowsSecurityCommand(file: string, args: readonly string[]): string {
