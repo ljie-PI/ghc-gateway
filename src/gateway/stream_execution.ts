@@ -21,7 +21,14 @@ export type StreamExecutionTerminalCause =
 
 export type StreamExecutionEmission<T> =
   | { readonly kind: "wire"; readonly bytes: Uint8Array }
-  | { readonly kind: "terminal"; readonly value: T; readonly writerMode?: "close" | "abort" };
+  | {
+    readonly kind: "terminal";
+    readonly outcome: Readonly<
+      | { readonly kind: "success"; readonly value: T }
+      | { readonly kind: "failure"; readonly error: unknown }
+    >;
+    readonly writerMode: "close" | "abort";
+  };
 
 export interface StreamExecutionDelivery {
   markDelivered(): void;
@@ -268,7 +275,9 @@ export async function createStreamExecutionResponse<T>(input: {
       }
       deliveryAdapterClaimed = true;
       deliveryFinalizer = finalize;
-      if (state === "completed") {
+      if (state === "terminating") {
+        settleDelivery();
+      } else if (state === "completed") {
         finalizeDelivery();
       }
       return {
@@ -310,9 +319,9 @@ export async function createStreamExecutionResponse<T>(input: {
           continue;
         }
         await finish(
-          next.value.writerMode === "abort" ? "postcommit_failure" : "semantic_success",
-          { kind: "success", value: next.value.value },
-          next.value.writerMode ?? "close",
+          next.value.outcome.kind === "success" ? "semantic_success" : "postcommit_failure",
+          next.value.outcome,
+          next.value.writerMode,
           true,
         );
         return;

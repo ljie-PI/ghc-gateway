@@ -55,7 +55,7 @@ export async function createAnthropicStreamResponse(input: {
     firstEmissionTimeoutMs: input.scope.config.timeouts.firstByteMs,
     normalizeFailure: (error) => normalizeChatStreamFailure(error, input.scope.signal),
     onTerminal: (result) => result.kind === "success"
-      ? observeTerminal(input.onTerminal, result.value)
+      ? observeTerminal(input.onTerminal, { kind: "success", usage: result.value })
       : observeTerminal(input.onTerminal, { kind: "failure", error: result.error }),
   });
 }
@@ -63,7 +63,7 @@ export async function createAnthropicStreamResponse(input: {
 async function* anthropicEmissions(
   frames: AsyncGenerator<ChatStreamFrame>,
   input: Parameters<typeof createAnthropicStreamResponse>[0],
-): AsyncIterable<StreamExecutionEmission<AnthropicTerminal>> {
+): AsyncIterable<StreamExecutionEmission<ObservedUsage>> {
   const converter = new AnthropicStreamConverter(input.model, input.createUuid);
   const firstFrames = await readThroughFirstSemanticChatFrame(
     frames,
@@ -107,12 +107,16 @@ async function* anthropicEmissions(
         for (const event of converter.finish()) {
           yield { kind: "wire", bytes: encodeAnthropicSse(event) };
         }
-        yield { kind: "terminal", value: { kind: "success", usage: observedUsage } };
+        yield {
+          kind: "terminal",
+          outcome: { kind: "success", value: observedUsage },
+          writerMode: "close",
+        };
         return;
       } else {
         yield {
           kind: "terminal",
-          value: { kind: "failure", error: upstreamStreamEventFailure() },
+          outcome: { kind: "failure", error: upstreamStreamEventFailure() },
           writerMode: "close",
         };
         return;

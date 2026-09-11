@@ -587,7 +587,11 @@ async function* chatEmissions(
           kind: "wire",
           bytes: measure(input.dependencies.performanceObserver, "event", encodeOpenAiChatDone),
         };
-        yield { kind: "terminal", value: usage };
+        yield {
+          kind: "terminal",
+          outcome: { kind: "success", value: usage },
+          writerMode: "close",
+        };
         return;
       } else {
         throw upstreamStreamEventFailure();

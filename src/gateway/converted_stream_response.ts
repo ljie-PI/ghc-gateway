@@ -132,7 +132,11 @@ async function* convertedEmissions(
       } else if (emission.kind === "wire") {
         yield { kind: "wire", bytes: emission.bytes };
       } else if (emission.kind === "terminal") {
-        yield { kind: "terminal", value: observedUsage };
+        yield {
+          kind: "terminal",
+          outcome: { kind: "success", value: observedUsage },
+          writerMode: "close",
+        };
         return;
       }
     }

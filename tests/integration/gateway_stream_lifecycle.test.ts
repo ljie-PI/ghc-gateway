@@ -60,7 +60,14 @@ describe("Stream Execution owner", () => {
               nextCalls += 1;
               return nextCalls === 1
                 ? { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("ok") } }
-                : { done: false, value: { kind: "terminal", value: "success" } };
+                : {
+                  done: false,
+                  value: {
+                    kind: "terminal",
+                    outcome: { kind: "success", value: "success" },
+                    writerMode: "close",
+                  },
+                };
             },
           };
         },
@@ -93,7 +100,11 @@ describe("Stream Execution owner", () => {
       emissions: {
         async *[Symbol.asyncIterator]() {
           yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
-          yield { kind: "terminal", value: "success" } as const;
+          yield {
+            kind: "terminal",
+            outcome: { kind: "success", value: "success" },
+            writerMode: "close",
+          } as const;
         },
       },
       signal: new AbortController().signal,
@@ -113,6 +124,56 @@ describe("Stream Execution owner", () => {
     expect(finalized).toBe(1);
   });
 
+  it("settles a terminating late claim after direct delivery without public body demand", async () => {
+    let cancelStarted!: () => void;
+    const started = new Promise<void>((resolve) => { cancelStarted = resolve; });
+    let releaseCancel!: () => void;
+    const cancelBarrier = new Promise<void>((resolve) => { releaseCancel = resolve; });
+    let finalized = 0;
+    const response = await createStreamExecutionResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers(),
+        bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+        cancel: async () => {
+          cancelStarted();
+          await cancelBarrier;
+        },
+      },
+      emissions: {
+        async *[Symbol.asyncIterator]() {
+          yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
+          yield {
+            kind: "terminal",
+            outcome: { kind: "success", value: "success" },
+            writerMode: "close",
+          } as const;
+        },
+      },
+      signal: new AbortController().signal,
+      deliverySignal: new AbortController().signal,
+      onTerminal: () => undefined,
+      normalizeFailure: (error) => error,
+    });
+    const handle = getStreamExecutionHandle(response);
+    const reader = response.body?.getReader();
+    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("ok");
+    await started;
+    expect(handle?.state).toBe("terminating");
+
+    const delivery = handle?.claimDeliveryAdapter(() => { finalized += 1; });
+    releaseCancel();
+    const completionState = await Promise.race([
+      handle?.completion.then(() => "completed" as const),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+    ]);
+    delivery?.settle();
+    await handle?.completion;
+
+    expect(completionState).toBe("completed");
+    expect(finalized).toBe(1);
+  });
+
   it("keeps completion pending until claimed delivery settles and then runs its finalizer", async () => {
     const order: string[] = [];
     const upstream: UpstreamByteStream = {
@@ -124,7 +185,11 @@ describe("Stream Execution owner", () => {
     const emissions: AsyncIterable<StreamExecutionEmission<string>> = {
       async *[Symbol.asyncIterator]() {
         yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
-        yield { kind: "terminal", value: "success" } as const;
+        yield {
+          kind: "terminal",
+          outcome: { kind: "success", value: "success" },
+          writerMode: "close",
+        } as const;
       },
     };
     const response = await createStreamExecutionResponse({
@@ -167,7 +232,14 @@ describe("Stream Execution owner", () => {
         return {
           next: async () => index++ === 0
             ? { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("ok") } }
-            : { done: false, value: { kind: "terminal", value: "success" } },
+            : {
+              done: false,
+              value: {
+                kind: "terminal",
+                outcome: { kind: "success", value: "success" },
+                writerMode: "close",
+              },
+            },
           return: async () => {
             counts.returned += 1;
             return { done: true, value: undefined };
@@ -671,7 +743,11 @@ describe("stream route lifecycle", () => {
           emissions: {
             async *[Symbol.asyncIterator]() {
               yield { kind: "wire", bytes: new TextEncoder().encode("delivered-directly") } as const;
-              yield { kind: "terminal", value: "done" } as const;
+              yield {
+                kind: "terminal",
+                outcome: { kind: "success", value: "done" },
+                writerMode: "close",
+              } as const;
             },
           },
           signal: scope.signal,
@@ -706,6 +782,84 @@ describe("stream route lifecycle", () => {
         expect(listeners.size).toBe(0);
       }
     } finally {
+      await gw.close();
+    }
+  });
+
+  it("releases Hono admission after a terminating late claim without public body demand", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    let requestCount = 0;
+    let cleanupStarted!: () => void;
+    const started = new Promise<void>((resolve) => { cleanupStarted = resolve; });
+    let releaseCleanup!: () => void;
+    const cleanupBarrier = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    let ownerCompletion: Promise<void> | undefined;
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/terminating-late-claim",
+      admission: "inference",
+      body: "none",
+      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
+        status: failure.kind === "queue_full" ? 503 : 400,
+      }),
+      endpoint: async (_request, scope) => {
+        if (requestCount++ > 0) {
+          return new Response("next");
+        }
+        const response = await createStreamExecutionResponse({
+          upstream: {
+            status: 200,
+            headers: new Headers(),
+            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+            cancel: async () => {
+              cleanupStarted();
+              await cleanupBarrier;
+            },
+          },
+          emissions: {
+            async *[Symbol.asyncIterator]() {
+              yield { kind: "wire", bytes: new TextEncoder().encode("delivered-directly") } as const;
+              yield {
+                kind: "terminal",
+                outcome: { kind: "success", value: "done" },
+                writerMode: "close",
+              } as const;
+            },
+          },
+          signal: scope.signal,
+          deliverySignal: scope.deliverySignal,
+          headers: { "Content-Type": "text/event-stream" },
+          onTerminal: () => undefined,
+          normalizeFailure: (error) => error,
+        });
+        const reader = response.body!.getReader();
+        expect(new TextDecoder().decode((await reader.read()).value)).toBe("delivered-directly");
+        await started;
+        expect(getStreamExecutionHandle(response)?.state).toBe("terminating");
+        reader.releaseLock();
+        ownerCompletion = getStreamExecutionHandle(response)?.completion;
+        return response;
+      },
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime,
+    }, [route]);
+    try {
+      const first = await gw.fetch(new Request("http://127.0.0.1:31400/v1/terminating-late-claim", { method: "POST" }));
+      expect(first.status).toBe(200);
+      expect(first.body).not.toBeNull();
+
+      releaseCleanup();
+      await ownerCompletion;
+
+      const second = await gw.fetch(new Request("http://127.0.0.1:31400/v1/terminating-late-claim", { method: "POST" }));
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe("next");
+    } finally {
+      releaseCleanup();
       await gw.close();
     }
   });
@@ -768,7 +922,14 @@ describe("stream route lifecycle", () => {
                   if (index === 0) {
                     return await blockedNext;
                   }
-                  return { done: false, value: { kind: "terminal", value: "done" } };
+                  return {
+                    done: false,
+                    value: {
+                      kind: "terminal",
+                      outcome: { kind: "success", value: "done" },
+                      writerMode: "close",
+                    },
+                  };
                 },
                 return: async () => {
                   counts.returned += 1;

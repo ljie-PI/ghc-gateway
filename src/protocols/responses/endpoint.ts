@@ -666,7 +666,11 @@ async function* responseByteEmissions(
     for (;;) {
       const next = await iterator.next();
       if (next.done === true) {
-        yield { kind: "terminal", value: undefined };
+        yield {
+          kind: "terminal",
+          outcome: { kind: "success", value: undefined },
+          writerMode: "close",
+        };
         return;
       }
       yield { kind: "wire", bytes: next.value };

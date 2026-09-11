@@ -149,7 +149,11 @@ async function* nativeMessagesEmissions(
       yield { kind: "wire", bytes: record };
     }
     if (observer.isTerminal) {
-      yield { kind: "terminal", value: observer.observedUsage };
+      yield {
+        kind: "terminal",
+        outcome: { kind: "success", value: observer.observedUsage },
+        writerMode: "close",
+      };
       return;
     }
     for (;;) {
@@ -159,14 +163,22 @@ async function* nativeMessagesEmissions(
         for (const record of finished.records) {
           yield { kind: "wire", bytes: record };
         }
-        yield { kind: "terminal", value: finished.usage };
+        yield {
+          kind: "terminal",
+          outcome: { kind: "success", value: finished.usage },
+          writerMode: "close",
+        };
         return;
       }
       for (const record of observer.consume(next.value)) {
         yield { kind: "wire", bytes: record };
       }
       if (observer.isTerminal) {
-        yield { kind: "terminal", value: observer.observedUsage };
+        yield {
+          kind: "terminal",
+          outcome: { kind: "success", value: observer.observedUsage },
+          writerMode: "close",
+        };
         return;
       }
     }
