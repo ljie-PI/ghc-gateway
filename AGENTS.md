@@ -10,8 +10,9 @@ Keep documentation limited to usage and concise contributor guidance. Do not rec
 
 ## Delivery workflow
 
-- Start focused maintenance branches from the latest `main` and submit pull requests targeting `main`.
-- Keep `main` unchanged until the reviewed pull request merges.
+- Execute each implementation issue in an isolated worktree on a focused maintenance branch created from the latest `main`; submit its pull request targeting `main` and keep `main` unchanged until the reviewed pull request merges.
+- After implementation and required validation, use `/skill:code-review` before opening the pull request to review Standards and Spec independently. Resolve every must-fix or important blocker and repeat the affected review until none remain.
+- After required CI passes and the reviewed pull request merges, remove its local and remote branches and worktree, synchronize `main`, and verify that it is clean.
 - Keep user-facing documentation aligned with the delivered runtime and CLI. Track task status and handoffs in GitHub Issues, not per-task specification files.
 
 ## Engineering guardrails
