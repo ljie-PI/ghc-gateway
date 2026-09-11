@@ -1,6 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
-import { closeSync, fstatSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, constants, fsyncSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   captureProcessStartIdentity,
   isCanonicalProcessStartIdentity,
@@ -9,14 +10,18 @@ import {
 import {
   DaemonIdentityFileError,
   ProtectedFileSystem,
-  sameProtectedFile,
   type ProtectedFileOptions,
 } from "./protected_file.js";
 
-const OPERATION_FILE = "daemon.operation.lock";
+const OPERATION_DATABASE = "daemon.operation.db";
+const OPERATION_OWNER = "daemon.operation.owner.json";
+const OPERATION_OWNER_TEMP = ".daemon.operation.owner.json.tmp";
 const MAX_OWNER_BYTES = 4 * 1024;
 const POLL_INTERVAL_MS = 50;
-const OWNER_KEYS = ["version", "pid", "processStartIdentity", "leaseToken"] as const;
+const SQLITE_BUSY = 5;
+const SQLITE_LOCKED = 6;
+const OWNER_KEYS = ["version", "state", "pid", "processStartIdentity", "leaseToken"] as const;
+const SIDECAR_SUFFIXES = ["-journal", "-wal", "-shm"] as const;
 
 export interface DaemonOperationLeaseHandle {
   release(): void;
@@ -39,10 +44,12 @@ export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
   ) => Promise<string | null>;
   readonly createToken?: () => string;
   readonly delay?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly onPhase?: (phase: "os_locked" | "held_published" | "released_published" | "database_closing") => void;
 }
 
-interface OperationOwner {
+export interface OperationOwner {
   readonly version: 1;
+  readonly state: "held" | "released";
   readonly pid: number;
   readonly processStartIdentity: string;
   readonly leaseToken: string;
@@ -60,6 +67,7 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
   private readonly createToken: () => string;
   private readonly delay: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly protectedOptions: ProtectedFileOptions;
+  private readonly onPhase: NonNullable<DaemonOperationLeaseFileOptions["onPhase"]>;
 
   constructor(options: Readonly<DaemonOperationLeaseFileOptions> = {}) {
     this.pid = options.pid ?? process.pid;
@@ -69,6 +77,7 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       ?? (async (pid, context) => await captureProcessStartIdentity(pid, undefined, context));
     this.createToken = options.createToken ?? randomUUID;
     this.delay = options.delay ?? abortableDelay;
+    this.onPhase = options.onPhase ?? (() => undefined);
     this.protectedOptions = {
       ...(options.platform === undefined ? {} : { platform: options.platform }),
       ...(options.runCommand === undefined ? {} : { runCommand: options.runCommand }),
@@ -82,37 +91,114 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     const signal = context.signal;
     signal?.throwIfAborted();
     const processStartIdentity = await this.captureOwnerIdentity(signal);
-    const owner: OperationOwner = {
+    const held: OperationOwner = {
       version: 1,
+      state: "held",
       pid: this.pid,
       processStartIdentity,
       leaseToken: this.createToken(),
     };
     const files = new ProtectedFileSystem(dataDir, this.protectedOptions);
     files.ensureProtectedDirectory();
-    const operationPath = path.join(files.directory, OPERATION_FILE);
+    const databasePath = path.join(files.directory, OPERATION_DATABASE);
+    const ownerPath = path.join(files.directory, OPERATION_OWNER);
+    const tempPath = path.join(files.directory, OPERATION_OWNER_TEMP);
+    this.ensureDatabase(files, databasePath);
 
     for (;;) {
       signal?.throwIfAborted();
-      let fd: number;
+      this.assertDatabaseAssets(files, databasePath);
+      let database: DatabaseSync | undefined;
       try {
-        fd = files.createExclusiveFile(operationPath, `${JSON.stringify(owner)}\n`);
+        database = new DatabaseSync(databasePath, { timeout: 0 });
+        database.exec("BEGIN EXCLUSIVE");
       } catch (error: unknown) {
-        if (!isAlreadyExists(error)) throw normalizeAcquireError(error);
-        try {
-          await this.waitForOrRecoverOwner(files, operationPath, signal);
-        } catch (ownerError: unknown) {
-          if (!isNotFound(ownerError) && files.pathExists(operationPath)) {
-            throw normalizeAcquireError(ownerError);
-          }
+        database?.close();
+        if (isSqliteBusy(error)) {
+          await this.delay(POLL_INTERVAL_MS, signal);
+          continue;
         }
-        continue;
+        throw normalizeAcquireError(error);
       }
-      return this.ownedLease(files, operationPath, fd, owner);
+
+      try {
+        this.onPhase("os_locked");
+        signal?.throwIfAborted();
+        this.assertDatabaseAssets(files, databasePath);
+        this.cleanupOwnerTemp(files, tempPath);
+        await this.verifyPreviousOwner(files, ownerPath, signal);
+        this.publishOwner(files, ownerPath, tempPath, held);
+        this.onPhase("held_published");
+        return this.ownedLease(files, database, ownerPath, tempPath, held);
+      } catch (error: unknown) {
+        closeDatabase(database);
+        throw normalizeAcquireError(error);
+      }
     }
   }
 
-  private async captureOwnerIdentity(signal: AbortSignal | undefined): Promise<string> {
+  private ensureDatabase(files: ProtectedFileSystem, databasePath: string): void {
+    if (!files.pathExists(databasePath)) {
+      let fd: number | undefined;
+      try {
+        fd = openSync(databasePath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
+        writeSync(fd, emptyDatabaseImage());
+        fsyncSync(fd);
+        closeSync(fd);
+        fd = undefined;
+        files.protectFile(databasePath);
+        files.assertProtectedRegularFile(databasePath);
+        files.flushDirectory();
+      } catch (error: unknown) {
+        if (fd !== undefined) closeSync(fd);
+        if (!isAlreadyExists(error)) throw normalizeAcquireError(error);
+      }
+    }
+    files.assertProtectedRegularFile(databasePath);
+  }
+
+  private assertDatabaseAssets(files: ProtectedFileSystem, databasePath: string): void {
+    files.ensureProtectedDirectory();
+    files.assertProtectedRegularFile(databasePath);
+    for (const suffix of SIDECAR_SUFFIXES) {
+      const sidecar = databasePath + suffix;
+      if (files.pathExists(sidecar)) {
+        files.assertProtectedRegularFile(sidecar);
+        throw new DaemonIdentityFileError("unsafe_path", "unexpected daemon operation database sidecar");
+      }
+    }
+  }
+
+  private cleanupOwnerTemp(files: ProtectedFileSystem, tempPath: string): void {
+    if (!files.pathExists(tempPath)) return;
+    files.assertProtectedRegularFile(tempPath);
+    unlinkSync(tempPath);
+    files.flushDirectory();
+  }
+
+  private async verifyPreviousOwner(
+    files: ProtectedFileSystem,
+    ownerPath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    if (!files.pathExists(ownerPath)) return;
+    const previous = this.readOwner(files, ownerPath);
+    if (previous.state === "released") return;
+
+    let actual: string | null;
+    try {
+      actual = await this.processIdentity(previous.pid, { ...(signal === undefined ? {} : { signal }) });
+    } catch (error: unknown) {
+      throw new DaemonIdentityFileError("unsafe_owner", "unable to verify operation lease owner", { cause: error });
+    }
+    if (actual === null) return;
+    if (actual === previous.processStartIdentity) {
+      throw new DaemonIdentityFileError("unsafe_owner", "operation lease owner is still active");
+    }
+    throw new DaemonIdentityFileError("unsafe_owner", "operation lease owner identity changed");
+  }
+
+  private captureOwnerIdentity = async (signal: AbortSignal | undefined): Promise<string> => {
     let identity: string | null;
     try {
       identity = await this.processStartIdentity({ ...(signal === undefined ? {} : { signal }) });
@@ -123,105 +209,81 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       throw new DaemonIdentityFileError("unsafe_owner", "unable to verify operation lease owner");
     }
     return identity;
+  };
+
+  private readOwner(files: ProtectedFileSystem, ownerPath: string): OperationOwner {
+    files.assertProtectedRegularFile(ownerPath);
+    const owner = decodeOperationOwner(files.readProtectedFile(ownerPath, MAX_OWNER_BYTES));
+    files.assertProtectedRegularFile(ownerPath);
+    return owner;
   }
 
-  private async waitForOrRecoverOwner(
+  private publishOwner(
     files: ProtectedFileSystem,
-    operationPath: string,
-    signal: AbortSignal | undefined,
-  ): Promise<void> {
-    const before = files.assertProtectedRegularFile(operationPath);
-    const owner = decodeOperationOwner(files.readProtectedFile(operationPath, MAX_OWNER_BYTES));
-    const after = files.assertProtectedRegularFile(operationPath);
-    if (!sameProtectedFile(before, after)) return;
-
-    let actual: string | null;
-    try {
-      actual = await this.processIdentity(owner.pid, { ...(signal === undefined ? {} : { signal }) });
-    } catch (error: unknown) {
-      throw new DaemonIdentityFileError("unsafe_owner", "unable to verify operation lease owner", { cause: error });
-    }
-    if (actual === null) {
-      await this.recoverDeadOwner(files, operationPath, after, owner, signal);
-      return;
-    }
-    if (actual !== owner.processStartIdentity) {
-      throw new DaemonIdentityFileError("unsafe_owner", "operation lease owner identity changed");
-    }
-    await this.delay(POLL_INTERVAL_MS, signal);
-  }
-
-  private async recoverDeadOwner(
-    files: ProtectedFileSystem,
-    operationPath: string,
-    observedFile: ReturnType<ProtectedFileSystem["assertProtectedRegularFile"]>,
+    ownerPath: string,
+    tempPath: string,
     owner: Readonly<OperationOwner>,
-    signal: AbortSignal | undefined,
-  ): Promise<void> {
-    const claimPath = path.join(
-      files.directory,
-      `.daemon.operation.recovery.${createHash("sha256").update(owner.leaseToken).digest("hex")}.lock`,
-    );
+  ): void {
+    let fd: number | undefined;
     try {
-      files.createHardLink(operationPath, claimPath);
+      fd = openSync(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      writeSync(fd, `${JSON.stringify(owner)}\n`, 0, "utf8");
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+      files.protectFile(tempPath);
+      files.assertProtectedRegularFile(tempPath);
+      renameSync(tempPath, ownerPath);
+      files.flushDirectory();
+      const published = this.readOwner(files, ownerPath);
+      if (!sameOwner(published, owner)) {
+        throw new DaemonIdentityFileError("unsafe_owner", "daemon operation owner changed during publication");
+      }
     } catch (error: unknown) {
-      if (isAlreadyExists(error) || isNotFound(error)) {
-        await this.delay(POLL_INTERVAL_MS, signal);
-        return;
+      if (fd !== undefined) closeSync(fd);
+      if (files.pathExists(tempPath)) {
+        try {
+          files.assertProtectedRegularFile(tempPath);
+          unlinkSync(tempPath);
+          files.flushDirectory();
+        } catch {
+          // Preserve the original sanitized failure. A later acquisition validates the temp file.
+        }
       }
       throw error;
-    }
-
-    try {
-      const claimedFile = files.assertProtectedRegularFile(claimPath);
-      const claimedOwner = decodeOperationOwner(files.readProtectedFile(claimPath, MAX_OWNER_BYTES));
-      const claimedAfter = files.assertProtectedRegularFile(claimPath);
-      if (!sameProtectedFile(observedFile, claimedFile)
-        || !sameProtectedFile(claimedFile, claimedAfter)
-        || !sameOwner(owner, claimedOwner)) {
-        return;
-      }
-
-      const currentFile = files.assertProtectedRegularFile(operationPath);
-      const currentOwner = decodeOperationOwner(files.readProtectedFile(operationPath, MAX_OWNER_BYTES));
-      const currentAfter = files.assertProtectedRegularFile(operationPath);
-      if (sameProtectedFile(claimedFile, currentFile)
-        && sameProtectedFile(currentFile, currentAfter)
-        && sameOwner(owner, currentOwner)) {
-        files.unlink(operationPath);
-      }
-    } finally {
-      files.unlinkIfExists(claimPath);
-      files.flushDirectory();
     }
   }
 
   private ownedLease(
     files: ProtectedFileSystem,
-    operationPath: string,
-    fd: number,
-    owner: Readonly<OperationOwner>,
+    database: DatabaseSync,
+    ownerPath: string,
+    tempPath: string,
+    held: Readonly<OperationOwner>,
   ): DaemonOperationLeaseHandle {
     let released = false;
     return {
       release: (): void => {
         if (released) return;
         released = true;
+        let publicationError: unknown;
         try {
-          const held = fstatSync(fd);
-          if (files.pathExists(operationPath)) {
-            const pathStat = files.assertProtectedRegularFile(operationPath);
-            const current = decodeOperationOwner(files.readProtectedFile(operationPath, MAX_OWNER_BYTES));
-            const finalStat = files.assertProtectedRegularFile(operationPath);
-            if (sameProtectedFile(held, pathStat)
-              && sameProtectedFile(pathStat, finalStat)
-              && sameOwner(current, owner)) {
-              files.unlink(operationPath);
-            }
+          const current = this.readOwner(files, ownerPath);
+          if (!sameOwner(current, held) || current.state !== "held") {
+            throw new DaemonIdentityFileError("unsafe_owner", "daemon operation ownership changed before release");
           }
+          this.publishOwner(files, ownerPath, tempPath, { ...held, state: "released" });
+          this.onPhase("released_published");
+        } catch (error: unknown) {
+          publicationError = error;
         } finally {
-          closeSync(fd);
+          try {
+            this.onPhase("database_closing");
+          } finally {
+            closeDatabase(database);
+          }
         }
+        if (publicationError !== undefined) throw normalizeAcquireError(publicationError);
       },
     };
   }
@@ -232,17 +294,19 @@ export function decodeOperationOwner(text: string): OperationOwner {
   try {
     parsed = JSON.parse(text) as unknown;
   } catch (error: unknown) {
-    throw new DaemonIdentityFileError("invalid_identity", "invalid daemon operation lease JSON", { cause: error });
+    throw new DaemonIdentityFileError("invalid_identity", "invalid daemon operation owner JSON", { cause: error });
   }
   if (!isRecord(parsed) || !hasExactKeys(parsed, OWNER_KEYS)
     || parsed.version !== 1
+    || (parsed.state !== "held" && parsed.state !== "released")
     || !isPositiveSafeInteger(parsed.pid)
     || !isCanonicalProcessStartIdentity(parsed.processStartIdentity)
-    || typeof parsed.leaseToken !== "string" || parsed.leaseToken.length === 0) {
-    throw new DaemonIdentityFileError("invalid_identity", "invalid daemon operation lease schema");
+    || typeof parsed.leaseToken !== "string" || parsed.leaseToken.length === 0 || parsed.leaseToken.length > 256) {
+    throw new DaemonIdentityFileError("invalid_identity", "invalid daemon operation owner schema");
   }
   return {
     version: 1,
+    state: parsed.state,
     pid: parsed.pid,
     processStartIdentity: parsed.processStartIdentity,
     leaseToken: parsed.leaseToken,
@@ -251,9 +315,40 @@ export function decodeOperationOwner(text: string): OperationOwner {
 
 function sameOwner(left: Readonly<OperationOwner>, right: Readonly<OperationOwner>): boolean {
   return left.version === right.version
+    && left.state === right.state
     && left.pid === right.pid
     && left.processStartIdentity === right.processStartIdentity
     && left.leaseToken === right.leaseToken;
+}
+
+let databaseImage: Buffer | undefined;
+
+function emptyDatabaseImage(): Buffer {
+  if (databaseImage !== undefined) return databaseImage;
+  const memory = new DatabaseSync(":memory:");
+  try {
+    databaseImage = Buffer.from((memory as unknown as { serialize(): Uint8Array }).serialize());
+    return databaseImage;
+  } finally {
+    memory.close();
+  }
+}
+
+function closeDatabase(database: DatabaseSync): void {
+  try {
+    database.exec("ROLLBACK");
+  } catch {
+    // close() also releases the OS lock if SQLite already rolled the transaction back.
+  } finally {
+    database.close();
+  }
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("errcode" in error)) return false;
+  const code = error.errcode;
+  return typeof code === "number"
+    && ((code & 0xff) === SQLITE_BUSY || (code & 0xff) === SQLITE_LOCKED);
 }
 
 function normalizeAcquireError(error: unknown): unknown {
@@ -276,10 +371,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
-}
-
-function isNotFound(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
 async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {

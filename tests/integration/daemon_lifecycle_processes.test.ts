@@ -27,8 +27,8 @@ describe("daemon lifecycle coordination across CLI processes", () => {
     try {
       const first = runStatus(fixture.dataDir);
       await vi.waitFor(() => expect(fixture.requests()).toBe(1), { timeout: 60_000 });
-      expect(JSON.parse(await readFile(path.join(fixture.dataDir, "daemon.operation.lock"), "utf8")))
-        .toMatchObject({ version: 1, pid: first.child.pid });
+      expect(JSON.parse(await readFile(path.join(fixture.dataDir, "daemon.operation.owner.json"), "utf8")))
+        .toMatchObject({ version: 1, state: "held", pid: first.child.pid });
 
       const second = runStatus(fixture.dataDir);
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -69,6 +69,27 @@ describe("daemon lifecycle coordination across CLI processes", () => {
       expect(JSON.parse(result.stdout)).toEqual(expectedStatus(fixture.dataDir, fixture.port));
       expect(result.stderr).toBe("");
       expect(fixture.requests()).toBe(2);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("survives real process crashes after OS lock and after released publication", { timeout: 240_000 }, async () => {
+    const fixture = await processFixture();
+    try {
+      const initialize = runStatus(fixture.dataDir);
+      await vi.waitFor(() => expect(fixture.requests()).toBe(1), { timeout: 60_000 });
+      fixture.releaseBlockedResponse();
+      await expect(initialize.result).resolves.toMatchObject({ code: 0 });
+
+      for (const phase of ["os_locked", "released_published"] as const) {
+        const crashed = runCrashHolder(fixture.dataDir, phase);
+        const crashedResult = await crashed.result;
+        expect(crashedResult).toMatchObject({ code: 23, stdout: `${phase}\n`, stderr: "" });
+        const recovered = runStatus(fixture.dataDir);
+        await expect(recovered.result).resolves.toMatchObject({ code: 0, stderr: "" });
+      }
+      expect(fixture.requests()).toBe(3);
     } finally {
       await fixture.close();
     }
@@ -147,6 +168,35 @@ function runStatus(dataDir: string) {
     "--json",
     "--data-dir", dataDir,
     "status",
+  ], {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  children.add(child);
+  let stdout = "";
+  let stderr = "";
+  child.stdout!.setEncoding("utf8");
+  child.stderr!.setEncoding("utf8");
+  child.stdout!.on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+  const result = new Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      children.delete(child);
+      resolve({ code, stdout, stderr });
+    });
+  });
+  return { child, result };
+}
+
+function runCrashHolder(dataDir: string, phase: "os_locked" | "released_published") {
+  const child = spawn(process.execPath, [
+    "scripts/tooling/bootstrap.mjs",
+    "tests/fixtures/daemon_operation_crash.ts",
+    dataDir,
+    phase,
   ], {
     cwd: repoRoot,
     env: process.env,

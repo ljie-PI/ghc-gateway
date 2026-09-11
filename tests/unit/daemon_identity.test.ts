@@ -252,6 +252,22 @@ describe("process start identity", () => {
     });
   });
 
+  it("forwards abort context through identity probes and verified termination commands", async () => {
+    const abort = new AbortController();
+    const contexts: Array<AbortSignal | undefined> = [];
+    const dependencies: ProcessIdentityDependencies = {
+      platform: "win32",
+      readFile: async () => "",
+      runCommand: async (_file, _args, _env, context) => {
+        contexts.push(context?.signal);
+        return "133852868960001234\r\n";
+      },
+    };
+    await captureProcessStartIdentity(4242, dependencies, { signal: abort.signal });
+    await terminateProcessIfMatching(4242, "windows:133852868960001234", dependencies, { signal: abort.signal });
+    expect(contexts).toEqual([abort.signal, abort.signal]);
+  });
+
   it("performs Linux identity verification and termination in one command", async () => {
     const calls: string[] = [];
     const dependencies: ProcessIdentityDependencies = {

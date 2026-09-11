@@ -1,10 +1,12 @@
-import { chmod, lstat, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   DaemonOperationLeaseFile,
   decodeOperationOwner,
+  type OperationOwner,
 } from "../../src/daemon/operation_lease.js";
 
 const START_IDENTITY = "linux:01234567-89ab-cdef-0123-456789abcdef:987654";
@@ -14,137 +16,62 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 describe("daemon operation lease", () => {
-  it("uses the shared canonical process identity formats for owner records", () => {
-    expect(() => decodeOperationOwner(JSON.stringify({
-      ...ownerRecord(),
-      processStartIdentity: "windows:001",
-    }))).toThrow();
-    expect(() => decodeOperationOwner(JSON.stringify({
-      ...ownerRecord(),
-      processStartIdentity: "macos:2026-02-30T12:00:00Z",
-    }))).toThrow();
+  it("accepts only the exact held/released owner schema", () => {
+    expect(decodeOperationOwner(JSON.stringify(ownerRecord()))).toEqual(ownerRecord());
+    for (const invalid of [
+      { ...ownerRecord(), extra: true },
+      { ...ownerRecord(), state: "waiting" },
+      { ...ownerRecord(), processStartIdentity: "windows:001" },
+      { ...ownerRecord(), leaseToken: "" },
+    ]) expect(() => decodeOperationOwner(JSON.stringify(invalid))).toThrow();
   });
 
-  it("exclusively owns a protected file separate from daemon lifetime identity", async () => {
+  it("uses a persistent protected SQLite database and publishes held then released metadata", async () => {
     const directory = await temporaryDirectory();
-    const leaseFile = new DaemonOperationLeaseFile({
-      pid: 4242,
-      processStartIdentity: async () => START_IDENTITY,
-      processIdentity: async () => START_IDENTITY,
-      createToken: () => "operation-token",
-    });
+    const phases: string[] = [];
+    const leaseFile = operationLease({ onPhase: (phase) => phases.push(phase) });
+    const lease = await leaseFile.acquire(directory);
+    const databasePath = path.join(directory, "daemon.operation.db");
+    const ownerPath = path.join(directory, "daemon.operation.owner.json");
 
-    const first = await leaseFile.acquire(directory);
-    const operationPath = path.join(directory, "daemon.operation.lock");
-    expect(JSON.parse(await readFile(operationPath, "utf8"))).toEqual({
-      version: 1,
-      pid: 4242,
-      processStartIdentity: START_IDENTITY,
-      leaseToken: "operation-token",
-    });
+    expect(JSON.parse(await readFile(ownerPath, "utf8"))).toEqual(ownerRecord({ leaseToken: "test-token" }));
     if (process.platform !== "win32") {
-      expect((await lstat(operationPath)).mode & 0o777).toBe(0o600);
+      expect((await lstat(databasePath)).mode & 0o777).toBe(0o600);
+      expect((await lstat(ownerPath)).mode & 0o777).toBe(0o600);
       expect((await lstat(directory)).mode & 0o777).toBe(0o700);
     }
-    await expect(lstat(path.join(directory, "daemon.lock"))).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(lstat(path.join(directory, "daemon.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    lease.release();
+    expect(JSON.parse(await readFile(ownerPath, "utf8"))).toEqual(ownerRecord({
+      state: "released",
+      leaseToken: "test-token",
+    }));
+    expect(await lstat(databasePath)).toMatchObject({ isFile: expect.any(Function) });
+    expect(phases).toEqual(["os_locked", "held_published", "released_published", "database_closing"]);
+    for (const suffix of ["-journal", "-wal", "-shm"]) {
+      await expect(lstat(databasePath + suffix)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
 
+  it("serializes the same database, allows different directories in parallel, and release is idempotent", async () => {
+    const firstDirectory = await temporaryDirectory();
+    const otherDirectory = await temporaryDirectory();
+    const leaseFile = operationLease({ createToken: (() => {
+      let token = 0;
+      return () => `token-${++token}`;
+    })() });
+    const first = await leaseFile.acquire(firstDirectory);
     let secondSettled = false;
-    const second = leaseFile.acquire(directory).finally(() => { secondSettled = true; });
-    await vi.waitFor(() => expect(secondSettled).toBe(false));
+    const second = leaseFile.acquire(firstDirectory).finally(() => { secondSettled = true; });
+    const other = await leaseFile.acquire(otherDirectory);
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    expect(secondSettled).toBe(false);
+    other.release();
+    first.release();
     first.release();
     (await second).release();
-    await expect(lstat(operationPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("releases only the unchanged file owned by its token and file identity", async () => {
-    const directory = await temporaryDirectory();
-    const leaseFile = operationLease({ createToken: () => "original-token" });
-    const lease = await leaseFile.acquire(directory);
-    const operationPath = path.join(directory, "daemon.operation.lock");
-    await writeFile(operationPath, `${JSON.stringify({
-      version: 1,
-      pid: 4242,
-      processStartIdentity: START_IDENTITY,
-      leaseToken: "replacement-token",
-    })}\n`, { mode: 0o600 });
-
-    lease.release();
-    expect(JSON.parse(await readFile(operationPath, "utf8"))).toMatchObject({ leaseToken: "replacement-token" });
-    if (process.platform !== "win32") await chmod(operationPath, 0o600);
-  });
-
-  it("recovers an orphan only after its owner is proven dead", async () => {
-    const directory = await temporaryDirectory();
-    const orphan = await operationLease({ createToken: () => "orphan-token" }).acquire(directory);
-    const recovered = await operationLease({
-      processIdentity: async () => null,
-      createToken: () => "recovered-token",
-    }).acquire(directory);
-    expect(JSON.parse(await readFile(path.join(directory, "daemon.operation.lock"), "utf8")))
-      .toMatchObject({ leaseToken: "recovered-token" });
-    recovered.release();
-    orphan.release();
-  });
-
-  it("atomically serializes competing recoverers without removing the new live lease", async () => {
-    const directory = await temporaryDirectory();
-    const orphan = await operationLease({ createToken: () => "orphan-token" }).acquire(directory);
-    let probes = 0;
-    let releaseProbes = (): void => undefined;
-    const bothProbing = new Promise<void>((resolve) => { releaseProbes = resolve; });
-    const proveDead = async (): Promise<null> => {
-      probes += 1;
-      if (probes === 2) releaseProbes();
-      await bothProbing;
-      return null;
-    };
-    const firstFile = operationLease({
-      pid: 5001,
-      processIdentity: async (pid) => pid === 4242 ? await proveDead() : START_IDENTITY,
-      createToken: () => "first-recoverer",
-    });
-    const secondFile = operationLease({
-      pid: 5002,
-      processIdentity: async (pid) => pid === 4242 ? await proveDead() : START_IDENTITY,
-      createToken: () => "second-recoverer",
-    });
-    const firstAcquire = firstFile.acquire(directory);
-    const secondAcquire = secondFile.acquire(directory);
-    const winner = await Promise.race([
-      firstAcquire.then((lease) => ({ lease, token: "first-recoverer" })),
-      secondAcquire.then((lease) => ({ lease, token: "second-recoverer" })),
-    ]);
-    expect(JSON.parse(await readFile(path.join(directory, "daemon.operation.lock"), "utf8")))
-      .toMatchObject({ leaseToken: winner.token });
-
-    let loserSettled = false;
-    const loser = (winner.token === "first-recoverer" ? secondAcquire : firstAcquire)
-      .finally(() => { loserSettled = true; });
-    await vi.waitFor(() => expect(loserSettled).toBe(false));
-    winner.lease.release();
-    (await loser).release();
-    orphan.release();
-  });
-
-  it("fails closed for PID reuse and unknown owner identity without removing the lease", async () => {
-    const directory = await temporaryDirectory();
-    const owner = await operationLease({ createToken: () => "owner-token" }).acquire(directory);
-    const operationPath = path.join(directory, "daemon.operation.lock");
-
-    await expect(operationLease({
-      processIdentity: async () => "linux:01234567-89ab-cdef-0123-456789abcdef:999999",
-    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_owner" });
-    expect(JSON.parse(await readFile(operationPath, "utf8"))).toMatchObject({ leaseToken: "owner-token" });
-
-    await expect(operationLease({
-      processIdentity: async () => { throw new Error("private probe diagnostic"); },
-    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_owner", message: "unable to verify operation lease owner" });
-    expect(await readFile(operationPath, "utf8")).not.toContain("private probe diagnostic");
-    owner.release();
-  });
-
-  it("allows an independently canceled waiter to leave the active owner untouched", async () => {
+  it("cancels a busy waiter without disturbing the holder or a later waiter", async () => {
     const directory = await temporaryDirectory();
     const leaseFile = operationLease();
     const active = await leaseFile.acquire(directory);
@@ -152,36 +79,133 @@ describe("daemon operation lease", () => {
     const waiting = leaseFile.acquire(directory, { signal: abort.signal });
     abort.abort();
     await expect(waiting).rejects.toBeDefined();
-    expect(JSON.parse(await readFile(path.join(directory, "daemon.operation.lock"), "utf8")))
-      .toMatchObject({ leaseToken: "test-token" });
+    expect(JSON.parse(await readFile(path.join(directory, "daemon.operation.owner.json"), "utf8")))
+      .toMatchObject({ state: "held", leaseToken: "test-token" });
     active.release();
     (await leaseFile.acquire(directory)).release();
   });
 
-  it.skipIf(process.platform === "win32")("fails closed for malformed, excessive, and weakly protected owner files", async () => {
-    const directory = await temporaryDirectory();
-    const bootstrap = await operationLease().acquire(directory);
-    bootstrap.release();
-    const operationPath = path.join(directory, "daemon.operation.lock");
-
-    await writeFile(operationPath, "{}\n", { mode: 0o600 });
-    await expect(operationLease().acquire(directory)).rejects.toMatchObject({ code: "invalid_identity" });
-    await writeFile(operationPath, "x".repeat(4097), { mode: 0o600 });
-    await expect(operationLease().acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
-    await writeFile(operationPath, `${JSON.stringify(ownerRecord())}\n`, { mode: 0o600 });
-    await chmod(operationPath, 0o644);
-    await expect(operationLease().acquire(directory)).rejects.toMatchObject({ code: "unsafe_permissions" });
+  it("recovers held metadata only when the previous PID is proven dead", async () => {
+    const directory = await initializedDirectory();
+    await writeOwner(directory, ownerRecord({ leaseToken: "orphan" }));
+    const recovered = await operationLease({
+      processIdentity: async () => null,
+      createToken: () => "recovered",
+    }).acquire(directory);
+    expect(await readOwner(directory)).toMatchObject({ state: "held", leaseToken: "recovered" });
+    recovered.release();
   });
 
-  it.skipIf(process.platform === "win32")("fails closed for a symlink operation lease", async () => {
+  it.each([
+    ["same live identity", async () => START_IDENTITY],
+    ["PID reuse", async () => "linux:01234567-89ab-cdef-0123-456789abcdef:999999"],
+    ["unknown identity", async () => { throw new Error("private SQLite/path diagnostic"); }],
+  ])("fails closed for previous held metadata with %s", async (_name, processIdentity) => {
+    const directory = await initializedDirectory();
+    await writeOwner(directory, ownerRecord({ leaseToken: "previous" }));
+    const callback = vi.fn();
+    await expect(operationLease({ processIdentity }).acquire(directory).then(callback))
+      .rejects.toMatchObject({ code: "unsafe_owner" });
+    expect(callback).not.toHaveBeenCalled();
+    expect(await readFile(path.join(directory, "daemon.operation.owner.json"), "utf8"))
+      .not.toContain("private SQLite/path diagnostic");
+  });
+
+  it("permits released metadata without probing the old PID", async () => {
+    const directory = await initializedDirectory();
+    const probe = vi.fn(async () => { throw new Error("must not probe"); });
+    const acquired = await operationLease({ processIdentity: probe }).acquire(directory);
+    expect(probe).not.toHaveBeenCalled();
+    acquired.release();
+  });
+
+  it("closes the SQLite transaction after crashes before held publication and recovers dead held publication", async () => {
+    const directory = await initializedDirectory();
+    const beforeHeld = operationLease({
+      onPhase: (phase) => { if (phase === "os_locked") throw new Error("crash before held"); },
+    });
+    await expect(beforeHeld.acquire(directory)).rejects.toMatchObject({ code: "io_error" });
+    (await operationLease().acquire(directory)).release();
+
+    const afterHeld = operationLease({
+      pid: 5000,
+      createToken: () => "crashed-holder",
+      onPhase: (phase) => { if (phase === "held_published") throw new Error("crash after held"); },
+    });
+    await expect(afterHeld.acquire(directory)).rejects.toMatchObject({ code: "io_error" });
+    expect(await readOwner(directory)).toMatchObject({ state: "held", leaseToken: "crashed-holder" });
+    const recovered = await operationLease({ processIdentity: async (pid) => pid === 5000 ? null : START_IDENTITY })
+      .acquire(directory);
+    recovered.release();
+  });
+
+  it("closes the database but leaves held metadata when released publication fails", async () => {
     const directory = await temporaryDirectory();
-    const bootstrap = await operationLease().acquire(directory);
-    bootstrap.release();
-    const outside = path.join(await temporaryDirectory(), "outside.lock");
-    await operationLease().acquire(path.dirname(outside)).then((lease) => lease.release());
-    await writeFile(outside, `${JSON.stringify(ownerRecord())}\n`, { mode: 0o600 });
-    await symlink(outside, path.join(directory, "daemon.operation.lock"), "file");
-    await expect(operationLease().acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
+    const lease = await operationLease().acquire(directory);
+    await mkdir(path.join(directory, ".daemon.operation.owner.json.tmp"));
+    expect(() => lease.release()).toThrow();
+    expect(await readOwner(directory)).toMatchObject({ state: "held", leaseToken: "test-token" });
+    await rmdir(path.join(directory, ".daemon.operation.owner.json.tmp"));
+    await expect(operationLease().acquire(directory)).rejects.toMatchObject({ code: "unsafe_owner" });
+  });
+
+  it("publishes released before closing the database lock", async () => {
+    const directory = await temporaryDirectory();
+    const observations: OperationOwner[] = [];
+    const lease = await operationLease({
+      onPhase: (phase) => {
+        if (phase === "database_closing") {
+          observations.push(JSON.parse(requireRead(path.join(directory, "daemon.operation.owner.json"))) as OperationOwner);
+        }
+      },
+    }).acquire(directory);
+    lease.release();
+    expect(observations).toEqual([ownerRecord({ state: "released", leaseToken: "test-token" })]);
+  });
+
+  it("fails closed when Windows reports the persistent database as a reparse point", async () => {
+    const directory = await temporaryDirectory();
+    const runCommand = (file: string, args: readonly string[]): string => {
+      const script = args.at(-1) ?? "";
+      if (file === "powershell.exe" && script.includes("ReparsePoint")
+        && script.includes("daemon.operation.db")) return "true\r\n";
+      return fakeWindowsSecurityCommand(file, args);
+    };
+    await expect(operationLease({ platform: "win32", runCommand }).acquire(directory))
+      .rejects.toMatchObject({ code: "unsafe_path" });
+  });
+
+  it.skipIf(process.platform === "win32")("fails closed for unsafe database, owner, temp, and sidecar paths", async () => {
+    const cases: Array<(directory: string) => Promise<void>> = [
+      async (directory) => { await chmod(path.join(directory, "daemon.operation.db"), 0o644); },
+      async (directory) => { await chmod(path.join(directory, "daemon.operation.owner.json"), 0o644); },
+      async (directory) => { await writeFile(path.join(directory, ".daemon.operation.owner.json.tmp"), "unsafe", { mode: 0o644 }); },
+      async (directory) => { await writeFile(path.join(directory, "daemon.operation.db-journal"), "unexpected", { mode: 0o600 }); },
+    ];
+    for (const arrange of cases) {
+      const directory = await initializedDirectory();
+      await arrange(directory);
+      await expect(operationLease().acquire(directory)).rejects.toMatchObject({
+        code: expect.stringMatching(/^unsafe_/u),
+      });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("fails closed for symlink database, owner, temp, and sidecar paths", async () => {
+    for (const name of [
+      "daemon.operation.db",
+      "daemon.operation.owner.json",
+      ".daemon.operation.owner.json.tmp",
+      "daemon.operation.db-wal",
+    ]) {
+      const directory = await initializedDirectory();
+      const target = path.join(await mkdtemp(path.join(tmpdir(), "ghcg-operation-outside-")), "target");
+      await writeFile(target, "outside", { mode: 0o600 });
+      const victim = path.join(directory, name);
+      try { await unlink(victim); } catch { /* absent is expected */ }
+      await symlink(target, victim, "file");
+      await expect(operationLease().acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
+    }
   });
 });
 
@@ -191,15 +215,49 @@ function operationLease(overrides: ConstructorParameters<typeof DaemonOperationL
     processStartIdentity: async () => START_IDENTITY,
     processIdentity: async () => START_IDENTITY,
     createToken: () => "test-token",
+    ...(process.platform === "win32" ? { runCommand: fakeWindowsSecurityCommand } : {}),
     ...overrides,
   });
 }
 
-function ownerRecord() {
+function ownerRecord(overrides: Partial<OperationOwner> = {}): OperationOwner {
   return {
     version: 1,
+    state: "held",
     pid: 4242,
     processStartIdentity: START_IDENTITY,
     leaseToken: "owner-token",
+    ...overrides,
   };
+}
+
+async function initializedDirectory(): Promise<string> {
+  const directory = await temporaryDirectory();
+  const lease = await operationLease().acquire(directory);
+  lease.release();
+  return directory;
+}
+
+async function writeOwner(directory: string, owner: OperationOwner): Promise<void> {
+  await writeFile(path.join(directory, "daemon.operation.owner.json"), `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+  if (process.platform !== "win32") await chmod(path.join(directory, "daemon.operation.owner.json"), 0o600);
+}
+
+async function readOwner(directory: string): Promise<OperationOwner> {
+  return JSON.parse(await readFile(path.join(directory, "daemon.operation.owner.json"), "utf8")) as OperationOwner;
+}
+
+function requireRead(filePath: string): string {
+  return readFileSync(filePath, "utf8");
+}
+
+function fakeWindowsSecurityCommand(file: string, args: readonly string[]): string {
+  if (file === "whoami") return "\"CONTOSO\\User\",\"S-1-5-21-1000\"\r\n";
+  if (file === "powershell.exe") {
+    return args.at(-1)?.includes("Get-Acl") === true ? "CONTOSO\\User\r\n" : "false\r\n";
+  }
+  if (file === "icacls" && args.length === 1) {
+    return `${args[0]} CONTOSO\\User:(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+  }
+  return "";
 }

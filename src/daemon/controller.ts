@@ -17,6 +17,12 @@ const DEPENDENCY_TIMEOUT_MS = 30_000;
 const STATUS_PATH = "/__ghcg/control/v1/status";
 const STOP_PATH = "/__ghcg/control/v1/stop";
 
+/**
+ * A lifecycle dependency must acknowledge abort before settling: after signal
+ * abort, it may settle only once its side effect is quiescent or ownership of
+ * every created resource has been returned to the controller for reconciliation.
+ * Rejecting while an unowned side effect can still commit violates this contract.
+ */
 export interface LifecycleDependencyContext {
   readonly signal: AbortSignal;
   readonly deadlineMs: number;

@@ -6,7 +6,6 @@ import {
   fstatSync,
   fsyncSync,
   lstatSync,
-  linkSync,
   mkdirSync,
   openSync,
   readSync,
@@ -51,7 +50,7 @@ export class ProtectedFileSystem {
     this.directory = path.resolve(directory);
     this.platform = options.platform ?? process.platform;
     this.runCommand = options.runCommand ?? defaultRunCommand;
-    this.windowsAcl = new WindowsAcl(this.runCommand);
+    this.windowsAcl = new WindowsAcl(this.runCommand, { cacheIdentity: true });
   }
 
   ensureProtectedDirectory(): void {
@@ -146,11 +145,6 @@ export class ProtectedFileSystem {
     }
   }
 
-  createHardLink(existingPath: string, newPath: string): void {
-    linkSync(existingPath, newPath);
-    this.flushDirectory();
-  }
-
   unlink(filePath: string): void {
     unlinkSync(filePath);
     this.flushDirectory();
@@ -223,10 +217,6 @@ export class ProtectedFileSystem {
   }
 }
 
-export function sameProtectedFile(left: Stats, right: Stats): boolean {
-  return sameFile(left, right);
-}
-
 function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
@@ -234,6 +224,9 @@ function sameFile(left: Stats, right: Stats): boolean {
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
+
+const WINDOWS_SECURITY_COMMAND_TIMEOUT_MS = 5_000;
+const WINDOWS_SECURITY_COMMAND_MAX_BUFFER_BYTES = 1024 * 1024;
 
 function defaultRunCommand(file: string, args: readonly string[]): string {
   const resolved = process.platform === "win32" && (file === "whoami" || file === "icacls")
@@ -243,6 +236,8 @@ function defaultRunCommand(file: string, args: readonly string[]): string {
     encoding: "utf8",
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: WINDOWS_SECURITY_COMMAND_TIMEOUT_MS,
+    maxBuffer: WINDOWS_SECURITY_COMMAND_MAX_BUFFER_BYTES,
   });
 }
 

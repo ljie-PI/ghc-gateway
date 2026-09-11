@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,7 @@ import type { StartupConfig } from "../config/startup_config.js";
 import type { HostedGateway } from "../gateway/create_gateway.js";
 import { GRACEFUL_SHUTDOWN_MS } from "../gateway/create_gateway.js";
 import { assertSupportedRuntime } from "../runtime_support.js";
-import { DaemonController } from "./controller.js";
+import { DaemonController, type LifecycleDependencyContext, type SpawnedDaemon } from "./controller.js";
 import {
   DaemonIdentityFile,
   DaemonIdentityFileError,
@@ -76,48 +76,13 @@ export function createProductionDaemonController(
       },
     },
     processIdentity: async (pid, context) => await captureProcessStartIdentity(pid, undefined, context),
-    spawn: async (startup, context) => {
-      context?.signal.throwIfAborted();
-      const child = spawn(execPath, [
-        childEntry,
-        "--data-dir", startup.dataDir,
-        "--port", String(startup.port),
-        "--log-level", startup.logLevel,
-      ], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-        env,
-      });
-      await new Promise<void>((resolve, reject) => {
-        const cleanup = (): void => {
-          child.off("error", onError);
-          child.off("spawn", onSpawn);
-          context.signal.removeEventListener("abort", onAbort);
-        };
-        const onError = (error: Error): void => {
-          cleanup();
-          reject(error);
-        };
-        const onSpawn = (): void => {
-          cleanup();
-          resolve();
-        };
-        const onAbort = (): void => {
-          cleanup();
-          if (child.pid === undefined) reject(context.signal.reason);
-          else resolve();
-        };
-        child.once("error", onError);
-        child.once("spawn", onSpawn);
-        context.signal.addEventListener("abort", onAbort, { once: true });
-        if (context.signal.aborted) onAbort();
-      });
-      if (child.pid === undefined) {
-        throw new Error("daemon child has no process id");
-      }
-      return { pid: child.pid, unref: () => child.unref() };
-    },
+    spawn: async (startup, context) => await spawnDaemonProcess(
+      execPath,
+      childEntry,
+      env,
+      startup,
+      context,
+    ),
     delay,
     nowMs: Date.now,
     controlRequest: async (identity, method, requestPath, context = {}) => await authenticatedControlRequest(
@@ -131,6 +96,56 @@ export function createProductionDaemonController(
       await terminateProcessIfMatching(identity.pid, identity.processStartIdentity, undefined, context);
     },
   });
+}
+
+type SpawnDaemonChild = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+) => ChildProcess;
+
+export async function spawnDaemonProcess(
+  execPath: string,
+  childEntry: string,
+  env: NodeJS.ProcessEnv,
+  startup: Readonly<StartupConfig>,
+  context: Readonly<LifecycleDependencyContext>,
+  spawnChild: SpawnDaemonChild = spawn,
+): Promise<SpawnedDaemon> {
+  context.signal.throwIfAborted();
+  const child = spawnChild(execPath, [
+    childEntry,
+    "--data-dir", startup.dataDir,
+    "--port", String(startup.port),
+    "--log-level", startup.logLevel,
+  ], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env,
+    signal: context.signal,
+  });
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      child.off("error", onError);
+      child.off("spawn", onSpawn);
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      // Once a PID exists, ownership must return to the controller even if
+      // AbortSignal caused child_process to report an error.
+      if (child.pid === undefined) reject(error);
+      else resolve();
+    };
+    const onSpawn = (): void => {
+      cleanup();
+      resolve();
+    };
+    child.once("error", onError);
+    child.once("spawn", onSpawn);
+  });
+  if (child.pid === undefined) throw new Error("daemon child has no process id");
+  return { pid: child.pid, unref: () => child.unref() };
 }
 
 export interface RunDaemonRuntimeOptions {

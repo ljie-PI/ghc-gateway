@@ -247,10 +247,12 @@ describe("daemon lifecycle coordination", () => {
     expect(elapsedMs).toBe(60_100);
   });
 
-  it("keeps the operation lease until a never-settling spawn acknowledges its deadline", async () => {
+  it("fails closed when a dependency ignores abort until it explicitly becomes quiescent", async () => {
     vi.useFakeTimers();
     try {
       const events: string[] = [];
+      const dependency = deferred();
+      let reads = 0;
       const coordinator = new LifecycleCoordinator({
         acquire: async () => {
           events.push("lease:acquire");
@@ -259,33 +261,47 @@ describe("daemon lifecycle coordination", () => {
       });
       const controller = new DaemonController({
         lifecycleCoordinator: coordinator,
-        identityFile: { read: async () => null, remove: async () => false },
-        processIdentity: async () => null,
-        spawn: async (_startup, context) => {
-          events.push("spawn:start");
-          return await new Promise<never>((_resolve, reject) => {
-            context?.signal.addEventListener("abort", () => {
-              events.push("spawn:abort-acknowledged");
-              reject(context.signal.reason);
-            }, { once: true });
-          });
+        identityFile: {
+          read: async (_dataDir, context) => {
+            reads += 1;
+            if (reads === 1) {
+              events.push("dependency:start");
+              context.signal.addEventListener("abort", () => events.push("dependency:signaled"), { once: true });
+              await dependency.promise;
+              events.push("dependency:quiescent");
+            }
+            return null;
+          },
+          remove: async () => false,
         },
+        processIdentity: async () => null,
+        spawn: async () => ({ pid: 4242, unref() {} }),
         delay: async () => undefined,
         nowMs: Date.now,
         controlRequest: async () => undefined,
         terminate: async () => undefined,
       });
 
-      const starting = controller.start(startup("bounded-spawn"));
-      const outcome = starting.catch((error: unknown) => error);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(events).toEqual(["lease:acquire", "spawn:start"]);
+      const active = controller.status("nonconforming");
+      const next = controller.status("nonconforming");
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(await outcome).toMatchObject({ code: "timeout" });
+      expect(events).toEqual(["lease:acquire", "dependency:start", "dependency:signaled"]);
+      let nextSettled = false;
+      void next.finally(() => { nextSettled = true; });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(nextSettled).toBe(false);
+      expect(events).not.toContain("lease:release");
+
+      dependency.resolve();
+      await expect(active).rejects.toMatchObject({ code: "timeout" });
+      await expect(next).resolves.toMatchObject({ state: "stopped" });
       expect(events).toEqual([
         "lease:acquire",
-        "spawn:start",
-        "spawn:abort-acknowledged",
+        "dependency:start",
+        "dependency:signaled",
+        "dependency:quiescent",
+        "lease:release",
+        "lease:acquire",
         "lease:release",
       ]);
     } finally {
