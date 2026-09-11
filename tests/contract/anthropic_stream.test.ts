@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
+import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
+import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
+import { createAnthropicStreamResponse } from "../../src/protocols/anthropic_messages/stream.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 import { anthropicGateway, anthropicRequest, sse } from "./anthropic_harness.js";
 
@@ -116,6 +119,58 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 
+  it("records an explicit upstream error as failure while gracefully closing unchanged Anthropic bytes", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const attempt = createRequestAttempt({
+      requestId: "req_explicit_error",
+      protocol: "anthropic",
+      abortedErrorCount: 1,
+      recorder: { recordUsage: (update) => usageUpdates.push(update) },
+    });
+    const terminalKinds: string[] = [];
+    const signal = new AbortController().signal;
+    const response = await createAnthropicStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers(),
+        bytes: (async function* () {
+          yield sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] });
+          yield new TextEncoder().encode("event: error\ndata: {\"error\":{\"message\":\"private\"}}\n\n");
+        })(),
+        cancel: async () => undefined,
+      },
+      model: "gpt",
+      createUuid: () => "00000000-0000-4000-8000-000000000001",
+      scope: {
+        requestId: "req_explicit_error",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt,
+      },
+      onTerminal: (result) => {
+        terminalKinds.push(result.kind);
+        if (result.kind === "failure") {
+          attempt.failure(result.error);
+        } else {
+          attempt.success();
+        }
+      },
+    });
+    const handle = getStreamExecutionHandle(response);
+
+    expect(await response.text()).toBe([
+      "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-000000000001\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"gpt\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"partial\"}}\n\n",
+    ].join(""));
+    await handle?.completion;
+
+    expect(handle?.cause).toBe("postcommit_failure");
+    expect(terminalKinds).toEqual(["failure"]);
+    expect(usageUpdates).toMatchObject([{ protocol: "anthropic", outcome: "upstream_error" }]);
+  });
+
   it("classifies post-commit parser failures without synthetic success terminals", async () => {
     const usageUpdates: UsageUpdate[] = [];
     async function* brokenStream(): AsyncIterable<Uint8Array> {
@@ -149,6 +204,83 @@ describe("Anthropic stream lifecycle", () => {
       }]);
     } finally {
       await close();
+    }
+  });
+
+  it("preserves native keepalive ordering while finalizing usage and iterator cleanup once", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    let returned = 0;
+    const records = [
+      ": keepalive\n\n",
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ];
+    const backend = new ScriptedCopilotBackend({
+      messagesStream: (async function* () {
+        try {
+          for (const record of records) {
+            yield new TextEncoder().encode(record);
+          }
+        } finally {
+          returned += 1;
+        }
+      })(),
+    });
+    const opened = await anthropicGateway({
+      backend,
+      usageUpdates,
+      catalogFetch: nativeMessagesCatalog,
+    });
+    try {
+      const response = await opened.gw.fetch(anthropicRequest({
+        model: "claude-native",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(records.join(""));
+      expect(returned).toBe(1);
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{ outcome: "success", inputTokens: 2, outputTokens: 0 }]);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it("times out a native keepalive-only stream before committing any stream bytes", async () => {
+    vi.useFakeTimers();
+    const usageUpdates: UsageUpdate[] = [];
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 100;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const backend = new ScriptedCopilotBackend({
+      messagesStream: (request) => commentThenStall(request.signal),
+    });
+    const opened = await anthropicGateway({
+      backend,
+      runtime,
+      usageUpdates,
+      catalogFetch: nativeMessagesCatalog,
+    });
+    try {
+      const pending = opened.gw.fetch(anthropicRequest({
+        model: "claude-native",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }));
+      await vi.advanceTimersByTimeAsync(5_000);
+      const response = await pending;
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"upstream timeout\"},\"request_id\":\"req_test_1\"}",
+      );
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{ outcome: "timeout" }]);
+    } finally {
+      vi.useRealTimers();
+      await opened.close();
     }
   });
 
@@ -246,6 +378,19 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 });
+
+function nativeMessagesCatalog() {
+  return {
+    data: [{
+      id: "claude-native",
+      name: "Claude Native",
+      vendor: "test",
+      model_picker_enabled: true,
+      capabilities: { type: "chat" },
+      model_info: { supported_endpoints: ["/v1/messages"] },
+    }],
+  };
+}
 
 async function* commentThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
   yield new TextEncoder().encode(": keepalive\n\n");

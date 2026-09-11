@@ -6,7 +6,12 @@ import { readWireJsonObjectBody } from "./body_reader.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "./failures.js";
 import { createRequestScope, type RequestScope } from "./request_scope.js";
 import { createRequestAttempt, type RequestAttempt } from "./request_attempt.js";
-import { boundedCleanup } from "./stream_execution.js";
+import {
+  boundedCleanup,
+  getStreamExecutionHandle,
+  type StreamExecutionDelivery,
+  type StreamExecutionHandle,
+} from "./stream_execution.js";
 import { abortWithTimeout, armTimeout, type TimeoutScheduler } from "./timeouts.js";
 import type { WireJsonObject } from "../serialization/wire_json.js";
 import type {
@@ -162,7 +167,18 @@ async function handleRoute(
   const settled = new Promise<void>((resolve) => {
     resolveSettled = resolve;
   });
+  let streamExecution: StreamExecutionHandle | undefined;
   const abortDelivery = (failure: GatewayFailure): void => {
+    const error = new GatewayFailureError(failure);
+    attempt.failure(error);
+    if (!workController.signal.aborted) {
+      workController.abort(error);
+    }
+    if (!deliveryController.signal.aborted) {
+      deliveryController.abort(error);
+    }
+  };
+  const cancelResponseDelivery = (failure: GatewayFailure): void => {
     const error = new GatewayFailureError(failure);
     attempt.failure(error);
     if (!deliveryController.signal.aborted) {
@@ -174,11 +190,13 @@ async function handleRoute(
   };
   const inflight: InflightRequest = {
     abortForShutdown: async () => {
+      const streamCompletion = streamExecution?.abort("shutdown");
       abortDelivery({
         kind: "aborted",
         source: "gateway",
         phase: "internal",
       });
+      await streamCompletion;
       await settled;
     },
   };
@@ -250,7 +268,9 @@ async function handleRoute(
     }
 
     const response = await route.endpoint(decoded, scope);
+    streamExecution = getStreamExecutionHandle(response);
     if (workController.signal.aborted) {
+      await streamExecution?.completion;
       const timeoutFailure = upstreamTimeoutFromSignal(workController.signal);
       if (timeoutFailure !== undefined && !request.signal.aborted) {
         attempt.failure(new GatewayFailureError(timeoutFailure));
@@ -274,10 +294,11 @@ async function handleRoute(
     return attachLifecycle(
       response,
       deliveryController.signal,
-      () => abortDelivery({ kind: "aborted", source: "request", phase: "stream" }),
+      () => cancelResponseDelivery({ kind: "aborted", source: "request", phase: "stream" }),
       attempt,
       cleanup,
       stream ? dependencies.streamFinished : undefined,
+      streamExecution,
     );
   } catch (error: unknown) {
     const failure = failureFromUnknown(error);
@@ -325,6 +346,7 @@ function attachLifecycle(
   attempt: RequestAttempt,
   cleanup: () => void,
   onFinished?: () => void,
+  streamExecution?: StreamExecutionHandle,
 ): Response {
   const body = response.body;
   if (body === null) {
@@ -333,56 +355,82 @@ function attachLifecycle(
   }
 
   let cleaned = false;
+  let onDeliveryAbort: () => void = () => undefined;
   const once = (): void => {
     if (cleaned) {
       return;
     }
     cleaned = true;
+    deliverySignal.removeEventListener("abort", onDeliveryAbort);
     onFinished?.();
     cleanup();
   };
 
+  let delivery: StreamExecutionDelivery | undefined;
   const reader = body.getReader();
   let cancellation: Promise<void> | undefined;
   const cancelBody = async (): Promise<void> => {
     cancellation ??= boundedCleanup(reader.cancel(), RESPONSE_BODY_CLEANUP_MS);
     await cancellation;
   };
+  const settleDelivery = (): void => {
+    delivery?.settle();
+  };
+  const awaitOwner = async (): Promise<void> => {
+    await streamExecution?.completion;
+    if (streamExecution === undefined) {
+      once();
+    }
+  };
   const stream = new ReadableStream<Uint8Array>({
     async pull(streamController): Promise<void> {
       if (deliverySignal.aborted) {
+        settleDelivery();
         await cancelBody();
-        once();
+        await awaitOwner();
         streamController.close();
         return;
       }
       try {
         const next = await reader.read();
         if (next.done) {
+          settleDelivery();
           await cancellation;
-          once();
+          await awaitOwner();
           streamController.close();
           return;
         }
         if (next.value !== undefined) {
           attempt.markCommitted();
           streamController.enqueue(next.value);
+          delivery?.markDelivered();
         }
       } catch (error: unknown) {
-        once();
+        settleDelivery();
+        await awaitOwner();
         streamController.error(error);
       }
     },
     async cancel(): Promise<void> {
+      settleDelivery();
       abortDelivery();
       await cancelBody();
-      once();
+      await awaitOwner();
     },
-  });
+  }, streamExecution === undefined ? undefined : { highWaterMark: 0 });
 
-  deliverySignal.addEventListener("abort", () => {
-    void cancelBody().finally(once);
-  }, { once: true });
+  onDeliveryAbort = () => {
+    settleDelivery();
+    void cancelBody().then(awaitOwner, awaitOwner);
+  };
+  const alreadyAborted = deliverySignal.aborted;
+  deliverySignal.addEventListener("abort", onDeliveryAbort, { once: true });
+  if (streamExecution !== undefined) {
+    delivery = streamExecution.claimDeliveryAdapter(once);
+  }
+  if (alreadyAborted || deliverySignal.aborted) {
+    onDeliveryAbort();
+  }
 
   return new Response(stream, {
     status: response.status,
