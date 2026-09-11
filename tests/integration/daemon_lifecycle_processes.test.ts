@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type ServerResponse } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonIdentityFile, type DaemonIdentityLease } from "../../src/daemon/identity_file.js";
 import { captureProcessStartIdentity } from "../../src/daemon/process_identity.js";
@@ -22,6 +23,40 @@ afterEach(async () => {
 });
 
 describe("daemon lifecycle coordination across CLI processes", () => {
+  it("atomically initializes a fresh operation database for simultaneous first acquirers", { timeout: 120_000 }, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ghcg-operation-first-acquirers-"));
+    const dataDir = path.join(root, "data");
+    const gatePath = path.join(root, "gate");
+    const eventsPath = path.join(root, "events");
+    try {
+      const first = runContender(dataDir, gatePath, eventsPath, "first");
+      const second = runContender(dataDir, gatePath, eventsPath, "second");
+      await Promise.all([first.ready, second.ready]);
+      await writeFile(gatePath, "go", "utf8");
+      const [firstResult, secondResult] = await Promise.all([first.result, second.result]);
+
+      expect(firstResult, firstResult.stderr).toEqual({ code: 0, stdout: "ready\ndone\n", stderr: "" });
+      expect(secondResult, secondResult.stderr).toEqual({ code: 0, stdout: "ready\ndone\n", stderr: "" });
+      const events = (await readFile(eventsPath, "utf8")).trim().split("\n");
+      expect(events).toMatchObject([
+        expect.stringMatching(/^start:(first|second)$/u),
+        expect.stringMatching(/^end:(first|second)$/u),
+        expect.stringMatching(/^start:(first|second)$/u),
+        expect.stringMatching(/^end:(first|second)$/u),
+      ]);
+      expect(events[0]?.slice(6)).toBe(events[1]?.slice(4));
+      expect(events[2]?.slice(6)).toBe(events[3]?.slice(4));
+      expect(events[0]?.slice(6)).not.toBe(events[2]?.slice(6));
+      await expectProtectedValidDatabase(dataDir);
+      expect(await operationArtifacts(dataDir)).toEqual([
+        "daemon.operation.db",
+        "daemon.operation.owner.json",
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("serializes status commands through the production operation lease", { timeout: 120_000 }, async () => {
     const fixture = await processFixture();
     try {
@@ -71,6 +106,30 @@ describe("daemon lifecycle coordination across CLI processes", () => {
       expect(fixture.requests()).toBe(2);
     } finally {
       await fixture.close();
+    }
+  });
+
+  it("recovers real initialization crashes before publication and before temp cleanup", { timeout: 240_000 }, async () => {
+    for (const phase of ["database_prepared", "database_published"] as const) {
+      const fixture = await processFixture();
+      try {
+        const crashed = runCrashHolder(fixture.dataDir, phase);
+        await expect(crashed.result).resolves.toEqual({ code: 23, stdout: `${phase}\n`, stderr: "" });
+        expect((await operationArtifacts(fixture.dataDir)).some((name) =>
+          name.startsWith(".daemon.operation.db.init-"))).toBe(true);
+
+        const recovered = runStatus(fixture.dataDir);
+        await vi.waitFor(() => expect(fixture.requests()).toBe(1), { timeout: 60_000 });
+        fixture.releaseBlockedResponse();
+        await expect(recovered.result).resolves.toMatchObject({ code: 0, stderr: "" });
+        await expectProtectedValidDatabase(fixture.dataDir);
+        expect(await operationArtifacts(fixture.dataDir)).toEqual([
+          "daemon.operation.db",
+          "daemon.operation.owner.json",
+        ]);
+      } finally {
+        await fixture.close();
+      }
     }
   });
 
@@ -191,7 +250,46 @@ function runStatus(dataDir: string) {
   return { child, result };
 }
 
-function runCrashHolder(dataDir: string, phase: "os_locked" | "released_published") {
+function runContender(dataDir: string, gatePath: string, eventsPath: string, contender: string) {
+  const child = spawn(process.execPath, [
+    "scripts/tooling/bootstrap.mjs",
+    "tests/fixtures/daemon_operation_contender.ts",
+    dataDir,
+    gatePath,
+    eventsPath,
+    contender,
+  ], {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  children.add(child);
+  let stdout = "";
+  let stderr = "";
+  let signalReady = (): void => undefined;
+  const ready = new Promise<void>((resolve) => { signalReady = resolve; });
+  child.stdout!.setEncoding("utf8");
+  child.stderr!.setEncoding("utf8");
+  child.stdout!.on("data", (chunk: string) => {
+    stdout += chunk;
+    if (stdout.includes("ready\n")) signalReady();
+  });
+  child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+  const result = new Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      children.delete(child);
+      resolve({ code, stdout, stderr });
+    });
+  });
+  return { ready, result };
+}
+
+function runCrashHolder(
+  dataDir: string,
+  phase: "database_prepared" | "database_published" | "os_locked" | "released_published",
+) {
   const child = spawn(process.execPath, [
     "scripts/tooling/bootstrap.mjs",
     "tests/fixtures/daemon_operation_crash.ts",
@@ -218,6 +316,22 @@ function runCrashHolder(dataDir: string, phase: "os_locked" | "released_publishe
     });
   });
   return { child, result };
+}
+
+async function expectProtectedValidDatabase(dataDir: string): Promise<void> {
+  const databasePath = path.join(dataDir, "daemon.operation.db");
+  if (process.platform !== "win32") expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    expect(database.prepare("PRAGMA quick_check").all()).toEqual([{ quick_check: "ok" }]);
+  } finally {
+    database.close();
+  }
+}
+
+async function operationArtifacts(dataDir: string): Promise<string[]> {
+  return (await readdir(dataDir)).filter((name) =>
+    name.startsWith("daemon.operation") || name.startsWith(".daemon.operation")).sort();
 }
 
 function expectedStatus(dataDir: string, port: number) {

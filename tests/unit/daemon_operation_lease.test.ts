@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { readFileSync, writeSync } from "node:fs";
+import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, readdir, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -50,6 +50,55 @@ describe("daemon operation lease", () => {
     for (const suffix of ["-journal", "-wal", "-shm"]) {
       await expect(lstat(databasePath + suffix)).rejects.toMatchObject({ code: "ENOENT" });
     }
+  });
+
+  it("completes short writes while initializing the database", async () => {
+    const directory = await temporaryDirectory();
+    let writes = 0;
+    const lease = await operationLease({
+      write: (fd, buffer, offset, length, position) => {
+        writes += 1;
+        return writeSync(fd, buffer, offset, Math.min(length, 17), position);
+      },
+    }).acquire(directory);
+    lease.release();
+
+    expect(writes).toBeGreaterThan(1);
+    expect(await initializationTemps(directory)).toEqual([]);
+  });
+
+  it("recovers protected initialization temps left before and after atomic database publication", async () => {
+    for (const published of [false, true]) {
+      const directory = await initializedDirectory();
+      const databasePath = path.join(directory, "daemon.operation.db");
+      const tempPath = path.join(directory, initializationTempName(9999));
+      await copyFile(databasePath, tempPath);
+      if (process.platform !== "win32") await chmod(tempPath, 0o600);
+      await unlink(databasePath);
+      if (published) await link(tempPath, databasePath);
+
+      const lease = await operationLease({ processIdentity: async () => null }).acquire(directory);
+      lease.release();
+      expect(await initializationTemps(directory)).toEqual([]);
+      expect(await lstat(databasePath)).toMatchObject({ isFile: expect.any(Function) });
+    }
+  });
+
+  it("fails closed for unsafe or unbounded database initialization temps", async () => {
+    const unsafeDirectory = await initializedDirectory();
+    await writeFile(path.join(unsafeDirectory, initializationTempName(9999)), "not sqlite", { mode: 0o600 });
+    await expect(operationLease({ processIdentity: async () => null }).acquire(unsafeDirectory))
+      .rejects.toMatchObject({ code: "unsafe_path" });
+
+    const unboundedDirectory = await initializedDirectory();
+    await Promise.all(Array.from({ length: 17 }, async (_, index) => {
+      await copyFile(
+        path.join(unboundedDirectory, "daemon.operation.db"),
+        path.join(unboundedDirectory, initializationTempName(10_000 + index)),
+      );
+    }));
+    await expect(operationLease({ processIdentity: async () => null }).acquire(unboundedDirectory))
+      .rejects.toMatchObject({ code: "unsafe_path" });
   });
 
   it("serializes the same database, allows different directories in parallel, and release is idempotent", async () => {
@@ -180,6 +229,11 @@ describe("daemon operation lease", () => {
       async (directory) => { await chmod(path.join(directory, "daemon.operation.db"), 0o644); },
       async (directory) => { await chmod(path.join(directory, "daemon.operation.owner.json"), 0o644); },
       async (directory) => { await writeFile(path.join(directory, ".daemon.operation.owner.json.tmp"), "unsafe", { mode: 0o644 }); },
+      async (directory) => {
+        const initPath = path.join(directory, initializationTempName(9999));
+        await copyFile(path.join(directory, "daemon.operation.db"), initPath);
+        await chmod(initPath, 0o644);
+      },
       async (directory) => { await writeFile(path.join(directory, "daemon.operation.db-journal"), "unexpected", { mode: 0o600 }); },
     ];
     for (const arrange of cases) {
@@ -196,6 +250,7 @@ describe("daemon operation lease", () => {
       "daemon.operation.db",
       "daemon.operation.owner.json",
       ".daemon.operation.owner.json.tmp",
+      initializationTempName(9999),
       "daemon.operation.db-wal",
     ]) {
       const directory = await initializedDirectory();
@@ -245,6 +300,15 @@ async function writeOwner(directory: string, owner: OperationOwner): Promise<voi
 
 async function readOwner(directory: string): Promise<OperationOwner> {
   return JSON.parse(await readFile(path.join(directory, "daemon.operation.owner.json"), "utf8")) as OperationOwner;
+}
+
+function initializationTempName(pid: number): string {
+  const identity = Buffer.from(START_IDENTITY, "utf8").toString("base64url");
+  return `.daemon.operation.db.init-${pid}-${identity}-01234567-89ab-4def-8123-456789abcdef`;
+}
+
+async function initializationTemps(directory: string): Promise<string[]> {
+  return (await readdir(directory)).filter((name) => name.startsWith(".daemon.operation.db.init-"));
 }
 
 function requireRead(filePath: string): string {

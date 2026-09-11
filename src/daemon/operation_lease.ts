@@ -1,5 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fsyncSync,
+  linkSync,
+  openSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+  type Stats,
+} from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -16,6 +27,8 @@ import {
 const OPERATION_DATABASE = "daemon.operation.db";
 const OPERATION_OWNER = "daemon.operation.owner.json";
 const OPERATION_OWNER_TEMP = ".daemon.operation.owner.json.tmp";
+const OPERATION_DATABASE_INIT_PREFIX = ".daemon.operation.db.init-";
+const MAX_DATABASE_INIT_TEMPS = 16;
 const MAX_OWNER_BYTES = 4 * 1024;
 const POLL_INTERVAL_MS = 50;
 const SQLITE_BUSY = 5;
@@ -37,6 +50,13 @@ export interface DaemonOperationLeaseAccess {
 
 export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
   readonly pid?: number;
+  readonly write?: (
+    fd: number,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number | null,
+  ) => number;
   readonly processStartIdentity?: (context?: Readonly<ProcessIdentityContext>) => Promise<string | null>;
   readonly processIdentity?: (
     pid: number,
@@ -44,6 +64,7 @@ export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
   ) => Promise<string | null>;
   readonly createToken?: () => string;
   readonly delay?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly onInitializationPhase?: (phase: "database_prepared" | "database_published") => void;
   readonly onPhase?: (phase: "os_locked" | "held_published" | "released_published" | "database_closing") => void;
 }
 
@@ -65,8 +86,10 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     context?: Readonly<ProcessIdentityContext>,
   ) => Promise<string | null>;
   private readonly createToken: () => string;
+  private readonly write: NonNullable<DaemonOperationLeaseFileOptions["write"]>;
   private readonly delay: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly protectedOptions: ProtectedFileOptions;
+  private readonly onInitializationPhase: NonNullable<DaemonOperationLeaseFileOptions["onInitializationPhase"]>;
   private readonly onPhase: NonNullable<DaemonOperationLeaseFileOptions["onPhase"]>;
 
   constructor(options: Readonly<DaemonOperationLeaseFileOptions> = {}) {
@@ -76,7 +99,10 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     this.processIdentity = options.processIdentity
       ?? (async (pid, context) => await captureProcessStartIdentity(pid, undefined, context));
     this.createToken = options.createToken ?? randomUUID;
+    this.write = options.write ?? ((fd, buffer, offset, length, position) =>
+      writeSync(fd, buffer, offset, length, position));
     this.delay = options.delay ?? abortableDelay;
+    this.onInitializationPhase = options.onInitializationPhase ?? (() => undefined);
     this.onPhase = options.onPhase ?? (() => undefined);
     this.protectedOptions = {
       ...(options.platform === undefined ? {} : { platform: options.platform }),
@@ -103,7 +129,7 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     const databasePath = path.join(files.directory, OPERATION_DATABASE);
     const ownerPath = path.join(files.directory, OPERATION_OWNER);
     const tempPath = path.join(files.directory, OPERATION_OWNER_TEMP);
-    this.ensureDatabase(files, databasePath);
+    await this.ensureDatabase(files, databasePath, processStartIdentity);
 
     for (;;) {
       signal?.throwIfAborted();
@@ -125,6 +151,7 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
         this.onPhase("os_locked");
         signal?.throwIfAborted();
         this.assertDatabaseAssets(files, databasePath);
+        await this.cleanupDatabaseInitTemps(files, databasePath, signal);
         this.cleanupOwnerTemp(files, tempPath);
         await this.verifyPreviousOwner(files, ownerPath, signal);
         this.publishOwner(files, ownerPath, tempPath, held);
@@ -137,24 +164,105 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     }
   }
 
-  private ensureDatabase(files: ProtectedFileSystem, databasePath: string): void {
-    if (!files.pathExists(databasePath)) {
-      let fd: number | undefined;
+  private async ensureDatabase(
+    files: ProtectedFileSystem,
+    databasePath: string,
+    processStartIdentity: string,
+  ): Promise<void> {
+    if (files.pathExists(databasePath)) {
+      files.assertProtectedRegularFile(databasePath);
+      return;
+    }
+
+    const initPath = path.join(
+      files.directory,
+      `${OPERATION_DATABASE_INIT_PREFIX}${this.pid}-${Buffer.from(processStartIdentity).toString("base64url")}-${randomUUID()}`,
+    );
+    let fd: number | undefined;
+    try {
+      fd = openSync(initPath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
+      writeAllSync(fd, emptyDatabaseImage(), this.write);
+      fsyncSync(fd);
+      files.protectFile(initPath);
+      files.assertProtectedRegularFile(initPath);
+      closeSync(fd);
+      fd = undefined;
+      this.validateDatabase(files, initPath);
+      this.onInitializationPhase("database_prepared");
       try {
-        fd = openSync(databasePath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
-        writeSync(fd, emptyDatabaseImage());
-        fsyncSync(fd);
-        closeSync(fd);
-        fd = undefined;
-        files.protectFile(databasePath);
-        files.assertProtectedRegularFile(databasePath);
+        linkSync(initPath, databasePath);
         files.flushDirectory();
+        this.onInitializationPhase("database_published");
       } catch (error: unknown) {
-        if (fd !== undefined) closeSync(fd);
-        if (!isAlreadyExists(error)) throw normalizeAcquireError(error);
+        if (!isAlreadyExists(error)) throw error;
       }
+      files.assertProtectedRegularFile(databasePath);
+      files.unlink(initPath);
+    } catch (error: unknown) {
+      if (fd !== undefined) closeSync(fd);
+      this.cleanupOwnDatabaseInitTemp(files, initPath);
+      throw normalizeAcquireError(error);
+    }
+  }
+
+  private validateDatabase(files: ProtectedFileSystem, databasePath: string): void {
+    files.assertProtectedRegularFile(databasePath);
+    let database: DatabaseSync | undefined;
+    try {
+      database = new DatabaseSync(databasePath, { readOnly: true });
+      const rows = database.prepare("PRAGMA quick_check").all() as Array<Record<string, unknown>>;
+      if (rows.length !== 1 || Object.values(rows[0] ?? {})[0] !== "ok") {
+        throw new Error("SQLite quick check failed");
+      }
+    } catch (error: unknown) {
+      throw new DaemonIdentityFileError("unsafe_path", "invalid daemon operation database", { cause: error });
+    } finally {
+      database?.close();
     }
     files.assertProtectedRegularFile(databasePath);
+  }
+
+  private cleanupOwnDatabaseInitTemp(files: ProtectedFileSystem, initPath: string): void {
+    if (!files.pathExists(initPath)) return;
+    try {
+      files.assertProtectedRegularFile(initPath);
+      files.unlink(initPath);
+    } catch {
+      // Preserve the original sanitized failure. A later holder validates initialization temps.
+    }
+  }
+
+  private async cleanupDatabaseInitTemps(
+    files: ProtectedFileSystem,
+    databasePath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const names = readdirSync(files.directory)
+      .filter((name) => name.startsWith(OPERATION_DATABASE_INIT_PREFIX));
+    if (names.length > MAX_DATABASE_INIT_TEMPS) {
+      throw new DaemonIdentityFileError("unsafe_path", "too many daemon operation database initialization files");
+    }
+    const databaseStat = files.assertProtectedRegularFile(databasePath);
+    for (const name of names) {
+      signal?.throwIfAborted();
+      const initOwner = decodeDatabaseInitName(name);
+      const initPath = path.join(files.directory, name);
+      const initStat = files.assertProtectedRegularFile(initPath);
+      if (sameFile(databaseStat, initStat)) {
+        files.unlink(initPath);
+        continue;
+      }
+      this.validateDatabase(files, initPath);
+
+      let actual: string | null;
+      try {
+        actual = await this.processIdentity(initOwner.pid, { ...(signal === undefined ? {} : { signal }) });
+      } catch (error: unknown) {
+        throw new DaemonIdentityFileError("unsafe_owner", "unable to verify database initializer", { cause: error });
+      }
+      if (actual === initOwner.processStartIdentity) continue;
+      files.unlink(initPath);
+    }
   }
 
   private assertDatabaseAssets(files: ProtectedFileSystem, databasePath: string): void {
@@ -227,7 +335,7 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     let fd: number | undefined;
     try {
       fd = openSync(tempPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
-      writeSync(fd, `${JSON.stringify(owner)}\n`, 0, "utf8");
+      writeAllSync(fd, Buffer.from(`${JSON.stringify(owner)}\n`, "utf8"), this.write);
       fsyncSync(fd);
       closeSync(fd);
       fd = undefined;
@@ -319,6 +427,38 @@ function sameOwner(left: Readonly<OperationOwner>, right: Readonly<OperationOwne
     && left.pid === right.pid
     && left.processStartIdentity === right.processStartIdentity
     && left.leaseToken === right.leaseToken;
+}
+
+function decodeDatabaseInitName(name: string): { readonly pid: number; readonly processStartIdentity: string } {
+  const match = /^\.daemon\.operation\.db\.init-([1-9]\d*)-([A-Za-z0-9_-]+)-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.exec(name);
+  const pid = Number(match?.[1]);
+  const encodedIdentity = match?.[2] ?? "";
+  const processStartIdentity = Buffer.from(encodedIdentity, "base64url").toString("utf8");
+  if (!Number.isSafeInteger(pid) || pid <= 0
+    || Buffer.from(processStartIdentity, "utf8").toString("base64url") !== encodedIdentity
+    || !isCanonicalProcessStartIdentity(processStartIdentity)) {
+    throw new DaemonIdentityFileError("unsafe_path", "invalid daemon operation database initialization file");
+  }
+  return { pid, processStartIdentity };
+}
+
+function sameFile(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function writeAllSync(
+  fd: number,
+  buffer: Uint8Array,
+  write: NonNullable<DaemonOperationLeaseFileOptions["write"]>,
+): void {
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const written = write(fd, buffer, offset, buffer.byteLength - offset, offset);
+    if (!Number.isSafeInteger(written) || written <= 0 || written > buffer.byteLength - offset) {
+      throw new Error("unable to write complete daemon file");
+    }
+    offset += written;
+  }
 }
 
 let databaseImage: Buffer | undefined;
