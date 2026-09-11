@@ -6,7 +6,11 @@ import { readWireJsonObjectBody } from "./body_reader.js";
 import { failureFromUnknown, GatewayFailureError, type GatewayFailure } from "./failures.js";
 import { createRequestScope, type RequestScope } from "./request_scope.js";
 import { createRequestAttempt, type RequestAttempt } from "./request_attempt.js";
-import { boundedCleanup } from "./stream_execution.js";
+import {
+  boundedCleanup,
+  getStreamExecutionHandle,
+  type StreamExecutionHandle,
+} from "./stream_execution.js";
 import { abortWithTimeout, armTimeout, type TimeoutScheduler } from "./timeouts.js";
 import type { WireJsonObject } from "../serialization/wire_json.js";
 import type {
@@ -162,18 +166,20 @@ async function handleRoute(
   const settled = new Promise<void>((resolve) => {
     resolveSettled = resolve;
   });
+  let streamExecution: StreamExecutionHandle | undefined;
   const abortDelivery = (failure: GatewayFailure): void => {
     const error = new GatewayFailureError(failure);
     attempt.failure(error);
-    if (!deliveryController.signal.aborted) {
-      deliveryController.abort(error);
-    }
     if (!workController.signal.aborted) {
       workController.abort(error);
+    }
+    if (!deliveryController.signal.aborted) {
+      deliveryController.abort(error);
     }
   };
   const inflight: InflightRequest = {
     abortForShutdown: async () => {
+      await streamExecution?.abort("shutdown");
       abortDelivery({
         kind: "aborted",
         source: "gateway",
@@ -250,6 +256,8 @@ async function handleRoute(
     }
 
     const response = await route.endpoint(decoded, scope);
+    streamExecution = getStreamExecutionHandle(response);
+    streamExecution?.claimDeliveryAdapter();
     if (workController.signal.aborted) {
       const timeoutFailure = upstreamTimeoutFromSignal(workController.signal);
       if (timeoutFailure !== undefined && !request.signal.aborted) {
@@ -278,6 +286,7 @@ async function handleRoute(
       attempt,
       cleanup,
       stream ? dependencies.streamFinished : undefined,
+      streamExecution,
     );
   } catch (error: unknown) {
     const failure = failureFromUnknown(error);
@@ -325,6 +334,7 @@ function attachLifecycle(
   attempt: RequestAttempt,
   cleanup: () => void,
   onFinished?: () => void,
+  streamExecution?: StreamExecutionHandle,
 ): Response {
   const body = response.body;
   if (body === null) {
@@ -360,6 +370,7 @@ function attachLifecycle(
         const next = await reader.read();
         if (next.done) {
           await cancellation;
+          await streamExecution?.completion;
           once();
           streamController.close();
           return;
@@ -367,15 +378,17 @@ function attachLifecycle(
         if (next.value !== undefined) {
           attempt.markCommitted();
           streamController.enqueue(next.value);
+          streamExecution?.markDelivered();
         }
       } catch (error: unknown) {
+        await streamExecution?.completion;
         once();
         streamController.error(error);
       }
     },
     async cancel(): Promise<void> {
-      abortDelivery();
       await cancelBody();
+      abortDelivery();
       once();
     },
   });

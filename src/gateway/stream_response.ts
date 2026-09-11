@@ -2,14 +2,15 @@ export interface StreamResponseWriter {
   readonly committed: boolean;
   enqueue(chunk: Uint8Array): Promise<boolean>;
   close(): void;
-  abort(): void;
+  abort(error?: unknown): void;
   readonly response: Response;
 }
 
 export function createStreamResponseWriter(init: {
   readonly status?: number;
   readonly headers?: HeadersInit;
-  readonly signal: AbortSignal;
+  readonly signal?: AbortSignal;
+  readonly onCommit?: () => void;
   readonly onCancel?: () => Promise<void> | void;
 }): StreamResponseWriter {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -18,16 +19,22 @@ export function createStreamResponseWriter(init: {
   let outstandingPulls = 0;
   let lookahead: Uint8Array | undefined;
   let waitingProducer: (() => void) | undefined;
+  let settleLookahead: ((accepted: boolean) => void) | undefined;
   let cancellation: Promise<void> | undefined;
 
   const cancelProducer = async (): Promise<void> => {
     cancellation ??= Promise.resolve().then(() => init.onCancel?.());
     await cancellation;
   };
+  const isAborted = (): boolean => init.signal?.aborted ?? false;
 
   const deliver = (chunk: Uint8Array): void => {
     committed = true;
     controller?.enqueue(chunk);
+    init.onCommit?.();
+    const settle = settleLookahead;
+    settleLookahead = undefined;
+    settle?.(true);
   };
 
   const wakeProducer = (): void => {
@@ -54,6 +61,9 @@ export function createStreamResponseWriter(init: {
     async cancel(): Promise<void> {
       closed = true;
       lookahead = undefined;
+      const settle = settleLookahead;
+      settleLookahead = undefined;
+      settle?.(false);
       wakeProducer();
       await cancelProducer();
     },
@@ -64,15 +74,15 @@ export function createStreamResponseWriter(init: {
       return committed;
     },
     async enqueue(chunk: Uint8Array): Promise<boolean> {
-      if (closed || init.signal.aborted) {
+      if (closed || isAborted()) {
         return false;
       }
-      while (!closed && !init.signal.aborted && lookahead !== undefined) {
+      while (!closed && !isAborted() && lookahead !== undefined) {
         await new Promise<void>((resolve) => {
           waitingProducer = resolve;
         });
       }
-      if (closed || init.signal.aborted) {
+      if (closed || isAborted()) {
         return false;
       }
       if (outstandingPulls > 0) {
@@ -81,7 +91,9 @@ export function createStreamResponseWriter(init: {
         return true;
       }
       lookahead = chunk;
-      return true;
+      return await new Promise<boolean>((resolve) => {
+        settleLookahead = resolve;
+      });
     },
     close(): void {
       closed = true;
@@ -96,11 +108,14 @@ export function createStreamResponseWriter(init: {
       }
       wakeProducer();
     },
-    abort(): void {
+    abort(error = new Error("aborted")): void {
       closed = true;
       lookahead = undefined;
+      const settle = settleLookahead;
+      settleLookahead = undefined;
+      settle?.(false);
       try {
-        controller?.error(new Error("aborted"));
+        controller?.error(error);
       } catch (_error) {
         // already closed
       }
@@ -111,9 +126,16 @@ export function createStreamResponseWriter(init: {
       : { status: init.status ?? 200, headers: init.headers }),
   };
 
-  init.signal.addEventListener("abort", () => {
-    void cancelProducer().finally(() => writer.abort());
-  }, { once: true });
+  if (init.signal !== undefined) {
+    const abort = (): void => {
+      void cancelProducer().finally(() => writer.abort());
+    };
+    if (init.signal.aborted) {
+      abort();
+    } else {
+      init.signal.addEventListener("abort", abort, { once: true });
+    }
+  }
 
   return writer;
 }

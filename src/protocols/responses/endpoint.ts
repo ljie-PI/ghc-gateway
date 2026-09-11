@@ -19,13 +19,11 @@ import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt, type AttemptUsage, type RequestAttempt } from "../../gateway/request_attempt.js";
 import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
 import { isOpenAiStrictSchemaCompatible } from "../conversion/strict_schema.js";
-import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
   boundedCleanup,
-  createExchangeCancellation,
-  createOwnedStreamCleanup,
-  nextWithDeadline,
+  createStreamExecutionResponse,
   withByteIdleDeadlines,
+  type StreamExecutionEmission,
 } from "../../gateway/stream_execution.js";
 import { duplicateMemberNames, isWireJsonArray, isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, serializeWireJson, type WireJson, type WireJsonArray, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
@@ -328,13 +326,11 @@ async function nativeStreamResponse(
     await boundedCleanup(upstream.cancel());
   }
   assertUpstreamSuccess(upstream);
-  const cancelExchange = createExchangeCancellation(upstream);
   const bytes = withByteIdleDeadlines(
     upstream.bytes,
     scope.signal,
     scope.config.timeouts.firstByteMs,
     scope.config.timeouts.streamIdleMs,
-    cancelExchange,
   );
   const observed = usage.enabled ? createNativeStreamObservation(usage) : undefined;
   return await streamBytesResponse(
@@ -361,7 +357,7 @@ async function nativeStreamResponse(
     upstream,
     scope,
     usage.failure,
-    cancelExchange,
+    () => observed?.finish(),
   );
 }
 
@@ -642,63 +638,44 @@ async function streamBytesResponse(
   upstream: UpstreamByteStream,
   scope: Readonly<RequestScope>,
   onFailure: (error: unknown) => void,
-  cancelExchange = createExchangeCancellation(upstream),
+  onSuccess?: () => void,
 ): Promise<Response> {
-  const iterator = bytes[Symbol.asyncIterator]();
-  const cleanup = createOwnedStreamCleanup(upstream, iterator, 1_000, cancelExchange);
-  let first: IteratorResult<Uint8Array>;
-  try {
-    first = await nextWithDeadline(
-      iterator,
-      scope.config.timeouts.firstByteMs,
-      scope.signal,
-      { source: "parser", phase: "stream" },
-    );
-  } catch (error: unknown) {
-    onFailure(error);
-    await cleanup();
-    throw error;
-  }
-  const writer = createStreamResponseWriter({
+  return await createStreamExecutionResponse({
+    upstream,
+    emissions: responseByteEmissions(bytes),
     signal: scope.signal,
+    deliverySignal: scope.deliverySignal,
     headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
-    onCancel: cleanup,
+    firstEmissionTimeoutMs: scope.config.timeouts.firstByteMs,
+    normalizeFailure: (error) => error,
+    onTerminal: (result) => {
+      if (result.kind === "failure") {
+        onFailure(result.error);
+      } else {
+        onSuccess?.();
+      }
+    },
   });
-  const onAbort = (): void => {
-    onFailure(new GatewayFailureError(failureFromSignal(scope.signal, {
-      source: "parser",
-      phase: "stream",
-    })));
-  };
-  scope.signal.addEventListener("abort", onAbort, { once: true });
-  void (async () => {
-    try {
-      if (first.done !== true && !await writer.enqueue(first.value)) {
-        await cleanup();
+}
+
+async function* responseByteEmissions(
+  bytes: AsyncIterable<Uint8Array>,
+): AsyncIterable<StreamExecutionEmission<undefined>> {
+  const iterator = bytes[Symbol.asyncIterator]();
+  try {
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done === true) {
+        yield { kind: "terminal", value: undefined };
         return;
       }
-      for (;;) {
-        const next = await iterator.next();
-        if (next.done === true) {
-          break;
-        }
-        if (!await writer.enqueue(next.value)) {
-          await cleanup();
-          return;
-        }
-      }
-      await cleanup();
-      writer.close();
-    } catch (error: unknown) {
-      onFailure(error);
-      await cleanup();
-      writer.abort();
-    } finally {
-      scope.signal.removeEventListener("abort", onAbort);
-      await cleanup();
+      yield { kind: "wire", bytes: next.value };
     }
-  })();
-  return writer.response;
+  } finally {
+    if (iterator.return !== undefined) {
+      await iterator.return();
+    }
+  }
 }
 
 function extendedChatRequest(
@@ -1480,16 +1457,23 @@ function nativeOutcome(payload: WireJsonObject): UsageUpdate["outcome"] {
     : "success";
 }
 
-function createNativeStreamObservation(usage: RequestAttempt): { readonly observe: (event: Readonly<WireJsonObject>) => void } {
+function createNativeStreamObservation(usage: RequestAttempt): {
+  readonly observe: (event: Readonly<WireJsonObject>) => void;
+  readonly finish: () => void;
+} {
   let observation: UsageObservation = {};
+  let outcome: UsageUpdate["outcome"] = "success";
   return {
     observe(event) {
       const observed = responsesUsageObservation(event);
       observation = { ...observation, ...observed };
       const type = memberValue(event, "type");
       if (type === "response.completed" || type === "response.incomplete" || type === "response.failed" || type === "error") {
-        usage.finish(nativeOutcome(event), responsesUsageNumbers(observation));
+        outcome = nativeOutcome(event);
       }
+    },
+    finish() {
+      usage.finish(outcome, responsesUsageNumbers(observation));
     },
   };
 }

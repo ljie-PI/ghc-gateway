@@ -1,6 +1,7 @@
 import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences, ModelPreference } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
+import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
@@ -23,9 +24,9 @@ import { createRequestAttempt, type RequestAttempt } from "../../gateway/request
 import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
 import {
   boundedCleanup,
-  createExchangeCancellation,
-  createOwnedStreamCleanup,
+  createStreamExecutionResponse,
   withByteIdleDeadlines,
+  type StreamExecutionEmission,
 } from "../../gateway/stream_execution.js";
 import {
   duplicateMemberNames,
@@ -156,9 +157,6 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         }), "chat");
       }
 
-      const upstreamController = new AbortController();
-      const abortUpstream = (): void => upstreamController.abort();
-      scope.signal.addEventListener("abort", abortUpstream, { once: true });
       const upstream = await openChatStream(copilot, {
         model: prepared.resolvedModel,
         body: prepared.bytes,
@@ -167,54 +165,16 @@ export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies)
         nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
         connectTimeoutMs: scope.config.timeouts.connectMs,
         firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
-        signal: upstreamController.signal,
+        signal: scope.signal,
       });
       if (upstream.status < 200 || upstream.status >= 300) {
         await boundedCleanup(upstream.cancel());
       }
       assertUpstreamSuccess(upstream.status, upstream.headers);
 
-      const cancelExchange = createExchangeCancellation(upstream);
-      const frames = parseChatSse(withByteIdleDeadlines(
-        upstream.bytes,
-        scope.signal,
-        scope.config.timeouts.firstByteMs,
-        scope.config.timeouts.streamIdleMs,
-        cancelExchange,
-      ), scope.config.limits.sseEventBytes);
-      const cleanupUpstream = createOwnedStreamCleanup(upstream, frames, 1_000, cancelExchange);
-      let firstFrames: readonly ChatStreamFrame[];
-      try {
-        firstFrames = await readThroughFirstSemanticChatFrame(
-          frames,
-          scope.signal,
-          scope.config.timeouts.firstByteMs,
-        );
-      } catch (error: unknown) {
-        const failure = normalizeChatStreamFailure(error, scope.signal);
-        if (failure.failure.kind === "upstream_timeout") {
-          upstreamController.abort(failure);
-        }
-        upstreamController.abort();
-        await cleanupUpstream();
-        throw failure;
-      }
-      if (firstFrames.at(-1)?.kind === "error") {
-        upstreamController.abort();
-        await cleanupUpstream();
-        throw upstreamStreamEventFailure();
-      }
-
-      return withUpstreamProtocol(openAiChatStreamResponse({
-        status: upstream.status,
-        signal: scope.signal,
-        requestId: scope.requestId,
-        firstFrames,
-        frames,
-        cleanupUpstream,
+      return withUpstreamProtocol(await openAiChatStreamResponse({
+        upstream,
         scope,
-        abortUpstream,
-        releaseUpstreamAbort: () => scope.signal.removeEventListener("abort", abortUpstream),
         dependencies,
         usage,
       }), "chat");
@@ -557,96 +517,85 @@ function retryAfter(headers: Headers): string | undefined {
   return safeRetryAfter(headers.get("retry-after") ?? undefined);
 }
 
-async function nextFrame(frames: AsyncGenerator<ChatStreamFrame>, signal: AbortSignal): Promise<ChatStreamFrame> {
-  try {
-    const next = await frames.next();
-    if (next.done === true) {
-      throw new GatewayFailureError({
-        kind: "upstream_stream_truncated",
-        source: "parser",
-        phase: "stream",
-      });
-    }
-    return next.value;
-  } catch (error: unknown) {
-    throw normalizeChatStreamFailure(error, signal);
-  }
-}
-
-function openAiChatStreamResponse(input: {
-  readonly status: number;
-  readonly signal: AbortSignal;
-  readonly requestId: string;
-  readonly firstFrames: readonly ChatStreamFrame[];
-  readonly frames: AsyncGenerator<ChatStreamFrame>;
-  readonly cleanupUpstream: () => Promise<void>;
+async function openAiChatStreamResponse(input: {
+  readonly upstream: UpstreamByteStream;
   readonly scope: Readonly<RequestScope>;
-  readonly abortUpstream: () => void;
-  readonly releaseUpstreamAbort: () => void;
   readonly dependencies: OpenAiChatRouteDependencies;
   readonly usage: RequestAttempt;
-}): Response {
-  const pending = [...input.firstFrames];
-  let closed = false;
-  let usage: ChatUsageCounters = {};
-  const closeFrames = async (): Promise<void> => {
-    if (closed) {
-      await input.cleanupUpstream();
-      return;
-    }
-    closed = true;
-    input.releaseUpstreamAbort();
-    await input.cleanupUpstream();
-  };
-  const stream = new ReadableStream<Uint8Array>({
-    async pull(controller): Promise<void> {
-      if (input.signal.aborted) {
-        await closeFrames();
-        controller.close();
-        return;
-      }
-      try {
-        const frame = pending.shift() ?? await nextFrame(input.frames, input.signal);
-        if (frame.kind === "chunk") {
-          measure(input.dependencies.performanceObserver, "event", () => {
-            usage = mergeChatUsageCounters(usage, usageObservationFromPayload(frame.chunk.payload));
-            input.usage.observeUsage(usageNumbers(usage));
-            controller.enqueue(encodeOpenAiChatSseChunk(frame.chunk.payload));
-          });
-          return;
-        }
-        if (frame.kind === "done") {
-          measure(input.dependencies.performanceObserver, "event", () => controller.enqueue(encodeOpenAiChatDone()));
-          input.usage.success(usageNumbers(usage));
-          await closeFrames();
-          controller.close();
-          return;
-        }
-        input.usage.failure(upstreamStreamEventFailure());
-        await closeFrames();
-        controller.error(new Error("upstream stream error", { cause: upstreamStreamEventFailure() }));
-      } catch (error: unknown) {
-        input.usage.failure(normalizeChatStreamFailure(error, input.signal));
-        await closeFrames();
-        controller.error(new Error("upstream stream error", {
-          cause: normalizeChatStreamFailure(error, input.signal),
-        }));
-      }
-    },
-    async cancel(): Promise<void> {
-      await closeFrames();
-    },
-  });
-  input.signal.addEventListener("abort", () => {
-    void closeFrames();
-  }, { once: true });
-  return new Response(stream, {
-    status: input.status,
+}): Promise<Response> {
+  const frames = parseChatSse(withByteIdleDeadlines(
+    input.upstream.bytes,
+    input.scope.signal,
+    input.scope.config.timeouts.firstByteMs,
+    input.scope.config.timeouts.streamIdleMs,
+  ), input.scope.config.limits.sseEventBytes);
+  return await createStreamExecutionResponse({
+    upstream: input.upstream,
+    emissions: chatEmissions(frames, input),
+    signal: input.scope.signal,
+    deliverySignal: input.scope.deliverySignal,
+    status: input.upstream.status,
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
-      "x-request-id": input.requestId,
+      "x-request-id": input.scope.requestId,
     },
+    firstEmissionTimeoutMs: input.scope.config.timeouts.firstByteMs,
+    normalizeFailure: (error) => normalizeChatStreamFailure(error, input.scope.signal),
+    presentPostCommitFailure: (error) => new Error("upstream stream error", { cause: error }),
+    onTerminal: (result) => result.kind === "success"
+      ? input.usage.success(usageNumbers(result.value))
+      : input.usage.failure(result.error),
   });
+}
+
+async function* chatEmissions(
+  frames: AsyncGenerator<ChatStreamFrame>,
+  input: Parameters<typeof openAiChatStreamResponse>[0],
+): AsyncIterable<StreamExecutionEmission<ChatUsageCounters>> {
+  const firstFrames = await readThroughFirstSemanticChatFrame(
+    frames,
+    input.scope.signal,
+    input.scope.config.timeouts.firstByteMs,
+  );
+  if (firstFrames.at(-1)?.kind === "error") {
+    throw upstreamStreamEventFailure();
+  }
+  const pending = [...firstFrames];
+  let usage: ChatUsageCounters = {};
+  try {
+    for (;;) {
+      const next = pending.length === 0
+        ? await frames.next()
+        : { done: false as const, value: pending.shift() as ChatStreamFrame };
+      if (next.done === true) {
+        throw new GatewayFailureError({
+          kind: "upstream_stream_truncated",
+          source: "parser",
+          phase: "stream",
+        });
+      }
+      const frame = next.value;
+      if (frame.kind === "chunk") {
+        const bytes = measure(input.dependencies.performanceObserver, "event", () => {
+          usage = mergeChatUsageCounters(usage, usageObservationFromPayload(frame.chunk.payload));
+          input.usage.observeUsage(usageNumbers(usage));
+          return encodeOpenAiChatSseChunk(frame.chunk.payload);
+        });
+        yield { kind: "wire", bytes };
+      } else if (frame.kind === "done") {
+        yield {
+          kind: "wire",
+          bytes: measure(input.dependencies.performanceObserver, "event", encodeOpenAiChatDone),
+        };
+        yield { kind: "terminal", value: usage };
+        return;
+      } else {
+        throw upstreamStreamEventFailure();
+      }
+    }
+  } finally {
+    await frames.return(undefined);
+  }
 }
 
 function usageObservationFromPayload(value: WireJson): ChatUsageCounters {

@@ -1,11 +1,10 @@
 import type { UpstreamByteStream } from "../copilot/upstream_types.js";
 import type { RequestScope } from "./request_scope.js";
-import { createStreamResponseWriter } from "./stream_response.js";
 import {
-  createExchangeCancellation,
-  createOwnedStreamCleanup,
+  createStreamExecutionResponse,
   nextWithDeadline,
   withByteIdleDeadlines,
+  type StreamExecutionEmission,
 } from "./stream_execution.js";
 import { GatewayFailureError, failureFromSignal } from "./failures.js";
 import { normalizeChatStreamFailure } from "../copilot/failures.js";
@@ -33,17 +32,15 @@ export async function createConvertedStreamResponse(input: {
     | { readonly kind: "failure"; readonly error: unknown }
   >) => void;
 }): Promise<Response> {
-  const cancelExchange = createExchangeCancellation(input.upstream);
   const performanceObserver = input.performanceObserver;
   let eventElapsedMs = 0;
   const aggregateEventMeasurements = performanceObserver?.observe !== undefined;
-  const emissions = convertProtocolStream(
+  const converted = convertProtocolStream(
     withByteIdleDeadlines(
       input.upstream.bytes,
       input.scope.signal,
       input.scope.config.timeouts.firstByteMs,
       input.scope.config.timeouts.streamIdleMs,
-      cancelExchange,
     ),
     {
       source: input.plan.target,
@@ -76,8 +73,26 @@ export async function createConvertedStreamResponse(input: {
         },
     },
   );
-  const iterator = emissions[Symbol.asyncIterator]();
-  const cleanupUpstream = createOwnedStreamCleanup(input.upstream, iterator, 1_000, cancelExchange);
+
+  return await createStreamExecutionResponse({
+    upstream: input.upstream,
+    emissions: convertedEmissions(converted, input),
+    signal: input.scope.signal,
+    deliverySignal: input.scope.deliverySignal,
+    headers: input.headers,
+    firstEmissionTimeoutMs: input.scope.config.timeouts.firstByteMs,
+    normalizeFailure: (error) => normalizeStreamFailure(error, input),
+    onTerminal: (result) => result.kind === "success"
+      ? observeTerminal(input.onTerminal, { kind: "success", usage: result.value })
+      : observeTerminal(input.onTerminal, { kind: "failure", error: result.error }),
+  });
+}
+
+async function* convertedEmissions(
+  converted: AsyncIterable<ConvertedStreamEmission>,
+  input: Parameters<typeof createConvertedStreamResponse>[0],
+): AsyncIterable<StreamExecutionEmission<SemanticUsage>> {
+  const iterator = converted[Symbol.asyncIterator]();
   let observedUsage: SemanticUsage = {
     inputTokens: 0,
     outputTokens: 0,
@@ -85,22 +100,17 @@ export async function createConvertedStreamResponse(input: {
     cacheWriteTokens: 0,
     reasoningTokens: 0,
   };
-  const prefetched: Uint8Array[] = [];
-  const firstSemanticStartedAt = Date.now();
   let firstSemanticObserved = false;
+  const startedAt = Date.now();
   try {
     for (;;) {
       let next: IteratorResult<ConvertedStreamEmission>;
       if (firstSemanticObserved) {
         next = await iterator.next();
       } else {
-        const remaining = input.scope.config.timeouts.firstByteMs - (Date.now() - firstSemanticStartedAt);
+        const remaining = input.scope.config.timeouts.firstByteMs - (Date.now() - startedAt);
         if (remaining <= 0) {
-          throw new GatewayFailureError({
-            kind: "upstream_timeout",
-            source: "converter",
-            phase: "stream",
-          });
+          throw new GatewayFailureError({ kind: "upstream_timeout", source: "converter", phase: "stream" });
         }
         next = await nextWithDeadline(
           iterator,
@@ -120,81 +130,17 @@ export async function createConvertedStreamResponse(input: {
       } else if (emission.kind === "usage") {
         observedUsage = emission.usage;
       } else if (emission.kind === "wire") {
-        prefetched.push(emission.bytes);
-        break;
+        yield { kind: "wire", bytes: emission.bytes };
+      } else if (emission.kind === "terminal") {
+        yield { kind: "terminal", value: observedUsage };
+        return;
       }
     }
-  } catch (error: unknown) {
-    await cleanupUpstream();
-    throw normalizeStreamFailure(error, input);
+  } finally {
+    if (iterator.return !== undefined) {
+      await iterator.return();
+    }
   }
-
-  const writer = createStreamResponseWriter({
-    signal: input.scope.signal,
-    headers: input.headers,
-    onCancel: async () => await closeStream(),
-  });
-  let closed = false;
-  let cleanup: Promise<void> | undefined;
-  const closeStream = async (): Promise<void> => {
-    if (closed) {
-      await cleanup;
-      return;
-    }
-    closed = true;
-    input.scope.signal.removeEventListener("abort", onAbort);
-    cleanup = cleanupUpstream();
-    await cleanup;
-  };
-  const onAbort = (): void => {
-    observeTerminal(input.onTerminal, {
-      kind: "failure",
-      error: new GatewayFailureError(failureFromSignal(input.scope.signal, {
-        source: "converter",
-        phase: "stream",
-      })),
-    });
-    void closeStream();
-  };
-  void (async () => {
-    try {
-      for (const bytes of prefetched) {
-        if (!await writer.enqueue(bytes)) {
-          return;
-        }
-      }
-      for (;;) {
-        const next = await iterator.next();
-        if (next.done === true) {
-          throw truncated();
-        }
-        const emission = next.value;
-        if (emission.kind === "wire") {
-          if (!await writer.enqueue(emission.bytes)) {
-            return;
-          }
-        } else if (emission.kind === "checkpoint") {
-          await input.persistCheckpoint?.(emission.intent);
-        } else if (emission.kind === "usage") {
-          observedUsage = emission.usage;
-        } else if (emission.kind === "terminal") {
-          observeTerminal(input.onTerminal, { kind: "success", usage: observedUsage });
-          await closeStream();
-          writer.close();
-          return;
-        }
-      }
-    } catch (error: unknown) {
-      observeTerminal(input.onTerminal, { kind: "failure", error: normalizeStreamFailure(error, input) });
-      await closeStream();
-      writer.abort();
-    } finally {
-      await closeStream();
-    }
-
-  })();
-  input.scope.signal.addEventListener("abort", onAbort, { once: true });
-  return writer.response;
 }
 
 function normalizeStreamFailure(

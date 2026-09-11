@@ -1,11 +1,9 @@
-import { GatewayFailureError, failureFromSignal } from "../../gateway/failures.js";
+import { GatewayFailureError } from "../../gateway/failures.js";
 import type { RequestScope } from "../../gateway/request_scope.js";
-import { createStreamResponseWriter } from "../../gateway/stream_response.js";
 import {
-  createExchangeCancellation,
-  createOwnedStreamCleanup,
-  nextWithDeadline,
+  createStreamExecutionResponse,
   withByteIdleDeadlines,
+  type StreamExecutionEmission,
 } from "../../gateway/stream_execution.js";
 import {
   isWireJsonNumber,
@@ -98,131 +96,83 @@ export async function createNativeMessagesStreamResponse(input: {
     | { readonly kind: "failure"; readonly error: unknown }
   >) => void;
 }): Promise<Response> {
-  const cancelExchange = createExchangeCancellation(input.upstream);
   const timed = withByteIdleDeadlines(
     input.upstream.bytes,
     input.scope.signal,
     input.scope.config.timeouts.firstByteMs,
     input.scope.config.timeouts.streamIdleMs,
-    cancelExchange,
   );
-  const iterator = timed[Symbol.asyncIterator]();
-  const cleanupUpstream = createOwnedStreamCleanup(input.upstream, iterator, 1_000, cancelExchange);
-  const observer = new NativeMessagesObserver(input.scope.config.limits.sseEventBytes);
-  const prefetched: Uint8Array[] = [];
-  let prefetchedBytes = 0;
-  const startedAt = Date.now();
-  try {
-    while (!observer.hasSemantic) {
-      const elapsed = Date.now() - startedAt;
-      if (elapsed >= input.scope.config.timeouts.firstByteMs) {
-        throw new GatewayFailureError({
-          kind: "upstream_timeout",
-          source: "parser",
-          phase: "stream",
-        });
-      }
-      const remaining = input.scope.config.timeouts.firstByteMs - elapsed;
-      const next = await nextWithDeadline(
-        iterator,
-        remaining,
-        input.scope.signal,
-        { source: "parser", phase: "stream" },
-      );
-      if (next.done === true) {
-        throw truncated();
-      }
-      prefetchedBytes += next.value.byteLength;
-      if (prefetchedBytes > input.scope.config.limits.accumulatorBytes) {
-        invalid();
-      }
-      prefetched.push(...observer.consume(next.value));
-    }
-  } catch (error: unknown) {
-    await cleanupUpstream();
-    throw error;
-  }
-
-  const writer = createStreamResponseWriter({
+  return await createStreamExecutionResponse({
+    upstream: input.upstream,
+    emissions: nativeMessagesEmissions(
+      timed,
+      input.scope.config.limits.sseEventBytes,
+      input.scope.config.limits.accumulatorBytes,
+    ),
     signal: input.scope.signal,
+    deliverySignal: input.scope.deliverySignal,
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",
       "request-id": input.scope.requestId,
     },
-    onCancel: async () => await closeStream(),
+    firstEmissionTimeoutMs: input.scope.config.timeouts.firstByteMs,
+    normalizeFailure: (error) => error,
+    onTerminal: (result) => result.kind === "success"
+      ? observe(input.onTerminal, { kind: "success", usage: result.value })
+      : observe(input.onTerminal, { kind: "failure", error: result.error }),
   });
-  let closed = false;
-  let cleanup: Promise<void> | undefined;
-  const closeStream = async (): Promise<void> => {
-    if (closed) {
-      await cleanup;
+}
+
+async function* nativeMessagesEmissions(
+  bytes: AsyncIterable<Uint8Array>,
+  eventLimitBytes: number,
+  accumulatorBytes: number,
+): AsyncIterable<StreamExecutionEmission<SemanticUsage>> {
+  const iterator = bytes[Symbol.asyncIterator]();
+  const observer = new NativeMessagesObserver(eventLimitBytes);
+  let prefetchedBytes = 0;
+  try {
+    while (!observer.hasSemantic) {
+      const next = await iterator.next();
+      if (next.done === true) {
+        throw truncated();
+      }
+      prefetchedBytes += next.value.byteLength;
+      if (prefetchedBytes > accumulatorBytes) {
+        invalid();
+      }
+      for (const record of observer.consume(next.value)) {
+        yield { kind: "wire", bytes: record };
+      }
+    }
+    if (observer.isTerminal) {
+      yield { kind: "terminal", value: observer.observedUsage };
       return;
     }
-    closed = true;
-    input.scope.signal.removeEventListener("abort", onAbort);
-    cleanup = cleanupUpstream();
-    await cleanup;
-  };
-  const onAbort = (): void => {
-    observe(input.onTerminal, {
-      kind: "failure",
-      error: new GatewayFailureError(failureFromSignal(input.scope.signal, {
-        source: "parser",
-        phase: "stream",
-      })),
-    });
-    void closeStream();
-  };
-  void (async () => {
-    try {
-      for (const value of prefetched) {
-        if (!await writer.enqueue(value)) {
-          return;
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done === true) {
+        const finished = observer.finish();
+        for (const record of finished.records) {
+          yield { kind: "wire", bytes: record };
         }
-      }
-      if (observer.isTerminal) {
-        observe(input.onTerminal, { kind: "success", usage: observer.observedUsage });
-        await closeStream();
-        writer.close();
+        yield { kind: "terminal", value: finished.usage };
         return;
       }
-      for (;;) {
-        const next = await iterator.next();
-        if (next.done === true) {
-          const finished = observer.finish();
-          for (const value of finished.records) {
-            if (!await writer.enqueue(value)) {
-              return;
-            }
-          }
-          observe(input.onTerminal, { kind: "success", usage: finished.usage });
-          await closeStream();
-          writer.close();
-          return;
-        }
-        for (const value of observer.consume(next.value)) {
-          if (!await writer.enqueue(value)) {
-            return;
-          }
-        }
-        if (observer.isTerminal) {
-          observe(input.onTerminal, { kind: "success", usage: observer.observedUsage });
-          await closeStream();
-          writer.close();
-          return;
-        }
+      for (const record of observer.consume(next.value)) {
+        yield { kind: "wire", bytes: record };
       }
-    } catch (error: unknown) {
-      observe(input.onTerminal, { kind: "failure", error });
-      await closeStream();
-      writer.abort();
-    } finally {
-      await closeStream();
+      if (observer.isTerminal) {
+        yield { kind: "terminal", value: observer.observedUsage };
+        return;
+      }
     }
-  })();
-  input.scope.signal.addEventListener("abort", onAbort, { once: true });
-  return writer.response;
+  } finally {
+    if (iterator.return !== undefined) {
+      await iterator.return();
+    }
+  }
 }
 
 class NativeRecordAccumulator {
