@@ -417,7 +417,7 @@ function attachLifecycle(
       await cancelBody();
       await awaitOwner();
     },
-  }, { highWaterMark: 0 });
+  }, streamExecution === undefined ? undefined : { highWaterMark: 0 });
 
   onDeliveryAbort = () => {
     settleDelivery();
