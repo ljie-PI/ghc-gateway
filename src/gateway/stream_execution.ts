@@ -32,7 +32,7 @@ export interface StreamExecutionHandle {
   readonly state: StreamExecutionState;
   readonly cause: StreamExecutionTerminalCause | undefined;
   readonly completion: Promise<void>;
-  claimDeliveryAdapter(finalize: () => Promise<void> | void): StreamExecutionDelivery;
+  claimDeliveryAdapter(finalize: () => void): StreamExecutionDelivery;
   abort(cause: "shutdown" | "request_abort" | "total_timeout"): Promise<void>;
 }
 
@@ -71,7 +71,8 @@ export async function createStreamExecutionResponse<T>(input: {
   });
   let barrier: Promise<void> | undefined;
   let deliveryAdapterClaimed = false;
-  let deliveryFinalizer: (() => Promise<void> | void) | undefined;
+  let deliveryFinalizer: (() => void) | undefined;
+  let deliveryFinalized = false;
   let deliverySettled = false;
   let resolveDelivery: () => void = () => undefined;
   const deliverySettlement = new Promise<void>((resolve) => {
@@ -95,6 +96,17 @@ export async function createStreamExecutionResponse<T>(input: {
         state = "committed";
       }
       resolveFirstDelivery();
+    }
+  };
+  const finalizeDelivery = (): void => {
+    if (deliveryFinalized || deliveryFinalizer === undefined) {
+      return;
+    }
+    deliveryFinalized = true;
+    try {
+      deliveryFinalizer();
+    } catch {
+      // Host finalization cannot prevent completion or listener cleanup.
     }
   };
 
@@ -149,11 +161,7 @@ export async function createStreamExecutionResponse<T>(input: {
           settleDelivery();
         }
         await deliverySettlement;
-        try {
-          await deliveryFinalizer?.();
-        } catch {
-          // Host finalization cannot prevent completion or listener cleanup.
-        }
+        finalizeDelivery();
       } finally {
         input.signal.removeEventListener("abort", onRequestAbort);
         input.deliverySignal.removeEventListener("abort", onDeliveryAbort);
@@ -260,6 +268,9 @@ export async function createStreamExecutionResponse<T>(input: {
       }
       deliveryAdapterClaimed = true;
       deliveryFinalizer = finalize;
+      if (state === "completed") {
+        finalizeDelivery();
+      }
       return {
         markDelivered,
         settle: settleDelivery,

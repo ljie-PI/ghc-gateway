@@ -367,10 +367,6 @@ function attachLifecycle(
   };
 
   let delivery: StreamExecutionDelivery | undefined;
-  if (streamExecution !== undefined) {
-    delivery = streamExecution.claimDeliveryAdapter(once);
-  }
-
   const reader = body.getReader();
   let cancellation: Promise<void> | undefined;
   const cancelBody = async (): Promise<void> => {
@@ -421,7 +417,7 @@ function attachLifecycle(
       await cancelBody();
       await awaitOwner();
     },
-  });
+  }, { highWaterMark: 0 });
 
   onDeliveryAbort = () => {
     settleDelivery();
@@ -429,6 +425,9 @@ function attachLifecycle(
   };
   const alreadyAborted = deliverySignal.aborted;
   deliverySignal.addEventListener("abort", onDeliveryAbort, { once: true });
+  if (streamExecution !== undefined) {
+    delivery = streamExecution.claimDeliveryAdapter(once);
+  }
   if (alreadyAborted || deliverySignal.aborted) {
     onDeliveryAbort();
   }

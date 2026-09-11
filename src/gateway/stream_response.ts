@@ -65,7 +65,7 @@ export function createStreamResponseWriter(init: {
       wakeProducer();
       await cancelProducer();
     },
-  });
+  }, { highWaterMark: 0 });
 
   const writer: StreamResponseWriter = {
     get committed(): boolean {

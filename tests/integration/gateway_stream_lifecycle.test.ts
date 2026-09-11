@@ -43,6 +43,76 @@ describe("stream writer", () => {
 });
 
 describe("Stream Execution owner", () => {
+  it("does not produce past the host claim window without real body demand", async () => {
+    let nextCalls = 0;
+    let terminalCalls = 0;
+    const response = await createStreamExecutionResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers(),
+        bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+        cancel: async () => undefined,
+      },
+      emissions: {
+        [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
+          return {
+            next: async () => {
+              nextCalls += 1;
+              return nextCalls === 1
+                ? { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("ok") } }
+                : { done: false, value: { kind: "terminal", value: "success" } };
+            },
+          };
+        },
+      },
+      signal: new AbortController().signal,
+      deliverySignal: new AbortController().signal,
+      onTerminal: () => { terminalCalls += 1; },
+      normalizeFailure: (error) => error,
+    });
+    const handle = getStreamExecutionHandle(response);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(nextCalls).toBe(1);
+    expect(terminalCalls).toBe(0);
+    expect(handle?.state).toBe("precommit");
+
+    await handle?.abort("shutdown");
+  });
+
+  it("runs a host finalizer exactly once when direct delivery completes before a late claim", async () => {
+    let finalized = 0;
+    const response = await createStreamExecutionResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers(),
+        bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+        cancel: async () => undefined,
+      },
+      emissions: {
+        async *[Symbol.asyncIterator]() {
+          yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
+          yield { kind: "terminal", value: "success" } as const;
+        },
+      },
+      signal: new AbortController().signal,
+      deliverySignal: new AbortController().signal,
+      onTerminal: () => undefined,
+      normalizeFailure: (error) => error,
+    });
+    const handle = getStreamExecutionHandle(response);
+
+    expect(await response.text()).toBe("ok");
+    await handle?.completion;
+    expect(handle?.state).toBe("completed");
+
+    const delivery = handle?.claimDeliveryAdapter(() => { finalized += 1; });
+    expect(finalized).toBe(1);
+    delivery?.settle();
+    expect(finalized).toBe(1);
+  });
+
   it("keeps completion pending until claimed delivery settles and then runs its finalizer", async () => {
     const order: string[] = [];
     const upstream: UpstreamByteStream = {
@@ -557,6 +627,87 @@ describe("stream route lifecycle", () => {
     expect(response.body).not.toBeNull();
     await gw.close();
     expect(closeSawCleanup).toBe(true);
+  });
+
+  it("releases admission and listeners when direct delivery completes before the public route claims ownership", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    const activeDeliveryListeners: Array<Set<EventListenerOrEventListenerObject>> = [];
+    let requestCount = 0;
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/late-completion",
+      admission: "inference",
+      body: "none",
+      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
+        status: failure.kind === "queue_full" ? 503 : 400,
+      }),
+      endpoint: async (_request, scope) => {
+        const index = requestCount++;
+        const listeners = new Set<EventListenerOrEventListenerObject>();
+        activeDeliveryListeners[index] = listeners;
+        const addDeliveryListener = scope.deliverySignal.addEventListener.bind(scope.deliverySignal);
+        vi.spyOn(scope.deliverySignal, "addEventListener").mockImplementation((type, listener, options) => {
+          if (type === "abort") {
+            listeners.add(listener);
+          }
+          addDeliveryListener(type, listener, options);
+        });
+        const removeDeliveryListener = scope.deliverySignal.removeEventListener.bind(scope.deliverySignal);
+        vi.spyOn(scope.deliverySignal, "removeEventListener").mockImplementation((type, listener, options) => {
+          if (type === "abort") {
+            listeners.delete(listener);
+          }
+          removeDeliveryListener(type, listener, options);
+        });
+        const response = await createStreamExecutionResponse({
+          upstream: {
+            status: 200,
+            headers: new Headers(),
+            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+            cancel: async () => undefined,
+          },
+          emissions: {
+            async *[Symbol.asyncIterator]() {
+              yield { kind: "wire", bytes: new TextEncoder().encode("delivered-directly") } as const;
+              yield { kind: "terminal", value: "done" } as const;
+            },
+          },
+          signal: scope.signal,
+          deliverySignal: scope.deliverySignal,
+          headers: { "Content-Type": "text/event-stream" },
+          onTerminal: () => undefined,
+          normalizeFailure: (error) => error,
+        });
+        const reader = response.body!.getReader();
+        const first = await reader.read();
+        expect(new TextDecoder().decode(first.value)).toBe("delivered-directly");
+        expect((await reader.read()).done).toBe(true);
+        reader.releaseLock();
+        await getStreamExecutionHandle(response)?.completion;
+        return response;
+      },
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime,
+    }, [route]);
+    try {
+      const first = await gw.fetch(new Request("http://127.0.0.1:31400/v1/late-completion", { method: "POST" }));
+      expect(first.status).toBe(200);
+      expect(await first.text()).toBe("");
+
+      const second = await gw.fetch(new Request("http://127.0.0.1:31400/v1/late-completion", { method: "POST" }));
+      expect(second.status).toBe(200);
+      expect(await second.text()).toBe("");
+      expect(activeDeliveryListeners).toHaveLength(2);
+      for (const listeners of activeDeliveryListeners) {
+        expect(listeners.size).toBe(0);
+      }
+    } finally {
+      await gw.close();
+    }
   });
 
   it("settles response cancellation through the owner before releasing admission", async () => {
