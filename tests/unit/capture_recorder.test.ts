@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
+import { EndpointDiscovery } from "../../src/copilot/endpoint_discovery.js";
 import { HttpCopilotBackend } from "../../src/copilot/transport.js";
-import { invalidateEndpoint } from "../../src/copilot/endpoint_discovery.js";
 import { recordCapture, type CaptureOptions } from "../../scripts/tooling/capture_recorder.js";
 import { expectedForecastArguments } from "../../scripts/tooling/capture_scenarios.js";
 
@@ -46,12 +46,16 @@ async function remote(protocol: Protocol, respond?: (response: ServerResponse, b
   await credentials.putGeneration(accountId, 1, {
     generation: 1, githubToken: "synthetic-github", copilotToken: "synthetic-copilot", copilotExpiresAtMs: Date.now() + 3_600_000,
   });
+  const endpointDiscovery = new EndpointDiscovery(async () => `http://127.0.0.1:${address.port}`);
   const backend = new HttpCopilotBackend({
     credentials,
     refreshCopilotToken: async () => { throw new Error("unexpected token refresh"); },
-    fetchDiscovery: async () => `http://127.0.0.1:${address.port}`,
+    endpointDiscovery,
   });
-  cleanup.push(async () => { await backend.close(); invalidateEndpoint(accountId); });
+  cleanup.push(async () => {
+    await backend.close();
+    await endpointDiscovery.close();
+  });
   let binds = 0;
   return {
     seen, backend,

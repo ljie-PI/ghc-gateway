@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
+import { EndpointDiscovery } from "../../src/copilot/endpoint_discovery.js";
 import { HttpCopilotBackend } from "../../src/copilot/transport.js";
 import { HttpCopilotModelsSource } from "../../src/copilot/models_source.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
@@ -94,10 +95,11 @@ export async function startReplaySdkHarness(options: {
   const history = new SqliteResponsesHistory(database, { nowMs });
   const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
 
+  const endpointDiscovery = new EndpointDiscovery(async () => replayEndpoint);
   const copilot = new HttpCopilotBackend({
     credentials,
     refreshCopilotToken: async () => ({ token: "dummy-token", expiresAtMs: nowMs() + 3_600_000 }),
-    fetchDiscovery: async () => replayEndpoint,
+    endpointDiscovery,
     fetchImpl: fetch,
   });
 
@@ -124,11 +126,13 @@ export async function startReplaySdkHarness(options: {
         await catalog.close();
         await copilot.close();
         await modelsSource.close();
+        await endpointDiscovery.close();
         closeState();
       },
       forceClose: () => {
         copilot.forceClose();
         modelsSource.forceClose();
+        endpointDiscovery.forceClose();
         closeState();
       },
     },

@@ -1,5 +1,6 @@
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { CredentialStore } from "../accounts/credential_store.js";
+import type { EndpointDiscoveryFetch } from "./endpoint_discovery.js";
 import { copilotHeaders } from "./identity.js";
 import { TokenRefreshError } from "./token_refresh.js";
 
@@ -62,7 +63,7 @@ export async function refreshCopilotToken(
 
 export function createCopilotEndpointDiscovery(
   credentials: CredentialStore,
-): (account: Readonly<BoundAccount>, signal?: AbortSignal) => Promise<string | null> {
+): EndpointDiscoveryFetch {
   return async (account, signal) => await fetchCopilotDiscovery(credentials, account, signal);
 }
 

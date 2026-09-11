@@ -4,17 +4,23 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import type { BoundAccount } from "../../src/accounts/account_directory.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
 import { outboundHeaders, ScriptedCopilotBackend } from "../../src/copilot/backend.js";
-import { discoverEndpoint, fallbackEndpoint, stripSecretsOnRedirect } from "../../src/copilot/endpoint_discovery.js";
+import { EndpointDiscovery, fallbackEndpoint, stripSecretsOnRedirect } from "../../src/copilot/endpoint_discovery.js";
 import { copilotHeaders } from "../../src/copilot/identity.js";
 import { HttpCopilotBackend } from "../../src/copilot/transport.js";
 import { getValidToken, needsRefresh } from "../../src/copilot/token_refresh.js";
 
 const execFileAsync = promisify(execFile);
+const testEndpointDiscoveries = new Set<EndpointDiscovery>();
+
+afterEach(async () => {
+  await Promise.all([...testEndpointDiscoveries].map(async (discovery) => await discovery.close()));
+  testEndpointDiscoveries.clear();
+});
 
 function account(kind: "github.com" | "ghes" = "github.com"): BoundAccount {
   const host = kind === "github.com" ? "github.com" : "ghe.example.com";
@@ -111,18 +117,184 @@ describe("Copilot transport", () => {
   it("discovers once per account with fallback", async () => {
     const bound = account();
     let calls = 0;
-    const first = await discoverEndpoint(bound, async () => {
+    const discovery = new EndpointDiscovery(async () => {
       calls += 1;
       return null;
     });
-    const second = await discoverEndpoint(bound, async () => {
-      calls += 1;
-      return "https://should-not-run";
-    });
+    const first = await discovery.discover(bound);
+    const second = await discovery.discover(bound);
     expect(first.endpoint).toBe("https://api.githubcopilot.com");
     expect(fallbackEndpoint(account("ghes"))).toBe("https://copilot-api.ghe.example.com");
     expect(second.cached).toBe(true);
     expect(calls).toBe(1);
+    await discovery.close();
+  });
+
+  it("isolates endpoint cache hits by Bound Account credential generation", async () => {
+    const generationOne = account();
+    const generationTwo = { ...generationOne, credentialGeneration: 2 };
+    let calls = 0;
+    const discovery = new EndpointDiscovery(async (current) => {
+      calls += 1;
+      return `https://generation-${current.credentialGeneration}.test.invalid`;
+    });
+    try {
+      await expect(discovery.discover(generationOne)).resolves.toEqual({
+        endpoint: "https://generation-1.test.invalid",
+        cached: false,
+      });
+      await expect(discovery.discover(generationOne)).resolves.toEqual({
+        endpoint: "https://generation-1.test.invalid",
+        cached: true,
+      });
+      await expect(discovery.discover(generationTwo)).resolves.toEqual({
+        endpoint: "https://generation-2.test.invalid",
+        cached: false,
+      });
+      await expect(discovery.discover(generationTwo)).resolves.toEqual({
+        endpoint: "https://generation-2.test.invalid",
+        cached: true,
+      });
+      expect(calls).toBe(2);
+    } finally {
+      await discovery.close();
+    }
+  });
+
+  it("keeps an invalidated stale completion out of the newer generation cache", async () => {
+    const generationOne = account();
+    const generationTwo = { ...generationOne, credentialGeneration: 2 };
+    const first = deferred<string | null>();
+    const second = deferred<string | null>();
+    let calls = 0;
+    const discovery = new EndpointDiscovery(async () => {
+      calls += 1;
+      return await (calls === 1 ? first.promise : second.promise);
+    });
+    try {
+      const stale = discovery.discover(generationOne);
+      discovery.invalidate(generationOne.accountId);
+      const current = discovery.discover(generationTwo);
+      second.resolve("https://generation-2.test.invalid");
+      await expect(current).resolves.toEqual({
+        endpoint: "https://generation-2.test.invalid",
+        cached: false,
+      });
+      first.resolve("https://generation-1.test.invalid");
+      await expect(stale).resolves.toEqual({
+        endpoint: "https://generation-1.test.invalid",
+        cached: false,
+      });
+      await expect(discovery.discover(generationTwo)).resolves.toEqual({
+        endpoint: "https://generation-2.test.invalid",
+        cached: true,
+      });
+      expect(calls).toBe(2);
+    } finally {
+      discovery.forceClose();
+    }
+  });
+
+  it("deduplicates same-generation discovery while canceling one waiter independently", async () => {
+    const source = deferred<string | null>();
+    let calls = 0;
+    const discovery = new EndpointDiscovery(async () => {
+      calls += 1;
+      return await source.promise;
+    });
+    const firstController = new AbortController();
+    try {
+      const first = discovery.discover(account(), firstController.signal);
+      const second = discovery.discover(account());
+      expect(calls).toBe(1);
+      firstController.abort();
+      await expect(first).rejects.toMatchObject({ name: "AbortError" });
+      source.resolve("https://shared.test.invalid");
+      await expect(second).resolves.toEqual({
+        endpoint: "https://shared.test.invalid",
+        cached: false,
+      });
+      await expect(discovery.discover(account())).resolves.toEqual({
+        endpoint: "https://shared.test.invalid",
+        cached: true,
+      });
+      expect(calls).toBe(1);
+    } finally {
+      discovery.forceClose();
+    }
+  });
+
+  it("drops an orphaned discovery before the next request", async () => {
+    const sources = [deferred<string | null>(), deferred<string | null>()];
+    const sourceSignals: AbortSignal[] = [];
+    let calls = 0;
+    const discovery = new EndpointDiscovery(async (_current, sourceSignal) => {
+      sourceSignals.push(sourceSignal!);
+      return await sources[calls++]!.promise;
+    });
+    const waiterController = new AbortController();
+    try {
+      const orphan = discovery.discover(account(), waiterController.signal);
+      waiterController.abort();
+      await expect(orphan).rejects.toMatchObject({ name: "AbortError" });
+      expect(sourceSignals[0]?.aborted).toBe(true);
+      sources[0]!.resolve("https://orphan.test.invalid");
+      await Promise.resolve();
+      const retry = discovery.discover(account());
+      expect(calls).toBe(2);
+      sources[1]!.resolve("https://retry.test.invalid");
+      await expect(retry).resolves.toEqual({
+        endpoint: "https://retry.test.invalid",
+        cached: false,
+      });
+    } finally {
+      discovery.forceClose();
+    }
+  });
+
+  it("does not retain a rejected discovery coordinator", async () => {
+    let calls = 0;
+    const discovery = new EndpointDiscovery(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("synthetic discovery failure");
+      }
+      return "https://retry.test.invalid";
+    });
+    try {
+      await expect(discovery.discover(account())).rejects.toThrow("synthetic discovery failure");
+      await expect(discovery.discover(account())).resolves.toEqual({
+        endpoint: "https://retry.test.invalid",
+        cached: false,
+      });
+      expect(calls).toBe(2);
+    } finally {
+      discovery.forceClose();
+    }
+  });
+
+  it("closes endpoint discovery without retaining in-flight work", async () => {
+    const source = deferred<string | null>();
+    let sourceSignal: AbortSignal | undefined;
+    const discovery = new EndpointDiscovery(async (_current, signal) => {
+      sourceSignal = signal;
+      return await source.promise;
+    });
+    const pending = discovery.discover(account());
+    const pendingResult = pending.catch((error: unknown) => error);
+    try {
+      const closing = discovery.close();
+      expect(sourceSignal?.aborted).toBe(true);
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      await closing;
+      await expect(discovery.discover(account())).rejects.toMatchObject({ name: "AbortError" });
+      discovery.forceClose();
+      discovery.forceClose();
+    } finally {
+      source.resolve("https://late.test.invalid");
+      await pendingResult;
+      discovery.forceClose();
+    }
   });
 
   it("binds a scripted backend to the provided account only", async () => {
@@ -161,7 +333,7 @@ describe("Copilot transport", () => {
     const backend = new HttpCopilotBackend({
       credentials: store,
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
-      fetchDiscovery: async () => null,
+      endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async (input, init) => {
         captured = { input, init };
         return new Response("{}", { status: 200 });
@@ -207,7 +379,7 @@ describe("Copilot transport", () => {
     const backend = new HttpCopilotBackend({
       credentials: store,
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
-      fetchDiscovery: async () => `http://127.0.0.1:${address.port}`,
+      endpointDiscovery: testEndpointDiscovery(async () => `http://127.0.0.1:${address.port}`),
     });
     try {
       const copilot = await backend.bind(bound, new AbortController().signal);
@@ -240,7 +412,7 @@ describe("Copilot transport", () => {
     const backend = new HttpCopilotBackend({
       credentials: store,
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
-      fetchDiscovery: async () => null,
+      endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
         return new Response("{}", { status: 200 });
@@ -272,7 +444,7 @@ describe("Copilot transport", () => {
     const backend = new HttpCopilotBackend({
       credentials: store,
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
-      fetchDiscovery: async () => null,
+      endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
         cancel(): void {
           canceled = true;
@@ -306,7 +478,7 @@ describe("Copilot transport", () => {
     const backend = new HttpCopilotBackend({
       credentials: store,
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
-      fetchDiscovery: async () => null,
+      endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
         pull(): void {
           // keep headers open without body bytes
@@ -326,3 +498,25 @@ describe("Copilot transport", () => {
     })).rejects.toThrow(/upstream timeout/u);
   });
 });
+
+function testEndpointDiscovery(
+  source: ConstructorParameters<typeof EndpointDiscovery>[0],
+): EndpointDiscovery {
+  const discovery = new EndpointDiscovery(source);
+  testEndpointDiscoveries.add(discovery);
+  return discovery;
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (error: unknown) => void;
+  } {
+  let resolve: (value: T) => void = () => undefined;
+  let reject: (error: unknown) => void = () => undefined;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
