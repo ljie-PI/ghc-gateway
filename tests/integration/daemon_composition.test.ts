@@ -1,11 +1,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory, type AccountDirectoryError } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
-import { discoverEndpoint, invalidateEndpoint } from "../../src/copilot/endpoint_discovery.js";
+import { EndpointDiscovery } from "../../src/copilot/endpoint_discovery.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { RuntimeConfigStore } from "../../src/config/runtime_config.js";
@@ -51,10 +52,12 @@ describe("production composition", () => {
     const closeCopilot = application.copilot.close.bind(application.copilot);
     const closeCatalog = application.catalog.close.bind(application.catalog);
     const telemetryRuntime = application.telemetryRuntime;
+    const endpointDiscovery = application.endpointDiscovery;
     const database = application.database;
-    if (telemetryRuntime === undefined || database === undefined) {
+    if (telemetryRuntime === undefined || endpointDiscovery === undefined || database === undefined) {
       throw new Error("expected production close owners");
     }
+    const closeEndpointDiscovery = endpointDiscovery.close.bind(endpointDiscovery);
     const closeTelemetry = telemetryRuntime.close.bind(telemetryRuntime);
     const closeSqlite = database.close.bind(database);
     application.copilot.close = async () => {
@@ -64,6 +67,10 @@ describe("production composition", () => {
     application.catalog.close = async () => {
       order.push("catalog");
       await closeCatalog();
+    };
+    endpointDiscovery.close = async () => {
+      order.push("endpoint-discovery");
+      await closeEndpointDiscovery();
     };
     telemetryRuntime.close = async () => {
       order.push("telemetry");
@@ -75,7 +82,7 @@ describe("production composition", () => {
     };
     try {
       await application.close?.();
-      expect(order).toEqual(["copilot", "catalog", "telemetry", "sqlite"]);
+      expect(order).toEqual(["copilot", "catalog", "endpoint-discovery", "telemetry", "sqlite"]);
     } finally {
       application.forceClose?.();
       await rm(dataDir, { recursive: true, force: true });
@@ -98,9 +105,14 @@ describe("production composition", () => {
       throw new Error("catalog close failed");
     };
     const telemetryRuntime = application.telemetryRuntime;
-    if (telemetryRuntime === undefined || application.database === undefined) {
+    const endpointDiscovery = application.endpointDiscovery;
+    if (telemetryRuntime === undefined || endpointDiscovery === undefined || application.database === undefined) {
       throw new Error("expected production close owners");
     }
+    endpointDiscovery.close = async () => {
+      order.push("endpoint-discovery");
+      throw new Error("endpoint discovery close failed");
+    };
     const closeSqlite = application.database.close.bind(application.database);
     telemetryRuntime.close = async () => {
       order.push("telemetry");
@@ -116,17 +128,98 @@ describe("production composition", () => {
         errors: [
           expect.objectContaining({ message: "copilot close failed" }),
           expect.objectContaining({ message: "catalog close failed" }),
+          expect.objectContaining({ message: "endpoint discovery close failed" }),
           expect.objectContaining({ message: "telemetry close failed" }),
           expect.objectContaining({ message: "sqlite close failed" }),
         ],
       });
-      expect(order).toEqual(["copilot", "catalog", "telemetry", "sqlite"]);
+      expect(order).toEqual(["copilot", "catalog", "endpoint-discovery", "telemetry", "sqlite"]);
       expect(application.database.prepare("SELECT 1").get()).toEqual({ "1": 1 });
     } finally {
       application.database.close = closeSqlite;
       application.forceClose?.();
       expect(() => application.database?.prepare("SELECT 1").get()).toThrow();
       await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("owns endpoint discovery per application and shares it across catalog and backend", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-discovery-owners-"));
+    const server = createServer((request, response) => {
+      modelRequests.push(request.url ?? "");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{
+        id: "gpt-test",
+        name: "GPT Test",
+        vendor: "openai",
+        model_picker_enabled: true,
+        model_info: { supported_endpoints: ["/chat/completions"] },
+      }] }));
+    });
+    const modelRequests: string[] = [];
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("expected model source listener");
+    }
+    const nativeFetch = globalThis.fetch;
+    const discoveryRequests: string[] = [];
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      const authorization = new Headers(init?.headers).get("authorization") ?? "";
+      const suffix = authorization.includes("context-a") ? "a" : "b";
+      if (url.endsWith("/copilot_internal/v2/token")) {
+        return new Response(JSON.stringify({ token: `copilot-${suffix}`, expires_at: 2_000_000_000 }), { status: 200 });
+      }
+      if (url.endsWith("/copilot_internal/user")) {
+        discoveryRequests.push(suffix);
+        return new Response(JSON.stringify({
+          copilot_plan: "individual",
+          quota_reset_date: "2026-10-01",
+          quota_snapshots: {
+            chat: quotaDetail(),
+            completions: quotaDetail(),
+            premium_interactions: quotaDetail(),
+          },
+          endpoints: { api: `http://127.0.0.1:${address.port}/${suffix}` },
+        }), { status: 200 });
+      }
+      throw new Error("unexpected scripted fetch");
+    }) as typeof fetch;
+    let contextA: ApplicationContext | undefined;
+    let contextB: ApplicationContext | undefined;
+    try {
+      contextA = await createProductionApplicationContext(
+        parseStartupConfig(["--data-dir", path.join(root, "a"), "--port", String(PORT)], {}),
+        {},
+      );
+      contextB = await createProductionApplicationContext(
+        parseStartupConfig(["--data-dir", path.join(root, "b"), "--port", String(PORT + 1)], {}),
+        {},
+      );
+      const accountA = await contextA.directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "177",
+        secret: { generation: 0, githubToken: "context-a" },
+      });
+      const accountB = await contextB.directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "177",
+        secret: { generation: 0, githubToken: "context-b" },
+      });
+      await contextA.registry!.get(accountA, signal());
+      await contextA.copilot.bind(accountA, signal());
+      expect(discoveryRequests).toEqual(["a"]);
+      await contextB.copilot.bind(accountB, signal());
+      expect(discoveryRequests).toEqual(["a", "b"]);
+      expect(modelRequests).toEqual(["/a/models"]);
+    } finally {
+      globalThis.fetch = nativeFetch;
+      await contextA?.close?.();
+      await contextB?.close?.();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -148,13 +241,8 @@ describe("production composition", () => {
       });
       await harness.catalog.get(account.accountId, signal());
       expect(harness.catalogFetchCount()).toBe(1);
-      let endpointFetches = 0;
-      const endpointSource = async () => {
-        endpointFetches += 1;
-        return "https://copilot.test.invalid";
-      };
-      await discoverEndpoint(account, endpointSource);
-      expect(endpointFetches).toBe(1);
+      await harness.endpointDiscovery.discover(account);
+      expect(harness.endpointFetchCount()).toBe(1);
 
       const bootstrap = await control(gateway, "POST", "/admin-bootstrap");
       expect(bootstrap.status).toBe(200);
@@ -264,11 +352,57 @@ describe("production composition", () => {
       expect(removed.status).toBe(200);
       await harness.catalog.get(account.accountId, signal());
       expect(harness.catalogFetchCount()).toBe(3);
-      await discoverEndpoint(account, endpointSource);
-      expect(endpointFetches).toBe(2);
-      invalidateEndpoint(account.accountId);
+      await harness.endpointDiscovery.discover(account);
+      expect(harness.endpointFetchCount()).toBe(2);
     } finally {
-      invalidateEndpoint("github.com/91919");
+      await gateway.close();
+    }
+  });
+
+  it("fences in-flight discovery across account logout and relogin", async () => {
+    const first = deferred<string | null>();
+    const second = deferred<string | null>();
+    let fetches = 0;
+    const harness = compositionHarness(async () => {
+      fetches += 1;
+      return await (fetches === 1 ? first.promise : second.promise);
+    });
+    const gateway = await composeProductionDaemonGateway({
+      startup: harness.startup,
+      env: {},
+      identity: IDENTITY,
+      logger: { write() {} },
+      requestStop() {},
+    }, { application: harness.application });
+    try {
+      const generationOne = await harness.directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "177",
+        secret: { generation: 0, githubToken: "generation-one" },
+      });
+      const stale = harness.endpointDiscovery.discover(generationOne);
+      const logout = await control(gateway, "POST", "/command", {
+        operation: "auth.logout",
+        arguments: { accountId: generationOne.accountId },
+      });
+      expect(logout.status).toBe(200);
+      const generationTwo = await harness.directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "177",
+        secret: { generation: 0, githubToken: "generation-two" },
+      });
+      expect(generationTwo.credentialGeneration).toBeGreaterThan(generationOne.credentialGeneration);
+      const current = harness.endpointDiscovery.discover(generationTwo);
+      second.resolve("https://generation-two.test.invalid");
+      await expect(current).resolves.toMatchObject({ endpoint: "https://generation-two.test.invalid" });
+      first.resolve("https://generation-one.test.invalid");
+      await expect(stale).resolves.toMatchObject({ endpoint: "https://generation-one.test.invalid" });
+      await expect(harness.endpointDiscovery.discover(generationTwo)).resolves.toEqual({
+        endpoint: "https://generation-two.test.invalid",
+        cached: true,
+      });
+      expect(fetches).toBe(2);
+    } finally {
       await gateway.close();
     }
   });
@@ -283,10 +417,14 @@ interface CompositionHarness {
   readonly history: SqliteResponsesHistory;
   readonly telemetry: TelemetryRecorder;
   readonly runtime: RuntimeConfigStore;
+  readonly endpointDiscovery: EndpointDiscovery;
   readonly catalogFetchCount: () => number;
+  readonly endpointFetchCount: () => number;
 }
 
-function compositionHarness(): CompositionHarness {
+function compositionHarness(
+  endpointSource: ConstructorParameters<typeof EndpointDiscovery>[0] = async () => "https://copilot.test.invalid",
+): CompositionHarness {
   const database = openDatabase({
     path: ":memory:",
     migrations: [
@@ -325,6 +463,11 @@ function compositionHarness(): CompositionHarness {
   const registry = new ModelCapabilityRegistry(catalog, {
     get: () => null,
   });
+  let endpointFetches = 0;
+  const endpointDiscovery = new EndpointDiscovery(async (account, signal) => {
+    endpointFetches += 1;
+    return await endpointSource(account, signal);
+  });
   const application: ApplicationContext = {
     database,
     credentials,
@@ -334,10 +477,12 @@ function compositionHarness(): CompositionHarness {
     copilot: new ScriptedCopilotBackend({}),
     history,
     telemetry,
+    endpointDiscovery,
     runtime,
     async close() {
       await telemetry.flush();
       await catalog.close();
+      await endpointDiscovery.close();
       closeDatabase(database);
     },
   };
@@ -350,7 +495,9 @@ function compositionHarness(): CompositionHarness {
     history,
     telemetry,
     runtime,
+    endpointDiscovery,
     catalogFetchCount: () => catalogFetches,
+    endpointFetchCount: () => endpointFetches,
   };
 }
 
@@ -383,4 +530,19 @@ async function adminJson(
 
 function signal(): AbortSignal {
   return new AbortController().signal;
+}
+
+function quotaDetail(): Record<string, unknown> {
+  return { entitlement: 100, remaining: 100, percent_remaining: 100, unlimited: false };
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  } {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }

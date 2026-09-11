@@ -15,7 +15,7 @@ import { ModelCapabilityRegistry } from "./copilot/capability_registry.js";
 import { HttpCopilotBackend } from "./copilot/transport.js";
 import type { CopilotBackend } from "./copilot/backend.js";
 import { getValidToken } from "./copilot/token_refresh.js";
-import { discoverEndpoint, invalidateEndpoint } from "./copilot/endpoint_discovery.js";
+import { EndpointDiscovery } from "./copilot/endpoint_discovery.js";
 import { CommandDispatcher } from "./cli/commands/dispatcher.js";
 import { RuntimeConfigStore } from "./config/runtime_config.js";
 import { defaultRuntimeConfigSnapshot, parseRuntimeConfigSnapshot, type RuntimeConfigSnapshot } from "./config/schema.js";
@@ -68,6 +68,7 @@ export interface ApplicationContext {
   readonly nowMs?: () => number;
   readonly createUuid?: () => string;
   readonly modelsSource?: CopilotModelsSource;
+  readonly endpointDiscovery?: EndpointDiscovery;
   readonly runtime?: RuntimeConfigStore;
   close?(): Promise<void> | void;
   forceClose?(): Promise<void> | void;
@@ -182,14 +183,14 @@ export async function createProductionApplicationContext(
     },
   );
   await directory.reconcile();
-  const fetchDiscovery = createCopilotEndpointDiscovery(credentials);
+  const endpointDiscovery = new EndpointDiscovery(createCopilotEndpointDiscovery(credentials));
   const modelsSource = HttpCopilotModelsSource.production(async (accountId, signal, credentialGeneration) => {
     const account = await directory.bindAccount(accountId, signal);
     if (credentialGeneration !== undefined && account.credentialGeneration !== credentialGeneration) {
       throw new DOMException("stale credential generation", "AbortError");
     }
     const token = await getValidToken(credentials, account, Date.now(), refreshCopilotToken, signal);
-    const { endpoint } = await discoverEndpoint(account, fetchDiscovery, signal);
+    const { endpoint } = await endpointDiscovery.discover(account, signal);
     return { token, endpoint };
   });
   const catalog = new CopilotModelCatalog(modelsSource);
@@ -197,7 +198,7 @@ export async function createProductionApplicationContext(
   const copilot = new HttpCopilotBackend({
     credentials,
     refreshCopilotToken,
-    fetchDiscovery,
+    endpointDiscovery,
   });
   const telemetry = new TelemetryRecorder(
     database,
@@ -229,12 +230,14 @@ export async function createProductionApplicationContext(
     telemetryRuntime,
     performanceObserver: telemetryRuntime.performance,
     modelsSource,
+    endpointDiscovery,
     runtime,
     async close() {
       const errors: unknown[] = [];
       for (const close of [
         async () => copilot.close(),
         async () => registry.close(),
+        async () => endpointDiscovery.close(),
         async () => telemetryRuntime.close(),
         async () => closeDatabaseOnce(),
       ]) {
@@ -251,6 +254,7 @@ export async function createProductionApplicationContext(
     forceClose() {
       copilot.forceClose();
       modelsSource.forceClose();
+      endpointDiscovery.forceClose();
       telemetryRuntime.forceClose();
       closeDatabaseOnce();
     },
@@ -319,7 +323,7 @@ export async function composeProductionDaemonGateway(
     const accountCaches = {
       invalidate(accountId: string): void {
         registry.invalidate(accountId);
-        invalidateEndpoint(accountId);
+        application.endpointDiscovery?.invalidate(accountId);
       },
     };
     const uptimeMs = options.uptimeMs ?? (() => Math.max(0, Math.floor(process.uptime() * 1000)));

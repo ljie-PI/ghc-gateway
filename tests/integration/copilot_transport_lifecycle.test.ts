@@ -2,10 +2,11 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Socket } from "node:net";
 import { Pool } from "undici";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BoundAccount } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
+import { EndpointDiscovery } from "../../src/copilot/endpoint_discovery.js";
 import {
   HttpCopilotBackend,
   InvalidUpstreamResponseError,
@@ -17,6 +18,12 @@ import type { ChatRequest } from "../../src/protocols/chat_completions/types.js"
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 let accountSequence = 0;
+const endpointDiscoveries = new Set<EndpointDiscovery>();
+
+afterEach(async () => {
+  await Promise.all([...endpointDiscoveries].map(async (discovery) => await discovery.close()));
+  endpointDiscoveries.clear();
+});
 
 describe("Copilot transport lifecycle", () => {
   it("reuses real loopback connections within the per-origin bound and closes them", async () => {
@@ -434,7 +441,7 @@ describe("Copilot transport lifecycle", () => {
     const backend = new HttpCopilotBackend({
       credentials: store,
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
-      fetchDiscovery: async (current) => `http://127.0.0.1:${61_000 + Number(current.userId)}`,
+      endpointDiscovery: testEndpointDiscovery(async (current) => `http://127.0.0.1:${61_000 + Number(current.userId)}`),
     });
     for (let index = 0; index < 20; index += 1) {
       const current = syntheticAccount(String(index), `pool-${index}`);
@@ -675,7 +682,7 @@ async function backendAt(
   const backend = new HttpCopilotBackend({
     credentials: store,
     refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
-    fetchDiscovery: async () => endpoint,
+    endpointDiscovery: testEndpointDiscovery(async () => endpoint),
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
     ...(options.poolLimits === undefined ? {} : { poolLimits: options.poolLimits }),
     ...(options.createDispatcher === undefined ? {} : { createDispatcher: options.createDispatcher }),
@@ -684,6 +691,14 @@ async function backendAt(
     backend,
     bound: await backend.bind(current, new AbortController().signal),
   };
+}
+
+function testEndpointDiscovery(
+  source: ConstructorParameters<typeof EndpointDiscovery>[0],
+): EndpointDiscovery {
+  const discovery = new EndpointDiscovery(source);
+  endpointDiscoveries.add(discovery);
+  return discovery;
 }
 
 function syntheticAccount(userId: string, suffix: string): BoundAccount {

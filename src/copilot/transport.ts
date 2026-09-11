@@ -4,7 +4,7 @@ import type { Dispatcher } from "undici";
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { CredentialStore } from "../accounts/credential_store.js";
 import type { ChatResponse } from "../protocols/chat_completions/types.js";
-import { discoverEndpoint, MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
+import { type EndpointDiscovery, MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
 import {
   BoundedInferencePoolRegistry,
   DEFAULT_INFERENCE_POOL_LIMITS,
@@ -76,7 +76,7 @@ export interface CopilotTransportDeps {
   readonly credentials: CredentialStore;
   readonly nowMs?: () => number;
   readonly refreshCopilotToken: (githubToken: string, signal?: AbortSignal) => Promise<{ token: string; expiresAtMs: number }>;
-  readonly fetchDiscovery: (account: BoundAccount, signal?: AbortSignal) => Promise<string | null>;
+  readonly endpointDiscovery: Pick<EndpointDiscovery, "discover">;
   readonly fetchImpl?: typeof fetch;
   readonly poolLimits?: InferencePoolLimits;
   readonly createDispatcher?: (
@@ -116,7 +116,7 @@ export class HttpCopilotBackend implements CopilotBackend {
       this.deps.refreshCopilotToken,
       signal,
     );
-    const discovered = await discoverEndpoint(account, this.deps.fetchDiscovery, signal);
+    const discovered = await this.deps.endpointDiscovery.discover(account, signal);
     if (this.closed) {
       throw closedError();
     }
