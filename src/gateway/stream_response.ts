@@ -9,7 +9,6 @@ export interface StreamResponseWriter {
 export function createStreamResponseWriter(init: {
   readonly status?: number;
   readonly headers?: HeadersInit;
-  readonly signal?: AbortSignal;
   readonly onCommit?: () => void;
   readonly onCancel?: () => Promise<void> | void;
 }): StreamResponseWriter {
@@ -26,7 +25,6 @@ export function createStreamResponseWriter(init: {
     cancellation ??= Promise.resolve().then(() => init.onCancel?.());
     await cancellation;
   };
-  const isAborted = (): boolean => init.signal?.aborted ?? false;
 
   const deliver = (chunk: Uint8Array): void => {
     committed = true;
@@ -74,15 +72,15 @@ export function createStreamResponseWriter(init: {
       return committed;
     },
     async enqueue(chunk: Uint8Array): Promise<boolean> {
-      if (closed || isAborted()) {
+      if (closed) {
         return false;
       }
-      while (!closed && !isAborted() && lookahead !== undefined) {
+      while (!closed && lookahead !== undefined) {
         await new Promise<void>((resolve) => {
           waitingProducer = resolve;
         });
       }
-      if (closed || isAborted()) {
+      if (closed) {
         return false;
       }
       if (outstandingPulls > 0) {
@@ -125,17 +123,6 @@ export function createStreamResponseWriter(init: {
       ? { status: init.status ?? 200 }
       : { status: init.status ?? 200, headers: init.headers }),
   };
-
-  if (init.signal !== undefined) {
-    const abort = (): void => {
-      void cancelProducer().finally(() => writer.abort());
-    };
-    if (init.signal.aborted) {
-      abort();
-    } else {
-      init.signal.addEventListener("abort", abort, { once: true });
-    }
-  }
 
   return writer;
 }

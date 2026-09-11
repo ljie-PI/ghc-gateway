@@ -131,6 +131,7 @@ async function* nativeMessagesEmissions(
 ): AsyncIterable<StreamExecutionEmission<SemanticUsage>> {
   const iterator = bytes[Symbol.asyncIterator]();
   const observer = new NativeMessagesObserver(eventLimitBytes);
+  const presemanticRecords: Uint8Array[] = [];
   let prefetchedBytes = 0;
   try {
     while (!observer.hasSemantic) {
@@ -142,9 +143,10 @@ async function* nativeMessagesEmissions(
       if (prefetchedBytes > accumulatorBytes) {
         invalid();
       }
-      for (const record of observer.consume(next.value)) {
-        yield { kind: "wire", bytes: record };
-      }
+      presemanticRecords.push(...observer.consume(next.value));
+    }
+    for (const record of presemanticRecords) {
+      yield { kind: "wire", bytes: record };
     }
     if (observer.isTerminal) {
       yield { kind: "terminal", value: observer.observedUsage };

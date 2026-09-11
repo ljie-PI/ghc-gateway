@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway } from "../../src/gateway/create_gateway.js";
@@ -17,8 +17,7 @@ import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("stream writer", () => {
   it("is pull-based, commits on first body byte, and writes nothing after abort", async () => {
-    const abort = new AbortController();
-    const writer = createStreamResponseWriter({ signal: abort.signal });
+    const writer = createStreamResponseWriter({});
     expect(writer.committed).toBe(false);
 
     const first = new Uint8Array([1, 2, 3]);
@@ -36,7 +35,7 @@ describe("stream writer", () => {
     expect(writer.committed).toBe(true);
     expect(chunk?.value).toEqual(first);
 
-    abort.abort();
+    writer.abort();
     const rejected = await writer.enqueue(new Uint8Array([9]));
     expect(rejected).toBe(false);
     writer.close();
@@ -44,6 +43,46 @@ describe("stream writer", () => {
 });
 
 describe("Stream Execution owner", () => {
+  it("keeps completion pending until claimed delivery settles and then runs its finalizer", async () => {
+    const order: string[] = [];
+    const upstream: UpstreamByteStream = {
+      status: 200,
+      headers: new Headers(),
+      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+      cancel: async () => { order.push("upstream"); },
+    };
+    const emissions: AsyncIterable<StreamExecutionEmission<string>> = {
+      async *[Symbol.asyncIterator]() {
+        yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
+        yield { kind: "terminal", value: "success" } as const;
+      },
+    };
+    const response = await createStreamExecutionResponse({
+      upstream,
+      emissions,
+      signal: new AbortController().signal,
+      deliverySignal: new AbortController().signal,
+      onTerminal: () => { order.push("terminal"); },
+      normalizeFailure: (error) => error,
+    });
+    const handle = getStreamExecutionHandle(response);
+    const delivery = handle?.claimDeliveryAdapter(() => { order.push("finalizer"); });
+    const reader = response.body?.getReader();
+    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("ok");
+    delivery?.markDelivered();
+
+    let completed = false;
+    void handle?.completion.then(() => { completed = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    expect(order).not.toContain("finalizer");
+
+    delivery?.settle();
+    await handle?.completion;
+    expect(order.at(-1)).toBe("finalizer");
+  });
+
   it("tracks semantic terminal and resource cleanup exactly once", async () => {
     const counts = { cancel: 0, returned: 0, terminal: 0 };
     const upstream: UpstreamByteStream = {
@@ -134,6 +173,56 @@ describe("Stream Execution owner", () => {
     expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
   });
 
+  it("lets a claimed delivery settle before reader cancellation without deadlocking completion", async () => {
+    let releaseNext: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
+    const blockedNext = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
+      releaseNext = resolve;
+    });
+    const counts = { cancel: 0, returned: 0, terminal: 0, finalized: 0 };
+    const upstream: UpstreamByteStream = {
+      status: 200,
+      headers: new Headers(),
+      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+      cancel: async () => { counts.cancel += 1; },
+    };
+    const response = await createStreamExecutionResponse({
+      upstream,
+      emissions: {
+        [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
+          let emitted = false;
+          return {
+            next: async () => {
+              if (!emitted) {
+                emitted = true;
+                return { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("prefix") } };
+              }
+              return await blockedNext;
+            },
+            return: async () => {
+              counts.returned += 1;
+              releaseNext?.({ done: true, value: undefined });
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      },
+      signal: new AbortController().signal,
+      deliverySignal: new AbortController().signal,
+      onTerminal: () => { counts.terminal += 1; },
+      normalizeFailure: (error) => error,
+    });
+    const handle = getStreamExecutionHandle(response);
+    const delivery = handle?.claimDeliveryAdapter(() => { counts.finalized += 1; });
+    const reader = response.body?.getReader();
+    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("prefix");
+    delivery?.markDelivered();
+
+    delivery?.settle();
+    await reader?.cancel();
+    await handle?.completion;
+    expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1, finalized: 1 });
+  });
+
   it("classifies response reader cancellation separately and tracks the stopped producer", async () => {
     let releaseNext: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
     const blockedNext = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
@@ -183,6 +272,35 @@ describe("Stream Execution owner", () => {
     expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
   });
 
+  it("classifies a delivery signal aborted before registration and still completes cleanup", async () => {
+    const deliveryAbort = new AbortController();
+    deliveryAbort.abort();
+    let cancelled = 0;
+    const upstream: UpstreamByteStream = {
+      status: 200,
+      headers: new Headers(),
+      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+      cancel: async () => { cancelled += 1; },
+    };
+    const emissions: AsyncIterable<StreamExecutionEmission<string>> = {
+      [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
+        return {
+          next: async () => { throw new Error("producer must not start"); },
+        };
+      },
+    };
+
+    await expect(createStreamExecutionResponse({
+      upstream,
+      emissions,
+      signal: new AbortController().signal,
+      deliverySignal: deliveryAbort.signal,
+      onTerminal: () => undefined,
+      normalizeFailure: (error) => error,
+    })).rejects.toMatchObject({ failure: { kind: "aborted" } });
+    expect(cancelled).toBe(1);
+  });
+
   it("classifies a signal aborted before registration and still completes cleanup", async () => {
     const abort = new AbortController();
     abort.abort();
@@ -221,9 +339,8 @@ describe("stream route lifecycle", () => {
       admission: "none",
       body: "none",
       presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), { status: 400 }),
-      endpoint: async (_request, scope) => {
+      endpoint: async (_request, _scope) => {
         const writer = createStreamResponseWriter({
-          signal: scope.signal,
           headers: { "Content-Type": "text/event-stream" },
         });
         expect(writer.committed).toBe(false);
@@ -442,6 +559,113 @@ describe("stream route lifecycle", () => {
     expect(closeSawCleanup).toBe(true);
   });
 
+  it("settles response cancellation through the owner before releasing admission", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    let requestCount = 0;
+    let firstCancelStarted!: () => void;
+    const cancelStarted = new Promise<void>((resolve) => { firstCancelStarted = resolve; });
+    let releaseFirstCancel!: () => void;
+    const firstCancelBarrier = new Promise<void>((resolve) => { releaseFirstCancel = resolve; });
+    const counts = { cancel: 0, returned: 0, terminal: 0 };
+    const deliveryListenerRemovals: number[] = [];
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/owned-cancel",
+      admission: "inference",
+      body: "none",
+      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
+        status: failure.kind === "queue_full" ? 503 : 400,
+      }),
+      endpoint: async (_request, scope) => {
+        const index = requestCount++;
+        deliveryListenerRemovals[index] = 0;
+        const removeDeliveryListener = scope.deliverySignal.removeEventListener.bind(scope.deliverySignal);
+        vi.spyOn(scope.deliverySignal, "removeEventListener").mockImplementation((type, listener, options) => {
+          if (type === "abort") {
+            deliveryListenerRemovals[index] = (deliveryListenerRemovals[index] ?? 0) + 1;
+          }
+          removeDeliveryListener(type, listener, options);
+        });
+        let releaseNext: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
+        const blockedNext = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
+          releaseNext = resolve;
+        });
+        const response = await createStreamExecutionResponse({
+          upstream: {
+            status: 200,
+            headers: new Headers(),
+            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+            cancel: async () => {
+              counts.cancel += 1;
+              if (index === 0) {
+                firstCancelStarted();
+                await firstCancelBarrier;
+              }
+            },
+          },
+          emissions: {
+            [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
+              let emitted = false;
+              return {
+                next: async () => {
+                  if (!emitted) {
+                    emitted = true;
+                    return { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("open") } };
+                  }
+                  if (index === 0) {
+                    return await blockedNext;
+                  }
+                  return { done: false, value: { kind: "terminal", value: "done" } };
+                },
+                return: async () => {
+                  counts.returned += 1;
+                  releaseNext?.({ done: true, value: undefined });
+                  return { done: true, value: undefined };
+                },
+              };
+            },
+          },
+          signal: scope.signal,
+          deliverySignal: scope.deliverySignal,
+          headers: { "Content-Type": "text/event-stream" },
+          onTerminal: () => { counts.terminal += 1; },
+          normalizeFailure: (error) => error,
+        });
+        return response;
+      },
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime,
+    }, [route]);
+    try {
+      const first = await gw.fetch(new Request("http://127.0.0.1:31400/v1/owned-cancel", { method: "POST" }));
+      const reader = first.body?.getReader();
+      expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("open");
+      const cancelling = reader?.cancel();
+      await cancelStarted;
+
+      const blocked = await gw.fetch(new Request("http://127.0.0.1:31400/v1/owned-cancel", { method: "POST" }));
+      expect(blocked.status).toBe(503);
+      releaseFirstCancel();
+      await cancelling;
+
+      const after = await gw.fetch(new Request("http://127.0.0.1:31400/v1/owned-cancel", { method: "POST" }));
+      expect(after.status).toBe(200);
+      expect(await after.text()).toBe("open");
+      expect(counts).toEqual({ cancel: 2, returned: 2, terminal: 2 });
+      expect(deliveryListenerRemovals).toHaveLength(2);
+      for (const removals of deliveryListenerRemovals) {
+        expect(removals).toBeGreaterThanOrEqual(2);
+      }
+    } finally {
+      releaseFirstCancel();
+      await gw.close();
+    }
+  });
+
   it("holds the inference slot until the stream body ends", async () => {
     const writers: ReturnType<typeof createStreamResponseWriter>[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
@@ -456,8 +680,8 @@ describe("stream route lifecycle", () => {
         status: failure.kind === "queue_full" ? 503 : 400,
         headers: { "Content-Type": "application/json; charset=utf-8" },
       }),
-      endpoint: async (_request, scope) => {
-        const writer = createStreamResponseWriter({ signal: scope.signal });
+      endpoint: async (_request, _scope) => {
+        const writer = createStreamResponseWriter({});
         writers.push(writer);
         return writer.response;
       },

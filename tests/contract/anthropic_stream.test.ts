@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
@@ -152,6 +152,83 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 
+  it("preserves native keepalive ordering while finalizing usage and iterator cleanup once", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    let returned = 0;
+    const records = [
+      ": keepalive\n\n",
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ];
+    const backend = new ScriptedCopilotBackend({
+      messagesStream: (async function* () {
+        try {
+          for (const record of records) {
+            yield new TextEncoder().encode(record);
+          }
+        } finally {
+          returned += 1;
+        }
+      })(),
+    });
+    const opened = await anthropicGateway({
+      backend,
+      usageUpdates,
+      catalogFetch: nativeMessagesCatalog,
+    });
+    try {
+      const response = await opened.gw.fetch(anthropicRequest({
+        model: "claude-native",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe(records.join(""));
+      expect(returned).toBe(1);
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{ outcome: "success", inputTokens: 2, outputTokens: 0 }]);
+    } finally {
+      await opened.close();
+    }
+  });
+
+  it("times out a native keepalive-only stream before committing any stream bytes", async () => {
+    vi.useFakeTimers();
+    const usageUpdates: UsageUpdate[] = [];
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.firstByteMs = 100;
+    runtime.timeouts.streamIdleMs = 60_000;
+    const backend = new ScriptedCopilotBackend({
+      messagesStream: (request) => commentThenStall(request.signal),
+    });
+    const opened = await anthropicGateway({
+      backend,
+      runtime,
+      usageUpdates,
+      catalogFetch: nativeMessagesCatalog,
+    });
+    try {
+      const pending = opened.gw.fetch(anthropicRequest({
+        model: "claude-native",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }));
+      await vi.advanceTimersByTimeAsync(5_000);
+      const response = await pending;
+      expect(response.status).toBe(504);
+      expect(await response.text()).toBe(
+        "{\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"upstream timeout\"},\"request_id\":\"req_test_1\"}",
+      );
+      expect(usageUpdates).toHaveLength(1);
+      expect(usageUpdates).toMatchObject([{ outcome: "timeout" }]);
+    } finally {
+      vi.useRealTimers();
+      await opened.close();
+    }
+  });
+
   it("keeps synthetic message_start behind the first semantic deadline", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
@@ -246,6 +323,19 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 });
+
+function nativeMessagesCatalog() {
+  return {
+    data: [{
+      id: "claude-native",
+      name: "Claude Native",
+      vendor: "test",
+      model_picker_enabled: true,
+      capabilities: { type: "chat" },
+      model_info: { supported_endpoints: ["/v1/messages"] },
+    }],
+  };
+}
 
 async function* commentThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
   yield new TextEncoder().encode(": keepalive\n\n");

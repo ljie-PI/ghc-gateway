@@ -23,12 +23,16 @@ export type StreamExecutionEmission<T> =
   | { readonly kind: "wire"; readonly bytes: Uint8Array }
   | { readonly kind: "terminal"; readonly value: T; readonly writerMode?: "close" | "abort" };
 
+export interface StreamExecutionDelivery {
+  markDelivered(): void;
+  settle(): void;
+}
+
 export interface StreamExecutionHandle {
   readonly state: StreamExecutionState;
   readonly cause: StreamExecutionTerminalCause | undefined;
   readonly completion: Promise<void>;
-  claimDeliveryAdapter(): void;
-  markDelivered(): void;
+  claimDeliveryAdapter(finalize: () => Promise<void> | void): StreamExecutionDelivery;
   abort(cause: "shutdown" | "request_abort" | "total_timeout"): Promise<void>;
 }
 
@@ -67,15 +71,30 @@ export async function createStreamExecutionResponse<T>(input: {
   });
   let barrier: Promise<void> | undefined;
   let deliveryAdapterClaimed = false;
+  let deliveryFinalizer: (() => Promise<void> | void) | undefined;
   let deliverySettled = false;
   let resolveDelivery: () => void = () => undefined;
-  const firstDelivery = new Promise<void>((resolve) => {
+  const deliverySettlement = new Promise<void>((resolve) => {
     resolveDelivery = resolve;
+  });
+  let firstDelivered = false;
+  let resolveFirstDelivery: () => void = () => undefined;
+  const firstDelivery = new Promise<void>((resolve) => {
+    resolveFirstDelivery = resolve;
   });
   const settleDelivery = (): void => {
     if (!deliverySettled) {
       deliverySettled = true;
       resolveDelivery();
+    }
+  };
+  const markDelivered = (): void => {
+    if (!firstDelivered) {
+      firstDelivered = true;
+      if (state === "precommit") {
+        state = "committed";
+      }
+      resolveFirstDelivery();
     }
   };
 
@@ -101,35 +120,46 @@ export async function createStreamExecutionResponse<T>(input: {
     }
     cause = terminalCause;
     state = "terminating";
-    settleDelivery();
     barrier = (async () => {
-      observe(result);
-      if (writerMode === "abort") {
-        const error = result.kind === "failure"
-          ? (input.presentPostCommitFailure?.(result.error) ?? result.error)
-          : undefined;
-        resources.writer?.abort(error);
-      }
-      await boundedCleanup(
-        Promise.resolve().then(async () => await input.upstream.cancel()),
-        input.cleanupTimeoutMs ?? 1_000,
-      );
-      if (iterator.return !== undefined) {
+      try {
+        observe(result);
+        if (writerMode === "abort") {
+          const error = result.kind === "failure"
+            ? (input.presentPostCommitFailure?.(result.error) ?? result.error)
+            : undefined;
+          resources.writer?.abort(error);
+        }
         await boundedCleanup(
-          Promise.resolve().then(async () => await iterator.return!()),
+          Promise.resolve().then(async () => await input.upstream.cancel()),
           input.cleanupTimeoutMs ?? 1_000,
         );
+        if (iterator.return !== undefined) {
+          await boundedCleanup(
+            Promise.resolve().then(async () => await iterator.return!()),
+            input.cleanupTimeoutMs ?? 1_000,
+          );
+        }
+        if (!fromProducer && resources.producer !== undefined) {
+          await boundedCleanup(resources.producer, input.cleanupTimeoutMs ?? 1_000);
+        }
+        if (writerMode === "close") {
+          resources.writer?.close();
+        }
+        if (!deliveryAdapterClaimed) {
+          settleDelivery();
+        }
+        await deliverySettlement;
+        try {
+          await deliveryFinalizer?.();
+        } catch {
+          // Host finalization cannot prevent completion or listener cleanup.
+        }
+      } finally {
+        input.signal.removeEventListener("abort", onRequestAbort);
+        input.deliverySignal.removeEventListener("abort", onDeliveryAbort);
+        state = "completed";
+        resolveCompletion();
       }
-      if (!fromProducer && resources.producer !== undefined) {
-        await boundedCleanup(resources.producer, input.cleanupTimeoutMs ?? 1_000);
-      }
-      if (writerMode === "close") {
-        resources.writer?.close();
-      }
-      input.signal.removeEventListener("abort", onRequestAbort);
-      input.deliverySignal.removeEventListener("abort", onDeliveryAbort);
-      state = "completed";
-      resolveCompletion();
     })();
     await barrier;
   };
@@ -204,10 +234,13 @@ export async function createStreamExecutionResponse<T>(input: {
     ...(input.headers === undefined ? {} : { headers: input.headers }),
     onCommit: () => {
       if (!deliveryAdapterClaimed) {
-        settleDelivery();
+        markDelivered();
       }
     },
     onCancel: async () => {
+      if (!deliveryAdapterClaimed) {
+        settleDelivery();
+      }
       const error = new GatewayFailureError({ kind: "aborted", source: "request", phase: "stream" });
       await finish("client_cancel", { kind: "failure", error });
     },
@@ -221,10 +254,17 @@ export async function createStreamExecutionResponse<T>(input: {
       return cause;
     },
     completion,
-    claimDeliveryAdapter: () => {
+    claimDeliveryAdapter: (finalize) => {
+      if (deliveryAdapterClaimed) {
+        throw new Error("stream delivery adapter already claimed");
+      }
       deliveryAdapterClaimed = true;
+      deliveryFinalizer = finalize;
+      return {
+        markDelivered,
+        settle: settleDelivery,
+      };
     },
-    markDelivered: settleDelivery,
     abort: async (terminalCause) => {
       const error = terminalCause === "total_timeout"
         ? new GatewayFailureError({ kind: "upstream_timeout", source: "gateway", phase: "stream" })
@@ -243,7 +283,6 @@ export async function createStreamExecutionResponse<T>(input: {
       if (barrier !== undefined) {
         return;
       }
-      state = "committed";
       for (;;) {
         const next = await iterator.next();
         if (next.done === true) {
