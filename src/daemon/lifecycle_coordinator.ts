@@ -3,6 +3,8 @@ import { CliError } from "../cli/control_client.js";
 import { DaemonIdentityFileError } from "./identity_file.js";
 import type { DaemonOperationLeaseAccess, DaemonOperationLeaseHandle } from "./operation_lease.js";
 
+export const MAX_PENDING_LIFECYCLE_OPERATIONS_PER_DIRECTORY = 64;
+
 export interface LifecycleOperationContext {
   readonly signal?: AbortSignal;
 }
@@ -46,6 +48,9 @@ export class LifecycleCoordinator implements LifecycleCoordinatorAccess {
     const key = path.resolve(dataDir);
     const lane = this.lanes.get(key) ?? { key, queue: [], draining: false };
     this.lanes.set(key, lane);
+    if (lane.queue.length >= MAX_PENDING_LIFECYCLE_OPERATIONS_PER_DIRECTORY) {
+      throw new CliError("unavailable");
+    }
 
     return await new Promise<T>((resolve, reject) => {
       const node: QueueNode = {

@@ -6,6 +6,7 @@ import {
   fstatSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readSync,
@@ -143,6 +144,11 @@ export class ProtectedFileSystem {
       if (isNotFound(error)) return false;
       throw error;
     }
+  }
+
+  createHardLink(existingPath: string, newPath: string): void {
+    linkSync(existingPath, newPath);
+    this.flushDirectory();
   }
 
   unlink(filePath: string): void {

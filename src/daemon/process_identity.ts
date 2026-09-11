@@ -3,13 +3,29 @@ import { readFile } from "node:fs/promises";
 
 export type ProcessStartIdentity = string;
 
+export function isCanonicalProcessStartIdentity(value: unknown): value is ProcessStartIdentity {
+  if (typeof value !== "string") return false;
+  if (/^linux:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(0|[1-9]\d*)$/u.test(value)
+    || /^windows:(0|[1-9]\d{0,19})$/u.test(value)) return true;
+  const macOs = /^macos:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)$/u.exec(value);
+  if (macOs?.[1] === undefined) return false;
+  const milliseconds = Date.parse(macOs[1]);
+  return Number.isFinite(milliseconds)
+    && new Date(milliseconds).toISOString().replace(".000Z", "Z") === macOs[1];
+}
+
+export interface ProcessIdentityContext {
+  readonly signal?: AbortSignal;
+}
+
 export interface ProcessIdentityDependencies {
   readonly platform: NodeJS.Platform;
-  readonly readFile: (path: string) => Promise<string>;
+  readonly readFile: (path: string, context?: Readonly<ProcessIdentityContext>) => Promise<string>;
   readonly runCommand: (
     file: string,
     args: readonly string[],
     env: Readonly<Record<string, string>>,
+    context?: Readonly<ProcessIdentityContext>,
   ) => Promise<string>;
 }
 
@@ -22,7 +38,10 @@ export class ProcessIdentityError extends Error {
 
 const DEFAULT_DEPENDENCIES: ProcessIdentityDependencies = {
   platform: process.platform,
-  readFile: async (filePath) => await readFile(filePath, "utf8"),
+  readFile: async (filePath, context) => await readFile(filePath, {
+    encoding: "utf8",
+    ...(context?.signal === undefined ? {} : { signal: context.signal }),
+  }),
   runCommand: runCommand,
 };
 const PROCESS_IDENTITY_TIMEOUT_MS = 5_000;
@@ -30,15 +49,16 @@ const PROCESS_IDENTITY_TIMEOUT_MS = 5_000;
 export async function captureProcessStartIdentity(
   pid: number,
   dependencies: ProcessIdentityDependencies = DEFAULT_DEPENDENCIES,
+  context: Readonly<ProcessIdentityContext> = {},
 ): Promise<ProcessStartIdentity | null> {
   assertPid(pid);
   switch (dependencies.platform) {
   case "linux":
-    return await captureLinuxIdentity(pid, dependencies);
+    return await captureLinuxIdentity(pid, dependencies, context);
   case "win32":
-    return await captureWindowsIdentity(pid, dependencies);
+    return await captureWindowsIdentity(pid, dependencies, context);
   case "darwin":
-    return await captureMacOsIdentity(pid, dependencies);
+    return await captureMacOsIdentity(pid, dependencies, context);
   default:
     throw new ProcessIdentityError("process identity is unsupported on this platform");
   }
@@ -57,8 +77,10 @@ export async function terminateProcessIfMatching(
   pid: number,
   expected: ProcessStartIdentity,
   dependencies: ProcessIdentityDependencies = DEFAULT_DEPENDENCIES,
+  context: Readonly<ProcessIdentityContext> = {},
 ): Promise<boolean> {
   assertPid(pid);
+  if (!isCanonicalProcessStartIdentity(expected)) return false;
   if (dependencies.platform === "win32") {
     const filetime = /^windows:(\d{1,20})$/u.exec(expected)?.[1];
     if (filetime === undefined) {
@@ -77,6 +99,7 @@ export async function terminateProcessIfMatching(
         "powershell.exe",
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         {},
+        context,
       );
       return true;
     } catch (error: unknown) {
@@ -102,7 +125,7 @@ export async function terminateProcessIfMatching(
       "[ \"$boot\" = \"$expected_boot\" ] && [ \"$ticks\" = \"$expected_ticks\" ] || exit 4",
       "kill -KILL \"$pid\"",
     ].join("; ");
-    return await runVerifiedTermination("sh", ["-c", script], dependencies);
+    return await runVerifiedTermination("sh", ["-c", script], dependencies, context);
   }
   if (dependencies.platform === "darwin") {
     const timestamp = /^macos:(.+)$/u.exec(expected)?.[1];
@@ -117,7 +140,7 @@ export async function terminateProcessIfMatching(
       "[ \"$actual_epoch\" = \"$expected\" ] || exit 4",
       "kill -KILL \"$pid\"",
     ].join("; ");
-    return await runVerifiedTermination("sh", ["-c", script], dependencies);
+    return await runVerifiedTermination("sh", ["-c", script], dependencies, context);
   }
   return false;
 }
@@ -126,9 +149,10 @@ async function runVerifiedTermination(
   file: string,
   args: readonly string[],
   dependencies: ProcessIdentityDependencies,
+  context: Readonly<ProcessIdentityContext>,
 ): Promise<boolean> {
   try {
-    await dependencies.runCommand(file, args, {});
+    await dependencies.runCommand(file, args, {}, context);
     return true;
   } catch (error: unknown) {
     if (commandExitCode(error) === 3 || commandExitCode(error) === 4) {
@@ -162,10 +186,11 @@ export function parseLinuxProcStatStartTicks(stat: string, expectedPid: number):
 async function captureLinuxIdentity(
   pid: number,
   dependencies: ProcessIdentityDependencies,
+  context: Readonly<ProcessIdentityContext>,
 ): Promise<ProcessStartIdentity | null> {
   let stat: string;
   try {
-    stat = await dependencies.readFile(`/proc/${pid}/stat`);
+    stat = await dependencies.readFile(`/proc/${pid}/stat`, context);
   } catch (error: unknown) {
     if (isNotFound(error)) {
       return null;
@@ -175,7 +200,7 @@ async function captureLinuxIdentity(
 
   let bootId: string;
   try {
-    bootId = (await dependencies.readFile("/proc/sys/kernel/random/boot_id")).trim().toLowerCase();
+    bootId = (await dependencies.readFile("/proc/sys/kernel/random/boot_id", context)).trim().toLowerCase();
   } catch (error: unknown) {
     throw new ProcessIdentityError("unable to read Linux boot identity", { cause: error });
   }
@@ -188,6 +213,7 @@ async function captureLinuxIdentity(
 async function captureWindowsIdentity(
   pid: number,
   dependencies: ProcessIdentityDependencies,
+  context: Readonly<ProcessIdentityContext>,
 ): Promise<ProcessStartIdentity | null> {
   const script = [
     `$process = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
@@ -200,6 +226,7 @@ async function captureWindowsIdentity(
       "powershell.exe",
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
       {},
+      context,
     );
   } catch (error: unknown) {
     if (commandExitCode(error) === 3) {
@@ -217,6 +244,7 @@ async function captureWindowsIdentity(
 async function captureMacOsIdentity(
   pid: number,
   dependencies: ProcessIdentityDependencies,
+  context: Readonly<ProcessIdentityContext>,
 ): Promise<ProcessStartIdentity | null> {
   let output: string;
   try {
@@ -224,6 +252,7 @@ async function captureMacOsIdentity(
       "ps",
       ["-o", "lstart=", "-p", String(pid)],
       { LC_ALL: "C", TZ: "UTC" },
+      context,
     );
   } catch (error: unknown) {
     if (commandExitCode(error) === 1) {
@@ -264,6 +293,7 @@ async function runCommand(
   file: string,
   args: readonly string[],
   env: Readonly<Record<string, string>>,
+  context: Readonly<ProcessIdentityContext> = {},
 ): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     execFile(file, [...args], {
@@ -271,6 +301,7 @@ async function runCommand(
       env: { ...process.env, ...env },
       windowsHide: true,
       timeout: PROCESS_IDENTITY_TIMEOUT_MS,
+      ...(context.signal === undefined ? {} : { signal: context.signal }),
     }, (error, stdout) => {
       if (error !== null) {
         reject(error);

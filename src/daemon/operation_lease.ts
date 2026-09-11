@@ -1,7 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, fstatSync } from "node:fs";
 import path from "node:path";
-import { captureProcessStartIdentity } from "./process_identity.js";
+import {
+  captureProcessStartIdentity,
+  isCanonicalProcessStartIdentity,
+  type ProcessIdentityContext,
+} from "./process_identity.js";
 import {
   DaemonIdentityFileError,
   ProtectedFileSystem,
@@ -28,8 +32,11 @@ export interface DaemonOperationLeaseAccess {
 
 export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
   readonly pid?: number;
-  readonly processStartIdentity?: () => Promise<string | null>;
-  readonly processIdentity?: (pid: number) => Promise<string | null>;
+  readonly processStartIdentity?: (context?: Readonly<ProcessIdentityContext>) => Promise<string | null>;
+  readonly processIdentity?: (
+    pid: number,
+    context?: Readonly<ProcessIdentityContext>,
+  ) => Promise<string | null>;
   readonly createToken?: () => string;
   readonly delay?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -43,8 +50,13 @@ interface OperationOwner {
 
 export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
   private readonly pid: number;
-  private readonly processStartIdentity: () => Promise<string | null>;
-  private readonly processIdentity: (pid: number) => Promise<string | null>;
+  private readonly processStartIdentity: (
+    context?: Readonly<ProcessIdentityContext>,
+  ) => Promise<string | null>;
+  private readonly processIdentity: (
+    pid: number,
+    context?: Readonly<ProcessIdentityContext>,
+  ) => Promise<string | null>;
   private readonly createToken: () => string;
   private readonly delay: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly protectedOptions: ProtectedFileOptions;
@@ -52,8 +64,9 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
   constructor(options: Readonly<DaemonOperationLeaseFileOptions> = {}) {
     this.pid = options.pid ?? process.pid;
     this.processStartIdentity = options.processStartIdentity
-      ?? (async () => await captureProcessStartIdentity(this.pid));
-    this.processIdentity = options.processIdentity ?? captureProcessStartIdentity;
+      ?? (async (context) => await captureProcessStartIdentity(this.pid, undefined, context));
+    this.processIdentity = options.processIdentity
+      ?? (async (pid, context) => await captureProcessStartIdentity(pid, undefined, context));
     this.createToken = options.createToken ?? randomUUID;
     this.delay = options.delay ?? abortableDelay;
     this.protectedOptions = {
@@ -68,7 +81,7 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
   ): Promise<DaemonOperationLeaseHandle> {
     const signal = context.signal;
     signal?.throwIfAborted();
-    const processStartIdentity = await this.captureOwnerIdentity();
+    const processStartIdentity = await this.captureOwnerIdentity(signal);
     const owner: OperationOwner = {
       version: 1,
       pid: this.pid,
@@ -99,14 +112,14 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     }
   }
 
-  private async captureOwnerIdentity(): Promise<string> {
+  private async captureOwnerIdentity(signal: AbortSignal | undefined): Promise<string> {
     let identity: string | null;
     try {
-      identity = await this.processStartIdentity();
+      identity = await this.processStartIdentity({ ...(signal === undefined ? {} : { signal }) });
     } catch (error: unknown) {
       throw new DaemonIdentityFileError("unsafe_owner", "unable to verify operation lease owner", { cause: error });
     }
-    if (identity === null || !isCanonicalProcessIdentity(identity)) {
+    if (identity === null || !isCanonicalProcessStartIdentity(identity)) {
       throw new DaemonIdentityFileError("unsafe_owner", "unable to verify operation lease owner");
     }
     return identity;
@@ -124,24 +137,63 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
 
     let actual: string | null;
     try {
-      actual = await this.processIdentity(owner.pid);
+      actual = await this.processIdentity(owner.pid, { ...(signal === undefined ? {} : { signal }) });
     } catch (error: unknown) {
       throw new DaemonIdentityFileError("unsafe_owner", "unable to verify operation lease owner", { cause: error });
     }
     if (actual === null) {
-      const finalBefore = files.assertProtectedRegularFile(operationPath);
-      const finalOwner = decodeOperationOwner(files.readProtectedFile(operationPath, MAX_OWNER_BYTES));
-      const finalAfter = files.assertProtectedRegularFile(operationPath);
-      const unchanged = sameProtectedFile(after, finalBefore)
-        && sameProtectedFile(finalBefore, finalAfter)
-        && sameOwner(owner, finalOwner);
-      if (unchanged) files.unlink(operationPath);
+      await this.recoverDeadOwner(files, operationPath, after, owner, signal);
       return;
     }
     if (actual !== owner.processStartIdentity) {
       throw new DaemonIdentityFileError("unsafe_owner", "operation lease owner identity changed");
     }
     await this.delay(POLL_INTERVAL_MS, signal);
+  }
+
+  private async recoverDeadOwner(
+    files: ProtectedFileSystem,
+    operationPath: string,
+    observedFile: ReturnType<ProtectedFileSystem["assertProtectedRegularFile"]>,
+    owner: Readonly<OperationOwner>,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const claimPath = path.join(
+      files.directory,
+      `.daemon.operation.recovery.${createHash("sha256").update(owner.leaseToken).digest("hex")}.lock`,
+    );
+    try {
+      files.createHardLink(operationPath, claimPath);
+    } catch (error: unknown) {
+      if (isAlreadyExists(error) || isNotFound(error)) {
+        await this.delay(POLL_INTERVAL_MS, signal);
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      const claimedFile = files.assertProtectedRegularFile(claimPath);
+      const claimedOwner = decodeOperationOwner(files.readProtectedFile(claimPath, MAX_OWNER_BYTES));
+      const claimedAfter = files.assertProtectedRegularFile(claimPath);
+      if (!sameProtectedFile(observedFile, claimedFile)
+        || !sameProtectedFile(claimedFile, claimedAfter)
+        || !sameOwner(owner, claimedOwner)) {
+        return;
+      }
+
+      const currentFile = files.assertProtectedRegularFile(operationPath);
+      const currentOwner = decodeOperationOwner(files.readProtectedFile(operationPath, MAX_OWNER_BYTES));
+      const currentAfter = files.assertProtectedRegularFile(operationPath);
+      if (sameProtectedFile(claimedFile, currentFile)
+        && sameProtectedFile(currentFile, currentAfter)
+        && sameOwner(owner, currentOwner)) {
+        files.unlink(operationPath);
+      }
+    } finally {
+      files.unlinkIfExists(claimPath);
+      files.flushDirectory();
+    }
   }
 
   private ownedLease(
@@ -185,7 +237,7 @@ export function decodeOperationOwner(text: string): OperationOwner {
   if (!isRecord(parsed) || !hasExactKeys(parsed, OWNER_KEYS)
     || parsed.version !== 1
     || !isPositiveSafeInteger(parsed.pid)
-    || !isCanonicalProcessIdentity(parsed.processStartIdentity)
+    || !isCanonicalProcessStartIdentity(parsed.processStartIdentity)
     || typeof parsed.leaseToken !== "string" || parsed.leaseToken.length === 0) {
     throw new DaemonIdentityFileError("invalid_identity", "invalid daemon operation lease schema");
   }
@@ -216,16 +268,6 @@ function hasExactKeys(value: Readonly<Record<string, unknown>>, expected: readon
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
-}
-
-function isCanonicalProcessIdentity(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  if (/^linux:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(0|[1-9]\d*)$/u.test(value)
-    || /^windows:(0|[1-9]\d{0,19})$/u.test(value)) return true;
-  const macOs = /^macos:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)$/u.exec(value);
-  if (macOs?.[1] === undefined) return false;
-  const milliseconds = Date.parse(macOs[1]);
-  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString().replace(".000Z", "Z") === macOs[1];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

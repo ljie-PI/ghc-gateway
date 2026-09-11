@@ -26,7 +26,11 @@ describe("stale PID safety", () => {
       managed: true,
       pid: IDENTITY.pid,
     });
-    expect(fixture.remove).toHaveBeenCalledWith(DATA_DIR, IDENTITY);
+    expect(fixture.remove).toHaveBeenCalledWith(
+      DATA_DIR,
+      IDENTITY,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(fixture.terminate).not.toHaveBeenCalled();
   });
 

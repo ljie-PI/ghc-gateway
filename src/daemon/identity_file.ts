@@ -12,7 +12,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { captureProcessStartIdentity } from "./process_identity.js";
+import {
+  captureProcessStartIdentity,
+  isCanonicalProcessStartIdentity,
+  type ProcessIdentityContext,
+} from "./process_identity.js";
 import {
   DaemonIdentityFileError,
   ProtectedFileSystem,
@@ -41,7 +45,10 @@ export interface DaemonIdentityLease {
 export interface DaemonIdentityFileOptions {
   readonly platform?: NodeJS.Platform;
   readonly runCommand?: (file: string, args: readonly string[]) => string;
-  readonly processIdentity?: (pid: number) => Promise<string | null>;
+  readonly processIdentity?: (
+    pid: number,
+    context?: Readonly<ProcessIdentityContext>,
+  ) => Promise<string | null>;
 }
 
 interface DaemonLockOwner {
@@ -69,14 +76,18 @@ export class DaemonIdentityFile {
   readonly path: string;
   private readonly lockPath: string;
   private readonly protectedFiles: ProtectedFileSystem;
-  private readonly processIdentity: (pid: number) => Promise<string | null>;
+  private readonly processIdentity: (
+    pid: number,
+    context?: Readonly<ProcessIdentityContext>,
+  ) => Promise<string | null>;
 
   constructor(directory: string, options: DaemonIdentityFileOptions = {}) {
     this.directory = path.resolve(directory);
     this.path = path.join(this.directory, "daemon.json");
     this.lockPath = path.join(this.directory, "daemon.lock");
     this.protectedFiles = new ProtectedFileSystem(this.directory, options);
-    this.processIdentity = options.processIdentity ?? captureProcessStartIdentity;
+    this.processIdentity = options.processIdentity
+      ?? (async (pid, context) => await captureProcessStartIdentity(pid, undefined, context));
   }
 
   read(): DaemonIdentity | null {
@@ -133,7 +144,11 @@ export class DaemonIdentityFile {
     };
   }
 
-  async remove(expected: Readonly<DaemonIdentity>): Promise<boolean> {
+  async remove(
+    expected: Readonly<DaemonIdentity>,
+    context: Readonly<ProcessIdentityContext> = {},
+  ): Promise<boolean> {
+    context.signal?.throwIfAborted();
     this.ensureProtectedDirectory();
     if (!pathExists(this.path)) {
       return false;
@@ -145,13 +160,14 @@ export class DaemonIdentityFile {
     if (pathExists(this.lockPath)) {
       const owner = this.readLockOwner();
       if (owner.pid !== expected.pid || owner.processStartIdentity !== expected.processStartIdentity
-        || !await this.proveLockOwnerDead(owner)) {
+        || !await this.proveLockOwnerDead(owner, context)) {
         return false;
       }
       if (!this.removeLockIfUnchanged(owner)) {
         return false;
       }
     }
+    context.signal?.throwIfAborted();
     return this.cleanupOwned(expected);
   }
 
@@ -193,10 +209,13 @@ export class DaemonIdentityFile {
     }
   }
 
-  private async proveLockOwnerDead(owner: Readonly<DaemonLockOwner>): Promise<boolean> {
+  private async proveLockOwnerDead(
+    owner: Readonly<DaemonLockOwner>,
+    context: Readonly<ProcessIdentityContext> = {},
+  ): Promise<boolean> {
     let actual: string | null;
     try {
-      actual = await this.processIdentity(owner.pid);
+      actual = await this.processIdentity(owner.pid, context);
     } catch (error: unknown) {
       throw new DaemonIdentityFileError("lease_conflict", "unable to verify daemon identity lease owner", { cause: error });
     }
@@ -311,7 +330,7 @@ export function decodeDaemonIdentity(text: string): DaemonIdentity {
     || parsed.version !== 1
     || typeof parsed.managed !== "boolean"
     || !isPositiveSafeInteger(parsed.pid)
-    || !isCanonicalProcessIdentity(parsed.processStartIdentity)
+    || !isCanonicalProcessStartIdentity(parsed.processStartIdentity)
     || !isNonemptyString(parsed.instanceNonce)
     || !isNonemptyString(parsed.controlToken)
     || !isPort(parsed.port)
@@ -340,7 +359,7 @@ function decodeLockOwner(text: string): DaemonLockOwner {
   if (!isRecord(parsed) || !hasExactKeys(parsed, LOCK_KEYS)
     || parsed.version !== 1
     || !isPositiveSafeInteger(parsed.pid)
-    || !isCanonicalProcessIdentity(parsed.processStartIdentity)
+    || !isCanonicalProcessStartIdentity(parsed.processStartIdentity)
     || !isNonemptyString(parsed.leaseToken)) {
     throw new DaemonIdentityFileError("invalid_identity", "invalid daemon lock schema");
   }
@@ -355,22 +374,6 @@ function decodeLockOwner(text: string): DaemonLockOwner {
 function hasExactKeys(value: Readonly<Record<string, unknown>>, expected: readonly string[]): boolean {
   const keys = Object.keys(value).sort();
   return keys.length === expected.length && [...expected].sort().every((key, index) => keys[index] === key);
-}
-
-function isCanonicalProcessIdentity(value: unknown): value is string {
-  if (typeof value !== "string") {
-    return false;
-  }
-  if (/^linux:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(0|[1-9]\d*)$/u.test(value)
-    || /^windows:(0|[1-9]\d{0,19})$/u.test(value)) {
-    return true;
-  }
-  const macOs = /^macos:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)$/u.exec(value);
-  if (macOs?.[1] === undefined) {
-    return false;
-  }
-  const milliseconds = Date.parse(macOs[1]);
-  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString().replace(".000Z", "Z") === macOs[1];
 }
 
 function isCanonicalTimestamp(value: unknown): value is string {

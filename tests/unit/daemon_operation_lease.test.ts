@@ -2,7 +2,10 @@ import { chmod, lstat, mkdtemp, readFile, symlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DaemonOperationLeaseFile } from "../../src/daemon/operation_lease.js";
+import {
+  DaemonOperationLeaseFile,
+  decodeOperationOwner,
+} from "../../src/daemon/operation_lease.js";
 
 const START_IDENTITY = "linux:01234567-89ab-cdef-0123-456789abcdef:987654";
 
@@ -11,6 +14,17 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 describe("daemon operation lease", () => {
+  it("uses the shared canonical process identity formats for owner records", () => {
+    expect(() => decodeOperationOwner(JSON.stringify({
+      ...ownerRecord(),
+      processStartIdentity: "windows:001",
+    }))).toThrow();
+    expect(() => decodeOperationOwner(JSON.stringify({
+      ...ownerRecord(),
+      processStartIdentity: "macos:2026-02-30T12:00:00Z",
+    }))).toThrow();
+  });
+
   it("exclusively owns a protected file separate from daemon lifetime identity", async () => {
     const directory = await temporaryDirectory();
     const leaseFile = new DaemonOperationLeaseFile({
@@ -70,6 +84,46 @@ describe("daemon operation lease", () => {
     expect(JSON.parse(await readFile(path.join(directory, "daemon.operation.lock"), "utf8")))
       .toMatchObject({ leaseToken: "recovered-token" });
     recovered.release();
+    orphan.release();
+  });
+
+  it("atomically serializes competing recoverers without removing the new live lease", async () => {
+    const directory = await temporaryDirectory();
+    const orphan = await operationLease({ createToken: () => "orphan-token" }).acquire(directory);
+    let probes = 0;
+    let releaseProbes = (): void => undefined;
+    const bothProbing = new Promise<void>((resolve) => { releaseProbes = resolve; });
+    const proveDead = async (): Promise<null> => {
+      probes += 1;
+      if (probes === 2) releaseProbes();
+      await bothProbing;
+      return null;
+    };
+    const firstFile = operationLease({
+      pid: 5001,
+      processIdentity: async (pid) => pid === 4242 ? await proveDead() : START_IDENTITY,
+      createToken: () => "first-recoverer",
+    });
+    const secondFile = operationLease({
+      pid: 5002,
+      processIdentity: async (pid) => pid === 4242 ? await proveDead() : START_IDENTITY,
+      createToken: () => "second-recoverer",
+    });
+    const firstAcquire = firstFile.acquire(directory);
+    const secondAcquire = secondFile.acquire(directory);
+    const winner = await Promise.race([
+      firstAcquire.then((lease) => ({ lease, token: "first-recoverer" })),
+      secondAcquire.then((lease) => ({ lease, token: "second-recoverer" })),
+    ]);
+    expect(JSON.parse(await readFile(path.join(directory, "daemon.operation.lock"), "utf8")))
+      .toMatchObject({ leaseToken: winner.token });
+
+    let loserSettled = false;
+    const loser = (winner.token === "first-recoverer" ? secondAcquire : firstAcquire)
+      .finally(() => { loserSettled = true; });
+    await vi.waitFor(() => expect(loserSettled).toBe(false));
+    winner.lease.release();
+    (await loser).release();
     orphan.release();
   });
 

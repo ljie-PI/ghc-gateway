@@ -4,7 +4,10 @@ import { CliError } from "../../src/cli/control_client.js";
 import type { StartupConfig } from "../../src/config/startup_config.js";
 import { DaemonController, type DaemonControllerDependencies } from "../../src/daemon/controller.js";
 import type { DaemonIdentity } from "../../src/daemon/identity_file.js";
-import { LifecycleCoordinator } from "../../src/daemon/lifecycle_coordinator.js";
+import {
+  LifecycleCoordinator,
+  MAX_PENDING_LIFECYCLE_OPERATIONS_PER_DIRECTORY,
+} from "../../src/daemon/lifecycle_coordinator.js";
 import type { DaemonOperationLeaseAccess } from "../../src/daemon/operation_lease.js";
 
 function deferred() {
@@ -55,6 +58,39 @@ describe("daemon lifecycle coordination", () => {
       "lease:acquire:same",
       "lease:release:same",
     ]);
+  });
+
+  it("bounds pending callers per directory, immediately reclaims cancellation, and isolates directories", async () => {
+    const coordinator = new LifecycleCoordinator(scriptedLeases([]));
+    const release = deferred();
+    const active = coordinator.run("limited", {}, async () => {
+      await release.promise;
+      return "active";
+    });
+    const aborts = Array.from(
+      { length: MAX_PENDING_LIFECYCLE_OPERATIONS_PER_DIRECTORY },
+      () => new AbortController(),
+    );
+    const pending = aborts.map((abort, index) => coordinator.run(
+      "limited",
+      { signal: abort.signal },
+      async () => index,
+    ));
+
+    await expect(coordinator.run("limited", {}, async () => "overflow"))
+      .rejects.toEqual(new CliError("unavailable"));
+    await expect(coordinator.run("other", {}, async () => "other"))
+      .resolves.toBe("other");
+
+    aborts[0]?.abort();
+    await expect(pending[0]).rejects.toEqual(new CliError("interrupted"));
+    const replacement = coordinator.run("limited", {}, async () => "replacement");
+    release.resolve();
+    await expect(active).resolves.toBe("active");
+    await expect(Promise.all(pending.slice(1))).resolves.toHaveLength(
+      MAX_PENDING_LIFECYCLE_OPERATIONS_PER_DIRECTORY - 1,
+    );
+    await expect(replacement).resolves.toBe("replacement");
   });
 
   it("removes a canceled pending caller without affecting active or later work", async () => {
@@ -211,6 +247,221 @@ describe("daemon lifecycle coordination", () => {
     expect(elapsedMs).toBe(60_100);
   });
 
+  it("keeps the operation lease until a never-settling spawn acknowledges its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      const coordinator = new LifecycleCoordinator({
+        acquire: async () => {
+          events.push("lease:acquire");
+          return { release: () => events.push("lease:release") };
+        },
+      });
+      const controller = new DaemonController({
+        lifecycleCoordinator: coordinator,
+        identityFile: { read: async () => null, remove: async () => false },
+        processIdentity: async () => null,
+        spawn: async (_startup, context) => {
+          events.push("spawn:start");
+          return await new Promise<never>((_resolve, reject) => {
+            context?.signal.addEventListener("abort", () => {
+              events.push("spawn:abort-acknowledged");
+              reject(context.signal.reason);
+            }, { once: true });
+          });
+        },
+        delay: async () => undefined,
+        nowMs: Date.now,
+        controlRequest: async () => undefined,
+        terminate: async () => undefined,
+      });
+
+      const starting = controller.start(startup("bounded-spawn"));
+      const outcome = starting.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events).toEqual(["lease:acquire", "spawn:start"]);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await outcome).toMatchObject({ code: "timeout" });
+      expect(events).toEqual([
+        "lease:acquire",
+        "spawn:start",
+        "spawn:abort-acknowledged",
+        "lease:release",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps reconciliation owned while initial identity capture acknowledges its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      let processCalls = 0;
+      let alive = true;
+      const controller = new DaemonController({
+        lifecycleCoordinator: recordingCoordinator(events),
+        identityFile: { read: async () => null, remove: async () => false },
+        processIdentity: async (_pid, context) => {
+          processCalls += 1;
+          if (processCalls === 1) {
+            events.push("identity:start");
+            return await rejectOnAbort(context?.signal, () => events.push("identity:abort-acknowledged"));
+          }
+          return alive ? runningIdentity().processStartIdentity : null;
+        },
+        spawn: async () => ({ pid: 4242, unref() {} }),
+        delay: timedDelay,
+        nowMs: Date.now,
+        controlRequest: async () => undefined,
+        terminate: async () => { alive = false; events.push("terminate"); },
+      });
+
+      const starting = controller.start(startup("bounded-identity"));
+      const outcome = starting.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(events).toContain("identity:abort-acknowledged");
+      expect(events).not.toContain("lease:release");
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(await outcome).toMatchObject({ state: "unreachable" });
+      expect(events.indexOf("identity:abort-acknowledged")).toBeLessThan(events.indexOf("terminate"));
+      expect(events.at(-1)).toBe("lease:release");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a never-settling stop request and completes owned cleanup before release", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      let stopTimedOut = false;
+      const identity = runningIdentity();
+      const controller = new DaemonController({
+        lifecycleCoordinator: recordingCoordinator(events),
+        identityFile: {
+          read: async () => identity,
+          remove: async () => { events.push("remove"); return true; },
+        },
+        processIdentity: async () => stopTimedOut ? null : identity.processStartIdentity,
+        spawn: async () => ({ pid: 4243, unref() {} }),
+        delay: async () => undefined,
+        nowMs: Date.now,
+        controlRequest: async (current, method, _requestPath, context) => method === "GET"
+          ? { state: "running", instance: instanceOf(current) }
+          : await rejectOnAbort(context?.signal, () => {
+            stopTimedOut = true;
+            events.push("stop:abort-acknowledged");
+          }),
+        terminate: async () => undefined,
+      });
+
+      const stopping = controller.stop("bounded-stop");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(stopping).resolves.toMatchObject({ state: "stopped" });
+      expect(events).toEqual([
+        "lease:acquire",
+        "stop:abort-acknowledged",
+        "remove",
+        "lease:release",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not release while a stale-identity removal is acknowledging its deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: string[] = [];
+      const identity = runningIdentity();
+      const controller = new DaemonController({
+        lifecycleCoordinator: recordingCoordinator(events),
+        identityFile: {
+          read: async () => identity,
+          remove: async (_dataDir, _expected, context) => {
+            events.push("remove:start");
+            return await rejectOnAbort(context?.signal, () => events.push("remove:abort-acknowledged"));
+          },
+        },
+        processIdentity: async () => null,
+        spawn: async () => ({ pid: 4243, unref() {} }),
+        delay: async () => undefined,
+        nowMs: Date.now,
+        controlRequest: async () => undefined,
+        terminate: async () => undefined,
+      });
+
+      const status = controller.status("bounded-remove");
+      const outcome = status.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await outcome).toMatchObject({ code: "timeout" });
+      expect(events).toEqual([
+        "lease:acquire",
+        "remove:start",
+        "remove:abort-acknowledged",
+        "lease:release",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["terminate", "post-terminate identity reconciliation"])(
+    "bounds never-settling %s before releasing the operation lease",
+    async (stage) => {
+      vi.useFakeTimers();
+      try {
+        const events: string[] = [];
+        const identity = runningIdentity();
+        let terminated = false;
+        const controller = new DaemonController({
+          lifecycleCoordinator: recordingCoordinator(events),
+          identityFile: { read: async () => identity, remove: async () => false },
+          processIdentity: async (_pid, context) => {
+            if (terminated && stage !== "terminate") {
+              events.push("reconcile:start");
+              return await rejectOnAbort(
+                context?.signal,
+                () => events.push("reconcile:abort-acknowledged"),
+              );
+            }
+            return identity.processStartIdentity;
+          },
+          spawn: async () => ({ pid: 4243, unref() {} }),
+          delay: timedDelay,
+          nowMs: Date.now,
+          controlRequest: async (current, method) => method === "GET"
+            ? { state: "running", instance: instanceOf(current) }
+            : { instance: instanceOf(current) },
+          terminate: async (_current, context) => {
+            terminated = true;
+            if (stage === "terminate") {
+              events.push("terminate:start");
+              await rejectOnAbort(
+                context?.signal,
+                () => events.push("terminate:abort-acknowledged"),
+              );
+            }
+          },
+        });
+
+        const stopping = controller.stop(`bounded-${stage}`);
+        const outcome = stopping.catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(stage === "terminate" ? 30_000 : 20_000);
+        expect(await outcome).toMatchObject({ code: "timeout" });
+        const acknowledgment = stage === "terminate"
+          ? "terminate:abort-acknowledged"
+          : "reconcile:abort-acknowledged";
+        expect(events).toContain(acknowledgment);
+        expect(events.indexOf(acknowledgment)).toBeLessThan(events.indexOf("lease:release"));
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("does not start active work canceled while its lease is being acquired", async () => {
     const acquired = deferred();
     let firstAcquire = true;
@@ -337,6 +588,46 @@ function runningIdentity(): DaemonIdentity {
     port: 31_400,
     createdAt: "2026-09-03T12:00:00.000Z",
   };
+}
+
+function instanceOf(identity: Readonly<DaemonIdentity>) {
+  return {
+    pid: identity.pid,
+    processStartIdentity: identity.processStartIdentity,
+    instanceNonce: identity.instanceNonce,
+  };
+}
+
+async function timedDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    }, { once: true });
+  });
+}
+
+async function rejectOnAbort(signal: AbortSignal | undefined, acknowledge: () => void): Promise<never> {
+  if (signal === undefined) throw new Error("missing dependency signal");
+  return await new Promise<never>((_resolve, reject) => {
+    const abort = (): void => {
+      acknowledge();
+      reject(signal.reason);
+    };
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function recordingCoordinator(events: string[]): LifecycleCoordinator {
+  return new LifecycleCoordinator({
+    acquire: async () => {
+      events.push("lease:acquire");
+      return { release: () => events.push("lease:release") };
+    },
+  });
 }
 
 function scriptedLeases(events: string[]): DaemonOperationLeaseAccess {
