@@ -492,6 +492,9 @@ export class AdminManagementApi {
       const catalog = await this.dependencies.registry.get(account, signal);
       signal.throwIfAborted();
       await this.requireSameCredentialGeneration(accountId, account, signal);
+      if (!this.dependencies.registry.isCurrent(catalog)) {
+        throw new AdminApiError("revision_conflict");
+      }
       this.dependencies.preferredModels.markInvalidIfMissing(
         accountId,
         catalog,
@@ -515,6 +518,9 @@ export class AdminManagementApi {
       await this.requireSameCredentialGeneration(accountId, account, signal);
       let preference: AdminStoredPreference;
       try {
+        if (!this.dependencies.registry.isCurrent(catalog)) {
+          throw new AdminApiError("revision_conflict");
+        }
         preference = this.dependencies.preferredModels.setPreferred(
           accountId,
           modelId,
