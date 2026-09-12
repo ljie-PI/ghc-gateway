@@ -48,7 +48,7 @@ export interface SessionRequestExpectation {
   readonly protocol: SdkProtocol;
   readonly turn: SessionTurn;
   readonly imageBase64: string;
-  readonly turns: readonly ExpectedResult[];
+  readonly turns: readonly { readonly text: string }[];
   readonly calls: readonly ForecastCall[];
 }
 
@@ -69,7 +69,7 @@ function matchesSessionBody(body: unknown, expected: SessionRequestExpectation):
   const actual: unknown[][] = [];
   let system = protocol === "messages" ? request.system : request.instructions;
   const items = protocol === "responses" ? request.input : request.messages;
-  if (!Array.isArray(items)) return false;
+  if (!boundedArray(items)) return false;
   for (const value of items) {
     const item = record(value);
     if (item === undefined) return false;
@@ -88,7 +88,7 @@ function matchesSessionBody(body: unknown, expected: SessionRequestExpectation):
       if (item.role !== "user" && item.role !== "assistant") return false;
       if (!appendContent(actual, item.role, item.content, protocol, expected.imageBase64)) return false;
       if (item.tool_calls !== undefined) {
-        if (protocol !== "chat" || item.role !== "assistant" || !Array.isArray(item.tool_calls)) return false;
+        if (protocol !== "chat" || item.role !== "assistant" || !boundedArray(item.tool_calls)) return false;
         for (const call of item.tool_calls) {
           const tool = record(call);
           const fn = record(tool?.function);
@@ -102,7 +102,7 @@ function matchesSessionBody(body: unknown, expected: SessionRequestExpectation):
   if (turn === 1) {
     if (request.tools !== undefined) return false;
   } else {
-    if (!Array.isArray(request.tools) || request.tools.length !== 1) return false;
+    if (!boundedArray(request.tools) || request.tools.length !== 1) return false;
     const tool = record(request.tools[0]);
     const fn = protocol === "chat" ? record(tool?.function) : tool;
     if (fn?.name !== "get_hourly_forecast" || (protocol !== "messages" && tool?.type !== "function")) return false;
@@ -135,7 +135,7 @@ function matchesSessionBody(body: unknown, expected: SessionRequestExpectation):
 function appendContent(target: unknown[][], role: string, content: unknown, protocol: SdkProtocol, imageBase64: string): boolean {
   if (content === null || content === undefined || content === "") return role === "assistant";
   if (typeof content === "string") { target.push([role, "text", content]); return true; }
-  if (!Array.isArray(content)) return false;
+  if (!boundedArray(content)) return false;
   for (const value of content) {
     const part = record(value);
     if (part === undefined) return false;
@@ -166,14 +166,18 @@ function appendContent(target: unknown[][], role: string, content: unknown, prot
 
 function textContent(value: unknown, type: string): string | undefined {
   if (typeof value === "string") return value;
-  if (!Array.isArray(value) || value.length !== 1) return undefined;
+  if (!boundedArray(value) || value.length !== 1) return undefined;
   const part = record(value[0]);
   return part?.type === type && typeof part.text === "string" ? part.text : undefined;
 }
 
 function parseArguments(value: unknown): unknown {
-  if (typeof value !== "string") throw new Error("Expected JSON tool arguments");
+  if (typeof value !== "string" || Buffer.byteLength(value) > 64 * 1024) throw new Error("Expected JSON tool arguments");
   return JSON.parse(value) as unknown;
+}
+
+function boundedArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.length <= 64;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

@@ -75,7 +75,7 @@ export function matchesTextRequest(body: unknown, protocol: SdkProtocol, scenari
     system = request.instructions;
     if (typeof request.input === "string") content = request.input;
     else {
-      if (!Array.isArray(request.input)) return false;
+      if (!boundedArray(request.input)) return false;
       const input = [...request.input];
       if (system === undefined && ["system", "developer"].includes(String(record(input[0])?.role))) {
         system = record(input.shift())?.content;
@@ -86,7 +86,7 @@ export function matchesTextRequest(body: unknown, protocol: SdkProtocol, scenari
       content = message.content;
     }
   } else {
-    if (!Array.isArray(request.messages)) return false;
+    if (!boundedArray(request.messages)) return false;
     const messages = [...request.messages];
     if (protocol === "chat" && record(messages[0])?.role === "system") {
       system = record(messages.shift())?.content;
@@ -100,7 +100,7 @@ export function matchesTextRequest(body: unknown, protocol: SdkProtocol, scenari
   }
   if (system !== scenario.system) return false;
   if (typeof content === "string") return imageBase64 === undefined && content === scenario.prompt;
-  if (!Array.isArray(content) || content.length !== (imageBase64 === undefined ? 1 : 2)) return false;
+  if (!boundedArray(content) || content.length !== (imageBase64 === undefined ? 1 : 2)) return false;
   let texts = 0;
   let images = 0;
   for (const value of content) {
@@ -116,12 +116,18 @@ export function matchesTextRequest(body: unknown, protocol: SdkProtocol, scenari
         if (part.type !== "image" || source?.type !== "base64" || source.media_type !== "image/jpeg" || source.data !== imageBase64) return false;
       } else {
         const image = protocol === "chat" ? record(part.image_url)?.url : part.image_url;
-        if (part.type !== (protocol === "chat" ? "image_url" : "input_image") || image !== `data:image/jpeg;base64,${imageBase64}`) return false;
+        const detail = protocol === "chat" ? record(part.image_url)?.detail : part.detail;
+        if (part.type !== (protocol === "chat" ? "image_url" : "input_image") || image !== `data:image/jpeg;base64,${imageBase64}`
+          || (detail !== undefined && detail !== "auto")) return false;
       }
       images += 1;
     }
   }
   return texts === 1 && images === (imageBase64 === undefined ? 0 : 1);
+}
+
+function boundedArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.length <= 64;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

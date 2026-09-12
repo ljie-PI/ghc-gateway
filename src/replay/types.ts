@@ -1,8 +1,6 @@
 import type { InferenceProtocol } from "../protocols/conversion/types.js";
 
-/**
- * Versioned replay exchange format.
- */
+/** Versioned replay exchange format. Response bytes remain the corpus authority. */
 export interface ReplayExchangeRecord {
   readonly version: 1;
   readonly caseId: string;
@@ -13,8 +11,6 @@ export interface ReplayExchangeRecord {
   readonly upstreamModel: string;
   readonly capturedAt?: string;
   readonly generatedAt?: string;
-  /** Shared ordered responses are never eligible for legacy independent matching. */
-  readonly selection?: "explicit";
   readonly request: {
     readonly method: string;
     readonly path: string;
@@ -52,31 +48,29 @@ export interface ReplayExchangeRecord {
   };
 }
 
-/** Response/expectation ownership is upstream-only; matrix callers reuse these IDs. */
-export interface ReplayResponseSet {
-  readonly id: string;
-  readonly targetProtocol: InferenceProtocol;
-  readonly exchangeIds: readonly string[];
-}
-
 export interface ReplayScenarioManifest {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
   readonly exchanges: readonly ReplayExchangeRecord[];
-  readonly responseSets: readonly ReplayResponseSet[];
 }
 
 export interface ReplayScenarioStep {
-  readonly exchangeId: string;
-  /**
-   * Independently validate significant ordered history, images, tool names/JSON
-   * arguments, and result IDs/content. Never derive this predicate by recording
-   * gateway requests. Only synchronous boolean true accepts a request; exceptions
-   * and all other return values fail closed. Do not retain the supplied body.
-   */
+  readonly ordinal: number;
+  readonly caseId: string;
+  readonly stream: boolean;
+  /** Synchronous, independently authored semantic request predicate. */
   readonly matchesRequest: (body: unknown) => boolean;
 }
 
+/** Harness registration is the sole scenario-selection authority. */
 export interface ReplayScenario {
-  readonly id: string;
+  readonly scenarioId: string;
+  readonly targetProtocol: InferenceProtocol;
+  readonly model: string;
   readonly steps: readonly ReplayScenarioStep[];
+}
+
+export interface ReplayReceipt {
+  readonly scenarioId: string;
+  readonly scenarioStep: number;
+  readonly matchedCaseId?: string;
 }

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createSdkClients, REPLAY_TARGETS, SDK_PROTOCOLS, type SdkProtocol, type SdkToolCall as ForecastCall } from "./client.js";
 import { readExpectedExchangeResult, type ExpectedResult } from "./replay_expectations.js";
 import { startReplaySdkHarness, type ReplaySdkHarness } from "./replay_harness.js";
-import { expectSessionTurn, matchesSessionRequest } from "./session_expectations.js";
+import { expectSessionTurn } from "./session_expectations.js";
 import { createSessionDriver, SESSION_TURNS, type SessionTurn } from "./session_inputs.js";
 import { TOKYO_RESULT } from "./scenarios.js";
 
@@ -19,7 +19,7 @@ describe("coherent five-turn image/tool continuity through official SDKs and pro
     harness = await startReplaySdkHarness();
     imageBase64 = (await readFile(new URL("./images/vergil.jpg", import.meta.url))).toString("base64");
     for (const target of REPLAY_TARGETS) {
-      expected.set(target.protocol, await Promise.all(responseSet(target.protocol).exchangeIds.map((id) => {
+      expected.set(target.protocol, await Promise.all(sessionIds(target.protocol).map((id) => {
         const exchange = harness.corpus.exchanges.find((entry) => entry.caseId === id);
         if (exchange === undefined) throw new Error("Missing session exchange");
         return readExpectedExchangeResult(exchange);
@@ -32,8 +32,9 @@ describe("coherent five-turn image/tool continuity through official SDKs and pro
   describe.each(SDK_PROTOCOLS)("%s downstream", (downstream) => {
     it.each(REPLAY_TARGETS)("five ordered turns against $protocol upstream", async (target) => {
       let calls: readonly ForecastCall[] = [];
-      const scenarioId = `session.${downstream}.${target.protocol}`;
-      select(scenarioId, target.protocol, () => calls);
+      const scenarioId = `replay.${target.protocol}.coherent-session`;
+      const receiptStart = harness.receipts.length;
+      select(scenarioId);
       const execute = createSessionDriver(createSdkClients(harness), downstream, target.model, imageBase64);
       try {
         for (const turn of SESSION_TURNS) {
@@ -42,9 +43,9 @@ describe("coherent five-turn image/tool continuity through official SDKs and pro
           if (turn === 2) calls = actual;
         }
         harness.replayServer.finishScenario();
-        const receipts = harness.receipts.filter((receipt) => receipt.scenarioId === scenarioId);
+        const receipts = harness.receipts.slice(receiptStart);
         expect(receipts.map((receipt) => receipt.scenarioStep)).toEqual(SESSION_TURNS);
-        expect(receipts.map((receipt) => receipt.matchedCaseId)).toEqual(responseSet(target.protocol).exchangeIds);
+        expect(receipts.map((receipt) => receipt.matchedCaseId)).toEqual(sessionIds(target.protocol));
       } finally {
         harness.replayServer.abortScenario();
       }
@@ -58,8 +59,9 @@ describe("coherent five-turn image/tool continuity through official SDKs and pro
       let calls: readonly ForecastCall[] = [];
       let changed = false;
       const failTurn: SessionTurn = mutation === "tool-schema" ? 2 : 3;
-      const scenarioId = `session.reject.${target.protocol}.${mutation}`;
-      select(scenarioId, target.protocol, () => calls);
+      const scenarioId = `replay.${target.protocol}.coherent-session`;
+      const receiptStart = harness.receipts.length;
+      select(scenarioId);
       let requests = 0;
       const clients = createSdkClients({ ...harness, fetch: async (url, init) => {
         requests += 1;
@@ -81,7 +83,7 @@ describe("coherent five-turn image/tool continuity through official SDKs and pro
           (error as { status?: number }).status);
         expect(changed, "the significant request field was actually mutated").toBe(true);
         expect(status, "gateway propagates replay rejection").toBe(409);
-        const receipts = harness.receipts.filter((receipt) => receipt.scenarioId === scenarioId);
+        const receipts = harness.receipts.slice(receiptStart);
         expect(receipts.map((receipt) => receipt.scenarioStep)).toEqual(SESSION_TURNS.slice(0, failTurn));
         expect(receipts.at(-1)?.matchedCaseId, "mutant reached replay but did not match").toBeUndefined();
         expect(() => harness.replayServer.finishScenario()).toThrow("replay scenario incomplete");
@@ -91,19 +93,12 @@ describe("coherent five-turn image/tool continuity through official SDKs and pro
     });
   });
 
-  function responseSet(protocol: SdkProtocol) {
-    const set = harness.corpus.responseSets.find((candidate) => candidate.id === `cosplay-shoot-planning.${protocol}`);
-    if (set === undefined || set.exchangeIds.length !== 5) throw new Error("Missing five-turn response set");
-    return set;
+  function sessionIds(protocol: SdkProtocol): string[] {
+    return SESSION_TURNS.map((turn) => `replay.${protocol}.coherent-session.turn-${turn}`);
   }
 
-  function select(id: string, protocol: SdkProtocol, calls: () => readonly ForecastCall[]) {
-    harness.replayServer.selectScenario({ id, steps: responseSet(protocol).exchangeIds.map((exchangeId, index) => ({
-      exchangeId,
-      matchesRequest: (body) => matchesSessionRequest(body, {
-        protocol, turn: SESSION_TURNS[index]!, imageBase64, turns: expected.get(protocol)!, calls: calls(),
-      }),
-    })) });
+  function select(id: string): void {
+    harness.replayServer.selectScenario(id);
   }
 });
 

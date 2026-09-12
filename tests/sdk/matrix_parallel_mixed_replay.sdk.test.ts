@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   CHAT_MODEL,
   MESSAGES_MODEL,
@@ -80,9 +80,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
   afterAll(async () => {
     await harness.close();
   });
+  afterEach(() => { harness.replayServer.abortScenario(); });
 
   describe("Parallel Tools Execution across Matrix Cells", () => {
     it("C -> C parallel tools", async () => {
+      const receiptStart = select("chat", "parallel-tools");
       const resp = await openai.chat.completions.create({
         model: CHAT_MODEL,
         messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
@@ -91,12 +93,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(2);
       expect(calls![0]?.id).not.toBe(calls![1]?.id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.parallel-tools.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
+      finish("chat", "parallel-tools", receiptStart);
     });
 
     it("C -> R parallel tools", async () => {
+      const receiptStart = select("responses", "parallel-tools");
       const resp = await openai.chat.completions.create({
         model: NATIVE_RESPONSES_MODEL,
         messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
@@ -105,12 +106,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(2);
       expect(calls![0]?.id).not.toBe(calls![1]?.id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.parallel-tools.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
+      finish("responses", "parallel-tools", receiptStart);
     });
 
     it("C -> M parallel tools", async () => {
+      const receiptStart = select("messages", "parallel-tools");
       const resp = await openai.chat.completions.create({
         model: MESSAGES_MODEL,
         messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
@@ -119,12 +119,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(2);
       expect(calls![0]?.id).not.toBe(calls![1]?.id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.parallel-tools.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
+      finish("messages", "parallel-tools", receiptStart);
     });
 
     it("M -> C parallel tools", async () => {
+      const receiptStart = select("chat", "parallel-tools");
       const resp = await anthropic.messages.create({
         model: CHAT_MODEL,
         max_tokens: 256,
@@ -134,12 +133,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.content.filter((b) => b.type === "tool_use");
       expect(calls.length).toBe(2);
       expect(calls[0]?.id).not.toBe(calls[1]?.id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.parallel-tools.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
+      finish("chat", "parallel-tools", receiptStart);
     });
 
     it("M -> R parallel tools", async () => {
+      const receiptStart = select("responses", "parallel-tools");
       const resp = await anthropic.messages.create({
         model: NATIVE_RESPONSES_MODEL,
         max_tokens: 256,
@@ -149,12 +147,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.content.filter((b) => b.type === "tool_use");
       expect(calls.length).toBe(2);
       expect(calls[0]?.id).not.toBe(calls[1]?.id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.parallel-tools.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
+      finish("responses", "parallel-tools", receiptStart);
     });
 
     it("M -> M parallel tools", async () => {
+      const receiptStart = select("messages", "parallel-tools");
       const resp = await anthropic.messages.create({
         model: MESSAGES_MODEL,
         max_tokens: 256,
@@ -164,12 +161,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.content.filter((b) => b.type === "tool_use");
       expect(calls.length).toBe(2);
       expect(calls[0]?.id).not.toBe(calls[1]?.id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.parallel-tools.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
+      finish("messages", "parallel-tools", receiptStart);
     });
 
     it("R -> C parallel tools", async () => {
+      const receiptStart = select("chat", "parallel-tools");
       const resp = await openai.responses.create({
         model: CHAT_MODEL,
         input: "Get weather for Tokyo and Paris simultaneously using get_weather twice.",
@@ -178,12 +174,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.output.filter((i) => i.type === "function_call");
       expect(calls.length).toBe(2);
       expect(calls[0]?.call_id).not.toBe(calls[1]?.call_id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.parallel-tools.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
+      finish("chat", "parallel-tools", receiptStart);
     });
 
     it("R -> M parallel tools", async () => {
+      const receiptStart = select("messages", "parallel-tools");
       const resp = await openai.responses.create({
         model: MESSAGES_MODEL,
         input: "Get weather for Tokyo and Paris simultaneously using get_weather twice.",
@@ -192,12 +187,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.output.filter((i) => i.type === "function_call");
       expect(calls.length).toBe(2);
       expect(calls[0]?.call_id).not.toBe(calls[1]?.call_id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.parallel-tools.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
+      finish("messages", "parallel-tools", receiptStart);
     });
 
     it("R -> R parallel tools", async () => {
+      const receiptStart = select("responses", "parallel-tools");
       const resp = await openai.responses.create({
         model: NATIVE_RESPONSES_MODEL,
         input: "Get weather for Tokyo and Paris simultaneously using get_weather twice.",
@@ -206,14 +200,13 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       const calls = resp.output.filter((i) => i.type === "function_call");
       expect(calls.length).toBe(2);
       expect(calls[0]?.call_id).not.toBe(calls[1]?.call_id);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.parallel-tools.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
+      finish("responses", "parallel-tools", receiptStart);
     });
   });
 
   describe("Mixed Image & Tool Execution across Matrix Cells", () => {
     it("C -> C mixed image and tool", async () => {
+      const receiptStart = select("chat", "mixed-image-tool");
       const resp = await openai.chat.completions.create({
         model: CHAT_MODEL,
         messages: [{
@@ -227,12 +220,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const calls = resp.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(1);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
+      finish("chat", "mixed-image-tool", receiptStart);
     });
 
     it("C -> R mixed image and tool", async () => {
+      const receiptStart = select("responses", "mixed-image-tool");
       const resp = await openai.chat.completions.create({
         model: NATIVE_RESPONSES_MODEL,
         messages: [{
@@ -246,12 +238,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const calls = resp.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(1);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
+      finish("responses", "mixed-image-tool", receiptStart);
     });
 
     it("C -> M mixed image and tool", async () => {
+      const receiptStart = select("messages", "mixed-image-tool");
       const resp = await openai.chat.completions.create({
         model: MESSAGES_MODEL,
         messages: [{
@@ -265,12 +256,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const calls = resp.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(1);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
+      finish("messages", "mixed-image-tool", receiptStart);
     });
 
     it("M -> C mixed image and tool", async () => {
+      const receiptStart = select("chat", "mixed-image-tool");
       const resp = await anthropic.messages.create({
         model: CHAT_MODEL,
         max_tokens: 256,
@@ -285,12 +275,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const calls = resp.content.filter((b) => b.type === "tool_use");
       expect(calls.length).toBe(1);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
+      finish("chat", "mixed-image-tool", receiptStart);
     });
 
     it("M -> R mixed image and tool", async () => {
+      const receiptStart = select("responses", "mixed-image-tool");
       const resp = await anthropic.messages.create({
         model: NATIVE_RESPONSES_MODEL,
         max_tokens: 256,
@@ -305,12 +294,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const calls = resp.content.filter((b) => b.type === "tool_use");
       expect(calls.length).toBe(1);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
+      finish("responses", "mixed-image-tool", receiptStart);
     });
 
     it("M -> M mixed image and tool", async () => {
+      const receiptStart = select("messages", "mixed-image-tool");
       const resp = await anthropic.messages.create({
         model: MESSAGES_MODEL,
         max_tokens: 256,
@@ -325,12 +313,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const calls = resp.content.filter((b) => b.type === "tool_use");
       expect(calls.length).toBe(1);
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
+      finish("messages", "mixed-image-tool", receiptStart);
     });
 
     it("R -> C mixed image and tool", async () => {
+      const receiptStart = select("chat", "mixed-image-tool");
       const resp = await openai.responses.create({
         model: CHAT_MODEL,
         input: [
@@ -347,12 +334,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const call = resp.output.find((i) => i.type === "function_call");
       expect(call).toBeDefined();
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.chat.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/chat/completions");
-      expect(r?.model).toBe(CHAT_MODEL);
+      finish("chat", "mixed-image-tool", receiptStart);
     });
 
     it("R -> M mixed image and tool", async () => {
+      const receiptStart = select("messages", "mixed-image-tool");
       const resp = await openai.responses.create({
         model: MESSAGES_MODEL,
         input: [
@@ -369,12 +355,11 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const call = resp.output.find((i) => i.type === "function_call");
       expect(call).toBeDefined();
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.messages.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/v1/messages");
-      expect(r?.model).toBe(MESSAGES_MODEL);
+      finish("messages", "mixed-image-tool", receiptStart);
     });
 
     it("R -> R mixed image and tool", async () => {
+      const receiptStart = select("responses", "mixed-image-tool");
       const resp = await openai.responses.create({
         model: NATIVE_RESPONSES_MODEL,
         input: [
@@ -391,9 +376,22 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       });
       const call = resp.output.find((i) => i.type === "function_call");
       expect(call).toBeDefined();
-      const r = harness.receipts.find((rec) => rec.matchedCaseId === "replay.responses.mixed-image-tool.nonstream");
-      expect(r?.path).toBe("/responses");
-      expect(r?.model).toBe(NATIVE_RESPONSES_MODEL);
+      finish("responses", "mixed-image-tool", receiptStart);
     });
   });
+
+  function select(protocol: "chat" | "messages" | "responses", family: "parallel-tools" | "mixed-image-tool"): number {
+    const receiptStart = harness.receipts.length;
+    harness.replayServer.selectScenario(`replay.${protocol}.${family}.nonstream`);
+    return receiptStart;
+  }
+
+  function finish(protocol: "chat" | "messages" | "responses", family: "parallel-tools" | "mixed-image-tool", receiptStart: number): void {
+    const scenarioId = `replay.${protocol}.${family}.nonstream`;
+    harness.replayServer.finishScenario();
+    expect(harness.receipts.slice(receiptStart)).toEqual([
+      { scenarioId, scenarioStep: 1, matchedCaseId: scenarioId },
+    ]);
+  }
+
 });

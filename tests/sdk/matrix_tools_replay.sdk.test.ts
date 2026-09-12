@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   CHAT_MODEL,
   MESSAGES_MODEL,
@@ -69,9 +69,11 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
   afterAll(async () => {
     await harness.close();
   });
+  afterEach(() => { harness.replayServer.abortScenario(); });
 
   describe("C -> C (Chat -> Chat tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("chat");
       const first = await openai.chat.completions.create({
         model: CHAT_MODEL,
         messages: [{ role: "user", content: "What is the weather in Tokyo?" }],
@@ -93,11 +95,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.choices[0]?.message.content?.length).toBeGreaterThan(0);
+      finish("chat", receiptStart);
     });
   });
 
   describe("C -> R (Chat -> Responses tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("responses");
       const first = await openai.chat.completions.create({
         model: NATIVE_RESPONSES_MODEL,
         messages: [{ role: "user", content: "What is the weather in Tokyo?" }],
@@ -119,11 +123,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.choices[0]?.message.content?.length).toBeGreaterThan(0);
+      finish("responses", receiptStart);
     });
   });
 
   describe("C -> M (Chat -> Messages tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("messages");
       const first = await openai.chat.completions.create({
         model: MESSAGES_MODEL,
         messages: [{ role: "user", content: "What is the weather in Tokyo?" }],
@@ -145,11 +151,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.choices[0]?.message.content?.length).toBeGreaterThan(0);
+      finish("messages", receiptStart);
     });
   });
 
   describe("M -> C (Messages -> Chat tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("chat");
       const first = await anthropic.messages.create({
         model: CHAT_MODEL,
         max_tokens: 64,
@@ -169,11 +177,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.content[0]?.type).toBe("text");
+      finish("chat", receiptStart);
     });
   });
 
   describe("M -> M (Messages -> Messages tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("messages");
       const first = await anthropic.messages.create({
         model: MESSAGES_MODEL,
         max_tokens: 64,
@@ -193,11 +203,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.content[0]?.type).toBe("text");
+      finish("messages", receiptStart);
     });
   });
 
   describe("M -> R (Messages -> Responses tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("responses");
       const first = await anthropic.messages.create({
         model: NATIVE_RESPONSES_MODEL,
         max_tokens: 64,
@@ -217,11 +229,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.content[0]?.type).toBe("text");
+      finish("responses", receiptStart);
     });
   });
 
   describe("R -> C (Responses -> Chat tools & continuation)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("chat");
       const first = await openai.responses.create({
         model: CHAT_MODEL,
         input: "Call get_weather once with city Tokyo.",
@@ -243,11 +257,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.output_text?.length).toBeGreaterThan(0);
+      finish("chat", receiptStart);
     });
   });
 
   describe("R -> M (Responses -> Messages tools & continuation)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("messages");
       const first = await openai.responses.create({
         model: MESSAGES_MODEL,
         input: "Call get_weather once with city Tokyo.",
@@ -273,11 +289,13 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.output_text?.length).toBeGreaterThan(0);
+      finish("messages", receiptStart);
     });
   });
 
   describe("R -> R (Responses -> Responses native tools & continuation)", () => {
     it("executes tool call and second request tool result", async () => {
+      const receiptStart = select("responses");
       const first = await openai.responses.create({
         model: NATIVE_RESPONSES_MODEL,
         input: "What is the weather in Tokyo?",
@@ -298,6 +316,23 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
         ],
       });
       expect(second.output_text?.length).toBeGreaterThan(0);
+      finish("responses", receiptStart);
     });
   });
+
+  function select(protocol: "chat" | "messages" | "responses"): number {
+    const receiptStart = harness.receipts.length;
+    harness.replayServer.selectScenario(`replay.${protocol}.weather-roundtrip`);
+    return receiptStart;
+  }
+
+  function finish(protocol: "chat" | "messages" | "responses", receiptStart: number): void {
+    const scenarioId = `replay.${protocol}.weather-roundtrip`;
+    harness.replayServer.finishScenario();
+    expect(harness.receipts.slice(receiptStart)).toEqual([
+      { scenarioId, scenarioStep: 1, matchedCaseId: `replay.${protocol}.tool-call.nonstream` },
+      { scenarioId, scenarioStep: 2, matchedCaseId: `replay.${protocol}.tool-result.nonstream` },
+    ]);
+  }
+
 });

@@ -5,7 +5,7 @@ import {
   createSdkClients, executeChat, executeMessages, executeResponses, REPLAY_TARGETS, SDK_PROTOCOLS,
   type SdkClients, type SdkProtocol,
 } from "./client.js";
-import { expectReasoningResult, expectUsage, matchesTextRequest, readExpectedExchangeResult } from "./replay_expectations.js";
+import { expectReasoningResult, expectUsage, readExpectedExchangeResult } from "./replay_expectations.js";
 import { type ReplaySdkHarness, startReplaySdkHarness } from "./replay_harness.js";
 
 const prompt = "Explain quantum entanglement in 20 words.";
@@ -25,10 +25,8 @@ describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", 
       const exchangeId = `replay.${target.protocol}.reasoning-effort.nonstream`;
       const exchange = harness.corpus.exchanges.find((candidate) => candidate.caseId === exchangeId)!;
       const expected = await readExpectedExchangeResult(exchange);
-      harness.replayServer.selectScenario({
-        id: `${downstream}.${target.protocol}.reasoning`,
-        steps: [{ exchangeId, matchesRequest: (body) => matchesTextRequest(body, target.protocol, { prompt }, undefined) }],
-      });
+      const receiptStart = harness.receipts.length;
+      harness.replayServer.selectScenario(exchangeId);
       try {
         const result = await executeReasoning(downstream, target.model);
         expect(expected.text.length).toBeGreaterThan(0);
@@ -64,6 +62,9 @@ describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", 
           }
         }
         harness.replayServer.finishScenario();
+        expect(harness.receipts.slice(receiptStart)).toEqual([
+          { scenarioId: exchangeId, scenarioStep: 1, matchedCaseId: exchangeId },
+        ]);
       } finally { harness.replayServer.abortScenario(); }
     });
   });

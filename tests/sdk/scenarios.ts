@@ -1,7 +1,7 @@
 import { IMAGE_ANALYSIS_SYSTEM, LONG_TEXT_PROMPT, SESSION_IMAGE_PROMPT } from "../../scripts/tooling/capture_scenarios.js";
 
 export {
-  LONG_TEXT_PROMPT, SESSION_SYSTEM, SESSION_IMAGE_PROMPT, FORECAST_COMPARE_PROMPT,
+  IMAGE_ANALYSIS_SYSTEM, LONG_TEXT_PROMPT, SESSION_SYSTEM, SESSION_IMAGE_PROMPT, FORECAST_COMPARE_PROMPT,
   FORECAST_FIELDS, FORECAST_PARAMETERS, FORECAST_TOOL_OPENAI, FORECAST_TOOL_RESPONSES,
   FORECAST_TOOL_ANTHROPIC, expectedForecastArguments, TOKYO_RESULT, PARIS_RESULT,
   SESSION_SYNTHESIS_PROMPT, SESSION_SHOT_LIST_PROMPT, SESSION_AUDIT_PROMPT,
@@ -14,6 +14,18 @@ export interface TextScenario {
   readonly imagePath?: string;
   readonly facts: readonly { readonly name: string; readonly pattern: RegExp }[];
 }
+
+export const WEATHER_PROMPT = "What is the weather in Tokyo?";
+export const WEATHER_RESPONSES_PROMPT = "Call get_weather once with city Tokyo.";
+export const PARALLEL_WEATHER_PROMPT = "Get weather for Tokyo and Paris simultaneously using get_weather twice.";
+export const MIXED_WEATHER_PROMPT = "What is the weather in the city where this character resides? Call get_weather.";
+export const WEATHER_RESULT = "{\"temperature\":22,\"condition\":\"sunny\"}";
+export const REASONING_PROMPT = "Explain quantum entanglement in 20 words.";
+export const WEATHER_PARAMETERS = {
+  type: "object",
+  properties: { city: { type: "string" } },
+  required: ["city"],
+} as const;
 
 export const TEXT_SCENARIOS: readonly TextScenario[] = [
   { id: "plain-text", prompt: LONG_TEXT_PROMPT, facts: [] },

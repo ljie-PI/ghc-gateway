@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "exchanges": [
     {
       "version": 1,
@@ -1620,8 +1620,7 @@
           "reasoningTokens": 774,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1695,8 +1694,7 @@
           "reasoningTokens": 417,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1732,8 +1730,7 @@
           "reasoningTokens": 1431,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1769,8 +1766,7 @@
           "reasoningTokens": 1274,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1806,8 +1802,7 @@
           "reasoningTokens": 1442,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1842,8 +1837,7 @@
           "reasoningTokens": 0,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1917,8 +1911,7 @@
           "reasoningTokens": 0,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1954,8 +1947,7 @@
           "reasoningTokens": 0,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1991,8 +1983,7 @@
           "reasoningTokens": 0,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2028,8 +2019,7 @@
           "reasoningTokens": 88,
           "visualTokens": "not_reported"
         }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2064,8 +2054,7 @@
           "visualTokens": "not_reported"
         }
       },
-      "capturedAt": "2026-09-08T13:46:01.413Z",
-      "selection": "explicit"
+      "capturedAt": "2026-09-08T13:46:01.413Z"
     },
     {
       "version": 1,
@@ -2139,8 +2128,7 @@
           "visualTokens": "not_reported"
         }
       },
-      "capturedAt": "2026-09-08T13:46:09.465Z",
-      "selection": "explicit"
+      "capturedAt": "2026-09-08T13:46:09.465Z"
     },
     {
       "version": 1,
@@ -2176,8 +2164,7 @@
           "visualTokens": "not_reported"
         }
       },
-      "capturedAt": "2026-09-08T13:46:23.632Z",
-      "selection": "explicit"
+      "capturedAt": "2026-09-08T13:46:23.632Z"
     },
     {
       "version": 1,
@@ -2213,8 +2200,7 @@
           "visualTokens": "not_reported"
         }
       },
-      "capturedAt": "2026-09-08T13:46:39.663Z",
-      "selection": "explicit"
+      "capturedAt": "2026-09-08T13:46:39.663Z"
     },
     {
       "version": 1,
@@ -2250,43 +2236,7 @@
           "visualTokens": "not_reported"
         }
       },
-      "capturedAt": "2026-09-08T13:46:52.509Z",
-      "selection": "explicit"
-    }
-  ],
-  "responseSets": [
-    {
-      "id": "cosplay-shoot-planning.chat",
-      "targetProtocol": "chat",
-      "exchangeIds": [
-        "replay.chat.coherent-session.turn-1",
-        "replay.chat.coherent-session.turn-2",
-        "replay.chat.coherent-session.turn-3",
-        "replay.chat.coherent-session.turn-4",
-        "replay.chat.coherent-session.turn-5"
-      ]
-    },
-    {
-      "id": "cosplay-shoot-planning.responses",
-      "targetProtocol": "responses",
-      "exchangeIds": [
-        "replay.responses.coherent-session.turn-1",
-        "replay.responses.coherent-session.turn-2",
-        "replay.responses.coherent-session.turn-3",
-        "replay.responses.coherent-session.turn-4",
-        "replay.responses.coherent-session.turn-5"
-      ]
-    },
-    {
-      "id": "cosplay-shoot-planning.messages",
-      "targetProtocol": "messages",
-      "exchangeIds": [
-        "replay.messages.coherent-session.turn-1",
-        "replay.messages.coherent-session.turn-2",
-        "replay.messages.coherent-session.turn-3",
-        "replay.messages.coherent-session.turn-4",
-        "replay.messages.coherent-session.turn-5"
-      ]
+      "capturedAt": "2026-09-08T13:46:52.509Z"
     }
   ]
 }
