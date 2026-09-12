@@ -831,17 +831,18 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
   }
   const sourceName = toolName(shape, "REQ-R-EXT-FUNCTION-NAME");
   const description = optionalString(single(shape, "description", "REQ-R-EXT-FUNCTION-DESCRIPTION"), "REQ-R-EXT-FUNCTION-DESCRIPTION");
-  const parameters = requiredObject(single(shape, "parameters", "REQ-R-EXT-FUNCTION-SCHEMA"), "REQ-R-EXT-FUNCTION-SCHEMA");
-  if (single(parameters, "type", "REQ-R-EXT-FUNCTION-SCHEMA-TYPE") !== "object") {
-    invalid("REQ-R-EXT-FUNCTION-SCHEMA");
-  }
-  const strictValue = single(shape, "strict", "REQ-R-EXT-FUNCTION-STRICT");
+  const parametersValue = single(shape, "parameters", "REQ-R-EXT-FUNCTION-SCHEMA");
+  const parameters = isWireJsonObject(parametersValue)
+    ? normalizedParameters(requiredObject(parametersValue, "REQ-R-EXT-FUNCTION-SCHEMA"))
+    : object([["type", "object"], ["properties", object([])]]);
+  const nestedStrict = single(shape, "strict", "REQ-R-EXT-FUNCTION-STRICT");
+  const strictValue = nestedStrict === undefined && nested !== undefined
+    ? single(tool, "strict", "REQ-R-EXT-FUNCTION-STRICT")
+    : nestedStrict;
   if (strictValue !== undefined && typeof strictValue !== "boolean") {
     invalid("REQ-R-EXT-FUNCTION-STRICT");
   }
-  if (strictValue === undefined && !isOpenAiStrictSchemaCompatible(parameters)) {
-    unsupported("REQ-R-EXT-FUNCTION-STRICT-AUTO");
-  }
+  const projectedStrict = strictValue ?? (isOpenAiStrictSchemaCompatible(parameters) ? true : undefined);
   const chatName = namespace === undefined ? sourceName : projectedNamespaceName(namespace, sourceName);
   addBinding(state, {
     kind: namespace === undefined ? "function" : "namespace",
@@ -852,8 +853,8 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
     ["type", "function"],
     ["name", chatName],
     ...(description === undefined ? [] : [["description", description] as const]),
-    ["parameters", normalizedParameters(parameters)],
-    ["strict", strictValue ?? true],
+    ["parameters", parameters],
+    ...(projectedStrict === undefined ? [] : [["strict", projectedStrict] as const]),
   ]));
 }
 

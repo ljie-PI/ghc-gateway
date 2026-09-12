@@ -608,7 +608,10 @@ function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
     stream: optionalBoolean(oneMember(semanticBody, "stream", "REQ-R-STREAM"), "REQ-R-STREAM") ?? false,
     instructions: decodeResponsesInstructions(oneMember(semanticBody, "instructions", "REQ-R-INSTRUCTIONS")),
     items,
-    tools: decodeResponsesTools(oneMember(semanticBody, "tools", "REQ-R-TOOLS")).map((tool) => {
+    tools: decodeResponsesTools(
+      oneMember(semanticBody, "tools", "REQ-R-TOOLS"),
+      extended !== undefined,
+    ).map((tool) => {
       const binding = extended?.ledger.bindings.find((candidate) => candidate.chatName === tool.name);
       return binding === undefined ? tool : {
         ...tool,
@@ -1097,7 +1100,10 @@ function decodeMessagesTools(
   });
 }
 
-function decodeResponsesTools(value: WireJson | undefined): readonly SemanticTool[] {
+function decodeResponsesTools(
+  value: WireJson | undefined,
+  allowCompatibilityStrictOmission = false,
+): readonly SemanticTool[] {
   if (value === undefined) {
     return [];
   }
@@ -1116,6 +1122,9 @@ function decodeResponsesTools(value: WireJson | undefined): readonly SemanticToo
       return decoded;
     }
     if (!isOpenAiStrictSchemaCompatible(decoded.parameters)) {
+      if (allowCompatibilityStrictOmission) {
+        return decoded;
+      }
       unsupported("REQ-R-TOOL-STRICT-AUTO");
     }
     return { ...decoded, strict: true };

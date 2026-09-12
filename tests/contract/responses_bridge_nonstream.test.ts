@@ -11,8 +11,8 @@ describe("Responses bridge non-stream conversion", () => {
     const request = requestFromJson(JSON.stringify({
       model: "gpt",
       tools: [
-        { type: "function", name: "lookup", parameters: { type: "object" }, strict: false },
-        { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: { type: "object" }, strict: false }] },
+        { type: "function", name: "lookup", parameters: {} },
+        { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: {} }] },
         { type: "custom", name: "render" },
         { type: "tool_search" },
       ],

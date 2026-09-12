@@ -45,8 +45,8 @@ describe("Responses bridge request conversion", () => {
       stream: true,
       stream_options: { other: "keep", include_usage: false },
       tools: [
-        { type: "function", name: "lookup", description: "Lookup", parameters: { type: "object", x: 1 }, strict: true },
-        { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: { type: "object" }, strict: false }] },
+        { type: "function", name: "lookup", description: "Lookup", parameters: { type: "string", x: 1 }, strict: true },
+        { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: {} }] },
         { type: "custom", name: "render", format: { type: "text" } },
         { type: "tool_search" },
       ],
@@ -103,7 +103,7 @@ describe("Responses bridge request conversion", () => {
       reasoning_effort: "xhigh",
       tools: [
         { type: "function", function: { name: "lookup", description: "Lookup", parameters: { type: "object", x: 1 }, strict: true } },
-        { type: "function", function: { name: "ns__child", description: null, parameters: { type: "object" }, strict: false } },
+        { type: "function", function: { name: "ns__child", description: null, parameters: { type: "object" } } },
         {
           type: "function",
           function: {
@@ -244,22 +244,10 @@ describe("Responses bridge request conversion", () => {
           tools: [{ type: "custom" }],
         }],
       }],
-      ["a missing function shape", {
-        tools: [
-          { type: "custom", name: "seed" },
-          { type: "function", name: "lookup" },
-        ],
-      }],
       ["a missing namespace shape", {
         tools: [
           { type: "custom", name: "seed" },
           { type: "namespace", name: "ns" },
-        ],
-      }],
-      ["an ambiguous automatic strict declaration", {
-        tools: [
-          { type: "custom", name: "seed" },
-          { type: "function", name: "lookup", parameters: { type: "object" } },
         ],
       }],
       ["a tool choice whose kind does not match its binding", {
@@ -298,12 +286,7 @@ describe("Responses bridge request conversion", () => {
           {
             type: "namespace",
             name: "docs",
-            tools: [{
-              type: "function",
-              name: "search",
-              parameters: { type: "object" },
-              strict: false,
-            }],
+            tools: [{ type: "function", name: "search", parameters: {} }],
           },
           { type: "custom", name: "render", format: { type: "text" } },
           { type: "tool_search" },
@@ -340,15 +323,55 @@ describe("Responses bridge request conversion", () => {
         ["\u0000render", "render"],
         ["\u0000tool_search", "tool_search"],
       ]);
-      expect(json(compatibility)).toMatchObject({
+      const compatibilityJson = json(compatibility) as {
+        tools: Array<{ function: Record<string, unknown> }>;
+      };
+      expect(compatibilityJson).toMatchObject({
         tools: [
           { function: { name: "lookup", strict: true } },
-          { function: { name: "docs__search", strict: false } },
+          { function: { name: "docs__search", parameters: { type: "object" } } },
           { function: { name: "render" } },
           { function: { name: "tool_search" } },
         ],
         tool_choice: { type: "function", function: { name: "docs__search" } },
       });
+      expect(compatibilityJson.tools[1]?.function).not.toHaveProperty("strict");
+    });
+
+    it("preserves historical extended function defaults through the shared projection", () => {
+      const request = requestFromJson(JSON.stringify({
+        model: "source",
+        input: "hi",
+        tools: [
+          { type: "function", name: "coerced", parameters: { type: "string", x: 1 } },
+          { type: "function", name: "defaulted" },
+          { type: "namespace", name: "docs", tools: [{ type: "function", name: "search", parameters: {} }] },
+          { type: "custom", name: "render" },
+        ],
+      }));
+      const production = prepareConvertedRequest(
+        "responses",
+        "chat",
+        request.body,
+        "target",
+        capability("target", ["chat"]),
+      );
+      const compatibility = convertResponsesRequest(request, {
+        resolvedModel: "target",
+        toolContext: buildRequestToolContext(request),
+        reasoningConfig: null,
+      });
+      const compatibilityBytes = serializeWireJson(compatibility);
+
+      expect(new TextDecoder().decode(compatibilityBytes)).toBe(new TextDecoder().decode(production.bytes));
+      const compatibilityJson = json(compatibility) as {
+        tools: Array<{ function: Record<string, unknown> }>;
+      };
+      expect(compatibilityJson.tools.slice(0, 3)).toEqual([
+        { type: "function", function: { name: "coerced", description: null, parameters: { type: "object", x: 1 } } },
+        { type: "function", function: { name: "defaulted", description: null, parameters: { type: "object", properties: {} } } },
+        { type: "function", function: { name: "docs__search", description: null, parameters: { type: "object" } } },
+      ]);
     });
   });
 
