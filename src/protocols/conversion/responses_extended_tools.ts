@@ -92,32 +92,18 @@ interface MutableState {
 }
 
 export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedResponsesExtendedTools | undefined {
-  const toolsValue = single(body, "tools", "REQ-R-EXT-TOOLS");
-  const inputValue = single(body, "input", "REQ-R-EXT-INPUT");
-  if (!hasExtendedSemantics(toolsValue, inputValue)) {
+  const decoded = decodeResponsesExtendedToolProjection(body);
+  if (decoded === undefined) {
     return undefined;
   }
+  const { state, inputValue, transformedChoice, projection } = decoded;
   assertAllowed(body, EXTENDED_RESPONSES_KEYS, "REQ-R-EXT-TOP");
   if (single(body, "text", "REQ-R-EXT-TEXT") !== undefined || single(body, "response_format", "REQ-R-EXT-FORMAT") !== undefined) {
     unsupported("REQ-R-EXT-FORMAT");
   }
-  const state: MutableState = {
-    bindings: [],
-    bySourceKey: new Map(),
-    byChatName: new Map(),
-    tools: [],
-    calls: [],
-    results: [],
-  };
-  const tools = requiredArray(toolsValue, "REQ-R-EXT-TOOLS");
-  for (const tool of tools.items) {
-    addDeclaration(state, tool);
-  }
-  collectDiscoveredDeclarations(state, inputValue);
   validateInstructionOrdering(inputValue);
   const chatMessages = projectExtendedChatMessages(body, state);
   const transformedInput = transformInput(state, inputValue);
-  const transformedChoice = transformToolChoice(state, single(body, "tool_choice", "REQ-R-EXT-CHOICE"));
   const prefixMembers = body.members
     .filter((member) => member.key === "n" || member.key === "parallel_tool_calls" || member.key === "stream")
     .map((member) => Object.freeze({ key: member.key, value: immutableWire(member.value) }));
@@ -127,7 +113,7 @@ export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedRes
   }
   const ledger: ResponsesToolBindingLedger = Object.freeze({
     kind: "responses_extended_tools",
-    bindings: Object.freeze(state.bindings.map((binding) => Object.freeze({ ...binding }))),
+    bindings: projection.bindings,
     calls: Object.freeze(state.calls.map((binding) => Object.freeze({ ...binding }))),
     results: Object.freeze(state.results.map((binding) => Object.freeze({ ...binding }))),
     chatMessages: Object.freeze(chatMessages.map((message) => immutableWire(message) as WireJsonObject)),
@@ -150,22 +136,66 @@ export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedRes
       }),
     }),
     ledger,
-    chatTools: Object.freeze(state.tools.map((tool) => {
-      const name = requiredString(single(tool, "name", "REQ-R-EXT-INTERNAL-NAME"), "REQ-R-EXT-INTERNAL-NAME");
-      const binding = state.byChatName.get(name);
-      return object([
-        ["type", "function"],
-        ["function", object([
-          ["name", name],
-          ["description", single(tool, "description", "REQ-R-EXT-INTERNAL-DESCRIPTION") ?? null],
-          ["parameters", single(tool, "parameters", "REQ-R-EXT-INTERNAL-PARAMETERS") as WireJson],
-          ...(binding?.kind === "custom" || binding?.kind === "tool_search"
-            ? []
-            : optionalCopied(tool, ["strict"])),
-        ])],
-      ]);
-    })),
+    chatTools: projection.chatTools,
   };
+}
+
+interface DecodedResponsesExtendedToolProjection {
+  readonly state: MutableState;
+  readonly inputValue: WireJson | undefined;
+  readonly transformedChoice: WireJson | undefined;
+  readonly projection: ResponsesToolCompatibilityProjection;
+}
+
+function decodeResponsesExtendedToolProjection(
+  body: WireJsonObject,
+): DecodedResponsesExtendedToolProjection | undefined {
+  const toolsValue = single(body, "tools", "REQ-R-EXT-TOOLS");
+  const inputValue = single(body, "input", "REQ-R-EXT-INPUT");
+  if (!hasExtendedSemantics(toolsValue, inputValue)) {
+    return undefined;
+  }
+  const state: MutableState = {
+    bindings: [],
+    bySourceKey: new Map(),
+    byChatName: new Map(),
+    tools: [],
+    calls: [],
+    results: [],
+  };
+  const tools = requiredArray(toolsValue, "REQ-R-EXT-TOOLS");
+  for (const tool of tools.items) {
+    addDeclaration(state, tool);
+  }
+  collectDiscoveredDeclarations(state, inputValue);
+  const projection: ResponsesToolCompatibilityProjection = Object.freeze({
+    chatTools: projectValidatedChatTools(state),
+    bindings: Object.freeze(state.bindings.map((binding) => Object.freeze({ ...binding }))),
+  });
+  return {
+    state,
+    inputValue,
+    transformedChoice: transformToolChoice(state, single(body, "tool_choice", "REQ-R-EXT-CHOICE")),
+    projection,
+  };
+}
+
+function projectValidatedChatTools(state: MutableState): readonly WireJsonObject[] {
+  return Object.freeze(state.tools.map((tool) => {
+    const name = requiredString(single(tool, "name", "REQ-R-EXT-INTERNAL-NAME"), "REQ-R-EXT-INTERNAL-NAME");
+    const binding = state.byChatName.get(name);
+    return object([
+      ["type", "function"],
+      ["function", object([
+        ["name", name],
+        ["description", single(tool, "description", "REQ-R-EXT-INTERNAL-DESCRIPTION") ?? null],
+        ["parameters", single(tool, "parameters", "REQ-R-EXT-INTERNAL-PARAMETERS") as WireJson],
+        ...(binding?.kind === "custom" || binding?.kind === "tool_search"
+          ? []
+          : optionalCopied(tool, ["strict"])),
+      ])],
+    ]);
+  }));
 }
 
 export interface CompatibilityResponsesToolBinding {
@@ -738,7 +768,7 @@ function invalidToolArguments(): never {
 
 function hasExtendedSemantics(tools: WireJson | undefined, input: WireJson | undefined): boolean {
   if (isWireJsonArray(tools) && tools.items.some((tool) => (
-    isWireJsonObject(tool) && single(tool, "type", "REQ-R-EXT-TOOL-TYPE") !== "function"
+    !isWireJsonObject(tool) || single(tool, "type", "REQ-R-EXT-TOOL-TYPE") !== "function"
   ))) {
     return true;
   }
@@ -1388,142 +1418,63 @@ function compatibilityArguments(value: WireJson | undefined): string {
 }
 
 export function projectResponsesToolsForCompatibility(body: WireJsonObject): ResponsesToolCompatibilityProjection {
+  const decoded = decodeResponsesExtendedToolProjection(body);
+  if (decoded !== undefined) {
+    return decoded.projection;
+  }
+  return projectOrdinaryResponsesToolsForCompatibility(body);
+}
+
+/**
+ * Retained only for ordinary function-only #182 bridge fixtures. Any custom,
+ * namespace, tool-search, malformed, or discovered declaration is routed to
+ * decodeResponsesExtendedToolProjection above.
+ */
+function projectOrdinaryResponsesToolsForCompatibility(
+  body: WireJsonObject,
+): ResponsesToolCompatibilityProjection {
   const chatTools: WireJsonObject[] = [];
   const bindings: ResponsesToolSourceBinding[] = [];
-  const byChatName = new Set<string>();
-  const add = (binding: ResponsesToolSourceBinding, tool: WireJsonObject): void => {
-    if (byChatName.has(binding.chatName)) {
-      return;
-    }
-    byChatName.add(binding.chatName);
-    bindings.push(binding);
-    chatTools.push(tool);
-  };
-  const addTool = (value: WireJson, namespace?: string): void => {
-    if (typeof value === "string") {
-      addCompatibilityCustom(value, value, add);
-      return;
-    }
-    if (!isWireJsonObject(value)) {
-      return;
-    }
-    const type = memberValues(value, "type")[0];
-    const nested = memberValues(value, "function")[0];
-    if (type === "function" || (type === undefined && (isWireJsonObject(nested) || memberValues(value, "name")[0] !== undefined))) {
-      const shape = isWireJsonObject(nested) ? nested : value;
-      const sourceName = compatibilityString(shape, "name")?.trim() ?? "";
-      if (sourceName.length === 0) {
-        return;
-      }
-      const chatName = namespace === undefined ? sourceName : projectedNamespaceName(namespace, sourceName);
-      const parametersValue = memberValues(shape, "parameters")[0];
-      const parameters = isWireJsonObject(parametersValue)
-        ? normalizedParameters(parametersValue)
-        : object([["type", "object"], ["properties", object([])]]);
-      const strictValue = memberValues(shape, "strict")[0] ?? memberValues(value, "strict")[0];
-      const functionMembers: Array<readonly [string, WireJson]> = [
-        ["name", chatName],
-        ["description", memberValues(shape, "description")[0] ?? null],
-        ["parameters", parameters],
-      ];
-      if (strictValue === true || strictValue === false) {
-        functionMembers.push(["strict", strictValue]);
-      } else if (isOpenAiStrictSchemaCompatible(parameters)) {
-        functionMembers.push(["strict", true]);
-      }
-      add({
-        kind: namespace === undefined ? "function" : "namespace",
-        chatName,
-        sourceName,
-        ...(namespace === undefined ? {} : { namespace }),
-      }, object([["type", "function"], ["function", object(functionMembers)]]));
-      return;
-    }
-    if (type === "namespace") {
-      const namespaceName = compatibilityString(value, "name") ?? "";
-      const children = memberValues(value, "tools")[0] ?? memberValues(value, "children")[0];
-      if (isWireJsonArray(children)) {
-        for (const child of children.items) {
-          if (isWireJsonObject(child) && memberValues(child, "type")[0] === "function") {
-            addTool(child, namespaceName);
-          }
-        }
-      }
-      return;
-    }
-    if (type === "custom") {
-      const name = compatibilityString(value, "name")?.trim() ?? "";
-      addCompatibilityCustom(name, value, add);
-      return;
-    }
-    if (type === "tool_search") {
-      add({ kind: "tool_search", chatName: "tool_search", sourceName: "tool_search" }, object([
-        ["type", "function"],
-        ["function", object([
-          ["name", "tool_search"],
-          ["description", TOOL_SEARCH_DESCRIPTION],
-          ["parameters", TOOL_SEARCH_SCHEMA],
-        ])],
-      ]));
-    }
-  };
+  const seenChatNames = new Set<string>();
   const declared = memberValues(body, "tools")[0];
-  if (isWireJsonArray(declared)) {
-    for (const tool of declared.items) {
-      addTool(tool);
-    }
+  if (!isWireJsonArray(declared)) {
+    return { chatTools, bindings };
   }
-  collectCompatibilityDiscovered(memberValues(body, "input")[0], addTool);
+  for (const value of declared.items) {
+    if (!isWireJsonObject(value) || memberValues(value, "type")[0] !== "function") {
+      continue;
+    }
+    const nested = memberValues(value, "function")[0];
+    const shape = isWireJsonObject(nested) ? nested : value;
+    const sourceName = compatibilityString(shape, "name")?.trim() ?? "";
+    if (sourceName.length === 0 || seenChatNames.has(sourceName)) {
+      continue;
+    }
+    seenChatNames.add(sourceName);
+    const parametersValue = memberValues(shape, "parameters")[0];
+    const parameters = isWireJsonObject(parametersValue)
+      ? normalizedParameters(parametersValue)
+      : object([["type", "object"], ["properties", object([])]]);
+    const strictValue = memberValues(shape, "strict")[0] ?? memberValues(value, "strict")[0];
+    const functionMembers: Array<readonly [string, WireJson]> = [
+      ["name", sourceName],
+      ["description", memberValues(shape, "description")[0] ?? null],
+      ["parameters", parameters],
+    ];
+    if (strictValue === true || strictValue === false) {
+      functionMembers.push(["strict", strictValue]);
+    } else if (isOpenAiStrictSchemaCompatible(parameters)) {
+      functionMembers.push(["strict", true]);
+    }
+    const binding: ResponsesToolSourceBinding = {
+      kind: "function",
+      chatName: sourceName,
+      sourceName,
+    };
+    bindings.push(binding);
+    chatTools.push(object([["type", "function"], ["function", object(functionMembers)]]));
+  }
   return { chatTools, bindings };
-}
-
-function addCompatibilityCustom(
-  name: string,
-  original: WireJson,
-  add: (binding: ResponsesToolSourceBinding, tool: WireJsonObject) => void,
-): void {
-  const trimmed = name.trim();
-  if (trimmed.length === 0) {
-    return;
-  }
-  add({ kind: "custom", chatName: trimmed, sourceName: trimmed }, object([
-    ["type", "function"],
-    ["function", object([
-      ["name", trimmed],
-      ["description", `Original tool definition:\n\`\`\`json\n${canonicalString(original)}\n\`\`\``],
-      ["parameters", CUSTOM_INPUT_SCHEMA],
-    ])],
-  ]));
-}
-
-function collectCompatibilityDiscovered(
-  value: WireJson | undefined,
-  addTool: (value: WireJson, namespace?: string) => void,
-  depth = 0,
-): void {
-  if (value === undefined || depth > 32) {
-    return;
-  }
-  if (isWireJsonArray(value)) {
-    for (const item of value.items) {
-      collectCompatibilityDiscovered(item, addTool, depth + 1);
-    }
-    return;
-  }
-  if (!isWireJsonObject(value)) {
-    return;
-  }
-  if (memberValues(value, "type")[0] === "tool_search_output") {
-    const tools = memberValues(value, "tools")[0];
-    if (isWireJsonArray(tools)) {
-      for (const tool of tools.items) {
-        addTool(tool);
-      }
-    }
-  }
-  for (const member of value.members) {
-    collectCompatibilityDiscovered(member.value, addTool, depth + 1);
-  }
 }
 
 function compatibilityString(value: WireJsonObject, key: string): string | undefined {

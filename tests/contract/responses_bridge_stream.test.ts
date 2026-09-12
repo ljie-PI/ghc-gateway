@@ -141,8 +141,8 @@ describe("Responses bridge stream conversion", () => {
         model: "gpt-4.1",
         input: "use tools",
         tools: [
-          { type: "function", name: "lookup", parameters: {} },
-          { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: {} }] },
+          { type: "function", name: "lookup", parameters: { type: "object" }, strict: false },
+          { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: { type: "object" }, strict: false }] },
           { type: "custom", name: "render" },
           { type: "tool_search" },
         ],

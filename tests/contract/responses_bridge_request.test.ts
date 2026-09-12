@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
+import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
 import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
 import {
   buildChatBridgeRequest,
@@ -44,9 +45,9 @@ describe("Responses bridge request conversion", () => {
       stream: true,
       stream_options: { other: "keep", include_usage: false },
       tools: [
-        { type: "function", name: "lookup", description: "Lookup", parameters: { type: "string", x: 1 }, strict: true },
-        { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: {} }] },
-        { type: "custom", name: "render", input_format: "text" },
+        { type: "function", name: "lookup", description: "Lookup", parameters: { type: "object", x: 1 }, strict: true },
+        { type: "namespace", name: "ns", tools: [{ type: "function", name: "child", parameters: { type: "object" }, strict: false }] },
+        { type: "custom", name: "render", format: { type: "text" } },
         { type: "tool_search" },
       ],
       tool_choice: { type: "function", name: "child", namespace: "ns" },
@@ -102,7 +103,7 @@ describe("Responses bridge request conversion", () => {
       reasoning_effort: "xhigh",
       tools: [
         { type: "function", function: { name: "lookup", description: "Lookup", parameters: { type: "object", x: 1 }, strict: true } },
-        { type: "function", function: { name: "ns__child", description: null, parameters: { type: "object" } } },
+        { type: "function", function: { name: "ns__child", description: null, parameters: { type: "object" }, strict: false } },
         {
           type: "function",
           function: {
@@ -216,6 +217,141 @@ describe("Responses bridge request conversion", () => {
     expect(json(noToolsConverted)).not.toHaveProperty("parallel_tool_calls");
   });
 
+  describe("extended declaration compatibility contract", () => {
+    it.each([
+      ["a flat/namespace projected-name collision", {
+        tools: [
+          { type: "custom", name: "seed" },
+          { type: "function", name: "ns__lookup", parameters: { type: "object" }, strict: false },
+          {
+            type: "namespace",
+            name: "ns",
+            tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
+          },
+        ],
+      }],
+      ["a malformed custom declaration", {
+        tools: [{ type: "custom", name: "render", format: { type: "json" } }],
+      }],
+      ["a malformed tool-search declaration", {
+        tools: [{ type: "tool_search", extra: true }],
+      }],
+      ["a malformed discovered declaration", {
+        tools: [{ type: "tool_search" }],
+        input: [{
+          type: "tool_search_output",
+          call_id: "search_1",
+          tools: [{ type: "custom" }],
+        }],
+      }],
+      ["a missing function shape", {
+        tools: [
+          { type: "custom", name: "seed" },
+          { type: "function", name: "lookup" },
+        ],
+      }],
+      ["a missing namespace shape", {
+        tools: [
+          { type: "custom", name: "seed" },
+          { type: "namespace", name: "ns" },
+        ],
+      }],
+      ["an ambiguous automatic strict declaration", {
+        tools: [
+          { type: "custom", name: "seed" },
+          { type: "function", name: "lookup", parameters: { type: "object" } },
+        ],
+      }],
+      ["a tool choice whose kind does not match its binding", {
+        tools: [{ type: "custom", name: "render" }],
+        tool_choice: { type: "function", name: "render" },
+      }],
+    ] as const)("rejects %s through production and the retained bridge", (_caseName, extra) => {
+      const request = requestFromJson(JSON.stringify({ model: "source", input: "hi", ...extra }));
+
+      expect(() => prepareConvertedRequest(
+        "responses",
+        "chat",
+        request.body,
+        "target",
+        capability("target", ["chat"]),
+      )).toThrow();
+      expect(() => buildRequestToolContext(request)).toThrow();
+    });
+
+    it("adapts strict declarations and tool choice from the production ledger with exact bytes and maps", () => {
+      const request = requestFromJson(JSON.stringify({
+        model: "source",
+        input: "hi",
+        tools: [
+          {
+            type: "function",
+            name: "lookup",
+            description: "Lookup",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+              additionalProperties: false,
+            },
+          },
+          {
+            type: "namespace",
+            name: "docs",
+            tools: [{
+              type: "function",
+              name: "search",
+              parameters: { type: "object" },
+              strict: false,
+            }],
+          },
+          { type: "custom", name: "render", format: { type: "text" } },
+          { type: "tool_search" },
+        ],
+        tool_choice: { type: "function", name: "search", namespace: "docs" },
+      }));
+      const production = prepareConvertedRequest(
+        "responses",
+        "chat",
+        request.body,
+        "target",
+        capability("target", ["chat"]),
+      );
+      const toolContext = buildRequestToolContext(request);
+      const compatibility = convertResponsesRequest(request, {
+        resolvedModel: "target",
+        toolContext,
+        reasoningConfig: null,
+      });
+      const compatibilityBytes = serializeWireJson(compatibility);
+
+      expect(new TextDecoder().decode(compatibilityBytes)).toBe(new TextDecoder().decode(production.bytes));
+      expect([...toolContext.chatNameToBinding.entries()]).toEqual(production.responseBindings?.bindings.map((binding) => [
+        binding.chatName,
+        {
+          kind: binding.kind,
+          originalName: binding.sourceName,
+          ...(binding.namespace === undefined ? {} : { namespace: binding.namespace }),
+        },
+      ]));
+      expect([...toolContext.sourceNameToChatName.entries()]).toEqual([
+        ["\u0000lookup", "lookup"],
+        ["docs\u0000search", "docs__search"],
+        ["\u0000render", "render"],
+        ["\u0000tool_search", "tool_search"],
+      ]);
+      expect(json(compatibility)).toMatchObject({
+        tools: [
+          { function: { name: "lookup", strict: true } },
+          { function: { name: "docs__search", strict: false } },
+          { function: { name: "render" } },
+          { function: { name: "tool_search" } },
+        ],
+        tool_choice: { type: "function", function: { name: "docs__search" } },
+      });
+    });
+  });
+
   it("relocates tool-output media and supports reasoning effort modes", () => {
     const dataUrl = `data:image/png;base64,${"a".repeat(8192)}`;
     const residual = "b".repeat(8192);
@@ -227,7 +363,7 @@ describe("Responses bridge request conversion", () => {
       model: "gpt",
       input: [
         { type: "custom_tool_call_output", call_id: "call_media", output: [{ type: "input_image", image_url: dataUrl }] },
-        { type: "tool_search_output", call_id: "call_json_media", output: encodedOutput },
+        { type: "tool_search_output", call_id: "call_json_media", output: encodedOutput, tools: [] },
       ],
       reasoning: { effort: "low" },
       tools: [{ type: "custom", name: "render" }],
@@ -262,6 +398,7 @@ describe("Responses bridge request conversion", () => {
               media: "[cc-switch: tool result media moved to the following user message]",
               residual,
             }),
+            tools: [],
             type: "tool_search_output",
           }),
         },
