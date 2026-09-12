@@ -11,6 +11,7 @@ import {
 import {
   ProcessIdentityError,
   captureProcessStartIdentity,
+  isCanonicalProcessStartIdentity,
   isSameProcess,
   parseLinuxProcStatStartTicks,
   terminateProcessIfMatching,
@@ -41,6 +42,17 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 describe("daemon identity schema", () => {
+  it("uses the canonical process-start identity formats", () => {
+    expect(isCanonicalProcessStartIdentity("linux:01234567-89ab-cdef-0123-456789abcdef:0")).toBe(true);
+    expect(isCanonicalProcessStartIdentity("windows:0")).toBe(true);
+    expect(isCanonicalProcessStartIdentity("macos:2024-02-29T23:59:59Z")).toBe(true);
+    expect(isCanonicalProcessStartIdentity("linux:01234567-89AB-cdef-0123-456789abcdef:1")).toBe(false);
+    expect(isCanonicalProcessStartIdentity("linux:01234567-89ab-cdef-0123-456789abcdef:01")).toBe(false);
+    expect(isCanonicalProcessStartIdentity("windows:001")).toBe(false);
+    expect(isCanonicalProcessStartIdentity("windows:184467440737095516160")).toBe(false);
+    expect(isCanonicalProcessStartIdentity("macos:2026-02-30T12:00:00Z")).toBe(false);
+  });
+
   it("accepts only the exact versioned schema", () => {
     expect(decodeDaemonIdentity(JSON.stringify(identity))).toEqual(identity);
     expect(() => decodeDaemonIdentity(JSON.stringify({ ...identity, extra: true }))).toThrow(DaemonIdentityFileError);
@@ -238,6 +250,22 @@ describe("process start identity", () => {
       args: ["-o", "lstart=", "-p", "4242"],
       env: { LC_ALL: "C", TZ: "UTC" },
     });
+  });
+
+  it("forwards abort context through identity probes and verified termination commands", async () => {
+    const abort = new AbortController();
+    const contexts: Array<AbortSignal | undefined> = [];
+    const dependencies: ProcessIdentityDependencies = {
+      platform: "win32",
+      readFile: async () => "",
+      runCommand: async (_file, _args, _env, context) => {
+        contexts.push(context?.signal);
+        return "133852868960001234\r\n";
+      },
+    };
+    await captureProcessStartIdentity(4242, dependencies, { signal: abort.signal });
+    await terminateProcessIfMatching(4242, "windows:133852868960001234", dependencies, { signal: abort.signal });
+    expect(contexts).toEqual([abort.signal, abort.signal]);
   });
 
   it("performs Linux identity verification and termination in one command", async () => {

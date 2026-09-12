@@ -78,7 +78,7 @@ describe("DaemonController lifecycle", () => {
       port: FIRST.port,
     });
     expect(fixture.spawn).toHaveBeenCalledOnce();
-    expect(fixture.spawn).toHaveBeenCalledWith(STARTUP);
+    expect(fixture.spawn).toHaveBeenCalledWith(STARTUP, expect.objectContaining({ deadlineMs: 30_000 }));
     expect(fixture.child.unref).toHaveBeenCalledOnce();
     expect(fixture.events).toEqual(["spawn", "delay:100", "control:GET:status", "unref"]);
     expect(fixture.terminate).not.toHaveBeenCalled();
@@ -110,6 +110,26 @@ describe("DaemonController lifecycle", () => {
     expect(fixture.spawn).toHaveBeenCalledOnce();
   });
 
+  it("finishes verified child cleanup before returning interruption after spawn", async () => {
+    const fixture = harness();
+    const abort = new AbortController();
+    const blocked = deferred();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    fixture.onDelayAsync = async () => await blocked.promise;
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    const starting = fixture.controller.start(STARTUP, { signal: abort.signal });
+    await vi.waitFor(() => expect(fixture.spawn).toHaveBeenCalledOnce());
+    abort.abort();
+    blocked.resolve();
+    await expect(starting).rejects.toMatchObject({ code: "interrupted" });
+    expect(fixture.terminate).toHaveBeenCalledWith({
+      pid: FIRST.pid,
+      processStartIdentity: FIRST.processStartIdentity,
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(fixture.child.unref).toHaveBeenCalledOnce();
+  });
+
   it("terminates only its process-identity-verified child after the 30 second ready deadline", async () => {
     const fixture = harness();
     fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
@@ -126,7 +146,7 @@ describe("DaemonController lifecycle", () => {
     expect(fixture.terminate).toHaveBeenCalledWith({
       pid: FIRST.pid,
       processStartIdentity: FIRST.processStartIdentity,
-    });
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(fixture.removed).toEqual([FIRST]);
     expect(fixture.child.unref).toHaveBeenCalledOnce();
   });
@@ -141,7 +161,7 @@ describe("DaemonController lifecycle", () => {
     expect(fixture.terminate).toHaveBeenCalledWith({
       pid: FIRST.pid,
       processStartIdentity: FIRST.processStartIdentity,
-    });
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 
   it("retries the spawned child identity probe before failed-start cleanup", async () => {
@@ -158,6 +178,51 @@ describe("DaemonController lifecycle", () => {
     await expect(fixture.controller.start(STARTUP)).resolves.toMatchObject({ state: "unreachable" });
     expect(reads).toBeGreaterThan(1);
     expect(fixture.terminate).toHaveBeenCalledOnce();
+  });
+
+  it("retries a null initial child identity probe during failed-start reconciliation", async () => {
+    const fixture = harness();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    let reads = 0;
+    fixture.processIdentityOverride = async (pid) => {
+      reads += 1;
+      if (reads === 1) return null;
+      return fixture.processes.get(pid) ?? null;
+    };
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    await expect(fixture.controller.start(STARTUP)).resolves.toMatchObject({ state: "unreachable" });
+    expect(reads).toBeGreaterThan(1);
+    expect(fixture.terminate).toHaveBeenCalledWith({
+      pid: FIRST.pid,
+      processStartIdentity: FIRST.processStartIdentity,
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("recaptures a null initial child identity before cleanup after readiness cancellation", async () => {
+    const fixture = harness();
+    const abort = new AbortController();
+    const blocked = deferred();
+    fixture.processes.set(FIRST.pid, FIRST.processStartIdentity);
+    let reads = 0;
+    fixture.processIdentityOverride = async (pid) => {
+      reads += 1;
+      if (reads === 1) return null;
+      return fixture.processes.get(pid) ?? null;
+    };
+    fixture.onDelayAsync = async () => await blocked.promise;
+    fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
+
+    const starting = fixture.controller.start(STARTUP, { signal: abort.signal });
+    await vi.waitFor(() => expect(fixture.events).toContain("delay:100"));
+    abort.abort();
+    blocked.resolve();
+    await expect(starting).rejects.toMatchObject({ code: "interrupted" });
+    expect(reads).toBeGreaterThan(1);
+    expect(fixture.terminate).toHaveBeenCalledWith({
+      pid: FIRST.pid,
+      processStartIdentity: FIRST.processStartIdentity,
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
   });
 
   it("bounds each readiness status call by the absolute 30 second deadline", async () => {
@@ -215,6 +280,28 @@ describe("DaemonController lifecycle", () => {
     expect(fixture.removed).toEqual([FIRST]);
   });
 
+  it("reconciles an authenticated stop before returning interruption", async () => {
+    const fixture = harness({ identity: FIRST });
+    const abort = new AbortController();
+    const response = deferred();
+    let stopStarted = false;
+    fixture.controlRequest = async (identity, method) => {
+      if (method === "GET") return { state: "running", instance: instanceOf(identity) };
+      stopStarted = true;
+      await response.promise;
+      return { instance: instanceOf(identity) };
+    };
+    fixture.onDelay = () => fixture.processes.delete(FIRST.pid);
+
+    const stopping = fixture.controller.stop(DATA_DIR, { signal: abort.signal });
+    await vi.waitFor(() => expect(stopStarted).toBe(true));
+    abort.abort();
+    response.resolve();
+    await expect(stopping).rejects.toMatchObject({ code: "interrupted" });
+    expect(fixture.removed).toEqual([FIRST]);
+    expect(fixture.terminate).not.toHaveBeenCalled();
+  });
+
   it("waits 10 seconds then uses a fresh process identity before force termination", async () => {
     const fixture = harness({ identity: FIRST });
     fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
@@ -222,7 +309,10 @@ describe("DaemonController lifecycle", () => {
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped" });
     expect(fixture.elapsedMs).toBeLessThanOrEqual(10_000);
     expect(fixture.processReads.at(-1)).toEqual(FIRST.pid);
-    expect(fixture.terminate).toHaveBeenCalledWith(FIRST);
+    expect(fixture.terminate).toHaveBeenCalledWith(
+      FIRST,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(fixture.removed).toEqual([FIRST]);
   });
 
@@ -269,7 +359,10 @@ describe("DaemonController lifecycle", () => {
     fixture.onTerminate = () => fixture.processes.delete(FIRST.pid);
 
     await expect(fixture.controller.stop(DATA_DIR)).resolves.toMatchObject({ state: "stopped" });
-    expect(fixture.terminate).toHaveBeenCalledWith(FIRST);
+    expect(fixture.terminate).toHaveBeenCalledWith(
+      FIRST,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(fixture.removed).toEqual([FIRST]);
   });
 
@@ -379,7 +472,10 @@ describe("DaemonController lifecycle", () => {
       }
     };
     await fixture.controller.restart(STARTUP);
-    expect(fixture.spawn).toHaveBeenCalledWith(expect.objectContaining({ port: 31_409 }));
+    expect(fixture.spawn).toHaveBeenCalledWith(
+      expect.objectContaining({ port: 31_409 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 });
 
@@ -466,6 +562,12 @@ function harness(options: HarnessOptions = {}) {
     terminate,
     controller: new DaemonController(dependencies),
   });
+}
+
+function deferred() {
+  let resolve = (): void => undefined;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 function instanceOf(identity: Readonly<DaemonIdentity>) {

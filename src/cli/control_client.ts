@@ -439,7 +439,7 @@ export async function authenticatedControlRequest(
   let response: Response;
   const timeout = controlTimeout(context.signal, context.timeoutMs ?? 30_000);
   try {
-    response = await Promise.race([fetchImpl(`http://127.0.0.1:${endpoint.port}${pathPart}`, {
+    response = await fetchImpl(`http://127.0.0.1:${endpoint.port}${pathPart}`, {
       method,
       headers: {
         "content-type": "application/json",
@@ -448,7 +448,7 @@ export async function authenticatedControlRequest(
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: timeout.signal,
-    }), timeout.promise]);
+    });
   } catch (_error: unknown) {
     timeout.clear();
     if (timeout.timedOut()) {
@@ -461,7 +461,7 @@ export async function authenticatedControlRequest(
   }
   let payload: unknown;
   try {
-    payload = await Promise.race([response.json(), timeout.promise]).catch(() => null) as unknown;
+    payload = await response.json().catch(() => null) as unknown;
   } finally {
     timeout.clear();
   }
@@ -492,7 +492,6 @@ const readControlEndpoint = readDaemonIdentity;
 
 function controlTimeout(parent: AbortSignal | undefined, ms: number): {
   readonly signal: AbortSignal;
-  readonly promise: Promise<never>;
   readonly clear: () => void;
   readonly timedOut: () => boolean;
   readonly parentAborted: () => boolean;
@@ -500,18 +499,12 @@ function controlTimeout(parent: AbortSignal | undefined, ms: number): {
   const controller = new AbortController();
   const signal = parent === undefined ? controller.signal : AbortSignal.any([parent, controller.signal]);
   let timedOut = false;
-  let rejectTimeout: (error: unknown) => void = () => undefined;
-  const promise = new Promise<never>((_resolve, reject) => {
-    rejectTimeout = reject;
-  });
   const timer = setTimeout(() => {
     timedOut = true;
-    controller.abort();
-    rejectTimeout(new CliError("timeout"));
+    controller.abort(new CliError("timeout"));
   }, ms);
   return {
     signal,
-    promise,
     clear: () => clearTimeout(timer),
     timedOut: () => timedOut,
     parentAborted: () => parent?.aborted === true,
