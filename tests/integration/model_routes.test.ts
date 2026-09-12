@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -29,7 +30,7 @@ describe("model routes errors and preferences", () => {
       migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     const catalog = new CopilotModelCatalog({
       async fetch() {
         return { data: [{ id: "visible", name: "V", vendor: "x", model_picker_enabled: true }] };
@@ -79,7 +80,7 @@ describe("model routes errors and preferences", () => {
       migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     await accounts.upsertAuthenticated({
       host: "github.com",
       userId: "1",
@@ -125,7 +126,7 @@ describe("model routes errors and preferences", () => {
       ],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     const account = await accounts.upsertAuthenticated({
       host: "github.com",
       userId: "1",
@@ -194,7 +195,7 @@ describe("model routes errors and preferences", () => {
       ],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     const account = await accounts.upsertAuthenticated({
       host: "github.com",
       userId: "1",
@@ -250,7 +251,7 @@ describe("model routes errors and preferences", () => {
       ],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     const account = await accounts.upsertAuthenticated({
       host: "github.com",
       userId: "1",
@@ -311,7 +312,7 @@ describe("model routes errors and preferences", () => {
       migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     await accounts.upsertAuthenticated({
       host: "github.com",
       userId: "1",

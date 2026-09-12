@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { describe, expect, it, vi } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
@@ -35,7 +36,7 @@ describe("effective capability authority", () => {
       ],
       nowMs,
     });
-    const directory = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const directory = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     const account = await directory.upsertAuthenticated({
       host: "github.com",
       userId: "1",

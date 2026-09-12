@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -58,6 +59,7 @@ describe("production composition", () => {
       throw new Error("expected production close owners");
     }
     const closeEndpointDiscovery = endpointDiscovery.close.bind(endpointDiscovery);
+    const closeAccountCoordinator = application.accountCoordinator.close.bind(application.accountCoordinator);
     const closeTelemetry = telemetryRuntime.close.bind(telemetryRuntime);
     const closeSqlite = database.close.bind(database);
     application.copilot.close = async () => {
@@ -72,6 +74,10 @@ describe("production composition", () => {
       order.push("endpoint-discovery");
       await closeEndpointDiscovery();
     };
+    application.accountCoordinator.close = async () => {
+      order.push("account-coordinator");
+      await closeAccountCoordinator();
+    };
     telemetryRuntime.close = async () => {
       order.push("telemetry");
       await closeTelemetry();
@@ -82,8 +88,37 @@ describe("production composition", () => {
     };
     try {
       await application.close?.();
-      expect(order).toEqual(["copilot", "registry", "endpoint-discovery", "telemetry", "sqlite"]);
+      expect(order).toEqual(["copilot", "registry", "endpoint-discovery", "account-coordinator", "telemetry", "sqlite"]);
     } finally {
+      application.forceClose?.();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("defers force-closing SQLite until admitted account work drains", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-coordinator-drain-"));
+    const application = await createProductionApplicationContext(
+      parseStartupConfig(["--data-dir", dataDir, "--port", String(PORT)], {}),
+      {},
+    );
+    const database = application.database;
+    if (database === undefined) throw new Error("expected production database");
+    let release = (): void => undefined;
+    const admitted = application.accountCoordinator.withLifecycle(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    try {
+      application.forceClose?.();
+      expect(database.prepare("SELECT 1").get()).toEqual({ "1": 1 });
+      await expect(application.accountCoordinator.withLifecycle(async () => undefined))
+        .rejects.toBeInstanceOf(DOMException);
+      release();
+      await admitted;
+      await application.accountCoordinator.drain();
+      await Promise.resolve();
+      expect(() => database.prepare("SELECT 1").get()).toThrow();
+    } finally {
+      release();
       application.forceClose?.();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -437,9 +472,10 @@ function compositionHarness(
     nowMs: () => NOW,
   });
   const credentials = new MemoryCredentialStore();
+  const accountCoordinator = new AccountCoordinator();
   const runtime = new RuntimeConfigStore(database, () => NOW);
   const snapshot = runtime.seedIfEmpty({});
-  const directory = new AccountDirectory(database, credentials, () => NOW, snapshot.accounts.maxAuthenticated);
+  const directory = new AccountDirectory(database, credentials, accountCoordinator, () => NOW, snapshot.accounts.maxAuthenticated);
   let catalogFetches = 0;
   const catalog = new CopilotModelCatalog({
     async fetch() {
@@ -471,6 +507,7 @@ function compositionHarness(
   const application: ApplicationContext = {
     database,
     credentials,
+    accountCoordinator,
     directory,
     registry,
     copilot: new ScriptedCopilotBackend({}),

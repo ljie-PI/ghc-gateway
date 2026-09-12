@@ -2,6 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import type * as Undici from "undici";
 import type { Dispatcher } from "undici";
 import type { BoundAccount } from "../accounts/account_directory.js";
+import type { AccountCoordinator } from "../accounts/account_coordinator.js";
 import type { CredentialStore } from "../accounts/credential_store.js";
 import type { ChatResponse } from "../protocols/chat_completions/types.js";
 import { type EndpointDiscovery, MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
@@ -74,6 +75,7 @@ export function classifyCopilotTransportError(error: unknown): CopilotTransportF
 
 export interface CopilotTransportDeps {
   readonly credentials: CredentialStore;
+  readonly accountCoordinator: AccountCoordinator;
   readonly nowMs?: () => number;
   readonly refreshCopilotToken: (githubToken: string, signal?: AbortSignal) => Promise<{ token: string; expiresAtMs: number }>;
   readonly endpointDiscovery: Pick<EndpointDiscovery, "discover">;
@@ -111,6 +113,7 @@ export class HttpCopilotBackend implements CopilotBackend {
     const nowMs = this.deps.nowMs ?? Date.now;
     const token = await getValidToken(
       this.deps.credentials,
+      this.deps.accountCoordinator,
       account,
       nowMs(),
       this.deps.refreshCopilotToken,

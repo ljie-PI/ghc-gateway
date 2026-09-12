@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
@@ -763,6 +764,7 @@ describe("CLI commands", () => {
         secret: { generation: 0, githubToken: "gho_scripted" },
       });
       const routes = createPublicRouteRegistrations({
+        accountCoordinator: harness.accountCoordinator,
         directory: harness.directory,
         registry: harness.registry,
         copilot: harness.backend,
@@ -892,6 +894,7 @@ async function dispatcherHarness(options: {
   readonly now?: () => number;
 } = {}): Promise<{
   readonly dispatcher: CommandDispatcher;
+  readonly accountCoordinator: AccountCoordinator;
   readonly directory: AccountDirectory;
   readonly registry: ModelCapabilityRegistry;
   readonly backend: ScriptedCopilotBackend;
@@ -914,7 +917,8 @@ async function dispatcherHarness(options: {
     ],
     nowMs: now,
   });
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), now);
+  const accountCoordinator = new AccountCoordinator();
+  const directory = new AccountDirectory(database, new MemoryCredentialStore(), accountCoordinator, now);
   const harness = {
     capiModels: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }],
   };
@@ -939,6 +943,7 @@ async function dispatcherHarness(options: {
   });
   return {
     dispatcher,
+    accountCoordinator,
     directory,
     registry,
     backend,

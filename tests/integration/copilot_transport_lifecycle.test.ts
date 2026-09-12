@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Socket } from "node:net";
@@ -440,6 +441,7 @@ describe("Copilot transport lifecycle", () => {
     const store = new MemoryCredentialStore();
     const backend = new HttpCopilotBackend({
       credentials: store,
+      accountCoordinator: new AccountCoordinator(),
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
       endpointDiscovery: testEndpointDiscovery(async (current) => `http://127.0.0.1:${61_000 + Number(current.userId)}`),
     });
@@ -681,6 +683,7 @@ async function backendAt(
   });
   const backend = new HttpCopilotBackend({
     credentials: store,
+    accountCoordinator: new AccountCoordinator(),
     refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
     endpointDiscovery: testEndpointDiscovery(async () => endpoint),
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),

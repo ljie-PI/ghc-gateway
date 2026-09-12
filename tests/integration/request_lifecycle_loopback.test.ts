@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
@@ -143,7 +144,7 @@ async function responsesGateway(options: {
     path: ":memory:",
     migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
   });
-  const accounts = new AccountDirectory(database, new MemoryCredentialStore());
+  const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator());
   await accounts.upsertAuthenticated({
     host: "github.com",
     userId: "1",

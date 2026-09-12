@@ -1,5 +1,5 @@
 import type { SqliteDatabase } from "../persistence/sqlite.js";
-import { withCredentialGenerationLock } from "./credential_generation_lock.js";
+import type { AccountCoordinator } from "./account_coordinator.js";
 import { AccountModelPreferences } from "./model_preferences.js";
 import type { CredentialStore, SecretCredential } from "./credential_store.js";
 import {
@@ -54,14 +54,13 @@ export class AccountDirectoryPostCommitError extends Error {
   }
 }
 
-let accountLifecycleLock: Promise<void> = Promise.resolve();
-
 export class AccountDirectory {
   readonly preferences: AccountModelPreferences;
 
   constructor(
     private readonly database: SqliteDatabase,
     private readonly credentials: CredentialStore,
+    private readonly coordinator: AccountCoordinator,
     private readonly nowMs: () => number = Date.now,
     maxAuthenticated = 8,
     private readonly clearModelCapabilities: (accountId: string) => void = () => undefined,
@@ -130,7 +129,7 @@ export class AccountDirectory {
     const environment = resolveGitHubEnvironment(input.host);
     const userId = canonicalUserId(input.userId);
     const accountId = formatAccountId(environment.host, userId);
-    return await withAccountLifecycleLock(() => withCredentialGenerationLock(accountId, async () => {
+    return await this.coordinator.withLifecycle(() => this.coordinator.withCredentialGeneration(accountId, async () => {
       throwIfAborted(signal);
       const existing = this.readAccount(accountId);
       if (existing?.credential_state === "removing") {
@@ -200,7 +199,7 @@ export class AccountDirectory {
       } catch (error: unknown) {
         throw new AccountDirectoryPostCommitError(
           accountId,
-          async (cleanupSignal) => await withAccountLifecycleLock(
+          async (cleanupSignal) => await this.coordinator.withLifecycle(
             async () => await this.credentials.prune(this.activeCredentialReferences(), cleanupSignal),
             cleanupSignal,
           ),
@@ -218,8 +217,8 @@ export class AccountDirectory {
     onRemoving?: () => void,
   ): Promise<AccountSummary> {
     throwIfAborted(signal);
-    return await withAccountLifecycleLock(
-      () => withCredentialGenerationLock(
+    return await this.coordinator.withLifecycle(
+      () => this.coordinator.withCredentialGeneration(
         accountId,
         () => this.removeUnlocked(accountId, expectedRevision, signal, onRemoving),
         signal,
@@ -274,12 +273,12 @@ export class AccountDirectory {
   }
 
   async reconcile(): Promise<void> {
-    await withAccountLifecycleLock(async () => {
+    await this.coordinator.withLifecycle(async () => {
       const removing = this.database.prepare(
         "SELECT account_id, revision FROM accounts WHERE credential_state = 'removing'",
       ).all() as Array<{ account_id: string; revision: number }>;
       for (const row of removing) {
-        await withCredentialGenerationLock(row.account_id, () => this.removeUnlocked(row.account_id, row.revision));
+        await this.coordinator.withCredentialGeneration(row.account_id, () => this.removeUnlocked(row.account_id, row.revision));
       }
       await this.credentials.prune(this.activeCredentialReferences());
     });
@@ -340,52 +339,6 @@ export class AccountDirectory {
       "SELECT account_id, revision, normalized_host, numeric_user_id, environment_kind, login, display_name, authenticated_at_ms, credential_generation, credential_state FROM accounts WHERE account_id = ?",
     ).get(accountId) as AccountRow | undefined;
   }
-}
-
-async function withAccountLifecycleLock<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-  const previous = accountLifecycleLock;
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const queued = previous.then(() => current);
-  accountLifecycleLock = queued;
-  try {
-    await waitForPrevious(previous, signal);
-  } catch (error: unknown) {
-    release();
-    void queued.finally(() => {
-      if (accountLifecycleLock === queued) {
-        accountLifecycleLock = Promise.resolve();
-      }
-    });
-    throw error;
-  }
-  try {
-    return await work();
-  } finally {
-    release();
-    if (accountLifecycleLock === queued) {
-      accountLifecycleLock = Promise.resolve();
-    }
-  }
-}
-
-async function waitForPrevious(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  if (signal === undefined) {
-    await previous;
-    return;
-  }
-  let removeAbortListener = (): void => undefined;
-  await Promise.race([
-    previous,
-    new Promise<void>((_resolve, reject) => {
-      const onAbort = (): void => reject(new DOMException("aborted", "AbortError"));
-      signal.addEventListener("abort", onAbort, { once: true });
-      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-    }),
-  ]).finally(removeAbortListener);
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

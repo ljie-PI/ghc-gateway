@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { createHash } from "node:crypto";
 import { createServer, type IncomingHttpHeaders, type ServerResponse } from "node:http";
 import { readdir, readFile, rm } from "node:fs/promises";
@@ -49,6 +50,7 @@ async function remote(protocol: Protocol, respond?: (response: ServerResponse, b
   const endpointDiscovery = new EndpointDiscovery(async () => `http://127.0.0.1:${address.port}`);
   const backend = new HttpCopilotBackend({
     credentials,
+    accountCoordinator: new AccountCoordinator(),
     refreshCopilotToken: async () => { throw new Error("unexpected token refresh"); },
     endpointDiscovery,
   });

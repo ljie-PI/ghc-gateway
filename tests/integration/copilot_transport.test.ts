@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -99,10 +100,96 @@ describe("Copilot transport", () => {
     const store = new MemoryCredentialStore();
     const bound = account("ghes");
     await store.putGeneration(bound.accountId, 1, { generation: 1, githubToken: "ghes-oauth" });
-    const token = await getValidToken(store, bound, Date.now(), async () => {
+    const token = await getValidToken(store, new AccountCoordinator(), bound, Date.now(), async () => {
       throw new Error("should not refresh");
     });
     expect(token).toBe("ghes-oauth");
+  });
+
+  it("deduplicates stale refreshes for one account generation", async () => {
+    const store = new MemoryCredentialStore();
+    const coordinator = new AccountCoordinator();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, { generation: 1, githubToken: "github" });
+    const started = deferred<void>();
+    const release = deferred<void>();
+    let refreshes = 0;
+    const refresh = async (): Promise<{ token: string; expiresAtMs: number }> => {
+      refreshes += 1;
+      started.resolve();
+      await release.promise;
+      return { token: "copilot", expiresAtMs: Date.now() + 120_000 };
+    };
+    const first = getValidToken(store, coordinator, bound, Date.now(), refresh);
+    await started.promise;
+    const second = getValidToken(store, coordinator, bound, Date.now(), refresh);
+    release.resolve();
+    await expect(Promise.all([first, second])).resolves.toEqual(["copilot", "copilot"]);
+    expect(refreshes).toBe(1);
+    expect(coordinator.inspect()).toMatchObject({ generationKeys: 0, generationPending: 0 });
+  });
+
+  it("refreshes different accounts and independent contexts concurrently", async () => {
+    const store = new MemoryCredentialStore();
+    const coordinator = new AccountCoordinator();
+    const firstAccount = account();
+    const secondAccount = { ...account(), accountId: "github.com/2", userId: "2" };
+    await store.putGeneration(firstAccount.accountId, 1, { generation: 1, githubToken: "github-one" });
+    await store.putGeneration(secondAccount.accountId, 1, { generation: 1, githubToken: "github-two" });
+    const bothStarted = deferred<void>();
+    const release = deferred<void>();
+    let started = 0;
+    const refresh = async (): Promise<{ token: string; expiresAtMs: number }> => {
+      started += 1;
+      if (started === 2) bothStarted.resolve();
+      await release.promise;
+      return { token: "copilot", expiresAtMs: Date.now() + 120_000 };
+    };
+    const first = getValidToken(store, coordinator, firstAccount, Date.now(), refresh);
+    const second = getValidToken(store, coordinator, secondAccount, Date.now(), refresh);
+    await bothStarted.promise;
+
+    const independentStore = new MemoryCredentialStore();
+    await independentStore.putGeneration(firstAccount.accountId, 1, { generation: 1, githubToken: "independent" });
+    await expect(getValidToken(
+      independentStore,
+      new AccountCoordinator(),
+      firstAccount,
+      Date.now(),
+      async () => ({ token: "independent-copilot", expiresAtMs: Date.now() + 120_000 }),
+    )).resolves.toBe("independent-copilot");
+
+    release.resolve();
+    await Promise.all([first, second]);
+  });
+
+  it("cancels a queued refresh waiter without damaging active or successor refreshes", async () => {
+    const store = new MemoryCredentialStore();
+    const coordinator = new AccountCoordinator();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, { generation: 1, githubToken: "github" });
+    const started = deferred<void>();
+    const release = deferred<void>();
+    let refreshes = 0;
+    const refresh = async (): Promise<{ token: string; expiresAtMs: number }> => {
+      refreshes += 1;
+      started.resolve();
+      await release.promise;
+      return { token: "copilot", expiresAtMs: Date.now() + 120_000 };
+    };
+    const active = getValidToken(store, coordinator, bound, Date.now(), refresh);
+    await started.promise;
+    const controller = new AbortController();
+    const canceled = getValidToken(store, coordinator, bound, Date.now(), refresh, controller.signal);
+    const successor = getValidToken(store, coordinator, bound, Date.now(), refresh);
+    await Promise.resolve();
+    controller.abort();
+    await expect(canceled).rejects.toMatchObject({ name: "AbortError" });
+    release.resolve();
+    await expect(active).resolves.toBe("copilot");
+    await expect(successor).resolves.toBe("copilot");
+    expect(refreshes).toBe(1);
+    expect(coordinator.inspect()).toMatchObject({ generationKeys: 0, generationPending: 0 });
   });
 
   it("strips secrets on cross-host redirect and keeps them on same host", () => {
@@ -332,6 +419,7 @@ describe("Copilot transport", () => {
     let captured: { readonly input: RequestInfo | URL; readonly init: RequestInit | undefined } | undefined;
     const backend = new HttpCopilotBackend({
       credentials: store,
+      accountCoordinator: new AccountCoordinator(),
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
       endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async (input, init) => {
@@ -378,6 +466,7 @@ describe("Copilot transport", () => {
     });
     const backend = new HttpCopilotBackend({
       credentials: store,
+      accountCoordinator: new AccountCoordinator(),
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
       endpointDiscovery: testEndpointDiscovery(async () => `http://127.0.0.1:${address.port}`),
     });
@@ -411,6 +500,7 @@ describe("Copilot transport", () => {
     });
     const backend = new HttpCopilotBackend({
       credentials: store,
+      accountCoordinator: new AccountCoordinator(),
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
       endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async () => {
@@ -443,6 +533,7 @@ describe("Copilot transport", () => {
     let canceled = false;
     const backend = new HttpCopilotBackend({
       credentials: store,
+      accountCoordinator: new AccountCoordinator(),
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
       endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({
@@ -477,6 +568,7 @@ describe("Copilot transport", () => {
     });
     const backend = new HttpCopilotBackend({
       credentials: store,
+      accountCoordinator: new AccountCoordinator(),
       refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
       endpointDiscovery: testEndpointDiscovery(async () => null),
       fetchImpl: async () => new Response(new ReadableStream<Uint8Array>({

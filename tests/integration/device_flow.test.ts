@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -50,7 +51,7 @@ describe("device flow", () => {
     });
     try {
       let now = nowMs();
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       const flows = new DeviceFlowService(accounts, scriptedClient(), () => now);
       const started = await flows.start("github.com");
       expect(started.userCode).toBe("ABCD-1234");
@@ -78,7 +79,7 @@ describe("device flow", () => {
       nowMs,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
       const pendingClient: DeviceOAuthClient = {
         async requestDeviceCode() {
           return {
@@ -111,7 +112,7 @@ describe("device flow", () => {
       nowMs,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
       const releases: Array<() => void> = [];
       const flows = new DeviceFlowService(accounts, {
         async requestDeviceCode() {
@@ -147,7 +148,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       let exchanges = 0;
       let release = (): void => undefined;
       const flows = new DeviceFlowService(accounts, {
@@ -192,7 +193,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       const flows = new DeviceFlowService(accounts, {
         async requestDeviceCode() {
           return {
@@ -228,7 +229,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       let exchanges = 0;
       const flows = new DeviceFlowService(accounts, {
         async requestDeviceCode() {
@@ -282,7 +283,7 @@ describe("device flow", () => {
     });
 
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       let exchanges = 0;
       let release = (): void => undefined;
       const flows = new DeviceFlowService(accounts, {
@@ -336,7 +337,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       let exchangeStarted = (): void => undefined;
       const startedExchange = new Promise<void>((resolve) => { exchangeStarted = resolve; });
       const flows = new DeviceFlowService(accounts, {
@@ -382,7 +383,7 @@ describe("device flow", () => {
     });
 
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), Date.now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), Date.now);
       let exchanges = 0;
       let userRequests = 0;
       const flows = new DeviceFlowService(accounts, {
@@ -430,7 +431,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       let userRequests = 0;
       const flows = new DeviceFlowService(accounts, {
         async requestDeviceCode() {
@@ -480,7 +481,7 @@ describe("device flow", () => {
         await persistenceRelease;
         await putGeneration(...args);
       };
-      const accounts = new AccountDirectory(database, credentials, () => now);
+      const accounts = new AccountDirectory(database, credentials, new AccountCoordinator(), () => now);
       const flows = new DeviceFlowService(accounts, scriptedClient(), () => now);
       const started = await flows.start("github.com");
       now += 5_000;
@@ -514,7 +515,7 @@ describe("device flow", () => {
     });
 
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       const upsertAuthenticated = accounts.upsertAuthenticated.bind(accounts);
       let committed = (): void => undefined;
       let release = (): void => undefined;
@@ -570,7 +571,7 @@ describe("device flow", () => {
     });
 
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       const upsertAuthenticated = accounts.upsertAuthenticated.bind(accounts);
       let committed = (): void => undefined;
       let release = (): void => undefined;
@@ -625,7 +626,7 @@ describe("device flow", () => {
         await cleanupRelease;
         if (cleanupAttempts < 3) throw new Error("cleanup failed");
       };
-      const accounts = new AccountDirectory(database, credentials, () => now);
+      const accounts = new AccountDirectory(database, credentials, new AccountCoordinator(), () => now);
       const flows = new DeviceFlowService(accounts, scriptedClient(), () => now);
       const started = await flows.start("github.com");
       now += 5_000;
@@ -662,7 +663,7 @@ describe("device flow", () => {
       nowMs: Date.now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), Date.now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), Date.now);
       let exchanges = 0;
       const flows = new DeviceFlowService(accounts, {
         async requestDeviceCode() {
@@ -707,7 +708,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       const flows = new DeviceFlowService(accounts, scriptedClient(), () => now);
       for (let index = 0; index < MAX_DEVICE_FLOWS + 1; index += 1) {
         const started = await flows.start("github.com");
@@ -729,7 +730,7 @@ describe("device flow", () => {
       nowMs: Date.now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), Date.now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), Date.now);
       const flows = new DeviceFlowService(accounts, {
         async requestDeviceCode(_environment, signal) {
           await new Promise<void>((_resolve, reject) => {
@@ -762,7 +763,7 @@ describe("device flow", () => {
       nowMs: Date.now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), Date.now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), Date.now);
       const flows = new DeviceFlowService(accounts, scriptedClient(), Date.now);
       const started = await flows.start("github.com");
       expect(vi.getTimerCount()).toBe(1);
@@ -784,7 +785,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       const upsertAuthenticated = accounts.upsertAuthenticated.bind(accounts);
       let committed = (): void => undefined;
       let releaseCommit = (): void => undefined;
@@ -824,7 +825,7 @@ describe("device flow", () => {
       nowMs,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
       let requestStarted = (): void => undefined;
       const startedRequest = new Promise<void>((resolve) => { requestStarted = resolve; });
       const flows = new DeviceFlowService(accounts, {
@@ -857,7 +858,7 @@ describe("device flow", () => {
       nowMs: () => now,
     });
     try {
-      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => now);
+      const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => now);
       let userRequestStarted = (): void => undefined;
       const startedUserRequest = new Promise<void>((resolve) => { userRequestStarted = resolve; });
       const flows = new DeviceFlowService(accounts, {

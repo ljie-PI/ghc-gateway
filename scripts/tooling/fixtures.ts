@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { formatAccountId, normalizeGitHubHost } from "../../src/accounts/github_environment.js";
 import { assertNode24 } from "./node_version.js";
@@ -805,7 +806,12 @@ async function createResponsesFixtureGateway(backend = new ScriptedCopilotBacken
     ],
     nowMs: () => 1_700_000_000_000,
   });
-  const accounts = new AccountDirectory(database, new MemoryCredentialStore(), () => 1_700_000_000_000);
+  const accounts = new AccountDirectory(
+    database,
+    new MemoryCredentialStore(),
+    new AccountCoordinator(),
+    () => 1_700_000_000_000,
+  );
   await accounts.upsertAuthenticated({
     host: "github.com",
     userId: "1",

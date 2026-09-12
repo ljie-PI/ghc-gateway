@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createAdminStaticModule } from "./admin/static.js";
 import { createAdminModule } from "./admin/routes.js";
 import type { AccountDirectory } from "./accounts/account_directory.js";
+import { AccountCoordinator } from "./accounts/account_coordinator.js";
 import { DeviceFlowService } from "./accounts/device_flow.js";
 import { HttpDeviceOAuthClient } from "./accounts/device_oauth.js";
 import { FileCredentialStore, type CredentialStore } from "./accounts/credential_store.js";
@@ -57,6 +58,7 @@ export interface ProductionDaemonCompositionOptions {
 export interface ApplicationContext {
   readonly database?: SqliteDatabase;
   readonly credentials?: CredentialStore;
+  readonly accountCoordinator: AccountCoordinator;
   readonly directory: AccountDirectory;
   readonly registry: ModelCapabilityRegistry;
   readonly copilot: CopilotBackend;
@@ -158,6 +160,7 @@ export async function createProductionApplicationContext(
   env: NodeJS.ProcessEnv = {},
 ): Promise<ApplicationContext> {
   const credentials = new FileCredentialStore(path.join(startup.dataDir, "credentials.json"));
+  const accountCoordinator = new AccountCoordinator();
   const database = openDatabase({
     path: path.join(startup.dataDir, "state.db"),
     migrations: MIGRATION_MANIFEST,
@@ -176,6 +179,7 @@ export async function createProductionApplicationContext(
   const directory = new SqliteAccountDirectory(
     database,
     credentials,
+    accountCoordinator,
     Date.now,
     snapshot.accounts.maxAuthenticated,
     (accountId) => {
@@ -189,7 +193,7 @@ export async function createProductionApplicationContext(
     if (credentialGeneration !== undefined && account.credentialGeneration !== credentialGeneration) {
       throw new DOMException("stale credential generation", "AbortError");
     }
-    const token = await getValidToken(credentials, account, Date.now(), refreshCopilotToken, signal);
+    const token = await getValidToken(credentials, accountCoordinator, account, Date.now(), refreshCopilotToken, signal);
     const { endpoint } = await endpointDiscovery.discover(account, signal);
     return { token, endpoint };
   });
@@ -197,6 +201,7 @@ export async function createProductionApplicationContext(
   const registry = new ModelCapabilityRegistry(catalog, productionBuiltinModelCapabilities);
   const copilot = new HttpCopilotBackend({
     credentials,
+    accountCoordinator,
     refreshCopilotToken,
     endpointDiscovery,
   });
@@ -221,6 +226,7 @@ export async function createProductionApplicationContext(
   return {
     database,
     credentials,
+    accountCoordinator,
     directory,
     registry,
     copilot,
@@ -237,6 +243,7 @@ export async function createProductionApplicationContext(
         async () => copilot.close(),
         async () => registry.close(),
         async () => endpointDiscovery.close(),
+        async () => accountCoordinator.close(),
         async () => telemetryRuntime.close(),
         async () => closeDatabaseOnce(),
       ]) {
@@ -255,7 +262,12 @@ export async function createProductionApplicationContext(
       modelsSource.forceClose();
       endpointDiscovery.forceClose();
       telemetryRuntime.forceClose();
-      closeDatabaseOnce();
+      accountCoordinator.stop();
+      if (accountCoordinator.isIdle()) {
+        closeDatabaseOnce();
+      } else {
+        void accountCoordinator.drain().then(closeDatabaseOnce).catch(() => undefined);
+      }
     },
   };
 }

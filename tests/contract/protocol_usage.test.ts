@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
@@ -244,7 +245,7 @@ function request(target: InferenceProtocol, stream: boolean): Request {
 }
 async function usageGateway(source: InferenceProtocol, updates: Counters[], usage: Counters, status = 200) {
   const database = openDatabase({ path: ":memory:", migrations: [configMigration, accountsMigration, telemetryMigration, historyMigration, ownershipMigration].map(embedMigration), nowMs });
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+  const directory = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
   await directory.upsertAuthenticated({ host: "github.com", userId: "1", secret: { generation: 0, githubToken: "test-token" } });
   const catalog = new CopilotModelCatalog({ async fetch() { return { data: [{ id: "test-model", name: "Test", vendor: "test", model_picker_enabled: true, model_info: { supported_endpoints: [source === "chat" ? "/chat/completions" : `/v1/${source}`], chat_output_token_field: "max_tokens" } }] }; } }, () => new Date(nowMs()));
   const backend = new ScriptedCopilotBackend({

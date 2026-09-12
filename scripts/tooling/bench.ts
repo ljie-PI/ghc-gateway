@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import type { BoundCopilot, CopilotBackend } from "../../src/copilot/backend.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
@@ -517,7 +518,8 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     nowMs,
   });
   const credentials = new MemoryCredentialStore();
-  const directory = new AccountDirectory(database, credentials, nowMs);
+  const accountCoordinator = new AccountCoordinator();
+  const directory = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
   await directory.upsertAuthenticated({
     host: "github.com",
     userId: "1",
@@ -560,6 +562,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
   const application: ApplicationContext = {
     database,
     credentials,
+    accountCoordinator,
     directory,
     registry,
     copilot: backend,
