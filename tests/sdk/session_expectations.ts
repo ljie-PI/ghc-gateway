@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { expect } from "vitest";
 import { sdkToolCalls as sessionCalls, type SdkProtocol, type SdkProtocolResult as SessionResult, type SdkToolCall as ForecastCall } from "./client.js";
@@ -48,7 +49,7 @@ export interface SessionRequestExpectation {
   readonly protocol: SdkProtocol;
   readonly turn: SessionTurn;
   readonly imageBase64: string;
-  readonly turns: readonly { readonly text: string }[];
+  readonly assistantTextSha256: readonly (string | undefined)[];
   readonly calls: readonly ForecastCall[];
 }
 
@@ -124,8 +125,8 @@ function matchesSessionBody(body: unknown, expected: SessionRequestExpectation):
     wanted.push(["user", "text", SESSION_PROMPTS[index]]);
     if (index === 0) wanted.push(["user", "image", expected.imageBase64]);
     if (index < turn - 1) {
-      const text = expected.turns[index]!.text;
-      if (text !== "") wanted.push(["assistant", "text", text]);
+      const textSha256 = expected.assistantTextSha256[index];
+      if (textSha256 !== undefined) wanted.push(["assistant", "text_sha256", textSha256]);
       if (index === 1) for (const call of expected.calls) wanted.push(["call", call.id, call.name, call.arguments]);
     }
   }
@@ -134,14 +135,14 @@ function matchesSessionBody(body: unknown, expected: SessionRequestExpectation):
 
 function appendContent(target: unknown[][], role: string, content: unknown, protocol: SdkProtocol, imageBase64: string): boolean {
   if (content === null || content === undefined || content === "") return role === "assistant";
-  if (typeof content === "string") { target.push([role, "text", content]); return true; }
+  if (typeof content === "string") { appendText(target, role, content); return true; }
   if (!boundedArray(content)) return false;
   for (const value of content) {
     const part = record(value);
     if (part === undefined) return false;
     const textType = protocol === "responses" ? (role === "assistant" ? "output_text" : "input_text") : "text";
     if (part.type === textType && typeof part.text === "string") {
-      if (part.text !== "") target.push([role, "text", part.text]);
+      if (part.text !== "") appendText(target, role, part.text);
     } else if (protocol === "messages" && part.type === "tool_use" && role === "assistant") {
       target.push(["call", part.id, part.name, part.input]);
     } else if (protocol === "messages" && part.type === "tool_result" && role === "user") {
@@ -162,6 +163,12 @@ function appendContent(target: unknown[][], role: string, content: unknown, prot
     }
   }
   return true;
+}
+
+function appendText(target: unknown[][], role: string, text: string): void {
+  target.push(role === "assistant"
+    ? [role, "text_sha256", createHash("sha256").update(text).digest("hex")]
+    : [role, "text", text]);
 }
 
 function textContent(value: unknown, type: string): string | undefined {

@@ -6,8 +6,8 @@ import { matchesTextRequest } from "./replay_expectations.js";
 import { matchesSessionRequest } from "./session_expectations.js";
 import {
   FORECAST_COMPARE_PROMPT, FORECAST_PARAMETERS, MIXED_WEATHER_PROMPT, PARALLEL_WEATHER_PROMPT,
-  REASONING_PROMPT, TEXT_SCENARIOS, WEATHER_PARAMETERS, WEATHER_PROMPT, WEATHER_RESPONSES_PROMPT,
-  WEATHER_RESULT,
+  REASONING_PROMPT, SESSION_ASSISTANT_TEXT_SHA256, TEXT_SCENARIOS, WEATHER_PARAMETERS, WEATHER_PROMPT,
+  WEATHER_RESPONSES_PROMPT, WEATHER_RESULT,
 } from "./scenarios.js";
 import { SESSION_TURNS } from "./session_inputs.js";
 
@@ -63,14 +63,15 @@ export async function createReplayScenarios(manifest: ReplayScenarioManifest): P
       matchesSimpleToolCall(body, protocol, MIXED_WEATHER_PROMPT, imageBase64)));
 
     const sessionIds = SESSION_TURNS.map((turn) => `replay.${protocol}.coherent-session.turn-${turn}`);
-    const turns = await Promise.all(sessionIds.map((caseId) => readFixedSessionTurn(manifest, caseId, protocol)));
-    const calls: readonly SdkToolCall[] = turns[1]!.toolCallIds.map((id, index) => ({
+    const toolCallIds = await readFixedSessionToolCallIds(manifest, sessionIds[1]!, protocol);
+    const calls: readonly SdkToolCall[] = toolCallIds.map((id, index) => ({
       id, name: "get_hourly_forecast", arguments: expectedSessionArguments(index),
     }));
     scenarios.push({
       scenarioId: `replay.${protocol}.coherent-session`, targetProtocol: protocol, model: MODELS[protocol],
       steps: sessionIds.map((caseId, index) => step(index + 1, caseId, index > 0, (body) => matchesSessionRequest(body, {
-        protocol, turn: SESSION_TURNS[index]!, imageBase64, turns, calls,
+        protocol, turn: SESSION_TURNS[index]!, imageBase64,
+        assistantTextSha256: SESSION_ASSISTANT_TEXT_SHA256[protocol], calls,
       }))),
     });
   }
@@ -246,20 +247,22 @@ function expectedSessionArguments(index: number): unknown {
     units: "metric", fields: ["temperature_c", "precipitation_probability", "cloud_cover_percent", "wind_speed_kph"] };
 }
 
-async function readFixedSessionTurn(manifest: ReplayScenarioManifest, caseId: string, protocol: SdkProtocol): Promise<{ text: string; toolCallIds: string[] }> {
+async function readFixedSessionToolCallIds(
+  manifest: ReplayScenarioManifest,
+  caseId: string,
+  protocol: SdkProtocol,
+): Promise<readonly string[]> {
   const raw = await readFile(new URL(`./corpus/${exchange(manifest, caseId).response.bodyFile}`, import.meta.url), "utf8");
   const values = raw.trimStart().startsWith("{")
     ? [JSON.parse(raw) as Record<string, unknown>]
     : raw.split(/\r?\n/u).filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).trim()).filter((data) => data !== "[DONE]")
       .map((data) => JSON.parse(data) as Record<string, unknown>);
-  const texts: string[] = [];
   const toolCallIds: string[] = [];
   for (const value of values) {
     if (protocol === "chat") {
       const choice = record((value.choices as unknown[] | undefined)?.[0]);
       const message = record(choice?.message) ?? record(choice?.delta);
-      if (typeof message?.content === "string") texts.push(message.content);
       if (Array.isArray(message?.tool_calls)) for (const rawCall of message.tool_calls) {
         const id = record(rawCall)?.id;
         if (typeof id === "string" && !toolCallIds.includes(id)) toolCallIds.push(id);
@@ -269,26 +272,18 @@ async function readFixedSessionTurn(manifest: ReplayScenarioManifest, caseId: st
         : value.type === "content_block_start" ? [value.content_block] : [];
       for (const rawPart of content) {
         const part = record(rawPart);
-        if (part?.type === "text" && typeof part.text === "string") texts.push(part.text);
         if (part?.type === "tool_use" && typeof part.id === "string") toolCallIds.push(part.id);
       }
-      const delta = record(value.delta);
-      if (value.type === "content_block_delta" && delta?.type === "text_delta" && typeof delta.text === "string") texts.push(delta.text);
     } else {
       const output = Array.isArray(value.output) ? value.output
         : value.type === "response.output_item.added" ? [value.item] : [];
       for (const rawItem of output) {
         const item = record(rawItem);
         if (item?.type === "function_call" && typeof item.call_id === "string") toolCallIds.push(item.call_id);
-        if (item?.type === "message" && Array.isArray(item.content)) for (const rawPart of item.content) {
-          const part = record(rawPart);
-          if (part?.type === "output_text" && typeof part.text === "string") texts.push(part.text);
-        }
       }
-      if (value.type === "response.output_text.delta" && typeof value.delta === "string") texts.push(value.delta);
     }
   }
-  return { text: texts.join(""), toolCallIds: [...new Set(toolCallIds)] };
+  return [...new Set(toolCallIds)];
 }
 
 async function fixedToolCallId(manifest: ReplayScenarioManifest, caseId: string, protocol: SdkProtocol): Promise<string> {

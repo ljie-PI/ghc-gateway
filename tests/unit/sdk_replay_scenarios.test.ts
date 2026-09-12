@@ -1,9 +1,13 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { parseReplayManifestText, validateReplayScenarios } from "../../src/replay/server.js";
 import { createReplayScenarios } from "../sdk/replay_scenarios.js";
+import { matchesSessionRequest } from "../sdk/session_expectations.js";
 import {
-  IMAGE_ANALYSIS_SYSTEM, MIXED_WEATHER_PROMPT, PARALLEL_WEATHER_PROMPT, SESSION_IMAGE_PROMPT,
+  expectedForecastArguments, FORECAST_COMPARE_PROMPT, FORECAST_TOOL_OPENAI, IMAGE_ANALYSIS_SYSTEM,
+  MIXED_WEATHER_PROMPT, PARALLEL_WEATHER_PROMPT, PARIS_RESULT, SESSION_IMAGE_PROMPT,
+  SESSION_SHOT_LIST_PROMPT, SESSION_SYNTHESIS_PROMPT, SESSION_SYSTEM, TOKYO_RESULT,
   WEATHER_PARAMETERS, WEATHER_PROMPT, WEATHER_RESULT,
 } from "../sdk/scenarios.js";
 
@@ -29,6 +33,50 @@ describe("structured SDK replay catalogue", () => {
       expect(scenario.steps.map((step) => step.ordinal)).toEqual(scenario.steps.map((_, index) => index + 1));
       expect(scenario.steps.length).toBeLessThanOrEqual(64);
     }
+  });
+
+  it("rejects mutated assistant history using independently authored semantic hashes", () => {
+    const imageBase64 = "authored-image";
+    const firstAssistant = "Independently authored image analysis.";
+    const thirdAssistant = "Independently authored city recommendation.";
+    const calls = (["Tokyo", "Paris"] as const).map((city, index) => ({
+      id: index === 0 ? "call_tokyo" : "call_paris",
+      name: "get_hourly_forecast",
+      arguments: expectedForecastArguments(city),
+    }));
+    const messages = [
+      { role: "system", content: SESSION_SYSTEM },
+      { role: "user", content: [
+        { type: "text", text: SESSION_IMAGE_PROMPT },
+        { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imageBase64}`, detail: "auto" } },
+      ] },
+      { role: "assistant", content: firstAssistant },
+      { role: "user", content: FORECAST_COMPARE_PROMPT },
+      { role: "assistant", content: null, tool_calls: calls.map((call) => ({
+        id: call.id, type: "function", function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+      })) },
+      { role: "tool", tool_call_id: calls[0]!.id, content: TOKYO_RESULT },
+      { role: "tool", tool_call_id: calls[1]!.id, content: PARIS_RESULT },
+      { role: "user", content: SESSION_SYNTHESIS_PROMPT },
+      { role: "assistant", content: thirdAssistant },
+      { role: "user", content: SESSION_SHOT_LIST_PROMPT },
+    ];
+    const expectation = {
+      protocol: "chat" as const,
+      turn: 4 as const,
+      imageBase64,
+      assistantTextSha256: [
+        createHash("sha256").update(firstAssistant).digest("hex"),
+        undefined,
+        createHash("sha256").update(thirdAssistant).digest("hex"),
+      ],
+      calls,
+    };
+
+    expect(matchesSessionRequest({ messages, tools: [FORECAST_TOOL_OPENAI] }, expectation)).toBe(true);
+    const mutated = structuredClone(messages);
+    (mutated[8] as { content: string }).content = `${thirdAssistant} changed`;
+    expect(matchesSessionRequest({ messages: mutated, tools: [FORECAST_TOOL_OPENAI] }, expectation)).toBe(false);
   });
 
   it("rejects deceptive magic substrings and structural image mutations", async () => {
