@@ -3346,6 +3346,85 @@ describe("shared conversion response codecs", () => {
     }).rejects.toThrow();
   });
 
+  it("captures one timestamp across the production Responses stream lifecycle", async () => {
+    let clockReads = 0;
+    const source = [
+      "data: {\"id\":\"chatcmpl_clock\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const emissions: ConvertedStreamEmission[] = [];
+    for await (const emission of convertProtocolStream(
+      chunks(encoder.encode(source)),
+      {
+        ...streamContext("chat", "responses"),
+        nowUnixSeconds: () => {
+          clockReads += 1;
+          return clockReads === 1 ? 1_700_000_000 : 1_800_000_000;
+        },
+      },
+    )) {
+      emissions.push(emission);
+    }
+    const text = wireText(emissions);
+
+    expect(clockReads).toBe(1);
+    expect(text.match(/"created_at":1700000000/gu)?.length).toBeGreaterThanOrEqual(3);
+    expect(text).not.toContain("1800000000");
+    expect(emissions.filter((emission) => emission.kind === "terminal")).toHaveLength(1);
+  });
+
+  it("propagates source failures without a success terminal", async () => {
+    const failure = new Error("source failed");
+    async function* throwingSource(): AsyncIterable<Uint8Array> {
+      if (failure.message === "__never__") {
+        yield new Uint8Array();
+      }
+      throw failure;
+    }
+    const iterator = convertProtocolStream(
+      throwingSource(),
+      streamContext("chat", "responses"),
+    )[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).rejects.toBe(failure);
+  });
+
+  it("is pull-based and returns the production source iterator on early consumer return", async () => {
+    let reads = 0;
+    let returns = 0;
+    const sourceText = [
+      "data: {\"id\":\"chatcmpl_pull\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const source: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        let delivered = false;
+        return {
+          async next() {
+            reads += 1;
+            if (delivered) {
+              return { done: true, value: undefined };
+            }
+            delivered = true;
+            return { done: false, value: encoder.encode(sourceText) };
+          },
+          async return() {
+            returns += 1;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const iterator = convertProtocolStream(source, streamContext("chat", "responses"))[Symbol.asyncIterator]();
+
+    expect((await iterator.next()).value?.kind).toBe("first_semantic");
+    expect(reads).toBe(1);
+    expect((await iterator.next()).value?.kind).toBe("checkpoint");
+    expect(reads).toBe(1);
+    await iterator.return?.();
+    expect(returns).toBe(1);
+  });
+
   it("rejects missing terminals and bounded-accumulator overflow", async () => {
     const truncated = convertProtocolStream(
       chunks(encoder.encode(messageEvent("content_block_start", {
