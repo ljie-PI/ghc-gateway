@@ -23,6 +23,7 @@ import type {
   UpstreamByteStream,
 } from "../../src/copilot/upstream_types.js";
 import type { ChatRequest, ChatResponse } from "../../src/protocols/chat_completions/types.js";
+import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -139,7 +140,7 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
     : { createRequestId: () => options.requestId ?? "req_test" };
   const routeDependencies = {
     directory: accounts,
-    catalog,
+    registry: testModelCapabilityRegistry(catalog),
     copilot: backend,
     ...(options.throwingPreferences
       ? {

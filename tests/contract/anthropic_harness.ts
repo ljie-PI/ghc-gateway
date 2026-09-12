@@ -13,6 +13,7 @@ import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_mess
 import type { RuntimeConfigSnapshot } from "../../src/config/schema.js";
 import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
+import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 
 export const ACCOUNT_ID = "github.com/1";
 
@@ -86,7 +87,7 @@ export async function anthropicGateway(options: {
     runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
   }, [createAnthropicMessagesRoute({
     directory: accounts,
-    catalog,
+    registry: testModelCapabilityRegistry(catalog),
     preferences: accounts.preferences,
     copilot: backend,
     createUuid: options.createUuid ?? (() => "00000000-0000-4000-8000-000000000001"),

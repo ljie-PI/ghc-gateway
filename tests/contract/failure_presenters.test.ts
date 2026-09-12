@@ -19,6 +19,8 @@ import {
 } from "../../src/protocols/responses/endpoint.js";
 import { presentResponsesFailure } from "../../src/protocols/responses/failure_presenter.js";
 import { presentModelCatalogFailure } from "../../src/protocols/model_catalog/failure_presenter.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
+import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 
 const requestId = "req_failure_matrix";
 const openAiModelsRequest = new Request("http://127.0.0.1:31400/v1/models");
@@ -127,13 +129,19 @@ describe("semantic failure presenters", () => {
     const recordUsage = vi.fn();
     const request = new Request("http://127.0.0.1:31400/");
     const failure: GatewayFailure = { kind: "upstream_timeout" };
+    const registry = new ModelCapabilityRegistry(new CopilotModelCatalog({
+      async fetch() { return { data: [] }; },
+    }), { get: () => null });
     const chat = createOpenAiChatRoute({
+      registry,
       usageRecorder: { recordUsage },
     } as unknown as OpenAiChatRouteDependencies);
     const messages = createAnthropicMessagesRoute({
+      registry,
       usageRecorder: { recordUsage },
     } as unknown as AnthropicMessagesRouteDependencies);
     const responses = createResponsesRoute({
+      registry,
       usageRecorder: { recordUsage },
     } as unknown as ResponsesRouteDependencies);
 

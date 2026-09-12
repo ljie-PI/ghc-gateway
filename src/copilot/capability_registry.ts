@@ -37,41 +37,13 @@ export interface CapabilityCatalogSnapshot {
   readonly models: readonly EffectiveModelCapabilitySnapshot[];
 }
 
-export interface CapabilitySnapshotDependencies {
-  readonly registry?: ModelCapabilityRegistry;
-  readonly catalog?: CopilotModelCatalog;
-}
-
-export async function loadCapabilitySnapshot(
-  dependencies: Readonly<CapabilitySnapshotDependencies>,
-  account: Readonly<BoundAccount>,
-  signal: AbortSignal,
-): Promise<CapabilityCatalogSnapshot> {
-  if (dependencies.registry !== undefined) {
-    return await dependencies.registry.get(account, signal);
+export function requireModelCapabilityRegistry(
+  registry: ModelCapabilityRegistry | undefined,
+): ModelCapabilityRegistry {
+  if (registry === undefined) {
+    throw new Error("model capability registry is unavailable");
   }
-
-  if (dependencies.catalog !== undefined) {
-    return capabilitySnapshotFromCatalog(
-      account,
-      await dependencies.catalog.get(account.accountId, signal, account.credentialGeneration),
-    );
-  }
-  throw new Error("model capability registry is unavailable");
-}
-
-export function isCapabilitySnapshotCurrent(
-  dependencies: Readonly<CapabilitySnapshotDependencies>,
-  snapshot: Readonly<CapabilityCatalogSnapshot>,
-): boolean {
-  if (dependencies.registry !== undefined) {
-    return dependencies.registry.isCurrent(snapshot);
-  }
-  return dependencies.catalog?.isCurrent(
-    snapshot.accountId,
-    snapshot.catalogGeneration,
-    snapshot.credentialGeneration,
-  ) === true;
+  return registry;
 }
 
 export class ModelCapabilityRegistry {
@@ -179,58 +151,6 @@ export class ModelCapabilityRegistry {
       },
     });
   }
-}
-
-export function capabilitySnapshotFromCatalog(
-  account: Readonly<BoundAccount>,
-  catalog: Readonly<CatalogSnapshot>,
-): CapabilityCatalogSnapshot {
-  const models = catalog.models.map((model) => {
-    const protocols = effectiveField(model.capabilities.protocols, UNKNOWN_DECLARATIONS.protocols, sameProtocols);
-    const maxInputTokens = effectiveField(model.capabilities.maxInputTokens, UNKNOWN_DECLARATIONS.maxInputTokens);
-    const maxOutputTokens = effectiveField(model.capabilities.maxOutputTokens, UNKNOWN_DECLARATIONS.maxOutputTokens);
-    const defaultConfiguration = effectiveField(
-      model.capabilities.defaultOutputTokens,
-      UNKNOWN_DECLARATIONS.defaultOutputTokens,
-    );
-    const chatOutputTokenField = effectiveField(
-      model.capabilities.chatOutputTokenField,
-      UNKNOWN_DECLARATIONS.chatOutputTokenField,
-    );
-    const supportedParameters = effectiveField(
-      model.capabilities.supportedParameters,
-      UNKNOWN_DECLARATIONS.supportedParameters,
-      sameStrings,
-    );
-    const reasoningEfforts = effectiveField(
-      model.capabilities.reasoningEfforts,
-      UNKNOWN_DECLARATIONS.reasoningEfforts,
-      sameStrings,
-    );
-    return deepFreeze({
-      accountId: account.accountId,
-      modelId: model.id,
-      name: model.name,
-      vendor: model.vendor,
-      protocols,
-      maxInputTokens,
-      maxOutputTokens,
-      defaultOutputTokens: resolveDefaultOutputTokens(defaultConfiguration, maxOutputTokens.value),
-      profile: { chatOutputTokenField, supportedParameters, reasoningEfforts },
-      revision: {
-        credentialGeneration: account.credentialGeneration,
-        catalogGeneration: catalog.generation,
-        builtinRevision: null,
-      },
-    });
-  });
-  return deepFreeze({
-    accountId: account.accountId,
-    credentialGeneration: account.credentialGeneration,
-    catalogGeneration: catalog.generation,
-    fetchedAt: catalog.fetchedAt,
-    models,
-  });
 }
 
 function deepFreeze<T>(value: T): T {

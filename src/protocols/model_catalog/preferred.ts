@@ -1,10 +1,6 @@
 import type { AccountModelPreferences, ModelPreference } from "../../accounts/model_preferences.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
-import type { CapabilityCatalogSnapshot } from "../../copilot/capability_registry.js";
-import {
-  isCapabilitySnapshotCurrent,
-  type CapabilitySnapshotDependencies,
-} from "../../copilot/capability_registry.js";
+import type { CapabilityCatalogSnapshot, ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import { AccountDirectoryError, type AccountDirectory, type BoundAccount } from "../../accounts/account_directory.js";
 
 export class PreferredModelManager {
@@ -65,7 +61,7 @@ export function reconcilePreferredModel(
 export async function reconcilePreferredModelIfCurrent(
   preferences: AccountModelPreferences,
   directory: AccountDirectory,
-  capabilities: Readonly<CapabilitySnapshotDependencies>,
+  registry: Pick<ModelCapabilityRegistry, "isCurrent">,
   boundAccount: Readonly<BoundAccount>,
   catalog: CapabilityCatalogSnapshot,
   observed: ModelPreference | null,
@@ -81,7 +77,7 @@ export async function reconcilePreferredModelIfCurrent(
     throw error;
   }
   if (current.credentialGeneration !== boundAccount.credentialGeneration
-    || !isCapabilitySnapshotCurrent(capabilities, catalog)) {
+    || !registry.isCurrent(catalog)) {
     return preferences.get(boundAccount.accountId);
   }
   return reconcilePreferredModel(preferences, boundAccount.accountId, catalog, observed);

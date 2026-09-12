@@ -6,6 +6,7 @@ import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
 import { UpstreamTimeoutError } from "../../src/copilot/transport.js";
@@ -680,7 +681,7 @@ describe("Responses endpoint", () => {
       runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
     }, [createResponsesRoute({
       directory: accounts,
-      catalog,
+      registry: testModelCapabilityRegistry(catalog),
       preferences: accounts.preferences,
       copilot: backend,
       history,

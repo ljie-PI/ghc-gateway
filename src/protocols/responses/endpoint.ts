@@ -1,8 +1,7 @@
 import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
-import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
-import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import {
   normalizeAccountBindingFailure,
   normalizeCatalogFailure,
@@ -68,8 +67,7 @@ import type {
 
 export interface ResponsesRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly registry?: ModelCapabilityRegistry;
-  readonly catalog?: CopilotModelCatalog;
+  readonly registry: ModelCapabilityRegistry;
   readonly preferences: AccountModelPreferences;
   readonly copilot: CopilotBackend;
   readonly history: ResponsesHistory;
@@ -81,6 +79,7 @@ export interface ResponsesRouteDependencies {
 }
 
 export function createResponsesRoute(dependencies: ResponsesRouteDependencies): RouteRegistration {
+  requireModelCapabilityRegistry(dependencies.registry);
   return {
     method: "POST",
     path: "/v1/responses",
@@ -1393,11 +1392,11 @@ async function loadCatalog(
   signal: AbortSignal,
 ) {
   try {
-    const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
+    const catalog = await dependencies.registry.get(account, signal);
     await reconcilePreferredModelIfCurrent(
       dependencies.preferences,
       dependencies.directory,
-      dependencies,
+      dependencies.registry,
       account,
       catalog,
       observedPreference,

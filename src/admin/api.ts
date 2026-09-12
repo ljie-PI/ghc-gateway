@@ -3,6 +3,7 @@ import { AgentError, type AgentErrorCode, type AgentsManager, type AgentsView, t
 import type { DeviceFlowCancelResult } from "../accounts/device_flow.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { BoundAccount } from "../accounts/account_directory.js";
+import type { ModelCapabilityRegistry } from "../copilot/capability_registry.js";
 import type {
   NativeModelProtocol,
   CapabilitySource,
@@ -224,64 +225,10 @@ export type AdminDeviceFlowPoll =
   | { readonly state: "expired" | "denied" | "failed" }
   | { readonly state: "complete"; readonly account: AdminAccount };
 
-export interface AdminCapabilityRegistry {
-  get(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<{
-    readonly accountId: string;
-    readonly credentialGeneration: number;
-    readonly catalogGeneration: number;
-    readonly fetchedAt: string;
-    readonly models: readonly {
-      readonly modelId: string;
-      readonly name: string;
-      readonly vendor: string;
-      readonly protocols: {
-        readonly value: readonly NativeModelProtocol[] | null;
-        readonly source: CapabilitySource;
-        readonly conflict: boolean;
-        readonly liveState: CapabilityFieldState;
-      };
-      readonly maxInputTokens: {
-        readonly value: number | null;
-        readonly source: CapabilitySource;
-        readonly conflict: boolean;
-        readonly liveState: CapabilityFieldState;
-      };
-      readonly maxOutputTokens: {
-        readonly value: number | null;
-        readonly source: CapabilitySource;
-        readonly conflict: boolean;
-        readonly liveState: CapabilityFieldState;
-      };
-      readonly defaultOutputTokens: {
-        readonly configuration: {
-          readonly value: number | null;
-          readonly source: CapabilitySource;
-          readonly conflict: boolean;
-          readonly liveState: CapabilityFieldState;
-        };
-        readonly effective: number;
-        readonly source: CapabilitySource | "known_ceiling" | "unknown_fallback";
-        readonly valid: boolean;
-      };
-      readonly profile: {
-        readonly chatOutputTokenField: {
-          readonly value: ChatOutputTokenField | null;
-          readonly source: CapabilitySource;
-          readonly conflict: boolean;
-          readonly liveState: CapabilityFieldState;
-        };
-      };
-      readonly revision: {
-        readonly builtinRevision: string | null;
-      };
-    }[];
-  }>;
-  invalidate(accountId: string): void;
-  isCurrent(snapshot: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>): boolean;
-  modelsUsableForAgentMapping(
-    snapshot: Awaited<ReturnType<AdminCapabilityRegistry["get"]>>,
-  ): Awaited<ReturnType<AdminCapabilityRegistry["get"]>>["models"];
-}
+export type AdminCapabilityRegistry = Pick<
+  ModelCapabilityRegistry,
+  "get" | "invalidate" | "isCurrent" | "modelsUsableForAgentMapping"
+>;
 
 export interface AdminAccountCaches {
   invalidate(accountId: string): void;

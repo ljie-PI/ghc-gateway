@@ -16,6 +16,7 @@ import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_mess
 import { createOpenAiChatRoute } from "../../src/protocols/openai_chat/endpoint.js";
 import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
 import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -1029,7 +1030,7 @@ async function matrixGateway(): Promise<MatrixHarness> {
   });
   const routeDependencies = {
     directory,
-    catalog,
+    registry: testModelCapabilityRegistry(catalog),
     preferences: directory.preferences,
     copilot: backend,
     createUuid: () => "00000000-0000-4000-8000-000000000104",

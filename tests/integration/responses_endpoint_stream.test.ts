@@ -23,6 +23,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import type { ResponsesRequest } from "../../src/protocols/responses/dto.js";
 import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
+import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
 import type {
   ResponsesHistory,
   ResponsesHistoryRecord,
@@ -456,7 +457,7 @@ async function streamGateway(
     runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
   }, [createResponsesRoute({
     directory: accounts,
-    catalog,
+    registry: testModelCapabilityRegistry(catalog),
     preferences: accounts.preferences,
     copilot: backend,
     history,

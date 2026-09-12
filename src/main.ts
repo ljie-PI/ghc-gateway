@@ -11,7 +11,7 @@ import { createCopilotEndpointDiscovery, refreshCopilotToken } from "./copilot/c
 import { HttpCopilotModelsSource } from "./copilot/models_source.js";
 import { CopilotModelCatalog, type CopilotModelsSource } from "./copilot/model_catalog.js";
 import { productionBuiltinModelCapabilities } from "./copilot/model_metadata.js";
-import { ModelCapabilityRegistry } from "./copilot/capability_registry.js";
+import { ModelCapabilityRegistry, requireModelCapabilityRegistry } from "./copilot/capability_registry.js";
 import { HttpCopilotBackend } from "./copilot/transport.js";
 import type { CopilotBackend } from "./copilot/backend.js";
 import { getValidToken } from "./copilot/token_refresh.js";
@@ -58,8 +58,7 @@ export interface ApplicationContext {
   readonly database?: SqliteDatabase;
   readonly credentials?: CredentialStore;
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
-  readonly registry?: ModelCapabilityRegistry;
+  readonly registry: ModelCapabilityRegistry;
   readonly copilot: CopilotBackend;
   readonly history: ResponsesHistory;
   readonly telemetry?: TelemetryRecorder;
@@ -112,16 +111,17 @@ export async function bootstrapGateway(options: BootstrapOptions = {}): Promise<
 }
 
 export function createPublicRouteRegistrations(context: Readonly<ApplicationContext>): readonly RouteRegistration[] {
+  const registry = requireModelCapabilityRegistry(context.registry);
   const preferences = context.directory.preferences;
   return [
     ...createModelCatalogRoutes({
       directory: context.directory,
-      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
+      registry,
       preferences,
     }),
     createOpenAiChatRoute({
       directory: context.directory,
-      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
+      registry,
       preferences,
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
@@ -131,7 +131,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
     }),
     createAnthropicMessagesRoute({
       directory: context.directory,
-      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
+      registry,
       preferences,
       copilot: context.copilot,
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
@@ -141,7 +141,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
     }),
     createResponsesRoute({
       directory: context.directory,
-      ...(context.registry === undefined ? { catalog: context.catalog } : { registry: context.registry }),
+      registry,
       preferences,
       copilot: context.copilot,
       history: context.history,
@@ -222,7 +222,6 @@ export async function createProductionApplicationContext(
     database,
     credentials,
     directory,
-    catalog,
     registry,
     copilot,
     history,
@@ -356,7 +355,6 @@ export async function composeProductionDaemonGateway(
     const dispatcher = new CommandDispatcher({
       directory: application.directory,
       deviceFlows,
-      catalog: application.catalog,
       runtimeConfig: runtime,
       updateRuntimeConfig,
       invalidateAccountCaches: (accountId) => accountCaches.invalidate(accountId),

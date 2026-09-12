@@ -157,12 +157,11 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
       database,
       credentials: new MemoryCredentialStore(),
       directory,
-      catalog,
       registry,
       copilot: backend,
       history,
       async close() {
-        await catalog.close();
+        await registry.close();
         closeState();
       },
       forceClose: closeState,

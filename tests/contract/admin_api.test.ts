@@ -4,7 +4,7 @@ import type { AdminModule } from "../../src/gateway/create_gateway.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
-import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { adminDependencies } from "./admin_test_harness.js";
 import { login } from "./admin_test_harness.js";
@@ -89,9 +89,8 @@ describe("Admin API", () => {
         })) };
       },
     }, () => new Date("2027-01-15T08:00:00Z"));
-    dependencies.registry.get = async (account, signal) => capabilitySnapshotFromCatalog(
-      account, await catalog.get(account.accountId, signal, account.credentialGeneration),
-    );
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
+    dependencies.registry.get = registry.get.bind(registry);
     const harness = await createHarness(dependencies);
     try {
       const session = await login(harness.gateway, harness.admin);

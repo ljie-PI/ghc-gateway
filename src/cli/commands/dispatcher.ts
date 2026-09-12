@@ -2,12 +2,7 @@ import type { AccountDirectory } from "../../accounts/account_directory.js";
 import { AccountDirectoryError, type AccountSummary } from "../../accounts/account_directory.js";
 import { DeviceFlowError, type DeviceFlowService } from "../../accounts/device_flow.js";
 import { PreferenceRevisionError } from "../../accounts/model_preferences.js";
-import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
-import {
-  isCapabilitySnapshotCurrent,
-  loadCapabilitySnapshot,
-  type ModelCapabilityRegistry,
-} from "../../copilot/capability_registry.js";
+import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import type { RuntimeConfigStore } from "../../config/runtime_config.js";
 import { isRuntimeConfigKey, readRuntimeConfigNumber, RUNTIME_CONFIG_RANGES, RuntimeConfigError, withRuntimeConfigNumber } from "../../config/runtime_config.js";
 import type { RuntimeConfigSnapshot } from "../../config/schema.js";
@@ -27,8 +22,7 @@ import {
 export interface CommandDispatcherDependencies {
   readonly directory: AccountDirectory;
   readonly deviceFlows: Pick<DeviceFlowService, "start" | "poll" | "cancel">;
-  readonly catalog: CopilotModelCatalog;
-  readonly registry?: ModelCapabilityRegistry;
+  readonly registry: ModelCapabilityRegistry;
   readonly runtimeConfig: RuntimeConfigStore;
   readonly updateRuntimeConfig?: (
     candidate: RuntimeConfigSnapshot,
@@ -39,7 +33,9 @@ export interface CommandDispatcherDependencies {
 }
 
 export class CommandDispatcher {
-  constructor(private readonly dependencies: CommandDispatcherDependencies) {}
+  constructor(private readonly dependencies: CommandDispatcherDependencies) {
+    requireModelCapabilityRegistry(dependencies.registry);
+  }
 
   async dispatch<Operation extends ControlOperation>(
     operation: Operation,
@@ -141,11 +137,11 @@ export class CommandDispatcher {
       const accountId = input.accountId ?? this.defaultAccount().accountId;
       const account = await this.dependencies.directory.bindAccount(accountId, signal);
       const beforePreference = this.dependencies.directory.preferences.get(accountId);
-      const catalog = await loadCapabilitySnapshot(this.dependencies, account, signal);
+      const catalog = await this.dependencies.registry.get(account, signal);
       await reconcilePreferredModelIfCurrent(
         this.dependencies.directory.preferences,
         this.dependencies.directory,
-        this.dependencies,
+        this.dependencies.registry,
         account,
         catalog,
         beforePreference,
@@ -168,10 +164,10 @@ export class CommandDispatcher {
       const input = args as ControlOperationMap["models.set"]["args"];
       const account = this.defaultAccount();
       const bound = await this.dependencies.directory.bindAccount(account.accountId, signal);
-      const catalog = await loadCapabilitySnapshot(this.dependencies, bound, signal);
+      const catalog = await this.dependencies.registry.get(bound, signal);
       const currentBound = await this.dependencies.directory.bindAccount(account.accountId, signal);
       if (currentBound.credentialGeneration !== bound.credentialGeneration
-        || !isCapabilitySnapshotCurrent(this.dependencies, catalog)) {
+        || !this.dependencies.registry.isCurrent(catalog)) {
         throw new PreferenceRevisionError();
       }
       const current = this.dependencies.directory.preferences.get(account.accountId);
@@ -213,7 +209,7 @@ export class CommandDispatcher {
 
   private invalidateAccountCaches(accountId: string): void {
     if (this.dependencies.invalidateAccountCaches === undefined) {
-      this.dependencies.catalog.invalidate(accountId);
+      this.dependencies.registry.invalidate(accountId);
       return;
     }
     this.dependencies.invalidateAccountCaches(accountId);

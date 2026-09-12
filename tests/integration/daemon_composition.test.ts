@@ -50,7 +50,7 @@ describe("production composition", () => {
     );
     const order: string[] = [];
     const closeCopilot = application.copilot.close.bind(application.copilot);
-    const closeCatalog = application.catalog.close.bind(application.catalog);
+    const closeRegistry = application.registry.close.bind(application.registry);
     const telemetryRuntime = application.telemetryRuntime;
     const endpointDiscovery = application.endpointDiscovery;
     const database = application.database;
@@ -64,9 +64,9 @@ describe("production composition", () => {
       order.push("copilot");
       await closeCopilot();
     };
-    application.catalog.close = async () => {
-      order.push("catalog");
-      await closeCatalog();
+    application.registry.close = async () => {
+      order.push("registry");
+      await closeRegistry();
     };
     endpointDiscovery.close = async () => {
       order.push("endpoint-discovery");
@@ -82,7 +82,7 @@ describe("production composition", () => {
     };
     try {
       await application.close?.();
-      expect(order).toEqual(["copilot", "catalog", "endpoint-discovery", "telemetry", "sqlite"]);
+      expect(order).toEqual(["copilot", "registry", "endpoint-discovery", "telemetry", "sqlite"]);
     } finally {
       application.forceClose?.();
       await rm(dataDir, { recursive: true, force: true });
@@ -100,9 +100,9 @@ describe("production composition", () => {
       order.push("copilot");
       throw new Error("copilot close failed");
     };
-    application.catalog.close = async () => {
-      order.push("catalog");
-      throw new Error("catalog close failed");
+    application.registry.close = async () => {
+      order.push("registry");
+      throw new Error("registry close failed");
     };
     const telemetryRuntime = application.telemetryRuntime;
     const endpointDiscovery = application.endpointDiscovery;
@@ -127,13 +127,13 @@ describe("production composition", () => {
         name: "AggregateError",
         errors: [
           expect.objectContaining({ message: "copilot close failed" }),
-          expect.objectContaining({ message: "catalog close failed" }),
+          expect.objectContaining({ message: "registry close failed" }),
           expect.objectContaining({ message: "endpoint discovery close failed" }),
           expect.objectContaining({ message: "telemetry close failed" }),
           expect.objectContaining({ message: "sqlite close failed" }),
         ],
       });
-      expect(order).toEqual(["copilot", "catalog", "endpoint-discovery", "telemetry", "sqlite"]);
+      expect(order).toEqual(["copilot", "registry", "endpoint-discovery", "telemetry", "sqlite"]);
       expect(application.database.prepare("SELECT 1").get()).toEqual({ "1": 1 });
     } finally {
       application.database.close = closeSqlite;
@@ -207,7 +207,7 @@ describe("production composition", () => {
         userId: "177",
         secret: { generation: 0, githubToken: "context-b" },
       });
-      await contextA.registry!.get(accountA, signal());
+      await contextA.registry.get(accountA, signal());
       await contextA.copilot.bind(accountA, signal());
       expect(discoveryRequests).toEqual(["a"]);
       await contextB.copilot.bind(accountB, signal());
@@ -239,7 +239,7 @@ describe("production composition", () => {
         login: "composition",
         secret: { generation: 0, githubToken: "test-token" },
       });
-      await harness.catalog.get(account.accountId, signal());
+      await harness.registry.get(account, signal());
       expect(harness.catalogFetchCount()).toBe(1);
       await harness.endpointDiscovery.discover(account);
       expect(harness.endpointFetchCount()).toBe(1);
@@ -350,8 +350,8 @@ describe("production composition", () => {
         arguments: { accountId: account.accountId },
       });
       expect(removed.status).toBe(200);
-      await harness.catalog.get(account.accountId, signal());
-      expect(harness.catalogFetchCount()).toBe(3);
+      await harness.registry.get(account, signal());
+      expect(harness.catalogFetchCount()).toBe(2);
       await harness.endpointDiscovery.discover(account);
       expect(harness.endpointFetchCount()).toBe(2);
     } finally {
@@ -413,7 +413,7 @@ interface CompositionHarness {
   readonly application: ApplicationContext;
   readonly database: ReturnType<typeof openDatabase>;
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry: ModelCapabilityRegistry;
   readonly history: SqliteResponsesHistory;
   readonly telemetry: TelemetryRecorder;
   readonly runtime: RuntimeConfigStore;
@@ -472,7 +472,6 @@ function compositionHarness(
     database,
     credentials,
     directory,
-    catalog,
     registry,
     copilot: new ScriptedCopilotBackend({}),
     history,
@@ -481,7 +480,7 @@ function compositionHarness(
     runtime,
     async close() {
       await telemetry.flush();
-      await catalog.close();
+      await registry.close();
       await endpointDiscovery.close();
       closeDatabase(database);
     },
@@ -491,7 +490,7 @@ function compositionHarness(
     application,
     database,
     directory,
-    catalog,
+    registry,
     history,
     telemetry,
     runtime,

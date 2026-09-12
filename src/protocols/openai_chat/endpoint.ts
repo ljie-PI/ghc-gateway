@@ -2,8 +2,7 @@ import type { AccountDirectory, BoundAccount } from "../../accounts/account_dire
 import type { AccountModelPreferences, ModelPreference } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
-import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
-import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import { parseChatSse } from "../../copilot/chat_sse.js";
 import {
   normalizeAccountBindingFailure,
@@ -54,8 +53,7 @@ import { chatUsageFromCounters, mergeChatUsageCounters, type ChatUsageCounters }
 
 export interface OpenAiChatRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly registry?: ModelCapabilityRegistry;
-  readonly catalog?: CopilotModelCatalog;
+  readonly registry: ModelCapabilityRegistry;
   readonly preferences?: Pick<AccountModelPreferences, "get">;
   readonly copilot: CopilotBackend;
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
@@ -79,6 +77,7 @@ interface PreparedOpenAiChatRequest {
 }
 
 export function createOpenAiChatRoute(dependencies: OpenAiChatRouteDependencies): RouteRegistration {
+  requireModelCapabilityRegistry(dependencies.registry);
   return {
     method: "POST",
     path: "/v1/chat/completions",
@@ -338,12 +337,12 @@ async function bindAccount(directory: AccountDirectory, signal: AbortSignal) {
 }
 
 async function loadCatalog(
-  dependencies: Pick<OpenAiChatRouteDependencies, "registry" | "catalog">,
+  dependencies: Pick<OpenAiChatRouteDependencies, "registry">,
   account: Readonly<BoundAccount>,
   signal: AbortSignal,
 ) {
   try {
-    return await loadCapabilitySnapshot(dependencies, account, signal);
+    return await dependencies.registry.get(account, signal);
   } catch (error: unknown) {
     throw normalizeCatalogFailure(error, signal);
   }

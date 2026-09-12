@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
+import { registrySnapshotFromDiscovery } from "../contract/model_capability_registry_harness.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
 import { resolveModel } from "../../src/protocols/model_catalog/resolver.js";
 import { planProtocolExecution } from "../../src/protocols/conversion/planner.js";
@@ -24,8 +24,8 @@ const account = {
   credentialGeneration: 4,
 };
 
-function snapshotWith(models: readonly { id: string; protocols: readonly string[] }[]) {
-  return capabilitySnapshotFromCatalog(account, {
+async function snapshotWith(models: readonly { id: string; protocols: readonly string[] }[]) {
+  return await registrySnapshotFromDiscovery(account, {
     accountId: account.accountId,
     generation: 7,
     credentialGeneration: 4,
@@ -44,8 +44,8 @@ function snapshotWith(models: readonly { id: string; protocols: readonly string[
 }
 
 describe("agent configuration compatibility with Gateway model resolution", () => {
-  it("resolves every generated Codex catalog slug explicitly and plans native Responses", () => {
-    const snapshot = snapshotWith([
+  it("resolves every generated Codex catalog slug explicitly and plans native Responses", async () => {
+    const snapshot = await snapshotWith([
       { id: "gpt-test", protocols: ["responses"] },
       { id: "claude-test", protocols: ["messages", "chat"] },
     ]);
@@ -90,8 +90,8 @@ describe("agent configuration compatibility with Gateway model resolution", () =
     expect(bridged.target).toBe("chat");
   });
 
-  it("resolves Claude role model IDs explicitly through the Messages endpoint", () => {
-    const snapshot = snapshotWith([
+  it("resolves Claude role model IDs explicitly through the Messages endpoint", async () => {
+    const snapshot = await snapshotWith([
       { id: "sonnet-real", protocols: ["messages"] },
       { id: "opus-real", protocols: ["chat"] },
       { id: "haiku-real", protocols: ["messages"] },
