@@ -16,6 +16,8 @@ import {
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
+import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
+import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -3387,6 +3389,93 @@ describe("shared conversion response codecs", () => {
     )[Symbol.asyncIterator]();
 
     await expect(iterator.next()).rejects.toBe(failure);
+  });
+
+  it("withholds converted Messages upstream errors after commit and records failure", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const attempt = createRequestAttempt({
+      requestId: "req_explicit_error",
+      protocol: "anthropic",
+      abortedErrorCount: 1,
+      recorder: { recordUsage: (update) => usageUpdates.push(update) },
+    });
+    const terminalKinds: string[] = [];
+    const signal = new AbortController().signal;
+    const diagnostic = "synthetic-sensitive-diagnostic";
+    const response = await createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: chunks(encoder.encode([
+          "data: {\"id\":\"chatcmpl_error\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+          `event: error\ndata: {"error":{"message":"${diagnostic}"}}\n\n`,
+        ].join(""))),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "messages",
+        target: "chat",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: [],
+        },
+      },
+      scope: {
+        requestId: "req_explicit_error",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt,
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000105",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      onTerminal: (result) => {
+        terminalKinds.push(result.kind);
+        if (result.kind === "failure") {
+          attempt.failure(result.error);
+        } else {
+          attempt.success();
+        }
+      },
+    });
+    const handle = getStreamExecutionHandle(response);
+    const reader = response.body?.getReader();
+    if (reader === undefined) {
+      throw new Error("missing response body");
+    }
+    let delivered = "";
+    await expect((async () => {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          return;
+        }
+        delivered += decoder.decode(next.value, { stream: true });
+      }
+    })()).rejects.toThrow();
+    await handle?.completion;
+
+    expect(delivered).toBe([
+      "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-000000000105\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"target\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"partial\"}}\n\n",
+    ].join(""));
+    expect(delivered).not.toContain(diagnostic);
+    expect(delivered).not.toContain("event: error");
+    expect(delivered).not.toContain("event: message_stop");
+    expect(handle?.cause).toBe("postcommit_failure");
+    expect(terminalKinds).toEqual(["failure"]);
+    expect(usageUpdates).toMatchObject([{ protocol: "anthropic", outcome: "upstream_error" }]);
   });
 
   it("is pull-based and returns the production source iterator on early consumer return", async () => {
