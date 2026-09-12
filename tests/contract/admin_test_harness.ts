@@ -241,8 +241,24 @@ function capabilityModel(modelId: string) {
         conflict: false,
         liveState: "missing" as const,
       },
+      supportedParameters: {
+        value: null,
+        source: "unknown" as const,
+        conflict: false,
+        liveState: "missing" as const,
+      },
+      reasoningEfforts: {
+        value: null,
+        source: "unknown" as const,
+        conflict: false,
+        liveState: "missing" as const,
+      },
     },
-    revision: { builtinRevision: "test" },
+    revision: {
+      credentialGeneration: 4,
+      catalogGeneration: 7,
+      builtinRevision: "test",
+    },
   };
 }
 

@@ -4,7 +4,7 @@ import type { AdminModule } from "../../src/gateway/create_gateway.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
-import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { adminDependencies } from "./admin_test_harness.js";
 import { login } from "./admin_test_harness.js";
@@ -89,9 +89,8 @@ describe("Admin API", () => {
         })) };
       },
     }, () => new Date("2027-01-15T08:00:00Z"));
-    dependencies.registry.get = async (account, signal) => capabilitySnapshotFromCatalog(
-      account, await catalog.get(account.accountId, signal, account.credentialGeneration),
-    );
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
+    dependencies.registry.get = registry.get.bind(registry);
     const harness = await createHarness(dependencies);
     try {
       const session = await login(harness.gateway, harness.admin);
@@ -338,6 +337,51 @@ describe("Admin API", () => {
       }
     }
   });
+
+  it.each(["refresh", "preferred"] as const)(
+    "rejects %s before preference writes when the registry snapshot becomes non-current during credential rebind",
+    async (operation) => {
+      const dependencies = adminDependencies();
+      const originalBind = dependencies.accounts.bindAccount;
+      const originalSetPreferred = dependencies.preferredModels.setPreferred;
+      const originalMarkInvalidIfMissing = dependencies.preferredModels.markInvalidIfMissing;
+      let bindCalls = 0;
+      let current = true;
+      let preferenceWrites = 0;
+      dependencies.accounts.bindAccount = async (...args) => {
+        const bound = await originalBind(...args);
+        bindCalls += 1;
+        if (bindCalls === 2) current = false;
+        return bound;
+      };
+      dependencies.registry.isCurrent = () => current;
+      dependencies.preferredModels.setPreferred = (...args) => {
+        preferenceWrites += 1;
+        return originalSetPreferred(...args);
+      };
+      dependencies.preferredModels.markInvalidIfMissing = (...args) => {
+        preferenceWrites += 1;
+        return originalMarkInvalidIfMissing(...args);
+      };
+      const harness = await createHarness(dependencies);
+      try {
+        const session = await login(harness.gateway, harness.admin);
+        const response = operation === "refresh"
+          ? await mutate(harness.gateway, "POST", "/admin/api/v1/models/refresh", session, {
+            accountId: "github.com/42",
+          })
+          : await mutate(harness.gateway, "PUT", "/admin/api/v1/models/preferred", session, {
+            accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+          });
+        expect(response.status).toBe(409);
+        expect(bindCalls).toBe(2);
+        expect(preferenceWrites).toBe(0);
+        expect(dependencies.preferences.get("github.com/42")).toBeNull();
+      } finally {
+        await harness.close();
+      }
+    },
+  );
 
   it("keeps model mutations serialized when a queued request aborts", async () => {
     const dependencies = adminDependencies();

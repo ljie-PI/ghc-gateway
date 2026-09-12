@@ -561,7 +561,6 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     database,
     credentials,
     directory,
-    catalog,
     registry,
     copilot: backend,
     history: measuredHistory,
@@ -574,7 +573,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
       if (closed) return;
       closed = true;
       await telemetry.flush();
-      await catalog.close();
+      await registry.close();
       closeDatabase(database);
     },
     forceClose() {

@@ -11,6 +11,7 @@ import { assertNode24 } from "./node_version.js";
 import { outboundHeaders, ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { parseChatSse } from "../../src/copilot/chat_sse.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
@@ -903,7 +904,7 @@ async function createResponsesFixtureGateway(backend = new ScriptedCopilotBacken
     runtime: defaultRuntimeConfigSnapshot(),
   }, [createResponsesRoute({
     directory: accounts,
-    catalog,
+    registry: new ModelCapabilityRegistry(catalog, { get: () => null }),
     preferences: accounts.preferences,
     copilot: backend,
     history,

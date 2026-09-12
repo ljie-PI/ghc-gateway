@@ -1,8 +1,7 @@
 import type { AccountDirectory, BoundAccount } from "../../accounts/account_directory.js";
 import type { AccountModelPreferences } from "../../accounts/model_preferences.js";
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
-import { loadCapabilitySnapshot, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
-import type { CopilotModelCatalog } from "../../copilot/model_catalog.js";
+import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import {
   MESSAGES_VERSION,
   type MessagesBetaFeature,
@@ -42,8 +41,7 @@ import {
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
-  readonly registry?: ModelCapabilityRegistry;
-  readonly catalog?: CopilotModelCatalog;
+  readonly registry: ModelCapabilityRegistry;
   readonly preferences: AccountModelPreferences;
   readonly copilot: CopilotBackend;
   readonly createUuid?: () => string;
@@ -58,6 +56,7 @@ const JSON_HEADERS = {
 } as const;
 
 export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRouteDependencies): RouteRegistration {
+  requireModelCapabilityRegistry(dependencies.registry);
   return {
     method: "POST",
     path: "/v1/messages",
@@ -338,11 +337,11 @@ async function loadCatalog(
   signal: AbortSignal,
 ) {
   try {
-    const catalog = await loadCapabilitySnapshot(dependencies, account, signal);
+    const catalog = await dependencies.registry.get(account, signal);
     await reconcilePreferredModelIfCurrent(
       dependencies.preferences,
       dependencies.directory,
-      dependencies,
+      dependencies.registry,
       account,
       catalog,
       observedPreference,

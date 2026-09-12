@@ -10,6 +10,7 @@ import { DeviceFlowService, type DeviceOAuthClient } from "../../src/accounts/de
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { createCopilotEndpointDiscovery, refreshCopilotToken } from "../../src/copilot/credential_provider.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import type { TokenRefreshError } from "../../src/copilot/token_refresh.js";
 import { isMainModule, runCli } from "../../src/cli/main.js";
 import { CliError, HttpControlClient, ScriptedControlClient } from "../../src/cli/control_client.js";
@@ -407,8 +408,8 @@ describe("CLI commands", () => {
       harness.directory.preferences.get = originalGet;
       expect(await client.request("models.list", {}, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", items: [{ id: "gpt" }] });
       expect(await client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "gpt", validity: "valid" });
-      const isCurrent = harness.catalog.isCurrent.bind(harness.catalog);
-      harness.catalog.isCurrent = () => false;
+      const isCurrent = harness.registry.isCurrent.bind(harness.registry);
+      harness.registry.isCurrent = () => false;
       await expect(client.request("models.set", { modelId: "gpt" }, { dataDir: "unused" }))
         .rejects.toMatchObject({ code: "revision_conflict" });
       await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });
@@ -416,17 +417,17 @@ describe("CLI commands", () => {
         modelId: "gpt",
         validity: "valid",
       });
-      harness.catalog.isCurrent = isCurrent;
+      harness.registry.isCurrent = isCurrent;
       await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });
       expect(harness.directory.preferences.get("github.com/42")?.validity).toBe("valid");
-      harness.catalog.invalidate("github.com/42");
+      harness.registry.invalidate("github.com/42");
       harness.capiModels = [];
       await client.request("models.list", { accountId: "github.com/42" }, { dataDir: "unused" });
       expect(harness.directory.preferences.get("github.com/42")?.validity).toBe("invalid");
-      harness.catalog.invalidate("github.com/42");
+      harness.registry.invalidate("github.com/42");
       harness.capiModels = [{ id: "claude", name: "Claude", vendor: "anthropic", model_picker_enabled: true }];
       expect(await client.request("models.set", { modelId: "claude" }, { dataDir: "unused" })).toMatchObject({ accountId: "github.com/42", modelId: "claude", validity: "valid" });
-      harness.catalog.invalidate("github.com/42");
+      harness.registry.invalidate("github.com/42");
       harness.capiModels = [];
       const getPreference = harness.directory.preferences.get.bind(harness.directory.preferences);
       let forcePreferenceConflict = true;
@@ -763,7 +764,7 @@ describe("CLI commands", () => {
       });
       const routes = createPublicRouteRegistrations({
         directory: harness.directory,
-        catalog: harness.catalog,
+        registry: harness.registry,
         copilot: harness.backend,
         history: harness.history,
       });
@@ -892,7 +893,7 @@ async function dispatcherHarness(options: {
 } = {}): Promise<{
   readonly dispatcher: CommandDispatcher;
   readonly directory: AccountDirectory;
-  readonly catalog: CopilotModelCatalog;
+  readonly registry: ModelCapabilityRegistry;
   readonly backend: ScriptedCopilotBackend;
   readonly history: SqliteResponsesHistory;
   readonly runtimeConfig: RuntimeConfigStore;
@@ -922,6 +923,7 @@ async function dispatcherHarness(options: {
       return { data: harness.capiModels };
     },
   });
+  const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
   const runtimeConfig = new RuntimeConfigStore(database, now);
   runtimeConfig.seedIfEmpty({});
   const history = new SqliteResponsesHistory(database, { nowMs: now });
@@ -932,13 +934,13 @@ async function dispatcherHarness(options: {
   const dispatcher = new CommandDispatcher({
     directory,
     deviceFlows: new DeviceFlowService(directory, options.device ?? deviceClient(), now),
-    catalog,
+    registry,
     runtimeConfig,
   });
   return {
     dispatcher,
     directory,
-    catalog,
+    registry,
     backend,
     history,
     runtimeConfig,

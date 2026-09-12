@@ -13,7 +13,7 @@ import {
   parseCapiModels,
 } from "../../src/copilot/model_catalog.js";
 import { productionModelInfoLookup } from "../../src/copilot/model_metadata.js";
-import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
+import { registrySnapshotFromDiscovery, testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 import { CapiFetchError, HttpCopilotModelsSource } from "../../src/copilot/models_source.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -183,7 +183,7 @@ describe("CAPI parse and cache", () => {
       maxOutputTokens: { state: "value", value: 64_000 },
       chatOutputTokenField: { state: "value", value: "max_completion_tokens" },
     });
-    const effective = capabilitySnapshotFromCatalog(bound("github.com/1"), snapshot);
+    const effective = await registrySnapshotFromDiscovery(bound("github.com/1"), snapshot);
     expect(JSON.parse(serializeOpenAiModels(effective)).data[0]).toEqual({
       id: "native", object: "model", created: 1_677_610_602, owned_by: "openai",
       max_input_tokens: 128_000,
@@ -500,17 +500,18 @@ describe("CAPI parse and cache", () => {
       },
     );
     const catalog = new CopilotModelCatalog(source);
+    const registry = testModelCapabilityRegistry(catalog);
     const gw = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: dir }),
       runtime: defaultRuntimeConfigSnapshot(),
     }, createModelCatalogRoutes({
       directory: accounts,
-      catalog,
+      registry,
       preferences: accounts.preferences,
-    }), { onClose: () => catalog.close() });
+    }), { onClose: () => registry.close() });
     try {
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"))).status).toBe(200);
-      catalog.invalidate("github.com/1");
+      registry.invalidate("github.com/1");
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"))).status).toBe(200);
       expect(requests).toBe(2);
       expect(createdDispatchers).toBe(1);
@@ -843,9 +844,8 @@ describe("model resolver", () => {
       }],
     }),
   };
-  const catalog = capabilitySnapshotFromCatalog(bound("github.com/1"), discovered);
-
-  it("uses valid visible preference only when model is missing", () => {
+  it("uses valid visible preference only when model is missing", async () => {
+    const catalog = await registrySnapshotFromDiscovery(bound("github.com/1"), discovered);
     const resolved = resolveModel(catalog, undefined, { modelId: "gpt", validity: "valid" });
     expect(resolved).toMatchObject({ source: "preferred", upstreamModel: "gpt" });
     expect(resolveModel(catalog, undefined, { modelId: "gpt", validity: "invalid" })).toEqual({ kind: "invalid_request" });
@@ -878,7 +878,7 @@ describe("listing routes", () => {
       runtime: defaultRuntimeConfigSnapshot(),
     }, createModelCatalogRoutes({
       directory: accounts,
-      catalog,
+      registry: testModelCapabilityRegistry(catalog),
       preferences: accounts.preferences,
     }));
     try {
@@ -906,7 +906,7 @@ describe("listing routes", () => {
 });
 
 describe("serializers", () => {
-  it("omits routing metadata from public OpenAI objects", () => {
+  it("omits routing metadata from public OpenAI objects", async () => {
     const discovered = {
       accountId: "a",
       fetchedAt: "2026-08-30T05:00:00Z",
@@ -917,7 +917,7 @@ describe("serializers", () => {
         capabilities: { supported_endpoints: ["/v1/responses"] },
       }] }),
     };
-    const catalog = capabilitySnapshotFromCatalog(bound("a"), discovered);
+    const catalog = await registrySnapshotFromDiscovery(bound("a"), discovered);
     const openai = JSON.parse(serializeOpenAiModels(catalog)) as { data: Array<Record<string, unknown>> };
     expect(openai.data[0]?.supported_endpoints).toBeUndefined();
     expect(openai.data[0]?.supportedEndpoints).toBeUndefined();

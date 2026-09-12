@@ -6,7 +6,6 @@ import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
-import { capabilitySnapshotFromCatalog } from "../../src/copilot/capability_registry.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { parseLiveModelCapabilities } from "../../src/copilot/model_capabilities.js";
 import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
@@ -36,12 +35,13 @@ describe("model routes errors and preferences", () => {
         return { data: [{ id: "visible", name: "V", vendor: "x", model_picker_enabled: true }] };
       },
     });
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
     const gw = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: dir }),
       runtime: defaultRuntimeConfigSnapshot(),
     }, createModelCatalogRoutes({
       directory: accounts,
-      catalog,
+      registry,
       preferences: accounts.preferences,
     }));
     try {
@@ -54,10 +54,10 @@ describe("model routes errors and preferences", () => {
       });
       const ok = await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       expect(ok.status).toBe(200);
-      const snapshot = await catalog.get("github.com/1", new AbortController().signal);
+      const snapshot = await registry.get(account, new AbortController().signal);
       const manager = new PreferredModelManager(accounts.preferences);
-      manager.setPreferred("github.com/1", "visible", 0, capabilitySnapshotFromCatalog(account, snapshot));
-      catalog.invalidate("github.com/1");
+      manager.setPreferred("github.com/1", "visible", 0, snapshot);
+      registry.invalidate("github.com/1");
       const empty = new CopilotModelCatalog({
         async fetch() {
           return { data: [] };
@@ -91,12 +91,13 @@ describe("model routes errors and preferences", () => {
         throw new CapiFetchError(429, retryAfter);
       },
     });
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
     const gw = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: dir }),
       runtime: defaultRuntimeConfigSnapshot(),
     }, createModelCatalogRoutes({
       directory: accounts,
-      catalog,
+      registry,
       preferences: accounts.preferences,
     }));
     try {
@@ -105,7 +106,7 @@ describe("model routes errors and preferences", () => {
       expect(valid.headers.get("retry-after")).toBe("120");
 
       retryAfter = undefined;
-      catalog.invalidate("github.com/1");
+      registry.invalidate("github.com/1");
       const invalid = await gw.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       expect(invalid.status).toBe(429);
       expect(invalid.headers.get("retry-after")).toBeNull();
@@ -322,12 +323,13 @@ describe("model routes errors and preferences", () => {
         throw error;
       },
     });
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
     const gateway = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: dir }),
       runtime: defaultRuntimeConfigSnapshot(),
     }, createModelCatalogRoutes({
       directory: accounts,
-      catalog,
+      registry,
       preferences: accounts.preferences,
     }), { createRequestId: () => "req_models" });
     try {
@@ -338,7 +340,7 @@ describe("model routes errors and preferences", () => {
         error: { type: "api_error", code: "504" },
       });
 
-      catalog.invalidate("github.com/1");
+      registry.invalidate("github.com/1");
       const anthropic = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models", {
         headers: { "anthropic-version": "2023-06-01" },
       }));
@@ -351,7 +353,7 @@ describe("model routes errors and preferences", () => {
       });
 
       error = new TokenRefreshError("missing", "secret-token https://unsafe.example/private");
-      catalog.invalidate("github.com/1");
+      registry.invalidate("github.com/1");
       const authentication = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       expect(authentication.status).toBe(401);
       expect(await authentication.text()).not.toContain("secret-token");

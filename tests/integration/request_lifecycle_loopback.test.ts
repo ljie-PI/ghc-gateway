@@ -14,6 +14,7 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
 import type { ResponsesHistory } from "../../src/protocols/responses/history.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
+import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
 
 describe("request lifecycle over loopback", () => {
   const closing: HostedGateway[] = [];
@@ -173,7 +174,7 @@ async function responsesGateway(options: {
     runtime,
   }, [createResponsesRoute({
     directory: accounts,
-    catalog,
+    registry: testModelCapabilityRegistry(catalog),
     preferences: accounts.preferences,
     copilot: backend,
     history: EMPTY_HISTORY,

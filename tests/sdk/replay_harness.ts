@@ -117,13 +117,12 @@ export async function startReplaySdkHarness(options: {
       database,
       credentials,
       directory,
-      catalog,
       registry,
       copilot,
       history,
       modelsSource,
       async close() {
-        await catalog.close();
+        await registry.close();
         await copilot.close();
         await modelsSource.close();
         await endpointDiscovery.close();

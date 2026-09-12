@@ -21,6 +21,7 @@ import { convertBufferedResponse } from "../../src/protocols/conversion/buffered
 import { convertProtocolStream } from "../../src/protocols/conversion/stream.js";
 import type { InferenceProtocol, SemanticUsage } from "../../src/protocols/conversion/types.js";
 import { TelemetryRecorder, type UsageUpdate } from "../../src/telemetry/recorder.js";
+import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 
 const encoder = new TextEncoder();
 const protocols = ["chat", "messages", "responses"] as const;
@@ -256,7 +257,7 @@ async function usageGateway(source: InferenceProtocol, updates: Counters[], usag
   });
   const recorder = new TelemetryRecorder(database, nowMs);
   const observations: UsageUpdate[] = [];
-  const dependencies = { directory, preferences: directory.preferences, catalog, copilot: backend, nowMs, createUuid: uuid, usageRecorder: { recordUsage(update: UsageUpdate) { observations.push(update); recorder.recordUsage(update); } } };
+  const dependencies = { directory, preferences: directory.preferences, registry: testModelCapabilityRegistry(catalog), copilot: backend, nowMs, createUuid: uuid, usageRecorder: { recordUsage(update: UsageUpdate) { observations.push(update); recorder.recordUsage(update); } } };
   const history = new SqliteResponsesHistory(database, { nowMs });
   const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime: defaultRuntimeConfigSnapshot() }, [createOpenAiChatRoute(dependencies), createAnthropicMessagesRoute(dependencies), createResponsesRoute({ ...dependencies, history, nowUnixSeconds: () => nowMs() / 1000 })], { createRequestId: () => "req_usage" });
   return { gw, database, recorder, updates: observations, backend, close: async () => { await gw.close(); closeDatabase(database); } };
