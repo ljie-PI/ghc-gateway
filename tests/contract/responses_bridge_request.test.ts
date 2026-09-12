@@ -267,6 +267,32 @@ describe("Responses bridge request conversion", () => {
       expect(() => buildRequestToolContext(request)).toThrow();
     });
 
+    it.each([
+      ["null", null],
+      ["array", []],
+      ["string", "schema"],
+      ["number", 1],
+    ] as const)("rejects explicit %s function parameters through the production planner and retained bridge", (_caseName, parameters) => {
+      const request = requestFromJson(JSON.stringify({
+        model: "source",
+        input: "hi",
+        tools: [{
+          type: "namespace",
+          name: "docs",
+          tools: [{ type: "function", name: "lookup", parameters }],
+        }],
+      }));
+
+      expect(() => prepareConvertedRequest(
+        "responses",
+        "chat",
+        request.body,
+        "target",
+        capability("target", ["chat"]),
+      )).toThrow();
+      expect(() => buildRequestToolContext(request)).toThrow();
+    });
+
     it("adapts strict declarations and tool choice from the production ledger with exact bytes and maps", () => {
       const request = requestFromJson(JSON.stringify({
         model: "source",

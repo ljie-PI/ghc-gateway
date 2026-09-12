@@ -832,9 +832,9 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
   const sourceName = toolName(shape, "REQ-R-EXT-FUNCTION-NAME");
   const description = optionalString(single(shape, "description", "REQ-R-EXT-FUNCTION-DESCRIPTION"), "REQ-R-EXT-FUNCTION-DESCRIPTION");
   const parametersValue = single(shape, "parameters", "REQ-R-EXT-FUNCTION-SCHEMA");
-  const parameters = isWireJsonObject(parametersValue)
-    ? normalizedParameters(requiredObject(parametersValue, "REQ-R-EXT-FUNCTION-SCHEMA"))
-    : object([["type", "object"], ["properties", object([])]]);
+  const parameters = parametersValue === undefined
+    ? object([["type", "object"], ["properties", object([])]])
+    : normalizedParameters(requiredObject(parametersValue, "REQ-R-EXT-FUNCTION-SCHEMA"));
   const nestedStrict = single(shape, "strict", "REQ-R-EXT-FUNCTION-STRICT");
   const strictValue = nestedStrict === undefined && nested !== undefined
     ? single(tool, "strict", "REQ-R-EXT-FUNCTION-STRICT")

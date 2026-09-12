@@ -287,6 +287,33 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it.each([
+    ["null", null],
+    ["array", []],
+    ["string", "schema"],
+    ["number", 1],
+  ] as const)("rejects explicit %s extended function parameters before inference", async (_caseName, parameters) => {
+    const { gw, backend, history, close } = await responsesGateway();
+    try {
+      const response = await gw.fetch(responsesRequest({
+        model: "chat",
+        input: "hi",
+        tools: [{
+          type: "namespace",
+          name: "docs",
+          tools: [{ type: "function", name: "lookup", parameters }],
+        }],
+      }));
+
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe("{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}");
+      expect(history.inspect()).toMatchObject({ count: 0, receiptCount: 0, legacyCount: 0 });
+      expect(backend.captured).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
   it("pins a known converted continuation to Chat before native-first selection", async () => {
     let captured: ChatRequest | undefined;
     const backend = new ScriptedCopilotBackend({
