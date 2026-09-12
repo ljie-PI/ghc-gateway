@@ -558,18 +558,22 @@ interface CompatibilityExtractedMedia {
 
 function extractCompatibilityMedia(value: WireJson, depth = 0): CompatibilityExtractedMedia {
   if (depth > 32) {
-    return { value, media: [] };
+    invalid("REQ-R-EXT-TOOL-RESULT-MEDIA-DEPTH");
   }
   if (typeof value === "string") {
-    try {
-      const bytes = new TextEncoder().encode(value.trim());
-      const parsed = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 });
+    const trimmed = value.trim();
+    if (looksLikeNestedJson(trimmed)) {
+      let parsed: WireJson;
+      try {
+        const bytes = new TextEncoder().encode(trimmed);
+        parsed = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 });
+      } catch {
+        invalid("REQ-R-EXT-TOOL-RESULT-MEDIA-JSON");
+      }
       const extracted = extractCompatibilityMedia(parsed, depth + 1);
       if (extracted.media.length > 0) {
         return { value: canonicalString(extracted.value), media: extracted.media };
       }
-    } catch {
-      // Non-JSON text remains ordinary compatibility content.
     }
   }
   const media = compatibilityMediaPart(value);
@@ -597,6 +601,10 @@ function extractCompatibilityMedia(value: WireJson, depth = 0): CompatibilityExt
     return { value: object(members), media: mediaItems };
   }
   return { value, media: [] };
+}
+
+function looksLikeNestedJson(value: string): boolean {
+  return value.startsWith("{") || value.startsWith("[") || value.startsWith("\"");
 }
 
 function compatibilityMediaPart(value: WireJson): WireJsonObject | undefined {
@@ -1065,20 +1073,22 @@ function validateInstructionOrdering(input: WireJson | undefined): void {
 
 function containsMedia(value: WireJson, depth = 0): boolean {
   if (depth > 32) {
-    return false;
+    invalid("REQ-R-EXT-RESULT-MEDIA-DEPTH");
   }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (trimmed.startsWith("data:image/")) {
       return true;
     }
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    if (looksLikeNestedJson(trimmed)) {
+      let parsed: WireJson;
       try {
         const bytes = new TextEncoder().encode(trimmed);
-        return containsMedia(parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 32 }), depth + 1);
+        parsed = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 });
       } catch {
-        return false;
+        invalid("REQ-R-EXT-RESULT-MEDIA-JSON");
       }
+      return containsMedia(parsed, depth + 1);
     }
     return false;
   }

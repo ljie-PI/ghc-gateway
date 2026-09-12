@@ -337,7 +337,7 @@ async function convertedNonstreamResponse(
   }
   usage.success(attemptUsage(converted.observations.usage));
   return new Response(Buffer.from(converted.bytes), {
-    status: upstream.status,
+    status: plan.request.responseBindings === undefined ? upstream.status : 200,
     headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
 }
