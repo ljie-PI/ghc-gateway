@@ -44,6 +44,7 @@ import {
   wireObject,
 } from "./wire.js";
 import { isOpenAiStrictSchemaCompatible } from "./strict_schema.js";
+import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
 
 const CHAT_TOP_LEVEL = new Set([
   "model",
@@ -567,25 +568,27 @@ function decodeMessagesToolResult(
 }
 
 function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
-  assertAllowedKeys(body, RESPONSES_TOP_LEVEL, "REQ-R-TOP");
-  validateStreamOptions(oneMember(body, "stream_options", "REQ-R-STREAM-OPTIONS"));
-  validateSingleChoice(oneMember(body, "n", "REQ-R-N"), "REQ-R-N");
-  const background = optionalBoolean(oneMember(body, "background", "REQ-R-BACKGROUND"), "REQ-R-BACKGROUND");
+  const extended = prepareResponsesExtendedTools(body);
+  const semanticBody = extended?.body ?? body;
+  assertAllowedKeys(semanticBody, RESPONSES_TOP_LEVEL, "REQ-R-TOP");
+  validateStreamOptions(oneMember(semanticBody, "stream_options", "REQ-R-STREAM-OPTIONS"));
+  validateSingleChoice(oneMember(semanticBody, "n", "REQ-R-N"), "REQ-R-N");
+  const background = optionalBoolean(oneMember(semanticBody, "background", "REQ-R-BACKGROUND"), "REQ-R-BACKGROUND");
   if (background === true) {
     unsupported("REQ-R-BACKGROUND");
   }
-  const previousResponseId = oneMember(body, "previous_response_id", "REQ-R-PREVIOUS");
+  const previousResponseId = oneMember(semanticBody, "previous_response_id", "REQ-R-PREVIOUS");
   if (previousResponseId !== undefined) {
     requiredString(previousResponseId, "REQ-R-PREVIOUS");
   }
-  const store = optionalBoolean(oneMember(body, "store", "REQ-R-STORE"), "REQ-R-STORE");
+  const store = optionalBoolean(oneMember(semanticBody, "store", "REQ-R-STORE"), "REQ-R-STORE");
   if (store === true) {
     unsupported("REQ-R-STORE");
   }
   const degradations = new Set<ConversionDegradationRule>();
-  const items = decodeResponsesInput(oneMember(body, "input", "REQ-R-INPUT"), degradations);
+  const items = decodeResponsesInput(oneMember(semanticBody, "input", "REQ-R-INPUT"), degradations);
   const reasoningObject = optionalObject(
-    oneMember(body, "reasoning", "REQ-R-REASONING"),
+    oneMember(semanticBody, "reasoning", "REQ-R-REASONING"),
     "REQ-R-REASONING",
   );
   if (reasoningObject !== undefined) {
@@ -601,30 +604,38 @@ function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
   }
   return Object.freeze({
     source: "responses",
-    model: optionalString(oneMember(body, "model", "REQ-R-MODEL"), "REQ-R-MODEL"),
-    stream: optionalBoolean(oneMember(body, "stream", "REQ-R-STREAM"), "REQ-R-STREAM") ?? false,
-    instructions: decodeResponsesInstructions(oneMember(body, "instructions", "REQ-R-INSTRUCTIONS")),
+    model: optionalString(oneMember(semanticBody, "model", "REQ-R-MODEL"), "REQ-R-MODEL"),
+    stream: optionalBoolean(oneMember(semanticBody, "stream", "REQ-R-STREAM"), "REQ-R-STREAM") ?? false,
+    instructions: decodeResponsesInstructions(oneMember(semanticBody, "instructions", "REQ-R-INSTRUCTIONS")),
     items,
-    tools: decodeResponsesTools(oneMember(body, "tools", "REQ-R-TOOLS")),
-    toolChoice: decodeResponsesToolChoice(oneMember(body, "tool_choice", "REQ-R-TOOL-CHOICE")),
+    tools: decodeResponsesTools(oneMember(semanticBody, "tools", "REQ-R-TOOLS")).map((tool) => {
+      const binding = extended?.ledger.bindings.find((candidate) => candidate.chatName === tool.name);
+      return binding === undefined ? tool : {
+        ...tool,
+        kind: binding.kind,
+        sourceName: binding.sourceName,
+        ...(binding.namespace === undefined ? {} : { namespace: binding.namespace }),
+      };
+    }),
+    toolChoice: decodeResponsesToolChoice(oneMember(semanticBody, "tool_choice", "REQ-R-TOOL-CHOICE")),
     parallelToolCalls: optionalBoolean(
-      oneMember(body, "parallel_tool_calls", "REQ-R-PARALLEL"),
+      oneMember(semanticBody, "parallel_tool_calls", "REQ-R-PARALLEL"),
       "REQ-R-PARALLEL",
     ),
     maxOutputTokens: aliasedPositiveInteger(
-      body,
+      semanticBody,
       ["max_output_tokens", "max_completion_tokens", "max_tokens"],
       "REQ-R-LIMIT",
     ),
     temperature: finiteNumber(
-      oneMember(body, "temperature", "REQ-R-TEMPERATURE"),
+      oneMember(semanticBody, "temperature", "REQ-R-TEMPERATURE"),
       "REQ-R-TEMPERATURE",
       0,
       2,
     ),
-    topP: finiteNumber(oneMember(body, "top_p", "REQ-R-TOP-P"), "REQ-R-TOP-P", 0, 1),
-    stop: parseStringList(oneMember(body, "stop", "REQ-R-STOP"), "REQ-R-STOP"),
-    outputFormat: decodeResponsesOutputFormat(body),
+    topP: finiteNumber(oneMember(semanticBody, "top_p", "REQ-R-TOP-P"), "REQ-R-TOP-P", 0, 1),
+    stop: parseStringList(oneMember(semanticBody, "stop", "REQ-R-STOP"), "REQ-R-STOP"),
+    outputFormat: decodeResponsesOutputFormat(semanticBody),
     reasoning: reasoningFromEffort(
       optionalString(
         reasoningObject === undefined ? undefined : oneMember(reasoningObject, "effort", "REQ-R-EFFORT"),
@@ -633,8 +644,9 @@ function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
       "REQ-R-EFFORT",
       true,
     ),
-    metadata: validatedMetadata(oneMember(body, "metadata", "REQ-R-METADATA"), "responses"),
+    metadata: validatedMetadata(oneMember(semanticBody, "metadata", "REQ-R-METADATA"), "responses"),
     degradations: [...degradations],
+    ...(extended === undefined ? {} : { responseBindings: extended.ledger }),
   });
 }
 
@@ -697,6 +709,7 @@ function decodeResponsesInput(
         ),
         name: requiredString(oneMember(object, "name", "REQ-R-FUNCTION-NAME"), "REQ-R-FUNCTION-NAME"),
         argumentsJson,
+        ...responsesRequestItemStatus(object, false),
       });
       continue;
     }
@@ -708,6 +721,7 @@ function decodeResponsesInput(
       );
       output.push({
         type: "tool_result",
+        itemId: optionalString(oneMember(object, "id", "REQ-R-FUNCTION-OUTPUT-ITEM-ID"), "REQ-R-FUNCTION-OUTPUT-ITEM-ID"),
         callId: requiredString(
           oneMember(object, "call_id", "REQ-R-FUNCTION-OUTPUT-ID"),
           "REQ-R-FUNCTION-OUTPUT-ID",
@@ -717,6 +731,7 @@ function decodeResponsesInput(
           degradations,
         ),
         isError: oneMember(object, "status", "REQ-R-FUNCTION-OUTPUT-STATUS") === "failed",
+        ...responsesRequestItemStatus(object, true),
       });
       continue;
     }
@@ -744,6 +759,20 @@ function decodeResponsesInput(
     unsupported("REQ-R-INPUT-TYPE");
   }
   return output;
+}
+
+function responsesRequestItemStatus(
+  object: WireJsonObject,
+  allowFailed: boolean,
+): { readonly status?: "completed" | "incomplete" | "in_progress" | "failed" } {
+  const status = optionalString(oneMember(object, "status", "REQ-R-ITEM-STATUS"), "REQ-R-ITEM-STATUS");
+  if (status === undefined) {
+    return {};
+  }
+  if (status === "completed" || status === "incomplete" || status === "in_progress" || (allowFailed && status === "failed")) {
+    return { status };
+  }
+  invalid("REQ-R-ITEM-STATUS");
 }
 
 function decodeResponsesContent(value: WireJson | undefined, allowImage: boolean): readonly SemanticContent[] {
@@ -1102,6 +1131,7 @@ function semanticTool(
   const description = optionalString(oneMember(object, "description", `${ruleId}-DESCRIPTION`), `${ruleId}-DESCRIPTION`);
   const strict = optionalBoolean(oneMember(object, "strict", `${ruleId}-STRICT`), `${ruleId}-STRICT`);
   return {
+    kind: "function",
     name: requiredString(oneMember(object, "name", `${ruleId}-NAME`), `${ruleId}-NAME`),
     ...(description === undefined ? {} : { description }),
     parameters: requiredObject(oneMember(object, schemaKey, `${ruleId}-SCHEMA`), `${ruleId}-SCHEMA`),
@@ -1318,6 +1348,9 @@ function encodeChatRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
+  if (request.responseBindings !== undefined && request.stream) {
+    unsupported("REQ-R-EXT-STREAM");
+  }
   validateConditionalTargetParameters(request, context.capability, "chat");
   const reasoning = supportsTargetReasoning(context.capability, ["reasoning_effort"], request.reasoning)
     ? request.reasoning
@@ -1325,7 +1358,9 @@ function encodeChatRequest(
   const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
     ? ["reasoning.presentation_omitted"]
     : [];
-  const messages = encodeChatMessages(request);
+  const messages = request.responseBindings === undefined
+    ? encodeChatMessages(request)
+    : encodeExtendedChatMessages(request);
   const budget = request.source === "messages"
     ? outputBudget(request.maxOutputTokens, context.capability)
     : request.maxOutputTokens;
@@ -1333,22 +1368,35 @@ function encodeChatRequest(
   if (budget !== undefined && tokenField === null) {
     unsupported("REQ-TARGET-C-TOKEN-DIALECT");
   }
-  const body = wireObject([
-    ["model", context.resolvedModel],
-    ["messages", wireArray(messages)],
-    ...(budget === undefined || tokenField === null ? [] : [[tokenField, wireNumber(budget)] as const]),
-    ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
-    ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
-    ["stop", request.stop === undefined ? undefined : wireArray(request.stop)],
-    ["stream", request.stream ? true : undefined],
-    ["stream_options", request.stream ? wireObject([["include_usage", true]]) : undefined],
-    ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
-    ["tool_choice", encodeChatToolChoice(request.toolChoice)],
-    ["parallel_tool_calls", request.parallelToolCalls],
-    ["response_format", encodeChatOutputFormat(request.outputFormat)],
-    ["reasoning_effort", reasoning?.effort],
-    ["metadata", request.metadata],
-  ]);
+  const body = request.responseBindings === undefined
+    ? wireObject([
+      ["model", context.resolvedModel],
+      ["messages", wireArray(messages)],
+      ...(budget === undefined || tokenField === null ? [] : [[tokenField, wireNumber(budget)] as const]),
+      ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
+      ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
+      ["stop", request.stop === undefined ? undefined : wireArray(request.stop)],
+      ["stream", request.stream ? true : undefined],
+      ["stream_options", request.stream ? wireObject([["include_usage", true]]) : undefined],
+      ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
+      ["tool_choice", encodeChatToolChoice(request.toolChoice)],
+      ["parallel_tool_calls", request.parallelToolCalls],
+      ["response_format", encodeChatOutputFormat(request.outputFormat)],
+      ["reasoning_effort", reasoning?.effort],
+      ["metadata", request.metadata],
+    ])
+    : wireObject([
+      ["model", context.resolvedModel],
+      ["messages", wireArray(messages)],
+      ...request.responseBindings.chatPrefixMembers.map((member) => [member.key, member.value] as const),
+      ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
+      ["tool_choice", encodeChatToolChoice(request.toolChoice)],
+      ...(budget === undefined || tokenField === null ? [] : [[tokenField, wireNumber(budget)] as const]),
+      ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
+      ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
+      ["reasoning_effort", reasoning?.effort],
+      ["metadata", request.metadata],
+    ]);
   return encodedRequest(request, body, reasoningDegradations);
 }
 
@@ -1396,6 +1444,9 @@ function encodeMessagesRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
+  if (request.responseBindings !== undefined) {
+    unsupported("REQ-R-EXT-TARGET");
+  }
   validateConditionalTargetParameters(request, context.capability, "messages");
   if (request.temperature !== undefined && request.temperature > 1) {
     unsupported("REQ-TARGET-M-TEMPERATURE");
@@ -1586,6 +1637,50 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
     if (mediaContent.length > 0) {
       output.push(wireObject([["role", "user"], ["content", wireArray(mediaContent)]]));
     }
+  }
+  return output;
+}
+
+function encodeExtendedChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[] {
+  const output: WireJsonObject[] = [];
+  if (request.instructions.length > 0) {
+    output.push(wireObject([["role", "system"], ["content", textContent(request.instructions) ?? ""]]));
+  }
+  for (let index = 0; index < request.items.length; index += 1) {
+    const item = request.items[index];
+    if (item === undefined) {
+      continue;
+    }
+    if (item.type === "message") {
+      output.push(wireObject([
+        ["role", item.role],
+        ["content", encodeChatContent(item.content)],
+      ]));
+      continue;
+    }
+    if (item.type === "tool_call") {
+      const calls: WireJsonObject[] = [];
+      for (; index < request.items.length; index += 1) {
+        const candidate = request.items[index];
+        if (candidate?.type !== "tool_call") {
+          index -= 1;
+          break;
+        }
+        calls.push(encodeChatToolCall(candidate));
+      }
+      output.push(wireObject([
+        ["role", "assistant"],
+        ["content", null],
+        ["tool_calls", wireArray(calls)],
+        ["reasoning_content", "tool call"],
+      ]));
+      continue;
+    }
+    output.push(wireObject([
+      ["role", "tool"],
+      ["tool_call_id", item.callId],
+      ["content", toolResultText(textContent(item.content) ?? "", item.isError)],
+    ]));
   }
   return output;
 }
@@ -1791,9 +1886,9 @@ function encodeChatTool(tool: SemanticTool): WireJsonObject {
     ["type", "function"],
     ["function", wireObject([
       ["name", tool.name],
-      ["description", tool.description],
+      ["description", tool.description ?? (tool.sourceName === undefined ? undefined : null)],
       ["parameters", tool.parameters],
-      ["strict", tool.strict],
+      ["strict", tool.kind === "custom" || tool.kind === "tool_search" ? undefined : tool.strict],
     ])],
   ]);
 }
@@ -1924,6 +2019,7 @@ function encodedRequest(
     initiator: firstItem?.type === "message" && firstItem.role === "assistant" ? "agent" : "user",
     messagesBetaFeatures: [],
     degradations: [...new Set([...request.degradations, ...additionalDegradations])],
+    ...(request.responseBindings === undefined ? {} : { responseBindings: request.responseBindings }),
   });
 }
 

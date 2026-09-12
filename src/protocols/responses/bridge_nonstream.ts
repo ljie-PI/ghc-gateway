@@ -12,6 +12,9 @@ import {
 import type { ResponsesHistoryRecord } from "./history.js";
 import type { RequestToolContext, ToolBinding } from "./tool_context.js";
 import type { ResponsesRequest } from "./dto.js";
+import { isGatewayManagedResponseId } from "../conversion/ids.js";
+
+export { isGatewayManagedResponseId } from "../conversion/ids.js";
 
 export interface ResponsesBridgeResponseContext {
   readonly originalRequest: ResponsesRequest;
@@ -393,17 +396,6 @@ function parseJsonString(value: string): WireJson | undefined {
     return parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 64 });
   } catch (_error: unknown) {
     return undefined;
-  }
-}
-
-export function isGatewayManagedResponseId(id: string): boolean {
-  if (!id.startsWith("resp_")) {
-    return false;
-  }
-  try {
-    return Buffer.from(id.slice("resp_".length), "base64").toString("utf8").startsWith("litellm:custom_llm_provider:");
-  } catch (_error: unknown) {
-    return false;
   }
 }
 

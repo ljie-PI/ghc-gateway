@@ -49,6 +49,25 @@ describe("protocol conversion matrix", () => {
     },
   );
 
+  it("keeps native Responses priority for extended tools", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-responses",
+        input: "render",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("x-ghcg-upstream-protocol")).toBe("responses");
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["responses"]);
+      expect(JSON.parse(decoder.decode(harness.responsesBodies[0]))).toMatchObject({
+        tools: [{ type: "custom", name: "render" }],
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("uses candidate compatibility before fixed priority without probing or fallback", async () => {
     const harness = await matrixGateway();
     try {

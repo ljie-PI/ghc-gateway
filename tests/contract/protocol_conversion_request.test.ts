@@ -1406,6 +1406,106 @@ describe("shared conversion request codecs", () => {
       capability(["chat"]),
     ).bytes))).toContain("image_url");
   });
+
+  it("encodes a custom Responses tool directly as the final Chat request and captures restoration bindings", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "render",
+      max_output_tokens: 7,
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      tool_choice: { type: "custom", name: "render" },
+    }), "target", capability(["chat"]));
+
+    const expected = {
+      model: "target",
+      messages: [{ role: "user", content: "render" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "render",
+          description: "Original tool definition:\n```json\n{\"format\":{\"type\":\"text\"},\"name\":\"render\",\"type\":\"custom\"}\n```",
+          parameters: {
+            type: "object",
+            properties: {
+              input: {
+                type: "string",
+                description: "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.",
+              },
+            },
+            required: ["input"],
+          },
+        },
+      }],
+      tool_choice: { type: "function", function: { name: "render" } },
+      max_tokens: 7,
+    };
+    expect(decoded(converted.bytes)).toEqual(expected);
+    expect(decoder.decode(converted.bytes)).toBe(JSON.stringify(expected));
+    expect(converted.responseBindings).toEqual({
+      kind: "responses_extended_tools",
+      bindings: [{ kind: "custom", chatName: "render", sourceName: "render" }],
+      calls: [],
+      results: [],
+      chatPrefixMembers: [],
+    });
+  });
+
+  it("captures immutable custom call and result identity for buffered restoration", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      input: [
+        {
+          type: "custom_tool_call",
+          id: "ct_item",
+          call_id: "call_custom",
+          name: "render",
+          input: "raw input",
+          status: "completed",
+        },
+        {
+          type: "custom_tool_call_output",
+          id: "ct_result",
+          call_id: "call_custom",
+          output: "done",
+          status: "failed",
+        },
+      ],
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+    }), "target", capability(["chat"]));
+
+    expect(converted.responseBindings).toMatchObject({
+      calls: [{
+        kind: "custom",
+        chatName: "render",
+        sourceName: "render",
+        itemId: "ct_item",
+        callId: "call_custom",
+        status: "completed",
+        rawCustomInput: "raw input",
+      }],
+      results: [{
+        kind: "custom",
+        itemId: "ct_result",
+        callId: "call_custom",
+        status: "failed",
+      }],
+    });
+    expect(Object.isFrozen(converted.responseBindings)).toBe(true);
+    expect(Object.isFrozen(converted.responseBindings?.calls)).toBe(true);
+  });
+
+  it("fails closed when namespace projection collides with a flat tool name", () => {
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      input: "collision",
+      tools: [
+        { type: "function", name: "ns__lookup", parameters: { type: "object" }, strict: false },
+        {
+          type: "namespace",
+          name: "ns",
+          tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
+        },
+      ],
+    }), "target", capability(["chat"]))).toThrow();
+  });
 });
 
 function capability(

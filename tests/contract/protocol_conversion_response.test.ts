@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
+import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
+import { convertBufferedPlannedResponse, convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
+import { planProtocolExecution } from "../../src/protocols/conversion/planner.js";
+import { isWireJsonObject, parseWireJson, serializeWireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 import { convertProtocolStream } from "../../src/protocols/conversion/stream.js";
 import type {
   ConvertedStreamEmission,
@@ -67,6 +70,106 @@ describe("shared conversion response codecs", () => {
       outputTokens: 4,
       cacheReadTokens: 3,
     });
+  });
+
+  it("restores extended Responses calls from the request-captured binding ledger", () => {
+    const plan = planProtocolExecution({
+      source: "responses",
+      body: responseBody({
+        model: "source",
+        input: "use tools",
+        tools: [
+          { type: "custom", name: "render", format: { type: "text" } },
+          {
+            type: "namespace",
+            name: "weather",
+            tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
+          },
+          { type: "tool_search" },
+        ],
+      }),
+      stream: false,
+      resolvedModel: "target",
+      capability: responseCapability(),
+    });
+    expect(plan.kind).toBe("converted");
+    if (plan.kind !== "converted") {
+      throw new Error("expected converted plan");
+    }
+    const converted = convertBufferedPlannedResponse(encoder.encode(JSON.stringify({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_custom", type: "function", function: { name: "render", arguments: "{\"input\":\"raw\"}" } },
+            { id: "call_namespace", type: "function", function: { name: "weather__lookup", arguments: "{}" } },
+            { id: "call_search", type: "function", function: { name: "tool_search", arguments: "{\"query\":\"tools\"}" } },
+          ],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 3, completion_tokens: 2 },
+    })), plan, {
+      maxBytes: 1_048_576,
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+    });
+
+    expect((decoded(converted.bytes).output as unknown[])).toEqual([
+      {
+        type: "custom_tool_call",
+        id: "fc_00000000-0000-4000-8000-000000000104",
+        call_id: "call_custom",
+        name: "render",
+        status: "completed",
+        input: "raw",
+      },
+      {
+        type: "function_call",
+        id: "fc_00000000-0000-4000-8000-000000000104",
+        call_id: "call_namespace",
+        name: "lookup",
+        namespace: "weather",
+        arguments: "{}",
+        status: "completed",
+      },
+      {
+        type: "tool_search_call",
+        call_id: "call_search",
+        status: "completed",
+        execution: "client",
+        arguments: { query: "tools" },
+        id: "fc_00000000-0000-4000-8000-000000000104",
+      },
+    ]);
+    expect(JSON.parse(decoder.decode(serializeWireJson({
+      kind: "array",
+      items: converted.checkpoint?.output ?? [],
+    })))).toEqual(decoded(converted.bytes).output);
+  });
+
+  it("fails closed when a Chat response names a tool absent from the captured ledger", () => {
+    const plan = planProtocolExecution({
+      source: "responses",
+      body: responseBody({ input: "render", tools: [{ type: "custom", name: "render", format: { type: "text" } }] }),
+      stream: false,
+      resolvedModel: "target",
+      capability: responseCapability(),
+    });
+    if (plan.kind !== "converted") {
+      throw new Error("expected converted plan");
+    }
+    expect(() => convertBufferedPlannedResponse(encoder.encode(JSON.stringify({
+      choices: [{
+        message: { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "missing", arguments: "{}" } }] },
+        finish_reason: "tool_calls",
+      }],
+    })), plan, {
+      maxBytes: 1_048_576,
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+    })).toThrow();
   });
 
   it("preserves refusal and incomplete state when converting Responses to Chat", () => {
@@ -4388,6 +4491,39 @@ function responseToolIdentityFixture(options: { renameIds: boolean; omitName: bo
         usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
       } } },
     ].map(({ type, payload }, index) => responseEvent(index, type, payload)).join(""),
+  };
+}
+
+function responseBody(value: unknown): WireJsonObject {
+  const bytes = encoder.encode(JSON.stringify(value));
+  const parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 64 });
+  if (!isWireJsonObject(parsed)) {
+    throw new Error("expected object");
+  }
+  return parsed;
+}
+
+function responseCapability(): EffectiveModelCapabilitySnapshot {
+  return {
+    accountId: "github.com/1",
+    modelId: "target",
+    name: "target",
+    vendor: "test",
+    protocols: { value: ["chat"], source: "live", conflict: false, liveState: "value" },
+    maxInputTokens: { value: 128_000, source: "live", conflict: false, liveState: "value" },
+    maxOutputTokens: { value: 16_384, source: "live", conflict: false, liveState: "value" },
+    defaultOutputTokens: {
+      configuration: { value: 4096, source: "live", conflict: false, liveState: "value" },
+      effective: 4096,
+      source: "live",
+      valid: true,
+    },
+    profile: {
+      chatOutputTokenField: { value: "max_tokens", source: "live", conflict: false, liveState: "value" },
+      supportedParameters: { value: [], source: "live", conflict: false, liveState: "value" },
+      reasoningEfforts: { value: [], source: "live", conflict: false, liveState: "value" },
+    },
+    revision: { credentialGeneration: 0, catalogGeneration: 1, builtinRevision: null },
   };
 }
 

@@ -41,13 +41,21 @@ export interface SemanticToolCallItem {
   readonly callId: string;
   readonly name: string;
   readonly argumentsJson: string;
+  readonly sourceKind?: "function" | "namespace" | "custom" | "tool_search" | undefined;
+  readonly sourceName?: string | undefined;
+  readonly namespace?: string | undefined;
+  readonly rawCustomInput?: string | undefined;
+  readonly toolSearchArguments?: WireJsonObject | undefined;
+  readonly status?: "completed" | "incomplete" | "in_progress" | "failed" | undefined;
 }
 
 export interface SemanticToolResultItem {
   readonly type: "tool_result";
+  readonly itemId?: string | undefined;
   readonly callId: string;
   readonly content: readonly SemanticContent[];
   readonly isError: boolean;
+  readonly status?: "completed" | "incomplete" | "in_progress" | "failed" | undefined;
 }
 
 export type SemanticRequestItem =
@@ -56,10 +64,43 @@ export type SemanticRequestItem =
   | SemanticToolResultItem;
 
 export interface SemanticTool {
+  readonly kind: "function" | "namespace" | "custom" | "tool_search";
   readonly name: string;
   readonly description?: string | undefined;
   readonly parameters: WireJsonObject;
   readonly strict?: boolean | undefined;
+  readonly sourceName?: string | undefined;
+  readonly namespace?: string | undefined;
+}
+
+export interface ResponsesToolSourceBinding {
+  readonly kind: "function" | "namespace" | "custom" | "tool_search";
+  readonly chatName: string;
+  readonly sourceName: string;
+  readonly namespace?: string | undefined;
+}
+
+export interface ResponsesToolCallBinding extends ResponsesToolSourceBinding {
+  readonly callId: string;
+  readonly itemId?: string | undefined;
+  readonly status?: "completed" | "incomplete" | "in_progress" | "failed" | undefined;
+  readonly rawCustomInput?: string | undefined;
+  readonly toolSearchArguments?: WireJsonObject | undefined;
+}
+
+export interface ResponsesToolResultBinding {
+  readonly kind: ResponsesToolSourceBinding["kind"];
+  readonly callId: string;
+  readonly itemId?: string | undefined;
+  readonly status?: "completed" | "incomplete" | "in_progress" | "failed" | undefined;
+}
+
+export interface ResponsesToolBindingLedger {
+  readonly kind: "responses_extended_tools";
+  readonly bindings: readonly ResponsesToolSourceBinding[];
+  readonly calls: readonly ResponsesToolCallBinding[];
+  readonly results: readonly ResponsesToolResultBinding[];
+  readonly chatPrefixMembers: readonly { readonly key: string; readonly value: WireJson }[];
 }
 
 export type SemanticToolChoice =
@@ -97,6 +138,7 @@ export interface SemanticRequest {
   readonly reasoning?: SemanticReasoning | undefined;
   readonly metadata?: WireJson | undefined;
   readonly degradations: readonly ConversionDegradationRule[];
+  readonly responseBindings?: ResponsesToolBindingLedger | undefined;
 }
 
 export interface EncodedConversionRequest {
@@ -111,6 +153,7 @@ export interface EncodedConversionRequest {
     | "context-1m-2025-08-07"
   )[];
   readonly degradations: readonly ConversionDegradationRule[];
+  readonly responseBindings?: ResponsesToolBindingLedger | undefined;
 }
 
 export interface NativeProtocolPlan {

@@ -8,7 +8,7 @@ import {
   type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
-import { isGatewayManagedResponseId } from "./bridge_nonstream.js";
+import { isGatewayManagedResponseId } from "../conversion/ids.js";
 import {
   RESPONSES_CHAT_CONVERSION_VERSION,
   RESPONSES_MESSAGES_CONVERSION_VERSION,

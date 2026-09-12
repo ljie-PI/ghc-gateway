@@ -10,6 +10,7 @@ import {
 } from "../../serialization/wire_json.js";
 import type { ResponsesRequest } from "./dto.js";
 import { isOpenAiStrictSchemaCompatible } from "../conversion/strict_schema.js";
+import { prepareResponsesExtendedTools } from "../conversion/responses_extended_tools.js";
 
 export type ToolBindingKind = "function" | "namespace" | "custom" | "tool_search";
 
@@ -62,6 +63,31 @@ const TOOL_SEARCH_SCHEMA: WireJsonObject = object([
 const TOOL_SEARCH_DESCRIPTION = "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.";
 
 export function buildRequestToolContext(request: Readonly<ResponsesRequest>): RequestToolContext {
+  let extended: ReturnType<typeof prepareResponsesExtendedTools>;
+  try {
+    extended = prepareResponsesExtendedTools(request.body);
+  } catch {
+    // Legacy fixture adapters accept broader shapes than the production conversion contract.
+    extended = undefined;
+  }
+  if (extended !== undefined) {
+    const chatNameToBinding = new Map<string, ToolBinding>();
+    const sourceNameToChatName = new Map<string, string>();
+    for (const binding of extended.ledger.bindings) {
+      chatNameToBinding.set(binding.chatName, {
+        kind: binding.kind,
+        originalName: binding.sourceName,
+        ...(binding.namespace === undefined ? {} : { namespace: binding.namespace }),
+      });
+      sourceNameToChatName.set(sourceToolKey(binding.namespace, binding.sourceName), binding.chatName);
+    }
+    return {
+      chatTools: extended.chatTools,
+      seenChatNames: new Set(chatNameToBinding.keys()),
+      chatNameToBinding,
+      sourceNameToChatName,
+    };
+  }
   const context: MutableToolContext = {
     chatTools: [],
     seenChatNames: new Set<string>(),
