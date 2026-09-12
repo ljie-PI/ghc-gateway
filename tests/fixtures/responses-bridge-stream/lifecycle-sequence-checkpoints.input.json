@@ -1,1 +1,0 @@
-{"request":{"model":"gpt","input":"hi"},"chunks":[{"id":"chatcmpl_reason","choices":[{"delta":{"role":"assistant","reasoning_content":"think"}}]},{"choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}],"usage":{"input_tokens":3,"output_tokens":4}}]}

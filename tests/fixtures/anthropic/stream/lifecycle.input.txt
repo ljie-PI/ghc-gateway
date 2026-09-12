@@ -1,9 +1,0 @@
-data: {"id":"chunk_1","choices":[{"delta":{"reasoning_content":"plan"}}]}
-
-data: {"id":"chunk_2","choices":[{"delta":{"content":"hello"}}]}
-
-data: {"id":"chunk_3","choices":[{"delta":{"tool_calls":[{"id":"call.1__thought__sigA","function":{"name":"lookup","arguments":"{\"a\":"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8,"completion_tokens":3}}
-
-data: {"id":"chunk_4","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"cache_read_input_tokens":2}}
-
-data: [DONE]

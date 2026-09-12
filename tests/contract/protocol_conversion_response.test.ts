@@ -16,6 +16,8 @@ import {
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
+import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
+import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -3344,6 +3346,172 @@ describe("shared conversion response codecs", () => {
         void _emission;
       }
     }).rejects.toThrow();
+  });
+
+  it("captures one timestamp across the production Responses stream lifecycle", async () => {
+    let clockReads = 0;
+    const source = [
+      "data: {\"id\":\"chatcmpl_clock\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const emissions: ConvertedStreamEmission[] = [];
+    for await (const emission of convertProtocolStream(
+      chunks(encoder.encode(source)),
+      {
+        ...streamContext("chat", "responses"),
+        nowUnixSeconds: () => {
+          clockReads += 1;
+          return clockReads === 1 ? 1_700_000_000 : 1_800_000_000;
+        },
+      },
+    )) {
+      emissions.push(emission);
+    }
+    const text = wireText(emissions);
+
+    expect(clockReads).toBe(1);
+    expect(text.match(/"created_at":1700000000/gu)?.length).toBeGreaterThanOrEqual(3);
+    expect(text).not.toContain("1800000000");
+    expect(emissions.filter((emission) => emission.kind === "terminal")).toHaveLength(1);
+  });
+
+  it("propagates source failures without a success terminal", async () => {
+    const failure = new Error("source failed");
+    async function* throwingSource(): AsyncIterable<Uint8Array> {
+      if (failure.message === "__never__") {
+        yield new Uint8Array();
+      }
+      throw failure;
+    }
+    const iterator = convertProtocolStream(
+      throwingSource(),
+      streamContext("chat", "responses"),
+    )[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).rejects.toBe(failure);
+  });
+
+  it("withholds converted Messages upstream errors after commit and records failure", async () => {
+    const usageUpdates: UsageUpdate[] = [];
+    const attempt = createRequestAttempt({
+      requestId: "req_explicit_error",
+      protocol: "anthropic",
+      abortedErrorCount: 1,
+      recorder: { recordUsage: (update) => usageUpdates.push(update) },
+    });
+    const terminalKinds: string[] = [];
+    const signal = new AbortController().signal;
+    const diagnostic = "synthetic-sensitive-diagnostic";
+    const response = await createConvertedStreamResponse({
+      upstream: {
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: chunks(encoder.encode([
+          "data: {\"id\":\"chatcmpl_error\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
+          `event: error\ndata: {"error":{"message":"${diagnostic}"}}\n\n`,
+        ].join(""))),
+        async cancel() {},
+      },
+      plan: {
+        kind: "converted",
+        source: "messages",
+        target: "chat",
+        stream: true,
+        requestModel: "target",
+        request: {
+          body: { kind: "object", members: [] },
+          bytes: encoder.encode("{}"),
+          stream: true,
+          hasVisionInput: false,
+          initiator: "user",
+          messagesBetaFeatures: [],
+          degradations: [],
+        },
+      },
+      scope: {
+        requestId: "req_explicit_error",
+        signal,
+        deliverySignal: signal,
+        config: defaultRuntimeConfigSnapshot(),
+        attempt,
+      },
+      model: "target",
+      createUuid: () => "00000000-0000-4000-8000-000000000105",
+      nowUnixSeconds: () => 1_700_000_000,
+      headers: {},
+      onTerminal: (result) => {
+        terminalKinds.push(result.kind);
+        if (result.kind === "failure") {
+          attempt.failure(result.error);
+        } else {
+          attempt.success();
+        }
+      },
+    });
+    const handle = getStreamExecutionHandle(response);
+    const reader = response.body?.getReader();
+    if (reader === undefined) {
+      throw new Error("missing response body");
+    }
+    let delivered = "";
+    await expect((async () => {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) {
+          return;
+        }
+        delivered += decoder.decode(next.value, { stream: true });
+      }
+    })()).rejects.toThrow();
+    await handle?.completion;
+
+    expect(delivered).toBe([
+      "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-000000000105\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"target\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}}}\n\n",
+      "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
+      "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"partial\"}}\n\n",
+    ].join(""));
+    expect(delivered).not.toContain(diagnostic);
+    expect(delivered).not.toContain("event: error");
+    expect(delivered).not.toContain("event: message_stop");
+    expect(handle?.cause).toBe("postcommit_failure");
+    expect(terminalKinds).toEqual(["failure"]);
+    expect(usageUpdates).toMatchObject([{ protocol: "anthropic", outcome: "upstream_error" }]);
+  });
+
+  it("is pull-based and returns the production source iterator on early consumer return", async () => {
+    let reads = 0;
+    let returns = 0;
+    const sourceText = [
+      "data: {\"id\":\"chatcmpl_pull\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ].join("");
+    const source: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]() {
+        let delivered = false;
+        return {
+          async next() {
+            reads += 1;
+            if (delivered) {
+              return { done: true, value: undefined };
+            }
+            delivered = true;
+            return { done: false, value: encoder.encode(sourceText) };
+          },
+          async return() {
+            returns += 1;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    };
+    const iterator = convertProtocolStream(source, streamContext("chat", "responses"))[Symbol.asyncIterator]();
+
+    expect((await iterator.next()).value?.kind).toBe("first_semantic");
+    expect(reads).toBe(1);
+    expect((await iterator.next()).value?.kind).toBe("checkpoint");
+    expect(reads).toBe(1);
+    await iterator.return?.();
+    expect(returns).toBe(1);
   });
 
   it("rejects missing terminals and bounded-accumulator overflow", async () => {

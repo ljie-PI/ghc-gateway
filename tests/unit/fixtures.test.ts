@@ -7,20 +7,32 @@ import { verifyFixtureManifests } from "../../scripts/tooling/fixtures.js";
 const FIXTURE_ROOT = path.resolve("tests/fixtures");
 
 describe("fixture family closure", () => {
+  it("keeps fixture tooling on production conversion ownership", async () => {
+    const tooling = await readFile(path.resolve("scripts/tooling/fixtures.ts"), "utf8");
+    for (const legacyPath of [
+      "anthropic_messages/request",
+      "anthropic_messages/bridge",
+      "anthropic_messages/stream",
+      "responses/bridge_stream",
+    ]) {
+      expect(tooling).not.toContain(legacyPath);
+    }
+  });
+
   it("byte-verifies executable manifests without documentation metadata", async () => {
     const entries = await verifyFixtureManifests();
     const count = (family: string): number => entries.filter((entry) => entry.family === family).length;
 
-    expect(entries).toHaveLength(53);
+    expect(entries).toHaveLength(48);
     for (const entry of entries) {
       expect(entry).not.toHaveProperty("source");
       expect(entry).not.toHaveProperty("owner");
     }
-    expect(count("anthropic")).toBe(4);
+    expect(count("anthropic")).toBe(1);
     expect(count("responses-native")).toBe(4);
     expect(count("responses-bridge-request")).toBe(3);
     expect(count("responses-bridge-nonstream")).toBe(2);
-    expect(count("responses-bridge-stream")).toBe(2);
+    expect(count("responses-bridge-stream")).toBe(0);
     expect(count("responses-endpoint")).toBe(3);
     expect(count("protocol-conversion")).toBe(3);
     expect(entries.some((entry) => entry.caseId.startsWith("gateway-http-host."))).toBe(true);

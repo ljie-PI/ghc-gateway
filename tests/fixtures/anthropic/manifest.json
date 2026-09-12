@@ -1,26 +1,5 @@
 [
   {
-    "caseId": "anthropic.request.tools-media-reasoning",
-    "family": "anthropic",
-    "input": "request/tools-media-reasoning.input.json",
-    "expected": "request/tools-media-reasoning.expected.json",
-    "encoder": "anthropic-request-object"
-  },
-  {
-    "caseId": "anthropic.nonstream.tools-usage",
-    "family": "anthropic",
-    "input": "nonstream/tools-usage.input.json",
-    "expected": "nonstream/tools-usage.expected.json",
-    "encoder": "anthropic-message-object"
-  },
-  {
-    "caseId": "anthropic.stream.lifecycle",
-    "family": "anthropic",
-    "input": "stream/lifecycle.input.txt",
-    "expected": "stream/lifecycle.expected.txt",
-    "encoder": "python-json-dumps-sse-bytes"
-  },
-  {
     "caseId": "anthropic.presenter.rate-limit",
     "family": "anthropic",
     "input": "presenter/rate-limit.input.txt",

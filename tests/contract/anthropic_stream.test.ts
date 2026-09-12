@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
-import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
-import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
-import { createAnthropicStreamResponse } from "../../src/protocols/anthropic_messages/stream.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 import { anthropicGateway, anthropicRequest, sse } from "./anthropic_harness.js";
 
@@ -117,58 +114,6 @@ describe("Anthropic stream lifecycle", () => {
     } finally {
       await close();
     }
-  });
-
-  it("records an explicit upstream error as failure while gracefully closing unchanged Anthropic bytes", async () => {
-    const usageUpdates: UsageUpdate[] = [];
-    const attempt = createRequestAttempt({
-      requestId: "req_explicit_error",
-      protocol: "anthropic",
-      abortedErrorCount: 1,
-      recorder: { recordUsage: (update) => usageUpdates.push(update) },
-    });
-    const terminalKinds: string[] = [];
-    const signal = new AbortController().signal;
-    const response = await createAnthropicStreamResponse({
-      upstream: {
-        status: 200,
-        headers: new Headers(),
-        bytes: (async function* () {
-          yield sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] });
-          yield new TextEncoder().encode("event: error\ndata: {\"error\":{\"message\":\"private\"}}\n\n");
-        })(),
-        cancel: async () => undefined,
-      },
-      model: "gpt",
-      createUuid: () => "00000000-0000-4000-8000-000000000001",
-      scope: {
-        requestId: "req_explicit_error",
-        signal,
-        deliverySignal: signal,
-        config: defaultRuntimeConfigSnapshot(),
-        attempt,
-      },
-      onTerminal: (result) => {
-        terminalKinds.push(result.kind);
-        if (result.kind === "failure") {
-          attempt.failure(result.error);
-        } else {
-          attempt.success();
-        }
-      },
-    });
-    const handle = getStreamExecutionHandle(response);
-
-    expect(await response.text()).toBe([
-      "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-000000000001\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"gpt\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}}}\n\n",
-      "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
-      "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"partial\"}}\n\n",
-    ].join(""));
-    await handle?.completion;
-
-    expect(handle?.cause).toBe("postcommit_failure");
-    expect(terminalKinds).toEqual(["failure"]);
-    expect(usageUpdates).toMatchObject([{ protocol: "anthropic", outcome: "upstream_error" }]);
   });
 
   it("classifies post-commit parser failures without synthetic success terminals", async () => {

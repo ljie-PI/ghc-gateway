@@ -23,15 +23,11 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
-import { convertChatResponse as convertAnthropicChatResponse } from "../../src/protocols/anthropic_messages/bridge.js";
-import { convertAnthropicRequest } from "../../src/protocols/anthropic_messages/request.js";
-import { createAnthropicStreamResponse } from "../../src/protocols/anthropic_messages/stream.js";
 import { anthropicErrorBody } from "../../src/protocols/anthropic_messages/wire.js";
 import { decodeOpenAiChatRequest, prepareOpenAiChatRequest } from "../../src/protocols/openai_chat/endpoint.js";
 import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "../../src/protocols/openai_chat/wire.js";
 import { convertResponsesRequest, buildChatBridgeRequest, type ReasoningConfig } from "../../src/protocols/responses/bridge_request.js";
 import { convertChatResponseToResponses } from "../../src/protocols/responses/bridge_nonstream.js";
-import { convertChatStream, type ResponsesBridgeStreamContext } from "../../src/protocols/responses/bridge_stream.js";
 import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
 import type { ResponsesRequest } from "../../src/protocols/responses/dto.js";
 import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
@@ -39,11 +35,8 @@ import { SqliteResponsesHistory, type ResponsesHistory } from "../../src/protoco
 import { normalizeNativeResponsesStream, serializeNativeResponsesRequest, validatedNativeResponsesBody } from "../../src/protocols/responses/native.js";
 import { planResponsesExecution, type ChatBridgePlan, type NativeResponsesPlan } from "../../src/protocols/responses/planner.js";
 import { buildRequestToolContext } from "../../src/protocols/responses/tool_context.js";
-import { encodeResponsesSseEvent } from "../../src/protocols/responses/wire.js";
 import { canonicalizeWireJson } from "../../src/serialization/canonical_json.js";
 import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, WireJsonError, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
-import type { UpstreamByteStream } from "../../src/copilot/upstream_types.js";
-import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
 import { convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
@@ -73,7 +66,6 @@ const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, F
   ["responses-native", expectedResponsesNativeFixture],
   ["responses-bridge-request", expectedResponsesBridgeRequestFixture],
   ["responses-bridge-nonstream", expectedResponsesBridgeNonstreamFixture],
-  ["responses-bridge-stream", expectedResponsesBridgeStreamFixture],
   ["responses-endpoint", expectedResponsesEndpointFixture],
   ["protocol-conversion", expectedProtocolConversionFixture],
 ]);
@@ -495,55 +487,11 @@ function resolvedModel(upstreamModel: string): ResolvedModel {
 
 async function expectedAnthropicFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
   const inputPath = path.join(fixtureFamilyRoot(entry), entry.input);
-  switch (entry.caseId) {
-  case "anthropic.request.tools-media-reasoning": {
-    const capability = fixtureCapability("gpt-5", ["chat"]);
-    return JSON.stringify(convertAnthropicRequest(
-      await readWireObject(inputPath),
-      "gpt-5",
-      "max_tokens",
-      capability.defaultOutputTokens,
-    ));
-  }
-  case "anthropic.nonstream.tools-usage":
-    return JSON.stringify(convertAnthropicChatResponse({
-      status: 200,
-      headers: new Headers(),
-      body: await readFile(inputPath),
-    }));
-  case "anthropic.stream.lifecycle": {
-    const input = await readFile(inputPath, "utf8");
-    const upstream: UpstreamByteStream = {
-      status: 200,
-      headers: new Headers({ "content-type": "text/event-stream" }),
-      bytes: asBytes(input.endsWith("\n\n") ? input : `${input}\n`),
-      cancel: async () => undefined,
-    };
-    const signal = new AbortController().signal;
-    const response = await createAnthropicStreamResponse({
-      upstream,
-      model: "gpt",
-      createUuid: () => "00000000-0000-4000-8000-000000000001",
-      scope: {
-        requestId: "req_fixture",
-        signal,
-        deliverySignal: signal,
-        config: defaultRuntimeConfigSnapshot(),
-        attempt: createRequestAttempt({
-          requestId: "req_fixture",
-          protocol: "anthropic",
-          abortedErrorCount: 1,
-        }),
-      },
-    });
-    return response.text();
-  }
-  case "anthropic.presenter.rate-limit":
-    await readFile(inputPath);
-    return anthropicErrorBody("rate_limit_error", "upstream request failed", "req_fixture");
-  default:
+  if (entry.caseId !== "anthropic.presenter.rate-limit") {
     return undefined;
   }
+  await readFile(inputPath);
+  return anthropicErrorBody("rate_limit_error", "upstream request failed", "req_fixture");
 }
 
 async function expectedResponsesNativeFixture(entry: FixtureManifestEntry): Promise<string | Uint8Array | undefined> {
@@ -640,33 +588,6 @@ async function expectedResponsesBridgeNonstreamFixture(entry: FixtureManifestEnt
     createUuid: () => `00000000-0000-4000-8000-${(++uuid).toString().padStart(12, "0")}`,
   });
   return decodeBytes(serializeWireJson(result.response));
-}
-
-async function expectedResponsesBridgeStreamFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
-  if (entry.caseId !== "responses-bridge-stream.lifecycle-sequence-checkpoints"
-    && entry.caseId !== "responses-bridge-stream.late-tools-terminal") {
-    return undefined;
-  }
-  const fixture = JSON.parse(await readFile(path.join(fixtureFamilyRoot(entry), entry.input), "utf8")) as {
-    readonly request: Record<string, unknown>;
-    readonly chunks: readonly Record<string, unknown>[];
-  };
-  const request = responsesRequestFromValue(fixture.request);
-  let uuid = 0;
-  const context: ResponsesBridgeStreamContext = {
-    originalRequest: request,
-    toolContext: buildRequestToolContext(request),
-    model: request.model ?? "gpt",
-    nowUnixSeconds: () => 1_700_000_000,
-    uuid: () => `00000000-0000-4000-8000-${(++uuid).toString().padStart(12, "0")}`,
-    customLlmProvider: "github_copilot",
-    modelId: request.model ?? "gpt",
-  };
-  let output = "";
-  for await (const emission of convertChatStream(wireChunkStream(fixture.chunks), context)) {
-    output += decodeBytes(encodeResponsesSseEvent(emission.event));
-  }
-  return output;
 }
 
 async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
@@ -1026,12 +947,6 @@ function wireObjectFromValue(value: Record<string, unknown>): WireJsonObject {
     throw new Error("fixture value must be an object");
   }
   return parsed;
-}
-
-async function* wireChunkStream(chunks: readonly Record<string, unknown>[]): AsyncIterable<{ readonly payload: WireJsonObject }> {
-  for (const chunk of chunks) {
-    yield { payload: wireObjectFromValue(chunk) };
-  }
 }
 
 async function collectBytes(source: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
