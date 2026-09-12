@@ -3,7 +3,6 @@ import {
   isWireJsonNumber,
   isWireJsonObject,
   memberValues,
-  parseWireJson,
   type WireJson,
   type WireJsonArray,
   type WireJsonObject,
@@ -14,7 +13,13 @@ import type { ChatChunk, ChatStreamFrame } from "../chat_completions/types.js";
 import { isSemanticChatChunk } from "../chat_completions/stream_semantics.js";
 import type { ResponsesRequest } from "./dto.js";
 import type { ResponsesHistoryRecord } from "./history.js";
-import type { RequestToolContext, ToolBinding } from "./tool_context.js";
+import { chatNameForSource, type RequestToolContext, type ToolBinding } from "./tool_context.js";
+import {
+  projectRestoredResponsesToolCallForCompatibility,
+  projectResponsesToolChoiceForCompatibility,
+  restoredResponsesToolNameForCompatibility,
+  restoreResponsesExtendedToolArguments,
+} from "../conversion/responses_extended_tools.js";
 
 export interface ResponsesBridgeStreamContext {
   readonly originalRequest: ResponsesRequest;
@@ -686,39 +691,27 @@ function reasoningItem(reasoning: ReasoningState, status: "in_progress" | "compl
 
 function toolItem(tool: ToolState, status: "in_progress" | "completed"): WireJsonObject {
   const binding = tool.binding;
-  const kind = toolKind(tool);
-  if (kind === "custom") {
-    return object([
-      ["type", "custom_tool_call"],
-      ["id", tool.id],
-      ["call_id", tool.id],
-      ["name", binding?.originalName ?? tool.name],
-      ["input", status === "completed" ? customInput(tool.arguments) : ""],
-      ["status", status],
-    ]);
+  if (binding !== undefined && binding.kind !== "function") {
+    const restored = projectRestoredResponsesToolCallForCompatibility(
+      binding,
+      tool.id,
+      tool.arguments,
+      status,
+      status === "completed" ? "completed" : "incomplete",
+      true,
+    );
+    if (restored !== undefined) {
+      return restored;
+    }
   }
-  if (kind === "tool_search") {
-    return object([
-      ["type", "tool_search_call"],
-      ["id", tool.id],
-      ["call_id", tool.id],
-      ["status", status],
-      ["execution", "client"],
-      ["arguments", status === "completed" ? toolSearchArguments(tool.arguments) : object([])],
-    ]);
-  }
-  const members: Array<readonly [string, WireJson]> = [
+  return object([
     ["type", "function_call"],
     ["id", tool.id],
     ["call_id", tool.id],
-    ["name", binding?.kind === "namespace" ? binding.originalName : tool.name],
+    ["name", tool.name],
     ["arguments", tool.arguments],
     ["status", status],
-  ];
-  if (binding?.kind === "namespace" && binding.namespace !== undefined) {
-    members.push(["namespace", binding.namespace]);
-  }
-  return object(members);
+  ]);
 }
 
 function toolKind(tool: ToolState): ToolBinding["kind"] {
@@ -726,13 +719,7 @@ function toolKind(tool: ToolState): ToolBinding["kind"] {
 }
 
 function finalToolName(tool: ToolState): string {
-  if (tool.binding?.kind === "namespace") {
-    return tool.binding.originalName;
-  }
-  if (toolKind(tool) === "tool_search") {
-    return "tool_search";
-  }
-  return tool.binding?.originalName ?? tool.name;
+  return restoredResponsesToolNameForCompatibility(tool.binding, tool.name);
 }
 
 function eventWithResponse(state: ConversionState, type: string, response: WireJsonObject): WireJsonObject {
@@ -794,20 +781,11 @@ function checkpointEmission(state: ConversionState, event: WireJsonObject): Resp
 
 function transformedToolChoice(state: ConversionState): WireJson | undefined {
   const value = memberValues(state.context.originalRequest.body, "tool_choice")[0];
-  if (!isWireJsonObject(value)) {
-    return value;
-  }
-  const type = stringMember(value, "type");
-  if (type === "function") {
-    return object([["type", "function"], ["name", stringMember(value, "name") ?? ""]]);
-  }
-  if (type === "custom") {
-    return object([["type", "custom"], ["name", stringMember(value, "name") ?? ""]]);
-  }
-  if (type === "tool_search") {
-    return object([["type", "tool_search"]]);
-  }
-  return value;
+  return projectResponsesToolChoiceForCompatibility(
+    value,
+    (namespace, name) => chatNameForSource(state.context.toolContext, namespace, name),
+    "responses",
+  );
 }
 
 function copyIfPresent(
@@ -851,37 +829,7 @@ function urlCitationAnnotation(source: WireJsonObject): WireJsonObject | undefin
 }
 
 function customInput(argumentsText: string): string {
-  if (argumentsText.trim().length === 0) {
-    return "";
-  }
-  const parsed = parseJson(argumentsText);
-  if (isWireJsonObject(parsed)) {
-    const input = memberValues(parsed, "input")[0];
-    if (typeof input === "string") {
-      return input;
-    }
-  }
-  return argumentsText;
-}
-
-function toolSearchArguments(argumentsText: string): WireJsonObject {
-  if (argumentsText.trim().length === 0) {
-    return object([]);
-  }
-  const parsed = parseJson(argumentsText);
-  if (isWireJsonObject(parsed)) {
-    return parsed;
-  }
-  return object([["query", argumentsText]]);
-}
-
-function parseJson(value: string): WireJson | undefined {
-  try {
-    const bytes = new TextEncoder().encode(value);
-    return parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 64 });
-  } catch (_error: unknown) {
-    return undefined;
-  }
+  return restoreResponsesExtendedToolArguments("custom", argumentsText, "incomplete").rawCustomInput ?? "";
 }
 
 function firstChoice(payload: WireJsonObject): WireJsonObject | undefined {

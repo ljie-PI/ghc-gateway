@@ -3,7 +3,6 @@ import {
   isWireJsonNumber,
   isWireJsonObject,
   memberValues,
-  parseWireJson,
   serializeWireJson,
   type WireJson,
   type WireJsonArray,
@@ -12,6 +11,10 @@ import {
 import type { ResponsesHistoryRecord } from "./history.js";
 import type { RequestToolContext, ToolBinding } from "./tool_context.js";
 import type { ResponsesRequest } from "./dto.js";
+import { isGatewayManagedResponseId } from "../conversion/ids.js";
+import { projectRestoredResponsesToolCallForCompatibility } from "../conversion/responses_extended_tools.js";
+
+export { isGatewayManagedResponseId } from "../conversion/ids.js";
 
 export interface ResponsesBridgeResponseContext {
   readonly originalRequest: ResponsesRequest;
@@ -100,7 +103,7 @@ function responseOutput(
     if (!isWireJsonObject(choice)) {
       continue;
     }
-    output.push(...toolCalls(choice, context));
+    output.push(...toolCalls(choice, context, itemStatus(choice)));
   }
   return output;
 }
@@ -196,15 +199,22 @@ function imageCall(
 function toolCalls(
   choice: WireJsonObject,
   context: Readonly<ResponsesBridgeResponseContext>,
+  responseItemStatus: string,
 ): WireJsonObject[] {
   const calls = arrayMember(objectMember(choice, "message"), "tool_calls");
   if (calls === undefined) {
     return [];
   }
-  return calls.items.map((call) => toolCall(call, context)).filter((call): call is WireJsonObject => call !== undefined);
+  return calls.items
+    .map((call) => toolCall(call, context, responseItemStatus))
+    .filter((call): call is WireJsonObject => call !== undefined);
 }
 
-function toolCall(value: WireJson, context: Readonly<ResponsesBridgeResponseContext>): WireJsonObject | undefined {
+function toolCall(
+  value: WireJson,
+  context: Readonly<ResponsesBridgeResponseContext>,
+  responseItemStatus: string,
+): WireJsonObject | undefined {
   if (!isWireJsonObject(value)) {
     return undefined;
   }
@@ -217,61 +227,29 @@ function toolCall(value: WireJson, context: Readonly<ResponsesBridgeResponseCont
   const args = stringMember(fn, "arguments") ?? "";
   const binding = context.toolContext.chatNameToBinding.get(chatName);
   const status = stringMember(fn, "status") ?? "completed";
-  if (binding?.kind === "custom") {
-    return object([
-      ["type", "custom_tool_call"],
-      ["id", id],
-      ["call_id", id],
-      ["name", binding.originalName],
-      ["status", status],
-      ["input", customInput(args)],
-    ]);
-  }
-  if (binding?.kind === "tool_search") {
-    return object([
-      ["type", "tool_search_call"],
-      ["call_id", id],
-      ["status", status],
-      ["execution", "client"],
-      ["arguments", toolSearchArguments(args)],
-    ]);
+  if (binding !== undefined && binding.kind !== "function") {
+    const restored = projectRestoredResponsesToolCallForCompatibility(
+      binding,
+      id,
+      args,
+      status,
+      responseItemStatus === "incomplete" ? "incomplete" : "completed",
+    );
+    if (restored !== undefined && binding.kind === "namespace") {
+      return { kind: "object", members: [...restored.members, ...providerSpecificFields(value, fn, binding).map(([key, memberValue]) => ({ key, value: memberValue }))] };
+    }
+    return restored;
   }
   const normal = object([
     ["type", "function_call"],
     ["id", id],
     ["call_id", id],
-    ["name", binding?.kind === "namespace" ? binding.originalName : chatName],
-    ...(binding?.kind === "namespace" && binding.namespace !== undefined ? [["namespace", binding.namespace] as const] : []),
+    ["name", chatName],
     ["arguments", args],
     ["status", status],
     ...providerSpecificFields(value, fn, binding),
   ]);
   return normal;
-}
-
-function customInput(argumentsText: string): string {
-  if (argumentsText.trim().length === 0) {
-    return "";
-  }
-  const parsed = parseJsonString(argumentsText);
-  if (isWireJsonObject(parsed)) {
-    const input = memberValues(parsed, "input")[0];
-    if (typeof input === "string") {
-      return input;
-    }
-  }
-  return argumentsText;
-}
-
-function toolSearchArguments(argumentsText: string): WireJsonObject {
-  if (argumentsText.trim().length === 0) {
-    return object([]);
-  }
-  const parsed = parseJsonString(argumentsText);
-  if (isWireJsonObject(parsed)) {
-    return parsed;
-  }
-  return object([["query", argumentsText]]);
 }
 
 function usage(value: WireJson | undefined): WireJsonObject {
@@ -385,26 +363,6 @@ function annotations(message: WireJsonObject): WireJsonObject[] {
     }
     return object(members);
   });
-}
-
-function parseJsonString(value: string): WireJson | undefined {
-  try {
-    const bytes = new TextEncoder().encode(value);
-    return parseWireJson(bytes, { maxBytes: Math.max(bytes.byteLength, 1), maxDepth: 64 });
-  } catch (_error: unknown) {
-    return undefined;
-  }
-}
-
-export function isGatewayManagedResponseId(id: string): boolean {
-  if (!id.startsWith("resp_")) {
-    return false;
-  }
-  try {
-    return Buffer.from(id.slice("resp_".length), "base64").toString("utf8").startsWith("litellm:custom_llm_provider:");
-  } catch (_error: unknown) {
-    return false;
-  }
 }
 
 function optionalMember(objectValue: WireJsonObject, key: string): Array<readonly [string, WireJson]> {

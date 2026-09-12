@@ -1406,6 +1406,143 @@ describe("shared conversion request codecs", () => {
       capability(["chat"]),
     ).bytes))).toContain("image_url");
   });
+
+  it("encodes a custom Responses tool directly as the final Chat request and captures restoration bindings", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "render",
+      max_output_tokens: 7,
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      tool_choice: { type: "custom", name: "render" },
+    }), "target", capability(["chat"]));
+
+    const expected = {
+      model: "target",
+      messages: [{ role: "user", content: "render" }],
+      tools: [{
+        type: "function",
+        function: {
+          name: "render",
+          description: "Original tool definition:\n```json\n{\"format\":{\"type\":\"text\"},\"name\":\"render\",\"type\":\"custom\"}\n```",
+          parameters: {
+            type: "object",
+            properties: {
+              input: {
+                type: "string",
+                description: "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.",
+              },
+            },
+            required: ["input"],
+          },
+        },
+      }],
+      tool_choice: { type: "function", function: { name: "render" } },
+      max_tokens: 7,
+    };
+    expect(decoded(converted.bytes)).toEqual(expected);
+    expect(decoder.decode(converted.bytes)).toBe(JSON.stringify(expected));
+    expect(converted.responseBindings).toEqual({
+      kind: "responses_extended_tools",
+      bindings: [{ kind: "custom", chatName: "render", sourceName: "render" }],
+      calls: [],
+      results: [],
+      chatMessages: [{
+        kind: "object",
+        members: [
+          { key: "role", value: "user" },
+          { key: "content", value: "render" },
+        ],
+      }],
+      chatPrefixMembers: [],
+    });
+  });
+
+  it("captures immutable custom call and result identity for buffered restoration", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      input: [
+        {
+          type: "custom_tool_call",
+          id: "ct_item",
+          call_id: "call_custom",
+          name: "render",
+          input: "raw input",
+          status: "completed",
+        },
+        {
+          type: "custom_tool_call_output",
+          id: "ct_result",
+          call_id: "call_custom",
+          output: "done",
+          status: "failed",
+        },
+      ],
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+    }), "target", capability(["chat"]));
+
+    expect(converted.responseBindings).toMatchObject({
+      calls: [{
+        kind: "custom",
+        chatName: "render",
+        sourceName: "render",
+        itemId: "ct_item",
+        callId: "call_custom",
+        status: "completed",
+        rawCustomInput: "raw input",
+      }],
+      results: [{
+        kind: "custom",
+        itemId: "ct_result",
+        callId: "call_custom",
+        status: "failed",
+      }],
+    });
+    expect(Object.isFrozen(converted.responseBindings)).toBe(true);
+    expect(Object.isFrozen(converted.responseBindings?.calls)).toBe(true);
+  });
+
+  it("fails closed when namespace projection collides with a flat tool name", () => {
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      input: "collision",
+      tools: [
+        { type: "function", name: "ns__lookup", parameters: { type: "object" }, strict: false },
+        {
+          type: "namespace",
+          name: "ns",
+          tools: [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }],
+        },
+      ],
+    }), "target", capability(["chat"]))).toThrow();
+  });
+
+  it("preserves accepted Responses reasoning and multipart ordering in exact extended Chat bytes", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      instructions: "top",
+      input: [
+        { type: "message", role: "system", content: [{ type: "input_text", text: "inline" }] },
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "first" },
+            { type: "input_image", image_url: "https://example.test/a.png", detail: "high" },
+            { type: "input_text", text: "second" },
+          ],
+        },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "plan" }] },
+        { type: "custom_tool_call", call_id: "call_custom", name: "render", input: "raw" },
+        { type: "tool_search_call", call_id: "call_search", arguments: { query: "docs" } },
+        { type: "custom_tool_call_output", call_id: "call_custom", output: "done" },
+        { type: "tool_search_output", call_id: "call_search", tools: [] },
+      ],
+      tools: [
+        { type: "custom", name: "render", format: { type: "text" } },
+        { type: "tool_search" },
+      ],
+    }), "target", capability(["chat"]));
+
+    expect(decoder.decode(converted.bytes)).toBe("{\"model\":\"target\",\"messages\":[{\"role\":\"system\",\"content\":\"top\\n\\ninline\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"first\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://example.test/a.png\"}},{\"type\":\"text\",\"text\":\"second\"}]},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_custom\",\"type\":\"function\",\"function\":{\"name\":\"render\",\"arguments\":\"{\\\"input\\\":\\\"raw\\\"}\"}},{\"id\":\"call_search\",\"type\":\"function\",\"function\":{\"name\":\"tool_search\",\"arguments\":\"{\\\"query\\\":\\\"docs\\\"}\"}}],\"reasoning_content\":\"plan\"},{\"role\":\"tool\",\"tool_call_id\":\"call_custom\",\"content\":\"{\\\"call_id\\\":\\\"call_custom\\\",\\\"output\\\":\\\"done\\\",\\\"type\\\":\\\"custom_tool_call_output\\\"}\"},{\"role\":\"tool\",\"tool_call_id\":\"call_search\",\"content\":\"{\\\"call_id\\\":\\\"call_search\\\",\\\"tools\\\":[],\\\"type\\\":\\\"tool_search_output\\\"}\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"render\",\"description\":\"Original tool definition:\\n```json\\n{\\\"format\\\":{\\\"type\\\":\\\"text\\\"},\\\"name\\\":\\\"render\\\",\\\"type\\\":\\\"custom\\\"}\\n```\",\"parameters\":{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.\"}},\"required\":[\"input\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"tool_search\",\"description\":\"Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query for tools or connectors to load.\"},\"limit\":{\"type\":\"integer\",\"description\":\"Maximum number of tool groups to return.\"}},\"required\":[\"query\"]}}}]}");
+  });
 });
 
 function capability(

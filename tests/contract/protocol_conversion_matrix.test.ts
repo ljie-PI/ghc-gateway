@@ -49,6 +49,25 @@ describe("protocol conversion matrix", () => {
     },
   );
 
+  it("keeps native Responses priority for extended tools", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-responses",
+        input: "render",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("x-ghcg-upstream-protocol")).toBe("responses");
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["responses"]);
+      expect(JSON.parse(decoder.decode(harness.responsesBodies[0]))).toMatchObject({
+        tools: [{ type: "custom", name: "render" }],
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("uses candidate compatibility before fixed priority without probing or fallback", async () => {
     const harness = await matrixGateway();
     try {
@@ -304,7 +323,7 @@ describe("protocol conversion matrix", () => {
     }
   });
 
-  it("rejects ambiguous Responses auto strictness on the extended Chat route", async () => {
+  it("preserves omitted strict on the extended Chat route", async () => {
     const harness = await matrixGateway();
     try {
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
@@ -322,9 +341,12 @@ describe("protocol conversion matrix", () => {
           { type: "custom", name: "render", format: { type: "text" } },
         ],
       }));
-      expect(response.status).toBe(422);
-      await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(response.status).toBe(200);
+      const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as {
+        tools: Array<{ function: { name: string; strict?: boolean } }>;
+      };
+      expect(request.tools.find((tool) => tool.function.name === "ambiguous")?.function).not.toHaveProperty("strict");
+      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
     } finally {
       await harness.close();
     }

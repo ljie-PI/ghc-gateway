@@ -187,6 +187,133 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it.each([201, 204])(
+    "presents extended-tools upstream %i success as the legacy 200 response",
+    async (upstreamStatus) => {
+      const backend = new ScriptedCopilotBackend({
+        chat: {
+          status: upstreamStatus,
+          headers: new Headers(),
+          body: text(JSON.stringify({
+            id: "chatcmpl_extended",
+            created: 1_700_000_000,
+            model: "chat",
+            choices: [{
+              index: 0,
+              message: {
+                role: "assistant",
+                content: null,
+                tool_calls: [{
+                  id: "call_render",
+                  type: "function",
+                  function: { name: "render", arguments: "{\"input\":\"draw\"}" },
+                }],
+              },
+              finish_reason: "tool_calls",
+            }],
+            usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+          })),
+        },
+      });
+      const { gw, history, close } = await responsesGateway({ backend });
+      try {
+        const response = await gw.fetch(responsesRequest({
+          model: "chat",
+          input: "render",
+          tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+        }));
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("{\"id\":\"resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmNoYXQ7dXBzdHJlYW1fcHJvdG9jb2w6Y2hhdDtyZXNwb25zZV9pZDowMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDE=\",\"object\":\"response\",\"created_at\":1700000000,\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":{},\"model\":\"chat\",\"output\":[{\"type\":\"custom_tool_call\",\"id\":\"fc_00000000-0000-4000-8000-000000000001\",\"call_id\":\"call_render\",\"name\":\"render\",\"status\":\"completed\",\"input\":\"draw\"}],\"parallel_tool_calls\":true,\"temperature\":null,\"tool_choice\":\"auto\",\"tools\":[],\"top_p\":null,\"max_output_tokens\":null,\"previous_response_id\":null,\"reasoning\":null,\"text\":{},\"truncation\":\"disabled\",\"usage\":{\"input_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":3}}");
+        expect(history.inspect()).toEqual({
+          revision: 1,
+          count: 1,
+          receiptCount: 1,
+          legacyCount: 0,
+          untrackedContinuationBlocked: false,
+          oldestAt: 1_700_000_000_000,
+          newestAt: 1_700_000_000_000,
+          ttlDays: 7,
+          maxResponses: 512,
+          maxReceipts: 2_048,
+        });
+        expect(backend.captured).toEqual([{ accountId: "github.com/1", kind: "chat" }]);
+      } finally {
+        await close();
+      }
+    },
+  );
+
+  it("preserves an ordinary converted upstream 201 status", async () => {
+    const backend = new ScriptedCopilotBackend({
+      chat: {
+        status: 201,
+        headers: new Headers(),
+        body: text("{\"id\":\"chatcmpl_ordinary\",\"created\":1700000000,\"model\":\"chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}"),
+      },
+    });
+    const { gw, close } = await responsesGateway({ backend });
+    try {
+      const response = await gw.fetch(responsesRequest({ model: "chat", input: "hello" }));
+      expect(response.status).toBe(201);
+      await response.text();
+      expect(backend.captured).toEqual([{ accountId: "github.com/1", kind: "chat" }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([
+    ["media traversal beyond its bound", deeplyNestedToolOutput(34)],
+    ["malformed nested JSON", "{\"nested\":"],
+  ])("rejects extended tool-result %s before inference", async (_caseName, output) => {
+    const { gw, backend, history, close } = await responsesGateway();
+    try {
+      const response = await gw.fetch(responsesRequest({
+        model: "chat",
+        input: [
+          { type: "custom_tool_call", call_id: "call_custom", name: "render", input: "raw" },
+          { type: "custom_tool_call_output", call_id: "call_custom", output },
+        ],
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+      }));
+
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe("{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}");
+      expect(history.inspect()).toMatchObject({ count: 0, receiptCount: 0, legacyCount: 0 });
+      expect(backend.captured).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([
+    ["null", null],
+    ["array", []],
+    ["string", "schema"],
+    ["number", 1],
+  ] as const)("rejects explicit %s extended function parameters before inference", async (_caseName, parameters) => {
+    const { gw, backend, history, close } = await responsesGateway();
+    try {
+      const response = await gw.fetch(responsesRequest({
+        model: "chat",
+        input: "hi",
+        tools: [{
+          type: "namespace",
+          name: "docs",
+          tools: [{ type: "function", name: "lookup", parameters }],
+        }],
+      }));
+
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe("{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}");
+      expect(history.inspect()).toMatchObject({ count: 0, receiptCount: 0, legacyCount: 0 });
+      expect(backend.captured).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
   it("pins a known converted continuation to Chat before native-first selection", async () => {
     let captured: ChatRequest | undefined;
     const backend = new ScriptedCopilotBackend({
@@ -703,6 +830,14 @@ describe("Responses endpoint", () => {
         closeDatabase(database);
       },
     };
+  }
+
+  function deeplyNestedToolOutput(depth: number): unknown {
+    let output: unknown = "ordinary non-media content";
+    for (let index = 0; index < depth; index += 1) {
+      output = { nested: output };
+    }
+    return output;
   }
 
   function responsesRequest(body: unknown, signal?: AbortSignal): Request {

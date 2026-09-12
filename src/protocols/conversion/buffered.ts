@@ -11,6 +11,7 @@ import {
 import type {
   ConversionDegradationRule,
   ConvertedBufferedResponse,
+  ConvertedProtocolPlan,
   InferenceProtocol,
   SemanticContent,
   SemanticRefusal,
@@ -22,6 +23,7 @@ import type {
 import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
 import { chatUsageFromCounters } from "./usage.js";
+import { restoreResponsesExtendedTools } from "./responses_extended_tools.js";
 
 export interface BufferedConversionContext {
   readonly source: InferenceProtocol;
@@ -41,12 +43,43 @@ const ZERO_USAGE: SemanticUsage = {
   reasoningTokens: 0,
 };
 
+export interface PlannedBufferedConversionContext {
+  readonly maxBytes: number;
+  readonly createUuid: () => string;
+  readonly nowUnixSeconds: () => number;
+}
+
+export function convertBufferedPlannedResponse(
+  bytes: Uint8Array,
+  plan: Readonly<ConvertedProtocolPlan>,
+  context: Readonly<PlannedBufferedConversionContext>,
+): ConvertedBufferedResponse {
+  return convertBufferedResponseInternal(bytes, {
+    ...context,
+    source: plan.target,
+    target: plan.source,
+    model: plan.requestModel,
+    degradations: plan.request.degradations,
+  }, plan.request.responseBindings);
+}
+
 export function convertBufferedResponse(
   bytes: Uint8Array,
   context: Readonly<BufferedConversionContext>,
 ): ConvertedBufferedResponse {
+  return convertBufferedResponseInternal(bytes, context);
+}
+
+function convertBufferedResponseInternal(
+  bytes: Uint8Array,
+  context: Readonly<BufferedConversionContext>,
+  responseBindings?: ConvertedProtocolPlan["request"]["responseBindings"],
+): ConvertedBufferedResponse {
   const payload = parseObject(bytes, context.maxBytes);
-  const semantic = decodeBuffered(context.source, payload);
+  const decoded = decodeBuffered(context.source, payload);
+  const semantic = responseBindings === undefined
+    ? decoded
+    : restoreResponsesExtendedTools(decoded, responseBindings);
   validateUniqueCallIds(semantic.items);
   const envelope = responseEnvelope(semantic, context);
   const checkpoint = context.target === "responses"
@@ -495,12 +528,31 @@ function responsesEnvelope(
         ["role", "assistant"],
         ["content", wireArray(content)],
       ]));
+    } else if (item.sourceKind === "custom") {
+      output.push(wireObject([
+        ["type", "custom_tool_call"],
+        ["id", item.itemId ?? `fc_${context.createUuid()}`],
+        ["call_id", item.callId],
+        ["name", item.sourceName ?? item.name],
+        ["status", response.status],
+        ["input", item.rawCustomInput ?? ""],
+      ]));
+    } else if (item.sourceKind === "tool_search") {
+      output.push(wireObject([
+        ["type", "tool_search_call"],
+        ["call_id", item.callId],
+        ["status", response.status],
+        ["execution", "client"],
+        ["arguments", item.toolSearchArguments],
+        ["id", item.itemId ?? `fc_${context.createUuid()}`],
+      ]));
     } else {
       output.push(wireObject([
         ["type", "function_call"],
         ["id", item.itemId ?? `fc_${context.createUuid()}`],
         ["call_id", item.callId],
-        ["name", item.name],
+        ["name", item.sourceName ?? item.name],
+        ["namespace", item.namespace],
         ["arguments", item.argumentsJson],
         ["status", response.status],
       ]));

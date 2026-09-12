@@ -1,5 +1,16 @@
 import type { InferenceProtocol } from "./types.js";
 
+export function isGatewayManagedResponseId(id: string): boolean {
+  if (!id.startsWith("resp_")) {
+    return false;
+  }
+  try {
+    return Buffer.from(id.slice("resp_".length), "base64").toString("utf8").startsWith("litellm:custom_llm_provider:");
+  } catch {
+    return false;
+  }
+}
+
 export function managedConvertedResponseId(
   upstreamProtocol: InferenceProtocol,
   model: string,
