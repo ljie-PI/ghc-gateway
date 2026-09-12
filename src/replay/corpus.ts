@@ -32,12 +32,13 @@ function validateExchanges(value: unknown): asserts value is readonly ReplayExch
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_EXCHANGES) throw replayConfigurationError();
   const ids = new Set<string>();
   for (const exchange of value as unknown[]) {
-    if (!isRecord(exchange) || !hasOnlyKeys(exchange, ["version", "caseId", "family", "sourceProtocol", "targetProtocol", "logicalModel", "upstreamModel", "capturedAt", "generatedAt", "request", "response", "downstreamExpectation"])
+    if (!isRecord(exchange) || !hasOnlyKeys(exchange, ["version", "caseId", "family", "sourceProtocol", "targetProtocol", "logicalModel", "upstreamModel", "capturedAt", "generatedAt", "selection", "request", "response", "downstreamExpectation"])
       || !isReplayId(exchange.caseId) || ids.has(exchange.caseId) || exchange.version !== 1 || exchange.family !== "replay"
       || !PROTOCOLS.has(String(exchange.sourceProtocol)) || !PROTOCOLS.has(String(exchange.targetProtocol))
       || !isReplayId(exchange.logicalModel) || !isReplayId(exchange.upstreamModel)
       || (exchange.capturedAt !== undefined && typeof exchange.capturedAt !== "string")
       || (exchange.generatedAt !== undefined && typeof exchange.generatedAt !== "string")
+      || (exchange.selection !== undefined && exchange.selection !== "explicit")
       || !isRecord(exchange.request) || !isRecord(exchange.response)) throw replayConfigurationError();
     ids.add(exchange.caseId);
     const { request, response } = exchange;
@@ -100,10 +101,29 @@ export function parseReplayManifestText(text: string): ReplayScenarioManifest {
   }
 }
 
-/** Validate manifest structure without assigning scenario ownership to it. */
+/** Validate historical recording metadata without assigning executable scenario ownership to it. */
 export function parseReplayManifest(value: unknown): ReplayScenarioManifest {
-  if (!isRecord(value) || !hasOnlyKeys(value, ["schemaVersion", "exchanges"]) || value.schemaVersion !== 3) throw replayConfigurationError();
+  if (!isRecord(value) || !hasOnlyKeys(value, ["schemaVersion", "exchanges", "responseSets"])
+    || value.schemaVersion !== 2 || !Array.isArray(value.responseSets) || value.responseSets.length > MAX_EXCHANGES) throw replayConfigurationError();
   validateExchanges(value.exchanges);
+  const exchanges = new Map(value.exchanges.map((exchange) => [exchange.caseId, exchange]));
+  const setIds = new Set<string>();
+  const grouped = new Set<string>();
+  for (const set of value.responseSets as unknown[]) {
+    if (!isRecord(set) || !hasOnlyKeys(set, ["id", "targetProtocol", "exchangeIds"])
+      || !isReplayId(set.id) || setIds.has(set.id) || !PROTOCOLS.has(String(set.targetProtocol))
+      || !Array.isArray(set.exchangeIds) || set.exchangeIds.length === 0 || set.exchangeIds.length > MAX_REPLAY_STEPS) throw replayConfigurationError();
+    setIds.add(set.id);
+    for (const id of set.exchangeIds as unknown[]) {
+      if (!isReplayId(id) || grouped.has(id)) throw replayConfigurationError();
+      const exchange = exchanges.get(id);
+      if (exchange === undefined || exchange.selection !== "explicit" || exchange.targetProtocol !== set.targetProtocol) throw replayConfigurationError();
+      grouped.add(id);
+    }
+  }
+  for (const exchange of value.exchanges) {
+    if (exchange.selection === "explicit" && !grouped.has(exchange.caseId)) throw replayConfigurationError();
+  }
   return value as unknown as ReplayScenarioManifest;
 }
 

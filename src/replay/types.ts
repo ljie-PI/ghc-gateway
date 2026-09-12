@@ -11,6 +11,8 @@ export interface ReplayExchangeRecord {
   readonly upstreamModel: string;
   readonly capturedAt?: string;
   readonly generatedAt?: string;
+  /** Historical recording metadata only; never executable scenario selection. */
+  readonly selection?: "explicit";
   readonly request: {
     readonly method: string;
     readonly path: string;
@@ -48,9 +50,17 @@ export interface ReplayExchangeRecord {
   };
 }
 
+/** Historical recording grouping only; harness registration owns executable scenarios. */
+export interface ReplayResponseSet {
+  readonly id: string;
+  readonly targetProtocol: InferenceProtocol;
+  readonly exchangeIds: readonly string[];
+}
+
 export interface ReplayScenarioManifest {
-  readonly schemaVersion: 3;
+  readonly schemaVersion: 2;
   readonly exchanges: readonly ReplayExchangeRecord[];
+  readonly responseSets: readonly ReplayResponseSet[];
 }
 
 export interface ReplayScenarioStep {
