@@ -43,6 +43,49 @@ describe("stream writer", () => {
 });
 
 describe("Stream Execution owner", () => {
+  it("owns first and subsequent responses independently through the public seam", async () => {
+    const cleanupCounts = [0, 0];
+    const terminalCounts = [0, 0];
+    const responses: Response[] = [];
+
+    for (const index of [0, 1]) {
+      responses.push(await createStreamExecutionResponse({
+        upstream: {
+          status: 200,
+          headers: new Headers(),
+          bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+          cancel: async () => { cleanupCounts[index] = (cleanupCounts[index] ?? 0) + 1; },
+        },
+        emissions: {
+          async *[Symbol.asyncIterator]() {
+            yield { kind: "wire", bytes: new TextEncoder().encode(`response-${index}`) } as const;
+            yield {
+              kind: "terminal",
+              outcome: { kind: "success", value: `result-${index}` },
+              writerMode: "close",
+            } as const;
+          },
+        },
+        signal: new AbortController().signal,
+        deliverySignal: new AbortController().signal,
+        onTerminal: () => { terminalCounts[index] = (terminalCounts[index] ?? 0) + 1; },
+        normalizeFailure: (error) => error,
+      }));
+    }
+
+    const handles = responses.map((response) => getStreamExecutionHandle(response));
+    expect(handles[0]).toBeDefined();
+    expect(handles[1]).toBeDefined();
+    expect(handles[0]).not.toBe(handles[1]);
+    expect(await Promise.all(responses.map(async (response) => await response.text())))
+      .toEqual(["response-0", "response-1"]);
+    await Promise.all(handles.map(async (handle) => await handle?.completion));
+    expect(handles.map((handle) => handle?.cause)).toEqual(["semantic_success", "semantic_success"]);
+    expect(handles.map((handle) => handle?.state)).toEqual(["completed", "completed"]);
+    expect(cleanupCounts).toEqual([1, 1]);
+    expect(terminalCounts).toEqual([1, 1]);
+  });
+
   it("does not produce past the host claim window without real body demand", async () => {
     let nextCalls = 0;
     let terminalCalls = 0;
@@ -474,6 +517,95 @@ describe("Stream Execution owner", () => {
 });
 
 describe("stream route lifecycle", () => {
+  it("presents a total timeout during first emission and releases owned resources", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    runtime.timeouts.totalMs = 123;
+    let releaseTotalTimeout: (() => void) | undefined;
+    let firstEmissionStarted!: () => void;
+    const emissionStarted = new Promise<void>((resolve) => { firstEmissionStarted = resolve; });
+    let releaseFirstEmission: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
+    const firstEmission = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
+      releaseFirstEmission = resolve;
+    });
+    const counts = { cancel: 0, returned: 0, terminal: 0 };
+    let requestCount = 0;
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/total-timeout",
+      admission: "inference",
+      body: "none",
+      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
+        status: failure.kind === "upstream_timeout" ? 504 : 400,
+      }),
+      endpoint: async (_request, scope) => {
+        if (requestCount++ > 0) {
+          return new Response("next");
+        }
+        return await createStreamExecutionResponse({
+          upstream: {
+            status: 200,
+            headers: new Headers(),
+            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
+            cancel: async () => { counts.cancel += 1; },
+          },
+          emissions: {
+            [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
+              return {
+                next: async () => {
+                  firstEmissionStarted();
+                  return await firstEmission;
+                },
+                return: async () => {
+                  counts.returned += 1;
+                  releaseFirstEmission?.({ done: true, value: undefined });
+                  return { done: true, value: undefined };
+                },
+              };
+            },
+          },
+          signal: scope.signal,
+          deliverySignal: scope.deliverySignal,
+          onTerminal: () => { counts.terminal += 1; },
+          normalizeFailure: (error) => error,
+        });
+      },
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime,
+    }, [route], {
+      delay: async (ms, signal) => {
+        if (ms !== runtime.timeouts.totalMs) {
+          return await defaultDelay(ms, signal);
+        }
+        await new Promise<void>((resolve, reject) => {
+          releaseTotalTimeout = resolve;
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      },
+    });
+
+    try {
+      const pending = gw.fetch(new Request("http://127.0.0.1:31400/v1/total-timeout", { method: "POST" }));
+      await emissionStarted;
+      expect(releaseTotalTimeout).toBeDefined();
+      releaseTotalTimeout?.();
+      const response = await pending;
+      expect(response.status).toBe(504);
+      expect(JSON.parse(await response.text())).toEqual({ kind: "upstream_timeout" });
+      expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
+
+      const next = await gw.fetch(new Request("http://127.0.0.1:31400/v1/total-timeout", { method: "POST" }));
+      expect(next.status).toBe(200);
+      expect(await next.text()).toBe("next");
+    } finally {
+      releaseFirstEmission?.({ done: true, value: undefined });
+      await gw.close();
+    }
+  });
+
   it("does not commit headers-only construction as success body", async () => {
     const route: RouteRegistration = {
       method: "POST",

@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { VERSION } from "../../src/version.js";
 import { assertNode24, currentNodeMajor } from "../../scripts/tooling/node_version.js";
@@ -31,7 +33,94 @@ async function readPackageJson(): Promise<PackageJson> {
   return JSON.parse(await readFile("package.json", "utf8")) as PackageJson;
 }
 
+function isRuntimeBearingImport(statement: ts.ImportDeclaration): boolean {
+  return statement.importClause?.isTypeOnly !== true;
+}
+
+function isRuntimeBearingExport(statement: ts.ExportDeclaration): boolean {
+  return !statement.isTypeOnly;
+}
+
+async function staticRuntimeImportGraph(
+  entrypoint: string,
+  graphRoot = path.resolve("."),
+): Promise<Set<string>> {
+  const repositoryRoot = path.resolve(graphRoot);
+  const pending = [path.resolve(entrypoint)];
+  const reached = new Set<string>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) {
+      continue;
+    }
+    const relativeCurrent = path.relative(repositoryRoot, current).replaceAll(path.sep, "/");
+    if (reached.has(relativeCurrent)) {
+      continue;
+    }
+    reached.add(relativeCurrent);
+
+    const source = await readFile(current, "utf8");
+    const sourceFile = ts.createSourceFile(current, source, ts.ScriptTarget.Latest, true);
+    for (const statement of sourceFile.statements) {
+      const declaration = ts.isImportDeclaration(statement) && isRuntimeBearingImport(statement)
+        ? statement
+        : ts.isExportDeclaration(statement) && isRuntimeBearingExport(statement)
+          ? statement
+          : undefined;
+      if (declaration?.moduleSpecifier === undefined
+        || !ts.isStringLiteral(declaration.moduleSpecifier)
+        || !declaration.moduleSpecifier.text.startsWith(".")) {
+        continue;
+      }
+      const sourceSpecifier = declaration.moduleSpecifier.text.replace(/\.js$/u, ".ts");
+      pending.push(path.resolve(path.dirname(current), sourceSpecifier));
+    }
+  }
+
+  return reached;
+}
+
 describe("package entrypoints and toolchain", () => {
+  it("follows verbatim runtime declarations but excludes type-only and dynamic imports", async () => {
+    const fixtureRoot = await mkdtemp(path.join(tmpdir(), "ghcg-static-import-graph-"));
+    const files = new Map([
+      ["entry.ts", [
+        "import { type InlineImport } from \"./inline-import.js\";",
+        "export { type InlineExport } from \"./inline-export.js\";",
+        "import type { ImportType } from \"./import-type.js\";",
+        "export type { ExportType } from \"./export-type.js\";",
+        "void import(\"./dynamic.js\");",
+      ].join("\n")],
+      ["inline-import.ts", "export interface InlineImport {}\n"],
+      ["inline-export.ts", "export interface InlineExport {}\n"],
+      ["import-type.ts", "export interface ImportType {}\n"],
+      ["export-type.ts", "export interface ExportType {}\n"],
+      ["dynamic.ts", "export const dynamic = true;\n"],
+    ]);
+
+    try {
+      await Promise.all([...files].map(async ([name, source]) => {
+        await writeFile(path.join(fixtureRoot, name), source, "utf8");
+      }));
+      const graph = await staticRuntimeImportGraph(path.join(fixtureRoot, "entry.ts"), fixtureRoot);
+
+      expect([...graph].sort()).toEqual(["entry.ts", "inline-export.ts", "inline-import.ts"]);
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps request-only Stream Execution modules out of the idle runtime import graph", async () => {
+    const graph = await staticRuntimeImportGraph("src/main.ts");
+
+    expect(graph).toContain("src/main.ts");
+    expect(graph).toContain("src/gateway/hono_app.ts");
+    expect(graph).toContain("src/gateway/stream_execution.ts");
+    expect(graph).not.toContain("src/gateway/stream_execution_owner.ts");
+    expect(graph).not.toContain("src/gateway/stream_response.ts");
+  });
+
   it("exposes the production package identity and entrypoints", async () => {
     const pkg = await readPackageJson();
 
