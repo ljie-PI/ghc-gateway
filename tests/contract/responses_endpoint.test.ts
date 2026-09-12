@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -778,7 +779,7 @@ describe("Responses endpoint", () => {
       ],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
     await accounts.upsertAuthenticated({
       host: "github.com",
       userId: "1",

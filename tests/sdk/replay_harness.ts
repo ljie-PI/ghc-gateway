@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import path from "node:path";
@@ -79,7 +80,8 @@ export async function startReplaySdkHarness(options: {
   });
 
   const credentials = new MemoryCredentialStore();
-  const directory = new AccountDirectory(database, credentials, nowMs);
+  const accountCoordinator = new AccountCoordinator();
+  const directory = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
   await directory.upsertAuthenticated({
     host: "github.com",
     userId: "1",
@@ -98,6 +100,7 @@ export async function startReplaySdkHarness(options: {
   const endpointDiscovery = new EndpointDiscovery(async () => replayEndpoint);
   const copilot = new HttpCopilotBackend({
     credentials,
+    accountCoordinator,
     refreshCopilotToken: async () => ({ token: "dummy-token", expiresAtMs: nowMs() + 3_600_000 }),
     endpointDiscovery,
     fetchImpl: fetch,
@@ -116,6 +119,7 @@ export async function startReplaySdkHarness(options: {
     application: {
       database,
       credentials,
+      accountCoordinator,
       directory,
       registry,
       copilot,

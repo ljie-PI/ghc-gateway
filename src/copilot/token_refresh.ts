@@ -1,6 +1,6 @@
 import type { BoundAccount } from "../accounts/account_directory.js";
+import type { AccountCoordinator } from "../accounts/account_coordinator.js";
 import type { CredentialStore, SecretCredential } from "../accounts/credential_store.js";
-import { withCredentialGenerationLock } from "../accounts/credential_generation_lock.js";
 
 export const REFRESH_SKEW_MS = 60_000;
 
@@ -26,6 +26,7 @@ export function needsRefresh(credential: SecretCredential, nowMs: number, enviro
 
 export async function getValidToken(
   store: CredentialStore,
+  coordinator: AccountCoordinator,
   account: BoundAccount,
   nowMs: number,
   refresh: (githubToken: string, signal?: AbortSignal) => Promise<{ token: string; expiresAtMs: number }>,
@@ -41,7 +42,7 @@ export async function getValidToken(
   if (account.environment.kind === "ghes") {
     return current.githubToken;
   }
-  await withCredentialGenerationLock(account.accountId, async () => {
+  await coordinator.withCredentialGeneration(account.accountId, async () => {
     throwIfAborted(signal);
     const again = await store.readGeneration(account.accountId, generation);
     throwIfAborted(signal);

@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -23,6 +24,7 @@ async function directory(maxAuthenticated = 8): Promise<{
   directory: AccountDirectory;
   database: ReturnType<typeof openDatabase>;
   credentials: MemoryCredentialStore;
+  coordinator: AccountCoordinator;
   close: () => void;
 }> {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-acc-"));
@@ -32,12 +34,40 @@ async function directory(maxAuthenticated = 8): Promise<{
     nowMs,
   });
   const credentials = new MemoryCredentialStore();
+  const coordinator = new AccountCoordinator();
   return {
-    directory: new AccountDirectory(database, credentials, nowMs, maxAuthenticated),
+    directory: new AccountDirectory(database, credentials, coordinator, nowMs, maxAuthenticated),
     database,
     credentials,
+    coordinator,
     close: () => closeDatabase(database),
   };
+}
+
+class GatedCredentialStore extends MemoryCredentialStore {
+  readonly putStarted: Promise<void>;
+  releasePut: () => void = () => undefined;
+  private markPutStarted: () => void = () => undefined;
+  private gated = true;
+
+  constructor() {
+    super();
+    this.putStarted = new Promise<void>((resolve) => { this.markPutStarted = resolve; });
+  }
+
+  override async putGeneration(
+    accountId: string,
+    generation: number,
+    value: SecretCredential,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.gated) {
+      this.gated = false;
+      this.markPutStarted();
+      await new Promise<void>((resolve) => { this.releasePut = resolve; });
+    }
+    await super.putGeneration(accountId, generation, value, signal);
+  }
 }
 
 describe("GitHub host and account id", () => {
@@ -183,7 +213,7 @@ describe("account directory", () => {
       nowMs,
     });
     const credentials = new FlakyRemoveCredentialStore();
-    const accounts = new AccountDirectory(database, credentials, nowMs);
+    const accounts = new AccountDirectory(database, credentials, new AccountCoordinator(), nowMs);
     try {
       const bound = await accounts.upsertAuthenticated({
         host: "github.com",
@@ -217,7 +247,7 @@ describe("account directory", () => {
       nowMs,
     });
     const credentials = new FlakyRemoveCredentialStore();
-    const accounts = new AccountDirectory(database, credentials, nowMs);
+    const accounts = new AccountDirectory(database, credentials, new AccountCoordinator(), nowMs);
     try {
       const bound = await accounts.upsertAuthenticated({
         host: "github.com",
@@ -352,7 +382,7 @@ describe("account directory", () => {
       migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
       nowMs,
     });
-    const accounts = new AccountDirectory(database, new FailingCredentialStore(), nowMs);
+    const accounts = new AccountDirectory(database, new FailingCredentialStore(), new AccountCoordinator(), nowMs);
     try {
       await expect(accounts.upsertAuthenticated({
         host: "github.com",
@@ -411,29 +441,39 @@ describe("account directory", () => {
   });
 
   it("serializes different-account activation across capacity and prune", async () => {
-    const { directory: accounts, credentials, close } = await directory(1);
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-acc-"));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    const credentials = new GatedCredentialStore();
+    const coordinator = new AccountCoordinator();
+    const accounts = new AccountDirectory(database, credentials, coordinator, nowMs, 1);
     try {
       const first = accounts.upsertAuthenticated({
         host: "github.com",
         userId: "1",
         secret: { generation: 0, githubToken: "one" },
       });
+      await credentials.putStarted;
       const second = accounts.upsertAuthenticated({
         host: "github.com",
         userId: "2",
         secret: { generation: 0, githubToken: "two" },
       });
-      const settled = await Promise.allSettled([first, second]);
-      expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      const active = accounts.list();
-      expect(active).toHaveLength(1);
-      const account = active[0];
-      expect(account).toBeDefined();
-      if (account !== undefined) {
-        expect(await credentials.readGeneration(account.accountId, 1)).not.toBeNull();
-      }
+      await Promise.resolve();
+      expect(accounts.list()).toEqual([]);
+      expect(coordinator.inspect().lifecyclePending).toBe(2);
+
+      credentials.releasePut();
+      await expect(first).resolves.toMatchObject({ accountId: "github.com/1" });
+      await expect(second).rejects.toMatchObject({ code: "capacity" });
+      expect(accounts.list()).toEqual([expect.objectContaining({ accountId: "github.com/1", state: "active" })]);
+      expect(await credentials.readGeneration("github.com/1", 1)).not.toBeNull();
+      expect(await credentials.readGeneration("github.com/2", 1)).toBeNull();
     } finally {
-      close();
+      closeDatabase(database);
     }
   });
 
@@ -445,7 +485,7 @@ describe("account directory", () => {
       nowMs,
     });
     const credentials = new MemoryCredentialStore();
-    const accounts = new AccountDirectory(database, credentials, nowMs);
+    const accounts = new AccountDirectory(database, credentials, new AccountCoordinator(), nowMs);
     try {
       const first = accounts.upsertAuthenticated({
         host: "github.com",
@@ -472,7 +512,7 @@ describe("account directory", () => {
   });
 
   it("serializes relogin with token refresh so old generations cannot be resurrected", async () => {
-    const { directory: accounts, credentials, close } = await directory();
+    const { directory: accounts, credentials, coordinator, close } = await directory();
     let releaseRefresh: () => void = () => undefined;
     let refreshStarted = false;
     try {
@@ -481,7 +521,7 @@ describe("account directory", () => {
         userId: "1",
         secret: { generation: 0, githubToken: "old" },
       });
-      const refresh = getValidToken(credentials, bound, nowMs(), async () => {
+      const refresh = getValidToken(credentials, coordinator, bound, nowMs(), async () => {
         refreshStarted = true;
         await new Promise<void>((resolve) => {
           releaseRefresh = resolve;

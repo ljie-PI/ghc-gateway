@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
@@ -73,7 +74,8 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
     ],
     nowMs,
   });
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), nowMs);
+  const accountCoordinator = new AccountCoordinator();
+  const directory = new AccountDirectory(database, new MemoryCredentialStore(), accountCoordinator, nowMs);
   await directory.upsertAuthenticated({
     host: "github.com",
     userId: "1",
@@ -156,6 +158,7 @@ export async function startOfflineSdkHarness(): Promise<OfflineSdkHarness> {
     application: {
       database,
       credentials: new MemoryCredentialStore(),
+      accountCoordinator,
       directory,
       registry,
       copilot: backend,

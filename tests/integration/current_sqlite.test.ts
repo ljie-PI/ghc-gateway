@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -45,7 +46,7 @@ describe("current-schema SQLite durability with synthetic data", () => {
         config.update(updatedConfig, 1);
         expect(() => config.update(updatedConfig, 1)).toThrow(RuntimeConfigError);
         const credentials = new MemoryCredentialStore();
-        const accounts = new AccountDirectory(database, credentials, nowMs);
+        const accounts = new AccountDirectory(database, credentials, new AccountCoordinator(), nowMs);
         const primary = await accounts.upsertAuthenticated({
           host: "github.com", userId: "1", secret: { generation: 0, githubToken: "synthetic-one" },
         });
@@ -78,7 +79,7 @@ describe("current-schema SQLite durability with synthetic data", () => {
         reopenedConfig.seedIfEmpty({ GHC_GATEWAY_ADMISSION_ACTIVE_MAX: "9" });
         expect(reopenedConfig.readRevision()).toBe(2);
         expect(reopenedConfig.readSnapshot()).toEqual(updatedConfig);
-        const reopenedAccounts = new AccountDirectory(database, credentials, nowMs);
+        const reopenedAccounts = new AccountDirectory(database, credentials, new AccountCoordinator(), nowMs);
         expect(reopenedAccounts.list()).toEqual(originalAccounts);
         expect(reopenedAccounts.defaultPreference()).toEqual(defaultState);
         expect(reopenedAccounts.preferences.get(primary.accountId)).toEqual(preference);

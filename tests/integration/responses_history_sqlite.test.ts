@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -301,7 +302,7 @@ describe("Responses history SQLite", () => {
     try {
       const directory = new AccountDirectory(
         opened.database,
-        new MemoryCredentialStore(),
+        new MemoryCredentialStore(), new AccountCoordinator(),
         () => 1_700_000_000_000,
         8,
         (accountId) => opened.store.clearAccount(accountId),
@@ -344,7 +345,7 @@ describe("Responses history SQLite", () => {
       const credentials = new MemoryCredentialStore();
       const directory = new AccountDirectory(
         opened.database,
-        credentials,
+        credentials, new AccountCoordinator(),
         () => 1_700_000_000_000,
       );
       const account = await directory.upsertAuthenticated({

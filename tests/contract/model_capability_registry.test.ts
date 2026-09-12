@@ -1,3 +1,4 @@
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
@@ -408,7 +409,7 @@ async function createHarness(
 }
 
 async function createAccount(database: SqliteDatabase, userId: string) {
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), () => 1_700_000_000_000);
+  const directory = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), () => 1_700_000_000_000);
   return await directory.upsertAuthenticated({
     host: "github.com",
     userId,
