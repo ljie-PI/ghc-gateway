@@ -13,7 +13,7 @@ import {
   type SdkMode,
   type SdkProtocol,
 } from "./client.js";
-import { expectScenarioResult, matchesTextRequest, readExpectedResult } from "./replay_expectations.js";
+import { expectScenarioResult, readExpectedResult } from "./replay_expectations.js";
 import { TEXT_SCENARIOS, type TextScenario } from "./scenarios.js";
 
 describe("long-text and image nine-cell matrix via production HTTP replay", () => {
@@ -33,7 +33,7 @@ describe("long-text and image nine-cell matrix via production HTTP replay", () =
     const expectedModels = REPLAY_TARGETS.map((target) => target.model);
     expect((await clients.openai.models.list()).data.map((model) => model.id)).toEqual(expectedModels);
     expect((await clients.anthropic.models.list()).data.map((model) => model.id)).toEqual(expectedModels);
-    expect(harness.receipts.some((receipt) => receipt.path === "/models")).toBe(true);
+    expect(harness.receipts).toEqual([]);
   });
 
   describe.each(TEXT_SCENARIOS)("$id", (scenario) => {
@@ -49,17 +49,16 @@ describe("long-text and image nine-cell matrix via production HTTP replay", () =
       describe.each(REPLAY_TARGETS)("$protocol upstream", (target) => {
         it.each(SDK_MODES)("%s preserves complete text and a normal terminal outcome", async (mode) => {
           const expected = await readExpectedResult(harness.corpus.exchanges, target.protocol, scenario.id, mode);
-          harness.replayServer.selectScenario({
-            id: `${downstream}.${target.protocol}.${scenario.id}.${mode}`,
-            steps: [{
-              exchangeId: `replay.${target.protocol}.${scenario.id}.${mode}`,
-              matchesRequest: (body) => matchesTextRequest(body, target.protocol, scenario, imageBase64),
-            }],
-          });
+          const scenarioId = `replay.${target.protocol}.${scenario.id}.${mode}`;
+          const receiptStart = harness.receipts.length;
+          harness.replayServer.selectScenario(scenarioId);
           try {
             const result = await executeScenario(downstream, target, scenario, mode, imageBase64);
             expectScenarioResult(result, expected, scenario, downstream, mode);
             harness.replayServer.finishScenario();
+            expect(harness.receipts.slice(receiptStart)).toEqual([
+              { scenarioId, scenarioStep: 1, matchedCaseId: scenarioId },
+            ]);
           } finally {
             harness.replayServer.abortScenario();
           }

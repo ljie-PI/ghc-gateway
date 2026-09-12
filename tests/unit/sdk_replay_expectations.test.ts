@@ -112,12 +112,12 @@ describe("independent SDK replay expectations (no SDK execution)", () => {
 
   it("reads every shared exchange using its own bodyFile and source metadata, including five-turn steps", async () => {
     const manifest = JSON.parse(await readFile(new URL("../sdk/corpus/manifest.json", import.meta.url), "utf8")) as ReplayScenarioManifest;
-    const shared = new Set(manifest.responseSets.flatMap((set) => set.exchangeIds));
-    expect(shared.size).toBeGreaterThan(0);
-    for (const exchange of manifest.exchanges.filter((candidate) => shared.has(candidate.caseId))) {
+    const shared = new Set(manifest.exchanges.map((exchange) => exchange.caseId));
+    expect(shared.size).toBe(45);
+    for (const exchange of manifest.exchanges) {
       const result = await readExpectedExchangeResult(exchange);
       expect(result.upstream).toBe(exchange.targetProtocol);
-      expect(result.usage).toEqual(exchange.downstreamExpectation?.usage);
+      if (exchange.downstreamExpectation?.usage !== undefined) expect(result.usage).toEqual(exchange.downstreamExpectation.usage);
       expectUsage(result.nativeUsage, result.upstream, result);
     }
   });

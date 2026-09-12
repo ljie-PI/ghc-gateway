@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createSdkClients, executeChat, executeMessages, executeResponses, REPLAY_TARGETS, SDK_PROTOCOLS, sdkToolCalls,
   type SdkClients, type SdkProtocol, type SdkProtocolResult,
@@ -19,6 +19,7 @@ describe("nine-cell parallel streaming tools with official SDK accumulation", ()
     clients = createSdkClients(harness);
   });
   afterAll(async () => { await harness.close(); });
+  afterEach(() => { harness.replayServer.abortScenario(); });
 
   describe.each(SDK_PROTOCOLS)("%s downstream", (downstream) => {
     it.each(REPLAY_TARGETS)("$protocol upstream preserves complete arguments, call binding and terminal usage", async (target) => {
@@ -26,6 +27,7 @@ describe("nine-cell parallel streaming tools with official SDK accumulation", ()
       const exchange = harness.corpus.exchanges.find((candidate) => candidate.caseId === exchangeId)!;
       const expected = await readExpectedExchangeResult(exchange);
       const receiptStart = harness.receipts.length;
+      harness.replayServer.selectScenario(exchangeId);
       const value = await executeTools(downstream, target.model);
       const { result } = value;
       const calls = sdkToolCalls(value);
@@ -45,8 +47,10 @@ describe("nine-cell parallel streaming tools with official SDK accumulation", ()
       expect(result.stream?.text === expected.text, "no duplicated or truncated streamed text").toBe(true);
       expect(result.stream?.terminalCount).toBe(1);
       expect(result.terminal === { chat: "tool_calls", messages: "tool_use", responses: "completed" }[downstream], "normal tool terminal outcome").toBe(true);
-      expect(harness.receipts.slice(receiptStart).filter((receipt) => receipt.matchedCaseId !== undefined))
-        .toMatchObject([{ matchedCaseId: exchangeId, model: target.model, stream: true }]);
+      harness.replayServer.finishScenario();
+      expect(harness.receipts.slice(receiptStart)).toEqual([
+        { scenarioId: exchangeId, scenarioStep: 1, matchedCaseId: exchangeId },
+      ]);
       // Chat/Responses raw argument frames are coarse. Interleaving and byte fragmentation remain
       // independently covered by protocol_conversion_response.test.ts, not fabricated capture frames.
     });
