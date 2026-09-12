@@ -3,6 +3,7 @@ import path from "node:path";
 import { access, readdir, readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { VERSION } from "../../src/version.js";
 import { assertNode24, currentNodeMajor } from "../../scripts/tooling/node_version.js";
@@ -31,7 +32,80 @@ async function readPackageJson(): Promise<PackageJson> {
   return JSON.parse(await readFile("package.json", "utf8")) as PackageJson;
 }
 
+function isRuntimeBearingImport(statement: ts.ImportDeclaration): boolean {
+  const clause = statement.importClause;
+  if (clause === undefined) {
+    return true;
+  }
+  if (clause.isTypeOnly) {
+    return false;
+  }
+  if (clause.name !== undefined || clause.namedBindings === undefined) {
+    return true;
+  }
+  if (ts.isNamespaceImport(clause.namedBindings)) {
+    return true;
+  }
+  return clause.namedBindings.elements.some((element) => !element.isTypeOnly);
+}
+
+function isRuntimeBearingExport(statement: ts.ExportDeclaration): boolean {
+  if (statement.isTypeOnly) {
+    return false;
+  }
+  if (statement.exportClause === undefined || !ts.isNamedExports(statement.exportClause)) {
+    return true;
+  }
+  return statement.exportClause.elements.some((element) => !element.isTypeOnly);
+}
+
+async function staticRuntimeImportGraph(entrypoint: string): Promise<Set<string>> {
+  const repositoryRoot = path.resolve(".");
+  const pending = [path.resolve(entrypoint)];
+  const reached = new Set<string>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) {
+      continue;
+    }
+    const relativeCurrent = path.relative(repositoryRoot, current).replaceAll(path.sep, "/");
+    if (reached.has(relativeCurrent)) {
+      continue;
+    }
+    reached.add(relativeCurrent);
+
+    const source = await readFile(current, "utf8");
+    const sourceFile = ts.createSourceFile(current, source, ts.ScriptTarget.Latest, true);
+    for (const statement of sourceFile.statements) {
+      const declaration = ts.isImportDeclaration(statement) && isRuntimeBearingImport(statement)
+        ? statement
+        : ts.isExportDeclaration(statement) && isRuntimeBearingExport(statement)
+          ? statement
+          : undefined;
+      if (declaration?.moduleSpecifier === undefined
+        || !ts.isStringLiteral(declaration.moduleSpecifier)
+        || !declaration.moduleSpecifier.text.startsWith(".")) {
+        continue;
+      }
+      const sourceSpecifier = declaration.moduleSpecifier.text.replace(/\.js$/u, ".ts");
+      pending.push(path.resolve(path.dirname(current), sourceSpecifier));
+    }
+  }
+
+  return reached;
+}
+
 describe("package entrypoints and toolchain", () => {
+  it("keeps request-only Stream Execution modules out of the idle runtime import graph", async () => {
+    const graph = await staticRuntimeImportGraph("src/main.ts");
+
+    expect(graph).toContain("src/gateway/hono_app.ts");
+    expect(graph).toContain("src/gateway/stream_execution.ts");
+    expect(graph).not.toContain("src/gateway/stream_execution_owner.ts");
+    expect(graph).not.toContain("src/gateway/stream_response.ts");
+  });
+
   it("exposes the production package identity and entrypoints", async () => {
     const pkg = await readPackageJson();
 
