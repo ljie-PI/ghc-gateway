@@ -1446,6 +1446,13 @@ describe("shared conversion request codecs", () => {
       bindings: [{ kind: "custom", chatName: "render", sourceName: "render" }],
       calls: [],
       results: [],
+      chatMessages: [{
+        kind: "object",
+        members: [
+          { key: "role", value: "user" },
+          { key: "content", value: "render" },
+        ],
+      }],
       chatPrefixMembers: [],
     });
   });
@@ -1505,6 +1512,36 @@ describe("shared conversion request codecs", () => {
         },
       ],
     }), "target", capability(["chat"]))).toThrow();
+  });
+
+  it("preserves accepted Responses reasoning and multipart ordering in exact extended Chat bytes", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      instructions: "top",
+      input: [
+        { type: "message", role: "system", content: [{ type: "input_text", text: "inline" }] },
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "first" },
+            { type: "input_image", image_url: "https://example.test/a.png", detail: "high" },
+            { type: "input_text", text: "second" },
+          ],
+        },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "plan" }] },
+        { type: "custom_tool_call", call_id: "call_custom", name: "render", input: "raw" },
+        { type: "tool_search_call", call_id: "call_search", arguments: { query: "docs" } },
+        { type: "custom_tool_call_output", call_id: "call_custom", output: "done" },
+        { type: "tool_search_output", call_id: "call_search", tools: [] },
+      ],
+      tools: [
+        { type: "custom", name: "render", format: { type: "text" } },
+        { type: "tool_search" },
+      ],
+    }), "target", capability(["chat"]));
+
+    expect(decoder.decode(converted.bytes)).toBe("{\"model\":\"target\",\"messages\":[{\"role\":\"system\",\"content\":\"top\\n\\ninline\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"first\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"https://example.test/a.png\"}},{\"type\":\"text\",\"text\":\"second\"}]},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_custom\",\"type\":\"function\",\"function\":{\"name\":\"render\",\"arguments\":\"{\\\"input\\\":\\\"raw\\\"}\"}},{\"id\":\"call_search\",\"type\":\"function\",\"function\":{\"name\":\"tool_search\",\"arguments\":\"{\\\"query\\\":\\\"docs\\\"}\"}}],\"reasoning_content\":\"plan\"},{\"role\":\"tool\",\"tool_call_id\":\"call_custom\",\"content\":\"{\\\"call_id\\\":\\\"call_custom\\\",\\\"output\\\":\\\"done\\\",\\\"type\\\":\\\"custom_tool_call_output\\\"}\"},{\"role\":\"tool\",\"tool_call_id\":\"call_search\",\"content\":\"{\\\"call_id\\\":\\\"call_search\\\",\\\"tools\\\":[],\\\"type\\\":\\\"tool_search_output\\\"}\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"render\",\"description\":\"Original tool definition:\\n```json\\n{\\\"format\\\":{\\\"type\\\":\\\"text\\\"},\\\"name\\\":\\\"render\\\",\\\"type\\\":\\\"custom\\\"}\\n```\",\"parameters\":{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"string\",\"description\":\"Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.\"}},\"required\":[\"input\"]}}},{\"type\":\"function\",\"function\":{\"name\":\"tool_search\",\"description\":\"Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Search query for tools or connectors to load.\"},\"limit\":{\"type\":\"integer\",\"description\":\"Maximum number of tool groups to return.\"}},\"required\":[\"query\"]}}}]}");
   });
 });
 

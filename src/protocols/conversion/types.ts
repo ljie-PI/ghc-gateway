@@ -100,6 +100,7 @@ export interface ResponsesToolBindingLedger {
   readonly bindings: readonly ResponsesToolSourceBinding[];
   readonly calls: readonly ResponsesToolCallBinding[];
   readonly results: readonly ResponsesToolResultBinding[];
+  readonly chatMessages: readonly WireJsonObject[];
   readonly chatPrefixMembers: readonly { readonly key: string; readonly value: WireJson }[];
 }
 

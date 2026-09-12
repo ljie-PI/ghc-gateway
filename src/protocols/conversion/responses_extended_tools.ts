@@ -77,6 +77,11 @@ export interface PreparedResponsesExtendedTools {
   readonly chatTools: readonly WireJsonObject[];
 }
 
+export interface ResponsesToolCompatibilityProjection {
+  readonly chatTools: readonly WireJsonObject[];
+  readonly bindings: readonly ResponsesToolSourceBinding[];
+}
+
 interface MutableState {
   readonly bindings: ResponsesToolSourceBinding[];
   readonly bySourceKey: Map<string, ResponsesToolSourceBinding>;
@@ -110,6 +115,7 @@ export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedRes
   }
   collectDiscoveredDeclarations(state, inputValue);
   validateInstructionOrdering(inputValue);
+  const chatMessages = projectExtendedChatMessages(body, state);
   const transformedInput = transformInput(state, inputValue);
   const transformedChoice = transformToolChoice(state, single(body, "tool_choice", "REQ-R-EXT-CHOICE"));
   const prefixMembers = body.members
@@ -124,6 +130,7 @@ export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedRes
     bindings: Object.freeze(state.bindings.map((binding) => Object.freeze({ ...binding }))),
     calls: Object.freeze(state.calls.map((binding) => Object.freeze({ ...binding }))),
     results: Object.freeze(state.results.map((binding) => Object.freeze({ ...binding }))),
+    chatMessages: Object.freeze(chatMessages.map((message) => immutableWire(message) as WireJsonObject)),
     chatPrefixMembers: Object.freeze(prefixMembers),
   });
   return {
@@ -161,6 +168,113 @@ export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedRes
   };
 }
 
+export interface CompatibilityResponsesToolBinding {
+  readonly kind: ResponsesToolSourceBinding["kind"];
+  readonly originalName: string;
+  readonly namespace?: string;
+}
+
+export function restoredResponsesToolNameForCompatibility(
+  binding: CompatibilityResponsesToolBinding | undefined,
+  chatName: string,
+): string {
+  if (binding?.kind === "namespace") {
+    return binding.originalName;
+  }
+  if (binding?.kind === "tool_search") {
+    return "tool_search";
+  }
+  return binding?.originalName ?? chatName;
+}
+
+export function projectRestoredResponsesToolCallForCompatibility(
+  binding: CompatibilityResponsesToolBinding,
+  callId: string,
+  argumentsJson: string,
+  itemStatus: string,
+  responseStatus: "completed" | "incomplete",
+  includeToolSearchItemId = false,
+): WireJsonObject | undefined {
+  if (binding.kind === "function") {
+    return undefined;
+  }
+  if (binding.kind === "namespace") {
+    return object([
+      ["type", "function_call"],
+      ["id", callId],
+      ["call_id", callId],
+      ["name", binding.originalName],
+      ...(binding.namespace === undefined ? [] : [["namespace", binding.namespace] as const]),
+      ["arguments", argumentsJson],
+      ["status", itemStatus],
+    ]);
+  }
+  const restored = includeToolSearchItemId && itemStatus === "in_progress"
+    ? {}
+    : restoreResponsesExtendedToolArguments(binding.kind, argumentsJson, responseStatus);
+  if (binding.kind === "custom") {
+    return object([
+      ["type", "custom_tool_call"],
+      ["id", callId],
+      ["call_id", callId],
+      ["name", binding.originalName],
+      ...(includeToolSearchItemId
+        ? [["input", restored.rawCustomInput ?? ""] as const, ["status", itemStatus] as const]
+        : [["status", itemStatus] as const, ["input", restored.rawCustomInput ?? ""] as const]),
+    ]);
+  }
+  return object([
+    ["type", "tool_search_call"],
+    ...(includeToolSearchItemId ? [["id", callId] as const] : []),
+    ["call_id", callId],
+    ["status", itemStatus],
+    ["execution", "client"],
+    ["arguments", restored.toolSearchArguments ?? object([])],
+  ]);
+}
+
+export interface RestoredExtendedToolArguments {
+  readonly rawCustomInput?: string;
+  readonly toolSearchArguments?: WireJsonObject;
+}
+
+export function restoreResponsesExtendedToolArguments(
+  kind: ResponsesToolSourceBinding["kind"],
+  argumentsJson: string,
+  status: "completed" | "incomplete",
+): RestoredExtendedToolArguments {
+  if (kind === "custom") {
+    if (status === "incomplete") {
+      try {
+        const parsed = parseUpstreamArguments(argumentsJson);
+        const inputs = memberValues(parsed, "input");
+        return {
+          rawCustomInput: inputs.length === 1 && typeof inputs[0] === "string"
+            && parsed.members.every((member) => member.key === "input")
+            ? inputs[0]
+            : argumentsJson,
+        };
+      } catch {
+        return { rawCustomInput: argumentsJson };
+      }
+    }
+    const parsed = parseUpstreamArguments(argumentsJson);
+    const inputs = memberValues(parsed, "input");
+    if (inputs.length !== 1 || typeof inputs[0] !== "string" || parsed.members.some((member) => member.key !== "input")) {
+      invalidToolArguments();
+    }
+    return { rawCustomInput: inputs[0] };
+  }
+  if (kind === "tool_search") {
+    return {
+      toolSearchArguments: status === "incomplete"
+        ? incompleteToolSearchArguments(argumentsJson)
+        : parseUpstreamArguments(argumentsJson),
+    };
+  }
+  return {};
+}
+
 export function restoreResponsesExtendedTools(
   response: Readonly<SemanticResponse>,
   ledger: Readonly<ResponsesToolBindingLedger>,
@@ -179,40 +293,12 @@ export function restoreResponsesExtendedTools(
       invalidUpstream();
     }
     const binding = matches[0] as ResponsesToolSourceBinding;
-    if (binding.kind === "custom") {
-      let rawCustomInput: string;
-      if (response.status === "incomplete") {
-        try {
-          const parsed = parseUpstreamArguments(item.argumentsJson);
-          const inputs = memberValues(parsed, "input");
-          rawCustomInput = inputs.length === 1 && typeof inputs[0] === "string"
-            && parsed.members.every((member) => member.key === "input")
-            ? inputs[0]
-            : item.argumentsJson;
-        } catch {
-          rawCustomInput = item.argumentsJson;
-        }
-      } else {
-        const parsed = parseUpstreamArguments(item.argumentsJson);
-        const inputs = memberValues(parsed, "input");
-        if (inputs.length !== 1 || typeof inputs[0] !== "string" || parsed.members.some((member) => member.key !== "input")) {
-          invalidToolArguments();
-        }
-        rawCustomInput = inputs[0];
-      }
+    if (binding.kind === "custom" || binding.kind === "tool_search") {
       return {
         ...item,
-        sourceKind: "custom",
+        sourceKind: binding.kind,
         sourceName: binding.sourceName,
-        rawCustomInput,
-      };
-    }
-    if (binding.kind === "tool_search") {
-      return {
-        ...item,
-        sourceKind: "tool_search",
-        sourceName: binding.sourceName,
-        toolSearchArguments: parseUpstreamArguments(item.argumentsJson),
+        ...restoreResponsesExtendedToolArguments(binding.kind, item.argumentsJson, response.status),
       };
     }
     return {
@@ -223,6 +309,388 @@ export function restoreResponsesExtendedTools(
     };
   });
   return { ...response, items };
+}
+
+interface ExtendedMessageState {
+  readonly output: WireJsonObject[];
+  readonly pendingReasoning: string[];
+}
+
+export function projectResponsesMessagesForCompatibility(body: WireJsonObject): readonly WireJsonObject[] {
+  const projection = projectResponsesToolsForCompatibility(body);
+  const bySource = new Map(projection.bindings.map((binding) => [sourceKey(binding.namespace, binding.sourceName), binding.chatName]));
+  return projectResponsesMessages(body, (namespace, name) => bySource.get(sourceKey(namespace, name)));
+}
+
+function projectExtendedChatMessages(body: WireJsonObject, state: MutableState): WireJsonObject[] {
+  return projectResponsesMessages(
+    body,
+    (namespace, name) => state.bySourceKey.get(sourceKey(namespace, name))?.chatName,
+  );
+}
+
+function projectResponsesMessages(
+  body: WireJsonObject,
+  resolveChatName: (namespace: string | undefined, name: string) => string | undefined,
+): WireJsonObject[] {
+  const messageState: ExtendedMessageState = { output: [], pendingReasoning: [] };
+  for (const instruction of compatibilityInstructionMessages(memberValues(body, "instructions")[0])) {
+    messageState.output.push(instruction);
+  }
+  const input = memberValues(body, "input")[0];
+  if (typeof input === "string") {
+    flushPendingReasoning(messageState);
+    messageState.output.push(chatMessage("user", input));
+  } else {
+    const items = isWireJsonArray(input) ? input.items : input === undefined ? [] : [input];
+    projectExtendedInputItems(items, messageState, resolveChatName);
+  }
+  flushPendingReasoning(messageState);
+  return mergeSystemMessages(messageState.output);
+}
+
+function projectExtendedInputItems(
+  items: readonly WireJson[],
+  state: ExtendedMessageState,
+  resolveChatName: (namespace: string | undefined, name: string) => string | undefined,
+): void {
+  let calls: WireJsonObject[] = [];
+  const flushCalls = (): void => {
+    if (calls.length === 0) {
+      return;
+    }
+    const reasoning = consumeReasoning(state);
+    state.output.push(object([
+      ["role", "assistant"],
+      ["content", null],
+      ["tool_calls", array(calls)],
+      ["reasoning_content", reasoning.length > 0 ? reasoning : "tool call"],
+    ]));
+    calls = [];
+  };
+
+  for (const item of items) {
+    if (!isWireJsonObject(item)) {
+      flushCalls();
+      continue;
+    }
+    const type = single(item, "type", "REQ-R-EXT-ITEM-TYPE");
+    if (type === "reasoning") {
+      appendReasoning(state.pendingReasoning, reasoningFromItem(item));
+      continue;
+    }
+    const call = projectResponsesToolCallForCompatibility(item, resolveChatName);
+    if (call !== undefined) {
+      appendReasoning(state.pendingReasoning, reasoningFromItem(item));
+      calls.push(call);
+      continue;
+    }
+    flushCalls();
+    if (type === "function_call_output" || type === "custom_tool_call_output" || type === "tool_search_output") {
+      const extracted = type === "function_call_output"
+        ? { value: item as WireJson, media: [] as readonly WireJsonObject[] }
+        : extractCompatibilityMedia(item);
+      const content = isWireJsonObject(extracted.value)
+        ? projectResponsesToolResultContentForCompatibility(extracted.value)
+        : undefined;
+      const callId = compatibilityString(item, "call_id")?.trim()
+        || compatibilityString(item, "id")?.trim()
+        || "";
+      if (content !== undefined) {
+        state.output.push(toolMessage(callId, content));
+      }
+      if (extracted.media.length > 0) {
+        state.output.push(compatibilityMediaMessage(callId, extracted.media));
+      }
+      continue;
+    }
+    const message = projectExtendedMessage(item);
+    if (message !== undefined) {
+      const role = projectedChatRole(item);
+      if (role !== "assistant") {
+        flushPendingReasoning(state);
+      } else {
+        appendReasoning(state.pendingReasoning, reasoningFromItem(item));
+      }
+      state.output.push(message);
+    }
+  }
+  flushCalls();
+}
+
+function projectExtendedMessage(item: WireJsonObject): WireJsonObject | undefined {
+  const type = single(item, "type", "REQ-R-EXT-ITEM-TYPE");
+  if (type !== undefined && type !== "message") {
+    return undefined;
+  }
+  const content = single(item, "content", "REQ-R-EXT-MESSAGE-CONTENT");
+  if (isWireJsonArray(content)) {
+    const parts = content.items
+      .map(projectExtendedContentPart)
+      .filter((part): part is WireJsonObject => part !== undefined);
+    return chatMessage(projectedChatRole(item), chatContentFromParts(parts));
+  }
+  return chatMessage(projectedChatRole(item), content ?? null);
+}
+
+function projectExtendedContentPart(value: WireJson): WireJsonObject | undefined {
+  if (!isWireJsonObject(value)) {
+    return undefined;
+  }
+  const type = single(value, "type", "REQ-R-EXT-CONTENT-TYPE");
+  if (type === "input_text" || type === "output_text" || type === "text") {
+    const text = single(value, "text", "REQ-R-EXT-CONTENT-TEXT");
+    return typeof text !== "string" || text.length === 0 ? undefined : object([["type", "text"], ["text", text]]);
+  }
+  if (type === "refusal") {
+    const text = single(value, "refusal", "REQ-R-EXT-CONTENT-REFUSAL");
+    return typeof text !== "string" || text.length === 0 ? undefined : object([["type", "text"], ["text", text]]);
+  }
+  if (type === "input_image") {
+    const image = single(value, "image_url", "REQ-R-EXT-CONTENT-IMAGE");
+    return object([
+      ["type", "image_url"],
+      ["image_url", isWireJsonObject(image) ? image : object([["url", typeof image === "string" ? image : ""]])],
+    ]);
+  }
+  if (type === "input_file") {
+    const fields = ["file_id", "file_data", "filename"]
+      .flatMap((key): Array<readonly [string, WireJson]> => {
+        const field = memberValues(value, key)[0];
+        return field === undefined ? [] : [[key, field]];
+      });
+    return fields.some(([key]) => key === "file_id" || key === "file_data")
+      ? object([["type", "file"], ["file", object(fields)]])
+      : undefined;
+  }
+  if (type === "input_audio") {
+    const audio = memberValues(value, "input_audio")[0];
+    return audio === undefined ? undefined : object([["type", "input_audio"], ["input_audio", audio]]);
+  }
+  return undefined;
+}
+
+function chatContentFromParts(parts: readonly WireJsonObject[]): WireJson {
+  if (parts.every((part) => single(part, "type", "REQ-R-EXT-CONTENT-TYPE") === "text")) {
+    return parts.map((part) => single(part, "text", "REQ-R-EXT-CONTENT-TEXT") as string).join("\n");
+  }
+  return array(parts);
+}
+
+function projectedChatRole(item: WireJsonObject): string {
+  const role = single(item, "role", "REQ-R-EXT-MESSAGE-ROLE");
+  if (role === "system" || role === "developer") {
+    return "system";
+  }
+  if (role === "assistant" || role === "tool") {
+    return role;
+  }
+  return "user";
+}
+
+function reasoningFromItem(item: WireJsonObject): string | undefined {
+  for (const key of ["reasoning_content", "reasoning"] as const) {
+    const value = single(item, key, "REQ-R-EXT-REASONING");
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+    if (isWireJsonObject(value)) {
+      const nested = single(value, "content", "REQ-R-EXT-REASONING")
+        ?? single(value, "text", "REQ-R-EXT-REASONING")
+        ?? single(value, "summary", "REQ-R-EXT-REASONING");
+      if (typeof nested === "string" && nested.length > 0) {
+        return nested;
+      }
+    }
+  }
+  for (const key of ["reasoning_details", "summary"] as const) {
+    const value = single(item, key, "REQ-R-EXT-REASONING");
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+    if (isWireJsonArray(value)) {
+      const text = value.items.map((part) => {
+        if (typeof part === "string") {
+          return part;
+        }
+        if (!isWireJsonObject(part)) {
+          return "";
+        }
+        const nested = single(part, "text", "REQ-R-EXT-REASONING")
+          ?? single(part, "content", "REQ-R-EXT-REASONING");
+        return typeof nested === "string" ? nested : "";
+      }).filter((part) => part.length > 0).join("\n\n");
+      return text.length === 0 ? undefined : text;
+    }
+  }
+  return undefined;
+}
+
+function canonicalJsonStringOrOriginal(value: string): string {
+  try {
+    const bytes = new TextEncoder().encode(value);
+    return canonicalString(parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 }));
+  } catch {
+    return value;
+  }
+}
+
+function compatibilityInstructionMessages(value: WireJson | undefined): WireJsonObject[] {
+  if (typeof value === "string") {
+    return value.length === 0 ? [] : [chatMessage("system", value)];
+  }
+  if (!isWireJsonArray(value)) {
+    return [];
+  }
+  const text = value.items.map((item) => {
+    if (typeof item === "string") {
+      return item;
+    }
+    return isWireJsonObject(item) ? compatibilityString(item, "text") ?? "" : "";
+  }).filter((item) => item.length > 0).join("\n\n");
+  return text.length === 0 ? [] : [chatMessage("system", text)];
+}
+
+interface CompatibilityExtractedMedia {
+  readonly value: WireJson;
+  readonly media: readonly WireJsonObject[];
+}
+
+function extractCompatibilityMedia(value: WireJson, depth = 0): CompatibilityExtractedMedia {
+  if (depth > 32) {
+    return { value, media: [] };
+  }
+  if (typeof value === "string") {
+    try {
+      const bytes = new TextEncoder().encode(value.trim());
+      const parsed = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 });
+      const extracted = extractCompatibilityMedia(parsed, depth + 1);
+      if (extracted.media.length > 0) {
+        return { value: canonicalString(extracted.value), media: extracted.media };
+      }
+    } catch {
+      // Non-JSON text remains ordinary compatibility content.
+    }
+  }
+  const media = compatibilityMediaPart(value);
+  if (media !== undefined) {
+    return { value: "[cc-switch: tool result media moved to the following user message]", media: [media] };
+  }
+  if (isWireJsonArray(value)) {
+    const items: WireJson[] = [];
+    const mediaItems: WireJsonObject[] = [];
+    for (const item of value.items) {
+      const extracted = extractCompatibilityMedia(item, depth + 1);
+      items.push(extracted.value);
+      mediaItems.push(...extracted.media);
+    }
+    return { value: array(items), media: mediaItems };
+  }
+  if (isWireJsonObject(value)) {
+    const members: Array<readonly [string, WireJson]> = [];
+    const mediaItems: WireJsonObject[] = [];
+    for (const member of value.members) {
+      const extracted = extractCompatibilityMedia(member.value, depth + 1);
+      members.push([member.key, extracted.value]);
+      mediaItems.push(...extracted.media);
+    }
+    return { value: object(members), media: mediaItems };
+  }
+  return { value, media: [] };
+}
+
+function compatibilityMediaPart(value: WireJson): WireJsonObject | undefined {
+  if (typeof value === "string" && value.trim().startsWith("data:image/")
+    && new TextEncoder().encode(value.trim()).byteLength >= 8192) {
+    return object([["type", "image_url"], ["image_url", object([["url", value.trim()]])]]);
+  }
+  if (!isWireJsonObject(value)) {
+    return undefined;
+  }
+  const type = compatibilityString(value, "type");
+  if (type === "input_image" || type === "image_url") {
+    const image = memberValues(value, "image_url")[0] ?? memberValues(value, "source")[0];
+    return object([
+      ["type", "image_url"],
+      ["image_url", isWireJsonObject(image) ? image : object([["url", typeof image === "string" ? image : ""]])],
+    ]);
+  }
+  if (type === "input_file" || type === "input_audio") {
+    return projectExtendedContentPart(value);
+  }
+  return undefined;
+}
+
+function compatibilityMediaMessage(callId: string, media: readonly WireJsonObject[]): WireJsonObject {
+  return chatMessage("user", array([
+    object([["type", "text"], ["text", `[cc-switch: media output of tool call ${callId}]`]]),
+    ...media,
+  ]));
+}
+
+function mergeSystemMessages(messages: readonly WireJsonObject[]): WireJsonObject[] {
+  const systemText: string[] = [];
+  const rest: WireJsonObject[] = [];
+  for (const message of messages) {
+    if (single(message, "role", "REQ-R-EXT-MESSAGE-ROLE") === "system") {
+      const content = single(message, "content", "REQ-R-EXT-MESSAGE-CONTENT");
+      if (typeof content === "string" && content.length > 0) {
+        systemText.push(content);
+      }
+    } else {
+      rest.push(message);
+    }
+  }
+  return systemText.length === 0 ? rest : [chatMessage("system", systemText.join("\n\n")), ...rest];
+}
+
+function chatMessage(role: string, content: WireJson): WireJsonObject {
+  return object([["role", role], ["content", content]]);
+}
+
+function toolMessage(callId: string, content: string): WireJsonObject {
+  return object([["role", "tool"], ["tool_call_id", callId], ["content", content]]);
+}
+
+function consumeReasoning(state: ExtendedMessageState): string {
+  const text = state.pendingReasoning.join("\n\n");
+  state.pendingReasoning.length = 0;
+  return text;
+}
+
+function appendReasoning(target: string[], value: string | undefined): void {
+  if (value !== undefined && value.length > 0 && !target.includes(value)) {
+    target.push(value);
+  }
+}
+
+function flushPendingReasoning(state: ExtendedMessageState): void {
+  if (state.pendingReasoning.length === 0) {
+    return;
+  }
+  const previousIndex = state.output.findLastIndex((message) => single(message, "role", "REQ-R-EXT-MESSAGE-ROLE") === "assistant");
+  const previous = state.output[previousIndex];
+  if (previous !== undefined && single(previous, "reasoning_content", "REQ-R-EXT-REASONING") === undefined) {
+    state.output[previousIndex] = {
+      kind: "object",
+      members: [...previous.members, { key: "reasoning_content", value: state.pendingReasoning.join("\n\n") }],
+    };
+  }
+  state.pendingReasoning.length = 0;
+}
+
+function incompleteToolSearchArguments(value: string): WireJsonObject {
+  if (value.trim().length === 0) {
+    return object([]);
+  }
+  try {
+    return parseUpstreamArguments(value);
+  } catch (error: unknown) {
+    if (error instanceof GatewayFailureError && error.failure.kind === "invalid_tool_arguments") {
+      return object([["query", value]]);
+    }
+    throw error;
+  }
 }
 
 function parseUpstreamArguments(value: string): WireJsonObject {
@@ -803,6 +1271,254 @@ function immutableWire(value: WireJson): WireJson {
     return Object.freeze({ ...value });
   }
   return value;
+}
+
+export function projectResponsesToolResultContentForCompatibility(item: WireJsonObject): string | undefined {
+  const type = compatibilityString(item, "type");
+  let content: string;
+  if (type === "function_call_output") {
+    const value = memberValues(item, "output")[0];
+    content = typeof value === "string"
+      ? canonicalJsonStringOrOriginal(value)
+      : value === undefined ? "" : canonicalString(value);
+  } else if (type === "custom_tool_call_output" || type === "tool_search_output") {
+    content = canonicalString(item);
+  } else {
+    return undefined;
+  }
+  if (memberValues(item, "status")[0] !== "failed") {
+    return content;
+  }
+  return `[cc-switch:tool-result-error]${content.length === 0 ? "" : `\n${content}`}`;
+}
+
+export function projectResponsesToolChoiceForCompatibility(
+  value: WireJson | undefined,
+  chatNameForSource: (namespace: string | undefined, name: string) => string | undefined,
+  target: "chat" | "responses" = "chat",
+): WireJson | undefined {
+  if (!isWireJsonObject(value)) {
+    return value;
+  }
+  const type = compatibilityString(value, "type");
+  if (type === "function") {
+    const sourceName = compatibilityString(value, "name") ?? "";
+    if (target === "responses") {
+      return object([["type", "function"], ["name", sourceName]]);
+    }
+    const chatName = chatNameForSource(compatibilityString(value, "namespace"), sourceName) ?? sourceName;
+    return object([["type", "function"], ["function", object([["name", chatName]])]]);
+  }
+  if (type === "tool_search") {
+    return target === "responses"
+      ? object([["type", "tool_search"]])
+      : object([["type", "function"], ["function", object([["name", "tool_search"]])]]);
+  }
+  if (type === "custom") {
+    const name = compatibilityString(value, "name") ?? "";
+    return target === "responses"
+      ? object([["type", "custom"], ["name", name]])
+      : object([["type", "function"], ["function", object([["name", name]])]]);
+  }
+  return value;
+}
+
+export function projectResponsesToolCallForCompatibility(
+  item: WireJsonObject,
+  chatNameForSource: (namespace: string | undefined, name: string) => string | undefined,
+): WireJsonObject | undefined {
+  const type = compatibilityString(item, "type");
+  const callId = compatibilityString(item, "call_id")?.trim()
+    || compatibilityString(item, "id")?.trim()
+    || "";
+  if (type === "function_call") {
+    const sourceName = compatibilityString(item, "name") ?? "";
+    const namespace = compatibilityString(item, "namespace");
+    const chatName = chatNameForSource(namespace, sourceName) ?? sourceName;
+    return compatibilityChatToolCall(callId, chatName, compatibilityArguments(memberValues(item, "arguments")[0]));
+  }
+  if (type === "custom_tool_call") {
+    return compatibilityChatToolCall(
+      callId,
+      compatibilityString(item, "name") ?? "",
+      canonicalString(object([["input", memberValues(item, "input")[0] ?? ""]])),
+    );
+  }
+  if (type === "tool_search_call") {
+    return compatibilityChatToolCall(
+      callId,
+      "tool_search",
+      canonicalString(memberValues(item, "arguments")[0] ?? object([])),
+    );
+  }
+  return undefined;
+}
+
+function compatibilityChatToolCall(id: string, name: string, argumentsJson: string): WireJsonObject {
+  return object([
+    ["id", id],
+    ["type", "function"],
+    ["function", object([["name", name], ["arguments", argumentsJson]])],
+  ]);
+}
+
+function compatibilityArguments(value: WireJson | undefined): string {
+  if (value === undefined || (typeof value === "string" && value.trim().length === 0)) {
+    return "{}";
+  }
+  if (typeof value !== "string") {
+    return canonicalString(value);
+  }
+  try {
+    const bytes = new TextEncoder().encode(value);
+    return canonicalString(parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 }));
+  } catch {
+    return value;
+  }
+}
+
+export function projectResponsesToolsForCompatibility(body: WireJsonObject): ResponsesToolCompatibilityProjection {
+  const chatTools: WireJsonObject[] = [];
+  const bindings: ResponsesToolSourceBinding[] = [];
+  const byChatName = new Set<string>();
+  const add = (binding: ResponsesToolSourceBinding, tool: WireJsonObject): void => {
+    if (byChatName.has(binding.chatName)) {
+      return;
+    }
+    byChatName.add(binding.chatName);
+    bindings.push(binding);
+    chatTools.push(tool);
+  };
+  const addTool = (value: WireJson, namespace?: string): void => {
+    if (typeof value === "string") {
+      addCompatibilityCustom(value, value, add);
+      return;
+    }
+    if (!isWireJsonObject(value)) {
+      return;
+    }
+    const type = memberValues(value, "type")[0];
+    const nested = memberValues(value, "function")[0];
+    if (type === "function" || (type === undefined && (isWireJsonObject(nested) || memberValues(value, "name")[0] !== undefined))) {
+      const shape = isWireJsonObject(nested) ? nested : value;
+      const sourceName = compatibilityString(shape, "name")?.trim() ?? "";
+      if (sourceName.length === 0) {
+        return;
+      }
+      const chatName = namespace === undefined ? sourceName : projectedNamespaceName(namespace, sourceName);
+      const parametersValue = memberValues(shape, "parameters")[0];
+      const parameters = isWireJsonObject(parametersValue)
+        ? normalizedParameters(parametersValue)
+        : object([["type", "object"], ["properties", object([])]]);
+      const strictValue = memberValues(shape, "strict")[0] ?? memberValues(value, "strict")[0];
+      const functionMembers: Array<readonly [string, WireJson]> = [
+        ["name", chatName],
+        ["description", memberValues(shape, "description")[0] ?? null],
+        ["parameters", parameters],
+      ];
+      if (strictValue === true || strictValue === false) {
+        functionMembers.push(["strict", strictValue]);
+      } else if (isOpenAiStrictSchemaCompatible(parameters)) {
+        functionMembers.push(["strict", true]);
+      }
+      add({
+        kind: namespace === undefined ? "function" : "namespace",
+        chatName,
+        sourceName,
+        ...(namespace === undefined ? {} : { namespace }),
+      }, object([["type", "function"], ["function", object(functionMembers)]]));
+      return;
+    }
+    if (type === "namespace") {
+      const namespaceName = compatibilityString(value, "name") ?? "";
+      const children = memberValues(value, "tools")[0] ?? memberValues(value, "children")[0];
+      if (isWireJsonArray(children)) {
+        for (const child of children.items) {
+          if (isWireJsonObject(child) && memberValues(child, "type")[0] === "function") {
+            addTool(child, namespaceName);
+          }
+        }
+      }
+      return;
+    }
+    if (type === "custom") {
+      const name = compatibilityString(value, "name")?.trim() ?? "";
+      addCompatibilityCustom(name, value, add);
+      return;
+    }
+    if (type === "tool_search") {
+      add({ kind: "tool_search", chatName: "tool_search", sourceName: "tool_search" }, object([
+        ["type", "function"],
+        ["function", object([
+          ["name", "tool_search"],
+          ["description", TOOL_SEARCH_DESCRIPTION],
+          ["parameters", TOOL_SEARCH_SCHEMA],
+        ])],
+      ]));
+    }
+  };
+  const declared = memberValues(body, "tools")[0];
+  if (isWireJsonArray(declared)) {
+    for (const tool of declared.items) {
+      addTool(tool);
+    }
+  }
+  collectCompatibilityDiscovered(memberValues(body, "input")[0], addTool);
+  return { chatTools, bindings };
+}
+
+function addCompatibilityCustom(
+  name: string,
+  original: WireJson,
+  add: (binding: ResponsesToolSourceBinding, tool: WireJsonObject) => void,
+): void {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) {
+    return;
+  }
+  add({ kind: "custom", chatName: trimmed, sourceName: trimmed }, object([
+    ["type", "function"],
+    ["function", object([
+      ["name", trimmed],
+      ["description", `Original tool definition:\n\`\`\`json\n${canonicalString(original)}\n\`\`\``],
+      ["parameters", CUSTOM_INPUT_SCHEMA],
+    ])],
+  ]));
+}
+
+function collectCompatibilityDiscovered(
+  value: WireJson | undefined,
+  addTool: (value: WireJson, namespace?: string) => void,
+  depth = 0,
+): void {
+  if (value === undefined || depth > 32) {
+    return;
+  }
+  if (isWireJsonArray(value)) {
+    for (const item of value.items) {
+      collectCompatibilityDiscovered(item, addTool, depth + 1);
+    }
+    return;
+  }
+  if (!isWireJsonObject(value)) {
+    return;
+  }
+  if (memberValues(value, "type")[0] === "tool_search_output") {
+    const tools = memberValues(value, "tools")[0];
+    if (isWireJsonArray(tools)) {
+      for (const tool of tools.items) {
+        addTool(tool);
+      }
+    }
+  }
+  for (const member of value.members) {
+    collectCompatibilityDiscovered(member.value, addTool, depth + 1);
+  }
+}
+
+function compatibilityString(value: WireJsonObject, key: string): string | undefined {
+  const member = memberValues(value, key)[0];
+  return typeof member === "string" ? member : undefined;
 }
 
 function object(members: readonly (readonly [string, WireJson])[]): WireJsonObject {

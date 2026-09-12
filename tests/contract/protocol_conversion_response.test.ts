@@ -5,6 +5,7 @@ import { planProtocolExecution } from "../../src/protocols/conversion/planner.js
 import { isWireJsonObject, parseWireJson, serializeWireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 import { convertProtocolStream } from "../../src/protocols/conversion/stream.js";
 import type {
+  ConvertedProtocolPlan,
   ConvertedStreamEmission,
   InferenceProtocol,
 } from "../../src/protocols/conversion/types.js";
@@ -170,6 +171,73 @@ describe("shared conversion response codecs", () => {
       createUuid: () => "00000000-0000-4000-8000-000000000104",
       nowUnixSeconds: () => 1_700_000_000,
     })).toThrow();
+  });
+
+  it("restores completed tool-search arguments only from a valid JSON object", () => {
+    const converted = convertBufferedPlannedResponse(encoder.encode(JSON.stringify({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_search", type: "function", function: { name: "tool_search", arguments: "{\"query\":\"docs\"}" } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    })), toolSearchPlan(), bufferedPresentation());
+
+    expect((decoded(converted.bytes).output as unknown[])).toEqual([{
+      type: "tool_search_call",
+      call_id: "call_search",
+      status: "completed",
+      execution: "client",
+      arguments: { query: "docs" },
+      id: "fc_00000000-0000-4000-8000-000000000104",
+    }]);
+    expect(decoded(converted.bytes).status).toBe("completed");
+    expect(converted.observations.terminal).toBe("completed");
+  });
+
+  it.each([
+    ["plain query", { query: "plain query" }],
+    ["", {}],
+  ])("restores incomplete tool-search arguments using the compatible fallback for %j", (argumentsText, expected) => {
+    const converted = convertBufferedPlannedResponse(encoder.encode(JSON.stringify({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_search", type: "function", function: { name: "tool_search", arguments: argumentsText } }],
+        },
+        finish_reason: "length",
+      }],
+    })), toolSearchPlan(), bufferedPresentation());
+
+    expect((decoded(converted.bytes).output as unknown[])).toEqual([{
+      type: "tool_search_call",
+      call_id: "call_search",
+      status: "incomplete",
+      execution: "client",
+      arguments: expected,
+      id: "fc_00000000-0000-4000-8000-000000000104",
+    }]);
+    expect(decoded(converted.bytes).status).toBe("incomplete");
+    expect(converted.observations.terminal).toBe("incomplete");
+    expect(converted.checkpoint).toMatchObject({ state: "route_only", output: [] });
+  });
+
+  it("fails closed on malformed completed tool-search arguments", () => {
+    expect(() => convertBufferedPlannedResponse(encoder.encode(JSON.stringify({
+      choices: [{
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_search", type: "function", function: { name: "tool_search", arguments: "plain query" } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    })), toolSearchPlan(), bufferedPresentation())).toThrow(expect.objectContaining({
+      failure: expect.objectContaining({ kind: "invalid_tool_arguments" }),
+    }));
   });
 
   it("preserves refusal and incomplete state when converting Responses to Chat", () => {
@@ -4501,6 +4569,28 @@ function responseBody(value: unknown): WireJsonObject {
     throw new Error("expected object");
   }
   return parsed;
+}
+
+function toolSearchPlan(): ConvertedProtocolPlan {
+  const plan = planProtocolExecution({
+    source: "responses",
+    body: responseBody({ input: "search", tools: [{ type: "tool_search" }] }),
+    stream: false,
+    resolvedModel: "target",
+    capability: responseCapability(),
+  });
+  if (plan.kind !== "converted") {
+    throw new Error("expected converted plan");
+  }
+  return plan;
+}
+
+function bufferedPresentation() {
+  return {
+    maxBytes: 1_048_576,
+    createUuid: () => "00000000-0000-4000-8000-000000000104",
+    nowUnixSeconds: () => 1_700_000_000,
+  };
 }
 
 function responseCapability(): EffectiveModelCapabilitySnapshot {

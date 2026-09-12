@@ -1360,7 +1360,7 @@ function encodeChatRequest(
     : [];
   const messages = request.responseBindings === undefined
     ? encodeChatMessages(request)
-    : encodeExtendedChatMessages(request);
+    : request.responseBindings.chatMessages;
   const budget = request.source === "messages"
     ? outputBudget(request.maxOutputTokens, context.capability)
     : request.maxOutputTokens;
@@ -1637,50 +1637,6 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
     if (mediaContent.length > 0) {
       output.push(wireObject([["role", "user"], ["content", wireArray(mediaContent)]]));
     }
-  }
-  return output;
-}
-
-function encodeExtendedChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[] {
-  const output: WireJsonObject[] = [];
-  if (request.instructions.length > 0) {
-    output.push(wireObject([["role", "system"], ["content", textContent(request.instructions) ?? ""]]));
-  }
-  for (let index = 0; index < request.items.length; index += 1) {
-    const item = request.items[index];
-    if (item === undefined) {
-      continue;
-    }
-    if (item.type === "message") {
-      output.push(wireObject([
-        ["role", item.role],
-        ["content", encodeChatContent(item.content)],
-      ]));
-      continue;
-    }
-    if (item.type === "tool_call") {
-      const calls: WireJsonObject[] = [];
-      for (; index < request.items.length; index += 1) {
-        const candidate = request.items[index];
-        if (candidate?.type !== "tool_call") {
-          index -= 1;
-          break;
-        }
-        calls.push(encodeChatToolCall(candidate));
-      }
-      output.push(wireObject([
-        ["role", "assistant"],
-        ["content", null],
-        ["tool_calls", wireArray(calls)],
-        ["reasoning_content", "tool call"],
-      ]));
-      continue;
-    }
-    output.push(wireObject([
-      ["role", "tool"],
-      ["tool_call_id", item.callId],
-      ["content", toolResultText(textContent(item.content) ?? "", item.isError)],
-    ]));
   }
   return output;
 }
