@@ -203,9 +203,10 @@ export class ProtectedFileSystem {
   }
 
   private inspectWindowsPath(target: string): readonly [string, boolean, string] {
+    const query = windowsSecurityQuery([target], "Owner");
+    const output = this.runCommand(query.executable, query.args, query.environment);
     try {
-      const query = windowsSecurityQuery([target], "Owner");
-      const row = query.parse(this.runCommand(query.executable, query.args, query.environment))[0]!;
+      const row = query.parse(output)[0]!;
       if (row[1] === null || row[2] === null) throw new Error("Windows path query failed");
       return [row[0], row[1], row[2]];
     } catch (cause: unknown) {

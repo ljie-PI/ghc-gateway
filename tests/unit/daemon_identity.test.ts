@@ -18,6 +18,8 @@ import {
   type ProcessIdentityDependencies,
 } from "../../src/daemon/process_identity.js";
 
+import { daemonRuntimeCliError } from "../../src/daemon/runtime.js";
+
 const identity: DaemonIdentity = {
   version: 1,
   managed: true,
@@ -172,7 +174,7 @@ describe("daemon identity file", () => {
     expect(commands.filter((command) => command === "whoami")).toHaveLength(1);
   });
 
-  it.each(["reparse", "broad ACL", "empty owner", "malformed", "timeout"] as const)(
+  it.each(["reparse", "broad ACL", "empty owner", "malformed"] as const)(
     "retains fail-closed daemon validation for %s", async (failure) => {
       const directory = await temporaryDirectory();
       await mkdir(directory);
@@ -180,7 +182,6 @@ describe("daemon identity file", () => {
         platform: "win32",
         runCommand: (command, args, environment) => {
           if (environment !== undefined) {
-            if (failure === "timeout") throw new Error("private command diagnostic");
             if (failure === "malformed") return "private command diagnostic";
             return JSON.stringify([directory, failure === "reparse", failure === "empty owner" ? "" : "CONTOSO\\current"]);
           }
@@ -193,6 +194,22 @@ describe("daemon identity file", () => {
       }));
     },
   );
+
+  it.each([
+    ["EACCES", "permission_denied"], ["EPERM", "permission_denied"], ["ETIMEDOUT", "internal_error"],
+  ] as const)("preserves the public %s execution-error mapping", async (code, expected) => {
+    const directory = await temporaryDirectory();
+    await mkdir(directory);
+    const failure = Object.assign(new Error("private command diagnostic"), { code });
+    const file = new DaemonIdentityFile(directory, {
+      platform: "win32",
+      runCommand: () => { throw failure; },
+    });
+    let caught: unknown;
+    try { file.read(); } catch (error: unknown) { caught = error; }
+    expect(caught).toBe(failure);
+    expect(daemonRuntimeCliError(caught)).toBe(expected);
+  });
 
   it("queries an existing path again on the next read rather than reusing its owner", async () => {
     const directory = await temporaryDirectory();
