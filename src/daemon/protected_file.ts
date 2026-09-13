@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { InvalidWindowsIdentityError, WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
+import { windowsSecurityQuery } from "../security/windows_security_query.js";
 
 export type DaemonIdentityFileErrorCode =
   | "invalid_identity"
@@ -37,13 +38,13 @@ export class DaemonIdentityFileError extends Error {
 
 export interface ProtectedFileOptions {
   readonly platform?: NodeJS.Platform;
-  readonly runCommand?: (file: string, args: readonly string[]) => string;
+  readonly runCommand?: (file: string, args: readonly string[], environment?: Readonly<Record<string, string>>) => string;
 }
 
 export class ProtectedFileSystem {
   readonly directory: string;
   private readonly platform: NodeJS.Platform;
-  private readonly runCommand: (file: string, args: readonly string[]) => string;
+  private readonly runCommand: NonNullable<ProtectedFileOptions["runCommand"]>;
   private readonly windowsAcl: WindowsAcl;
 
   constructor(directory: string, options: Readonly<ProtectedFileOptions> = {}) {
@@ -60,13 +61,17 @@ export class ProtectedFileSystem {
       created = true;
     }
     const stat = lstatSync(this.directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || this.isWindowsReparsePoint(this.directory)) {
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new DaemonIdentityFileError("unsafe_path", "daemon directory must be a regular directory");
+    }
+    const security = this.platform === "win32" && !created ? this.inspectWindowsPath(this.directory) : undefined;
+    if (security?.[1] ?? this.isWindowsReparsePoint(this.directory)) {
       throw new DaemonIdentityFileError("unsafe_path", "daemon directory must be a regular directory");
     }
     this.assertOwner(stat);
     if (this.platform === "win32") {
       if (created) this.restrictWindowsAcl(this.directory, true);
-      this.assertWindowsAcl(this.directory);
+      this.assertWindowsAcl(this.directory, security?.[2]);
     } else if ((stat.mode & 0o777) !== 0o700) {
       throw new DaemonIdentityFileError("unsafe_permissions", "daemon directory permissions must be 0700");
     }
@@ -123,12 +128,16 @@ export class ProtectedFileSystem {
 
   assertProtectedRegularFile(filePath: string): Stats {
     const stat = lstatSync(filePath);
-    if (!stat.isFile() || stat.isSymbolicLink() || this.isWindowsReparsePoint(filePath)) {
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new DaemonIdentityFileError("unsafe_path", "daemon path must be a regular file");
+    }
+    const security = this.platform === "win32" ? this.inspectWindowsPath(filePath) : undefined;
+    if (security?.[1] === true) {
       throw new DaemonIdentityFileError("unsafe_path", "daemon path must be a regular file");
     }
     this.assertOwner(stat);
     if (this.platform === "win32") {
-      this.assertWindowsAcl(filePath);
+      this.assertWindowsAcl(filePath, security?.[2]);
     } else if ((stat.mode & 0o777) !== 0o600) {
       throw new DaemonIdentityFileError("unsafe_permissions", "daemon file permissions must be 0600");
     }
@@ -193,9 +202,23 @@ export class ProtectedFileSystem {
     this.windowsAcl.restrict(target, directory, { setOwner: true, currentIdentity: current });
   }
 
-  private assertWindowsAcl(target: string): void {
+  private inspectWindowsPath(target: string): readonly [string, boolean, string] {
+    try {
+      const query = windowsSecurityQuery([target], "Owner");
+      const row = query.parse(this.runCommand(query.executable, query.args, query.environment))[0]!;
+      if (row[1] === null || row[2] === null) throw new Error("Windows path query failed");
+      return [row[0], row[1], row[2]];
+    } catch (cause: unknown) {
+      throw new DaemonIdentityFileError("unsafe_path", "unable to inspect daemon path security", { cause });
+    }
+  }
+
+  private assertWindowsAcl(target: string, inspectedOwner?: string): void {
     const current = this.currentWindowsIdentity();
-    const owner = windowsOwner(target, this.runCommand);
+    const owner = inspectedOwner ?? windowsOwner(target, this.runCommand);
+    if (owner.length === 0) {
+      throw new DaemonIdentityFileError("unsafe_owner", "unable to resolve daemon path owner");
+    }
     if (!this.windowsAcl.isCurrentIdentity(owner, current)) {
       throw new DaemonIdentityFileError("unsafe_owner", "daemon path must be owned by the current user");
     }
@@ -228,12 +251,13 @@ function isNotFound(error: unknown): boolean {
 const WINDOWS_SECURITY_COMMAND_TIMEOUT_MS = 5_000;
 const WINDOWS_SECURITY_COMMAND_MAX_BUFFER_BYTES = 1024 * 1024;
 
-function defaultRunCommand(file: string, args: readonly string[]): string {
+function defaultRunCommand(file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
   const resolved = process.platform === "win32" && (file === "whoami" || file === "icacls")
     ? windowsCommandPath(file)
     : file;
   return execFileSync(resolved, [...args], {
     encoding: "utf8",
+    ...(environment === undefined ? {} : { env: { ...process.env, ...environment } }),
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: WINDOWS_SECURITY_COMMAND_TIMEOUT_MS,

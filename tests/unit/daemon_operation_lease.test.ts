@@ -238,7 +238,11 @@ describe("daemon operation lease", () => {
 
   it("fails closed when Windows reports the persistent database as a reparse point", async () => {
     const directory = await temporaryDirectory();
-    const runCommand = (file: string, args: readonly string[]): string => {
+    const runCommand = (file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string => {
+      if (environment?.GHCG_SECURITY_PATHS !== undefined) {
+        const target = Buffer.from(environment.GHCG_SECURITY_PATHS, "base64").toString("utf8");
+        return JSON.stringify([target, target.endsWith("daemon.operation.db"), "CONTOSO\\User"]) + "\r\n";
+      }
       const script = args.at(-1) ?? "";
       if (file === "powershell.exe" && script.includes("ReparsePoint")
         && script.includes("daemon.operation.db")) return "true\r\n";
@@ -345,7 +349,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fakeWindowsSecurityCommand(file: string, args: readonly string[]): string {
+function fakeWindowsSecurityCommand(file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
+  if (environment?.GHCG_SECURITY_PATHS !== undefined) {
+    const target = Buffer.from(environment.GHCG_SECURITY_PATHS, "base64").toString("utf8");
+    return JSON.stringify([target, false, "CONTOSO\\User"]) + "\r\n";
+  }
   if (file === "whoami") return "\"CONTOSO\\User\",\"S-1-5-21-1000\"\r\n";
   if (file === "powershell.exe") {
     return args.at(-1)?.includes("Get-Acl") === true ? "CONTOSO\\User\r\n" : "false\r\n";

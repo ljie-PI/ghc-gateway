@@ -149,11 +149,68 @@ describe("daemon identity file", () => {
       await mkdir(directory);
       const file = new DaemonIdentityFile(directory, {
         platform: "win32",
-        runCommand: (command, args) => windowsSecurityCommand(command, args, directory, owner),
+        runCommand: (command, args, environment) => windowsSecurityCommand(command, args, directory, owner, environment),
       });
       expect(file.read()).toBeNull();
     },
   );
+
+  it("uses one PowerShell query and retains icacls for an existing directory", async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(directory);
+    const commands: string[] = [];
+    const file = new DaemonIdentityFile(directory, {
+      platform: "win32",
+      runCommand: (command, args, environment) => {
+        commands.push(command);
+        return windowsSecurityCommand(command, args, directory, "CONTOSO\\current", environment);
+      },
+    });
+    expect(file.read()).toBeNull();
+    expect(commands.filter((command) => /powershell\.exe$/iu.test(command))).toHaveLength(1);
+    expect(commands.filter((command) => command === "icacls")).toHaveLength(1);
+    expect(commands.filter((command) => command === "whoami")).toHaveLength(1);
+  });
+
+  it.each(["reparse", "broad ACL", "empty owner", "malformed", "timeout"] as const)(
+    "retains fail-closed daemon validation for %s", async (failure) => {
+      const directory = await temporaryDirectory();
+      await mkdir(directory);
+      const file = new DaemonIdentityFile(directory, {
+        platform: "win32",
+        runCommand: (command, args, environment) => {
+          if (environment !== undefined) {
+            if (failure === "timeout") throw new Error("private command diagnostic");
+            if (failure === "malformed") return "private command diagnostic";
+            return JSON.stringify([directory, failure === "reparse", failure === "empty owner" ? "" : "CONTOSO\\current"]);
+          }
+          const output = windowsSecurityCommand(command, args, directory, "CONTOSO\\current");
+          return command === "icacls" && failure === "broad ACL" ? output + "Everyone:(F)\r\n" : output;
+        },
+      });
+      expect(() => file.read()).toThrowError(expect.objectContaining({
+        code: failure === "broad ACL" ? "unsafe_permissions" : failure === "empty owner" ? "unsafe_owner" : "unsafe_path",
+      }));
+    },
+  );
+
+  it("queries an existing path again on the next read rather than reusing its owner", async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(directory);
+    let owner = "CONTOSO\\current";
+    let queries = 0;
+    const file = new DaemonIdentityFile(directory, {
+      platform: "win32",
+      runCommand: (command, args, environment) => {
+        if (environment !== undefined) queries += 1;
+        return windowsSecurityCommand(command, args, directory, owner, environment);
+      },
+    });
+    expect(file.read()).toBeNull();
+    owner = "CONTOSO\\other";
+    expect(() => file.read()).toThrowError(expect.objectContaining({ code: "unsafe_owner" }));
+    expect(queries).toBe(2);
+  });
 
   it("fails closed when Get-Acl reports a different Windows owner", async () => {
     const directory = await temporaryDirectory();
@@ -161,9 +218,9 @@ describe("daemon identity file", () => {
     const calls: string[] = [];
     const file = new DaemonIdentityFile(directory, {
       platform: "win32",
-      runCommand: (command, args) => {
+      runCommand: (command, args, environment) => {
         calls.push(`${command} ${args.join(" ")}`);
-        return windowsSecurityCommand(command, args, directory, "CONTOSO\\other");
+        return windowsSecurityCommand(command, args, directory, "CONTOSO\\other", environment);
       },
     });
     expect(() => file.read()).toThrowError(expect.objectContaining({ code: "unsafe_owner" }));
@@ -176,9 +233,14 @@ function windowsSecurityCommand(
   args: readonly string[],
   target: string,
   owner: string,
+  environment?: Readonly<Record<string, string>>,
 ): string {
   if (command === "whoami") {
     return "\"CONTOSO\\current\",\"S-1-5-21-1000\"\r\n";
+  }
+  if (environment?.GHCG_SECURITY_PATHS !== undefined) {
+    return Buffer.from(environment.GHCG_SECURITY_PATHS, "base64").toString("utf8").split("\0")
+      .map((inspected) => JSON.stringify([inspected, false, owner])).join("\r\n") + "\r\n";
   }
   if (command === "powershell.exe") {
     return args.join(" ").includes("Get-Acl") ? `${owner}\r\n` : "false\r\n";

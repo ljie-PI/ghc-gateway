@@ -33,6 +33,72 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private reversible agent configuration", () => {
+  it("queries shared external inspect paths once without writing client or recovery files", async () => {
+    const home = fs.realpathSync.native(homeWithCrash());
+    const parent = path.join(home, ".clients");
+    const files = [
+      seed(home, ".clients/settings.json", "{}"),
+      seed(home, ".clients/ghcg-models.json", "{}"),
+      seed(home, ".clients/config.toml", "model = \"old\"\n"),
+    ];
+    const calls: string[][] = [];
+    const manager = new FileAgentsManager({
+      home, env: { CLAUDE_CONFIG_DIR: parent, CODEX_HOME: parent },
+      inspectCommand: async (_file, _args, options) => {
+        const targets = Buffer.from(options.env!.GHCG_SECURITY_PATHS!, "base64").toString("utf8").split("\0");
+        calls.push(targets);
+        expect(options).toMatchObject({ timeout: 10000, shell: false });
+        return { stdout: targets.map((target) => JSON.stringify([target, false, "O:SYG:SYD:PAI(A;;FA;;;SY)"])).join("\r\n") };
+      },
+    });
+    const statuses = await manager.inspect(origin);
+    const expected = [parent, ...files].map((target) => process.platform === "win32" ? target.toLowerCase() : target);
+    expect(calls).toEqual([expected]);
+    expect(statuses.map(({ id, state }) => [id, state])).toEqual([["claude", "not_managed"], ["codex", "not_managed"]]);
+    expect(fs.readdirSync(home)).toEqual([".clients"]);
+    expect(files.map((target) => fs.readFileSync(target, "utf8"))).toEqual(["{}", "{}", "model = \"old\"\n"]);
+  });
+
+  it.each(["reparse", "query failure", "replacement"] as const)("isolates %s during inspect to the affected client", async (failure) => {
+    const home = fs.realpathSync.native(homeWithCrash());
+    const claude = seed(home, ".claude/settings.json", "{}");
+    seed(home, ".codex/config.toml", "model = \"old\"\n");
+    let commands = 0;
+    const manager = new FileAgentsManager({ home, inspectCommand: async (_file, _args, options) => {
+      commands += 1;
+      const targets = Buffer.from(options.env!.GHCG_SECURITY_PATHS!, "base64").toString("utf8").split("\0");
+      if (failure === "replacement") {
+        fs.renameSync(claude, claude + ".saved");
+        fs.writeFileSync(claude, "replacement", { mode: 0o600 });
+      }
+      return { stdout: targets.map((target) => {
+        if (target.toLowerCase() === claude.toLowerCase()) {
+          if (failure === "query failure") return JSON.stringify([target, null, null]);
+          if (failure === "reparse") return JSON.stringify([target, true, ""]);
+        }
+        return JSON.stringify([target, false, "O:SYG:SYD:PAI(A;;FA;;;SY)"]);
+      }).join("\n") };
+    } });
+    const statuses = await manager.inspect(origin);
+    expect(commands).toBe(1);
+    expect(statuses[0]).toMatchObject({ id: "claude", state: failure === "replacement" ? "recovery_required" : "unsafe_path", revision: "0".repeat(64) });
+    expect(statuses[1]).toMatchObject({ id: "codex", state: "not_managed" });
+  });
+
+  it("does not accept newly appearing targets or reuse a previous inspect result", async () => {
+    const home = fs.realpathSync.native(homeWithCrash());
+    let commands = 0;
+    const manager = new FileAgentsManager({ home, inspectCommand: async (_file, _args, options) => {
+      commands += 1;
+      const targets = Buffer.from(options.env!.GHCG_SECURITY_PATHS!, "base64").toString("utf8").split("\0");
+      if (commands === 1) seed(home, ".claude/settings.json", "{}");
+      return { stdout: targets.map((target) => JSON.stringify([target, false, "O:SYG:SYD:PAI(A;;FA;;;SY)"])).join("\n") };
+    } });
+    expect((await manager.inspect(origin))[0]!.revision).toBe("0".repeat(64));
+    expect((await manager.inspect(origin))[0]).toMatchObject({ state: "not_managed" });
+    expect(commands).toBe(2);
+  });
+
   it("reads without creating any directories and rejects invalid parsing before writes", async () => {
     const h = harness();
     expect((await h.status("codex")).state).toBe("not_managed");

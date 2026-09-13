@@ -4,13 +4,15 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentRestoreRequest, type AgentModel } from "./types.js";
 import { AgentStore, copyMappings, newImage, type AgentState, type StepState } from "./store.js";
-import { assertNoLinks, assertOwned, assertPrivate, canonical, digest, exists, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, syncDirectory, writeExclusive, type FileImage } from "./files.js";
+import { assertNoLinks, assertOwned, assertPrivate, canonical, digest, exists, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, syncDirectory, writeExclusive, type FileImage, imageParents, inspectImages, type InspectCommand, type InspectionTarget } from "./files.js";
 import { projectAgent } from "./transform.js";
 
 export interface AgentManagerOptions {
   readonly home?: string;
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly now?: () => Date;
+  /** Command boundary for the inspect-only Windows batch. */
+  readonly inspectCommand?: InspectCommand;
   /** Deterministic failure/race injection at durable transaction boundaries. */
   readonly checkpoint?: (point: "intent" | "staged" | "displaced" | "linked" | "published" | "complete", agent: AgentId, index: number) => void;
 }
@@ -39,7 +41,25 @@ export class FileAgentsManager implements AgentsManager {
   }
 
   async inspect(origin: string): Promise<readonly AgentStatus[]> {
-    return await Promise.all((["claude", "codex"] as const).map((agent) => this.status(agent, origin)));
+    const agents = ["claude", "codex"] as const;
+    if (process.platform !== "win32" && this.options.inspectCommand === undefined) {
+      return await Promise.all(agents.map((agent) => this.status(agent, origin)));
+    }
+    const states = await Promise.allSettled(agents.map((agent) => new AgentStore(this.root, agent).read()));
+    const targets = states.map((result, index): PromiseSettledResult<readonly InspectionTarget[]> => {
+      try {
+        const state = settledValue(result);
+        const value = this.targetPaths(agents[index]!, state).map((target, targetIndex) => {
+          const step = state.pending?.steps.find((entry) => entry.target === targetIndex);
+          return { path: target, ...(step === undefined ? {} : { allowedLink: path.join(step.scratch, "next") }) };
+        });
+        return { status: "fulfilled", value };
+      } catch (reason: unknown) { return { status: "rejected", reason }; }
+    });
+    const images = await inspectImages(targets, this.options.inspectCommand);
+    return await Promise.all(agents.map((agent, index) => this.status(agent, origin, {
+      state: states[index]!, targets: targets[index]!, images: images[index]!,
+    })));
   }
 
   async apply(request: AgentApplyRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus> {
@@ -134,16 +154,20 @@ export class FileAgentsManager implements AgentsManager {
     } finally { this.busy.delete(agent); }
   }
 
-  private async status(agent: AgentId, origin: string): Promise<AgentStatus> {
+  private async status(agent: AgentId, origin: string, prepared?: {
+    readonly state: PromiseSettledResult<AgentState>;
+    readonly targets: PromiseSettledResult<readonly InspectionTarget[]>;
+    readonly images: PromiseSettledResult<(FileImage | null)[]>;
+  }): Promise<AgentStatus> {
     let state: AgentState | null = null;
     let paths = this.paths[agent];
     let revision = "0".repeat(64);
     let kind: AgentStatus["state"] = "not_managed";
     let canRestore = false;
     try {
-      state = await new AgentStore(this.root, agent).read();
-      paths = this.targetPaths(agent, state);
-      const images = await this.images(paths, state);
+      state = prepared === undefined ? await new AgentStore(this.root, agent).read() : settledValue(prepared.state);
+      paths = prepared === undefined ? this.targetPaths(agent, state) : settledValue(prepared.targets).map((target) => target.path);
+      const images = prepared === undefined ? await this.images(paths, state) : settledValue(prepared.images);
       revision = this.revision(state, images, paths, origin);
       kind = state.targets.length === 0 ? "not_managed" : state.pending !== null ? "recovery_required" : "installed";
       try { await this.requireRecoverable(state, images); canRestore = state.targets.length > 0; }
@@ -163,11 +187,7 @@ export class FileAgentsManager implements AgentsManager {
   }
   private async images(paths: readonly string[], state?: AgentState): Promise<(FileImage | null)[]> {
     // Client files usually share a parent directory; verify each distinct one once.
-    const parents = new Set(paths.map((target) => {
-      let parent = path.dirname(target);
-      while (!exists(parent)) parent = path.dirname(parent);
-      return parent;
-    }));
+    const parents = imageParents(paths);
     for (const parent of parents) await assertOwned(parent, true);
     return await Promise.all(paths.map(async (target, index) => {
       const stage = state?.pending?.steps.find((step) => step.target === index);
@@ -332,4 +352,9 @@ export class FileAgentsManager implements AgentsManager {
   private hit(point: Parameters<NonNullable<AgentManagerOptions["checkpoint"]>>[0], agent: AgentId, index: number): void {
     this.options.checkpoint?.(point, agent, index);
   }
+}
+
+function settledValue<T>(result: PromiseSettledResult<T>): T {
+  if (result.status === "rejected") throw result.reason;
+  return result.value;
 }

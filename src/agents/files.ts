@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, type ExecFileOptionsWithStringEncoding } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
+import { windowsSecurityQuery, type WindowsSecurityRow } from "../security/windows_security_query.js";
 import { AgentError } from "./types.js";
 
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -45,7 +46,7 @@ export function assertNoLinks(target: string): void {
     current = parent;
   }
 }
-export async function assertOwned(target: string, directory: boolean, allowedLink?: string): Promise<string | null> {
+function ownedStat(target: string, directory: boolean, allowedLink?: string): fs.Stats {
   assertNoLinks(target);
   const stat = fs.lstatSync(target);
   const linked = allowedLink !== undefined && exists(allowedLink) ? fs.lstatSync(allowedLink) : null;
@@ -53,17 +54,21 @@ export async function assertOwned(target: string, directory: boolean, allowedLin
     && !(stat.nlink === 2 && linked?.ino === stat.ino && linked.dev === stat.dev))) {
     throw new AgentError("agent_unsafe_path");
   }
-  if (process.platform !== "win32") {
-    if (stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0) throw new AgentError("agent_unsafe_path");
-    return null;
-  }
-  return await windowsAcl(target);
+  if (process.platform !== "win32"
+    && (stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0)) throw new AgentError("agent_unsafe_path");
+  return stat;
+}
+export async function assertOwned(target: string, directory: boolean, allowedLink?: string): Promise<string | null> {
+  ownedStat(target, directory, allowedLink);
+  return process.platform === "win32" ? await windowsAcl(target) : null;
 }
 export async function readImage(target: string, allowedLink?: string): Promise<FileImage | null> {
   assertNoLinks(target);
   if (!exists(target)) return null;
   const recordedAcl = await assertOwned(target, false, allowedLink);
-  const before = fs.lstatSync(target);
+  return readImageContents(target, recordedAcl);
+}
+function readImageContents(target: string, recordedAcl: string | null, before = fs.lstatSync(target)): FileImage {
   if (before.size > MAX_FILE_BYTES) throw new AgentError("agent_invalid_config");
   const fd = fs.openSync(target, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   try {
@@ -83,6 +88,81 @@ export async function readImage(target: string, allowedLink?: string): Promise<F
     return { bytes: data.subarray(0, size).toString("base64"), mode: stat.mode & 0o777, acl: recordedAcl };
   } finally { fs.closeSync(fd); }
 }
+export type InspectionTarget = { readonly path: string; readonly allowedLink?: string };
+export type InspectCommand = (file: string, args: string[], options: ExecFileOptionsWithStringEncoding) => Promise<{ stdout: string }>;
+
+export function imageParents(paths: readonly string[]): readonly string[] {
+  return [...new Set(paths.map((target) => {
+    let parent = path.dirname(target);
+    while (!exists(parent)) parent = path.dirname(parent);
+    return parent;
+  }))];
+}
+
+/** One read-only phase: snapshot roles, query distinct paths, then validate/read without yielding. */
+export async function inspectImages(
+  groups: readonly PromiseSettledResult<readonly InspectionTarget[]>[],
+  runCommand: InspectCommand = promisify(execFile),
+): Promise<PromiseSettledResult<(FileImage | null)[]>[]> {
+  const prepared = groups.map((group) => {
+    if (group.status === "rejected") return group;
+    try {
+      const parents = imageParents(group.value.map((target) => target.path));
+      const roles = [...parents.map((target) => ({ path: target, directory: true, allowedLink: undefined })),
+        ...group.value.map((target) => ({ ...target, directory: false }))];
+      const observed = roles.map((role) => {
+        assertNoLinks(role.path);
+        return { ...role, stat: exists(role.path) ? ownedStat(role.path, role.directory, role.allowedLink) : null };
+      });
+      return { status: "fulfilled" as const, value: { parents, observed } };
+    } catch (reason: unknown) { return { status: "rejected" as const, reason }; }
+  });
+  const key = (target: string) => path.win32.normalize(target).toLowerCase();
+  const distinct = new Map<string, string>();
+  for (const group of prepared) {
+    if (group.status === "fulfilled") {
+      for (const item of group.value.observed) if (item.stat !== null) distinct.set(key(item.path), item.path);
+    }
+  }
+  let rows: readonly WindowsSecurityRow[] | null = [];
+  if (distinct.size > 0) {
+    try {
+      const query = windowsSecurityQuery([...distinct.values()], "Sddl");
+      const { stdout } = await runCommand(query.executable, query.args, {
+        encoding: "utf8", windowsHide: true, shell: false, timeout: 10000, maxBuffer: query.maxBuffer,
+        env: { ...process.env, ...query.environment },
+      });
+      rows = query.parse(stdout);
+    } catch { rows = null; }
+  }
+  return prepared.map((group) => {
+    if (group.status === "rejected") return group;
+    try {
+      if (rows === null) throw new AgentError("agent_unsafe_path");
+      const { parents, observed } = group.value;
+      const targets = observed.slice(parents.length);
+      if (JSON.stringify(imageParents(targets.map((item) => item.path))) !== JSON.stringify(parents)) {
+        throw new AgentError("agent_unsafe_path");
+      }
+      const acls = observed.map((before) => {
+        assertNoLinks(before.path);
+        const after = exists(before.path) ? ownedStat(before.path, before.directory, before.allowedLink) : null;
+        if (before.stat === null && after === null) return null;
+        if (before.stat === null || after === null || before.stat.dev !== after.dev || before.stat.ino !== after.ino
+          || before.stat.ctimeMs !== after.ctimeMs || before.stat.mtimeMs !== after.mtimeMs) {
+          throw new AgentError("agent_conflict");
+        }
+        const row = rows.find((item) => key(item[0]) === key(before.path));
+        if (row === undefined || row[1] !== false || row[2] === null) throw new AgentError("agent_unsafe_path");
+        return row[2];
+      });
+      const value = targets.map((item, index) => item.stat === null ? null
+        : readImageContents(item.path, acls[parents.length + index]!, item.stat));
+      return { status: "fulfilled" as const, value };
+    } catch (reason: unknown) { return { status: "rejected" as const, reason }; }
+  });
+}
+
 export function sameImage(a: FileImage | null, b: FileImage | null): boolean {
   return digest(a) === digest(b);
 }

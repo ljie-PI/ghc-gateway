@@ -20,6 +20,7 @@ import {
 import {
   DaemonIdentityFileError,
   ProtectedFileSystem,
+  type ProtectedFileOptions,
 } from "./protected_file.js";
 
 export { DaemonIdentityFileError } from "./protected_file.js";
@@ -42,9 +43,7 @@ export interface DaemonIdentityLease {
   release(): void;
 }
 
-export interface DaemonIdentityFileOptions {
-  readonly platform?: NodeJS.Platform;
-  readonly runCommand?: (file: string, args: readonly string[]) => string;
+export interface DaemonIdentityFileOptions extends ProtectedFileOptions {
   readonly processIdentity?: (
     pid: number,
     context?: Readonly<ProcessIdentityContext>,
