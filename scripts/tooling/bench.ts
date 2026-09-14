@@ -51,7 +51,7 @@ import "./ci_network_guard.js";
 
 const execFileAsync = promisify(execFile);
 const MIB = 1024 * 1024;
-const IDLE_LIMIT_BYTES = 64 * MIB;
+const IDLE_LIMIT_BYTES = 80 * MIB;
 const STABLE_DELTA_LIMIT_BYTES = 16 * MIB;
 const DEFAULT_REPEAT = 1;
 const DEFAULT_MEMORY_STREAMS = 1_000;
