@@ -1,4 +1,6 @@
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream } from "./test_support/http_copilot.js";
+import type { HttpExpectation, HttpStreamControl } from "./test_support/copilot_http.js";
+import { mkdir, mkdtemp, rm, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -9,7 +11,7 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { formatAccountId, normalizeGitHubHost } from "../../src/accounts/github_environment.js";
 import { assertNode24 } from "./node_version.js";
-import { outboundHeaders, ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { outboundHeaders } from "../../src/copilot/backend.js";
 import { parseChatSse } from "../../src/copilot/chat_sse.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
@@ -757,17 +759,25 @@ async function expectedResponsesEndpointFixture(entry: FixtureManifestEntry): Pr
     }
   }
   if (entry.caseId === "responses-endpoint.post-commit-failure") {
-    async function* brokenStream(): AsyncIterable<Uint8Array> {
-      yield new TextEncoder().encode("data: {\"id\":\"chatcmpl_partial\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n");
-      throw new Error("fixture stream failure");
-    }
-    const fixture = await createResponsesFixtureGateway(new ScriptedCopilotBackend({ chatStream: brokenStream() }));
+    let exchange: HttpStreamControl | undefined;
+    const fixture = await createResponsesFixtureGateway([{ method: "POST", path: "/chat/completions", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (control) => {
+        exchange = control;
+        await control.write(new TextEncoder().encode("data: {\"id\":\"chatcmpl_partial\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"));
+      } },
+    }]);
     try {
       const response = await fixture.gateway.fetch(responsesHttpRequest({ model: "chat", input: "hi", stream: true }));
       let body = "";
       let failed = false;
       try {
-        body = await response.text();
+        const reader = response.body!.getReader();
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          body += new TextDecoder().decode(next.value);
+          if (body.includes("response.output_text.delta")) exchange?.disconnect();
+        }
       } catch (_error: unknown) {
         failed = true;
       }
@@ -779,73 +789,76 @@ async function expectedResponsesEndpointFixture(entry: FixtureManifestEntry): Pr
   return undefined;
 }
 
-async function createResponsesFixtureGateway(backend = new ScriptedCopilotBackend({
-  responses: {
-    status: 200,
-    headers: new Headers(),
-    body: new TextEncoder().encode("{\"id\":\"resp_native\",\"output\":[]}"),
-  },
-  chat: {
-    status: 200,
-    headers: new Headers(),
-    body: new TextEncoder().encode("{\"id\":\"chatcmpl_bridge\",\"created\":1700000000,\"model\":\"chat\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"done\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}"),
-  },
-})): Promise<{
+async function createResponsesFixtureGateway(expectations: readonly HttpExpectation[] = [{ method: "POST", path: "/responses", body: jsonStream(false), reply: {
+  status: 200,
+  headers: {},
+  body: new TextEncoder().encode("{\"id\":\"resp_native\",\"output\":[]}"),
+} },
+{ method: "POST", path: "/chat/completions", body: jsonStream(false), reply: {
+  status: 200,
+  headers: {},
+  body: new TextEncoder().encode("{\"id\":\"chatcmpl_bridge\",\"created\":1700000000,\"model\":\"chat\",\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":\"done\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]}}]}"),
+} }]): Promise<{
   readonly gateway: Awaited<ReturnType<typeof createGateway>>;
   readonly history: SqliteResponsesHistory;
   close(): Promise<void>;
 }> {
-  const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-responses-fixture-"));
-  const database = openDatabase({
-    path: path.join(dir, "state.db"),
-    migrations: [
-      embedMigration(runtimeConfigMigration),
-      embedMigration(accountsMigration),
-      embedMigration(responsesHistoryMigration),
-      embedMigration(responsesContinuationMigration),
-    ],
-    nowMs: () => 1_700_000_000_000,
+  return await withSetupCleanup(async (own) => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-responses-fixture-"));
+    own(() => rm(dir, { recursive: true, force: true }));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        embedMigration(responsesHistoryMigration),
+        embedMigration(responsesContinuationMigration),
+      ],
+      nowMs: () => 1_700_000_000_000,
+    });
+    own(() => closeDatabase(database));
+    const credentials = new MemoryCredentialStore();
+    const accountCoordinator = new AccountCoordinator();
+    const accounts = new AccountDirectory(database, credentials, accountCoordinator, () => 1_700_000_000_000);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "fixture" },
+    });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return { data: [
+          { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] } },
+          { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+        ] };
+      },
+    });
+    const history = new SqliteResponsesHistory(database, { nowMs: () => 1_700_000_000_000 });
+    const http = await startHttpCopilot({ credentials, accountCoordinator, nowMs: () => 1_700_000_000_000, expectations });
+    own(() => http.close());
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
+    own(() => registry.close());
+    const gateway = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: dir }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [createResponsesRoute({
+      directory: accounts,
+      registry,
+      preferences: accounts.preferences,
+      copilot: http.backend,
+      history,
+      nowUnixSeconds: () => 1_700_000_000,
+      createUuid: () => "00000000-0000-4000-8000-000000000001",
+    })], { createRequestId: () => "req_fixture" });
+    own(() => gateway.close());
+    return {
+      gateway,
+      history,
+      async close() {
+        await closeAll([() => gateway.close(), () => registry.close(), () => http.close(), () => closeDatabase(database), () => rm(dir, { recursive: true, force: true })]);
+      },
+    };
   });
-  const accounts = new AccountDirectory(
-    database,
-    new MemoryCredentialStore(),
-    new AccountCoordinator(),
-    () => 1_700_000_000_000,
-  );
-  await accounts.upsertAuthenticated({
-    host: "github.com",
-    userId: "1",
-    secret: { generation: 0, githubToken: "fixture" },
-  });
-  const catalog = new CopilotModelCatalog({
-    async fetch() {
-      return { data: [
-        { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] } },
-        { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
-      ] };
-    },
-  });
-  const history = new SqliteResponsesHistory(database, { nowMs: () => 1_700_000_000_000 });
-  const gateway = await createGateway({
-    startup: parseStartupConfig([], {}, { homedir: dir }),
-    runtime: defaultRuntimeConfigSnapshot(),
-  }, [createResponsesRoute({
-    directory: accounts,
-    registry: new ModelCapabilityRegistry(catalog, { get: () => null }),
-    preferences: accounts.preferences,
-    copilot: backend,
-    history,
-    nowUnixSeconds: () => 1_700_000_000,
-    createUuid: () => "00000000-0000-4000-8000-000000000001",
-  })], { createRequestId: () => "req_fixture" });
-  return {
-    gateway,
-    history,
-    async close() {
-      await gateway.close();
-      closeDatabase(database);
-    },
-  };
 }
 
 function nativeFixturePlan(body: WireJsonObject): NativeResponsesPlan {

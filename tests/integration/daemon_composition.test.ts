@@ -1,3 +1,4 @@
+import { startCopilotHttpMock } from "../../scripts/tooling/test_support/copilot_http.js";
 import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -6,7 +7,8 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory, type AccountDirectoryError } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { HttpCopilotBackend } from "../../src/copilot/transport.js";
+import { withSetupCleanup, closeAll } from "../../scripts/tooling/test_support/http_copilot.js";
 import { EndpointDiscovery } from "../../src/copilot/endpoint_discovery.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
@@ -259,7 +261,7 @@ describe("production composition", () => {
   });
 
   it("shares management state and applies runtime settings to every live owner", async () => {
-    const harness = compositionHarness();
+    const harness = await compositionHarness();
     const gateway = await composeProductionDaemonGateway({
       startup: harness.startup,
       env: {},
@@ -398,7 +400,7 @@ describe("production composition", () => {
     const first = deferred<string | null>();
     const second = deferred<string | null>();
     let fetches = 0;
-    const harness = compositionHarness(async () => {
+    const harness = await compositionHarness(async () => {
       fetches += 1;
       return await (fetches === 1 ? first.promise : second.promise);
     });
@@ -457,84 +459,89 @@ interface CompositionHarness {
   readonly endpointFetchCount: () => number;
 }
 
-function compositionHarness(
-  endpointSource: ConstructorParameters<typeof EndpointDiscovery>[0] = async () => "https://copilot.test.invalid",
-): CompositionHarness {
-  const database = openDatabase({
-    path: ":memory:",
-    migrations: [
-      embedMigration(runtimeConfigMigration),
-      embedMigration(accountsMigration),
-      embedMigration(telemetryMigration),
-      embedMigration(historyMigration),
-      embedMigration(continuationMigration),
-    ],
-    nowMs: () => NOW,
+async function compositionHarness(
+  endpointSource?: ConstructorParameters<typeof EndpointDiscovery>[0],
+): Promise<CompositionHarness> {
+  return await withSetupCleanup(async (own) => {
+    const upstream = await startCopilotHttpMock();
+    own(() => upstream.stop());
+    const database = openDatabase({
+      path: ":memory:",
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        embedMigration(telemetryMigration),
+        embedMigration(historyMigration),
+        embedMigration(continuationMigration),
+      ],
+      nowMs: () => NOW,
+    });
+    own(() => closeDatabase(database));
+    const credentials = new MemoryCredentialStore();
+    const accountCoordinator = new AccountCoordinator();
+    const runtime = new RuntimeConfigStore(database, () => NOW);
+    const snapshot = runtime.seedIfEmpty({});
+    const directory = new AccountDirectory(database, credentials, accountCoordinator, () => NOW, snapshot.accounts.maxAuthenticated);
+    let catalogFetches = 0;
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        catalogFetches += 1;
+        return { data: [{
+          id: "gpt-test",
+          name: "GPT Test",
+          vendor: "openai",
+          model_picker_enabled: true,
+          model_info: {
+            supported_endpoints: ["/chat/completions"],
+            max_input_tokens: 200_000,
+            max_output_tokens: 16_384,
+            chat_output_token_field: "max_tokens",
+          },
+        }] };
+      },
+    }, () => new Date(NOW));
+    const history = new SqliteResponsesHistory(database, { nowMs: () => NOW, ttlDays: snapshot.history.ttlDays });
+    const telemetry = new TelemetryRecorder(database, () => NOW);
+    const registry = new ModelCapabilityRegistry(catalog, {
+      get: () => null,
+    });
+    own(() => registry.close());
+    let endpointFetches = 0;
+    const endpointDiscovery = new EndpointDiscovery(async (account, signal) => {
+      endpointFetches += 1;
+      return endpointSource === undefined ? upstream.origin : await endpointSource(account, signal);
+    });
+    own(() => endpointDiscovery.close());
+    const application: ApplicationContext = {
+      database,
+      credentials,
+      accountCoordinator,
+      directory,
+      registry,
+      copilot: new HttpCopilotBackend({ credentials, accountCoordinator, nowMs: () => NOW, endpointDiscovery, refreshCopilotToken: async (token) => ({ token: `http-test-${token}`, expiresAtMs: NOW + 3_600_000 }) }),
+      history,
+      telemetry,
+      endpointDiscovery,
+      runtime,
+      async close() {
+        await closeAll([() => expect(upstream.requests).toHaveLength(0), () => application.copilot.close(), () => telemetry.flush(), () => registry.close(), () => endpointDiscovery.close(), () => upstream.stop(), () => closeDatabase(database)]);
+      },
+    };
+    own(() => application.copilot.close());
+    return {
+      startup: parseStartupConfig(["--data-dir", "daemon-composition", "--port", String(PORT)], {}),
+      application,
+      database,
+      directory,
+      registry,
+      history,
+      telemetry,
+      runtime,
+      endpointDiscovery,
+      catalogFetchCount: () => catalogFetches,
+      endpointFetchCount: () => endpointFetches,
+    };
   });
-  const credentials = new MemoryCredentialStore();
-  const accountCoordinator = new AccountCoordinator();
-  const runtime = new RuntimeConfigStore(database, () => NOW);
-  const snapshot = runtime.seedIfEmpty({});
-  const directory = new AccountDirectory(database, credentials, accountCoordinator, () => NOW, snapshot.accounts.maxAuthenticated);
-  let catalogFetches = 0;
-  const catalog = new CopilotModelCatalog({
-    async fetch() {
-      catalogFetches += 1;
-      return { data: [{
-        id: "gpt-test",
-        name: "GPT Test",
-        vendor: "openai",
-        model_picker_enabled: true,
-        model_info: {
-          supported_endpoints: ["/chat/completions"],
-          max_input_tokens: 200_000,
-          max_output_tokens: 16_384,
-          chat_output_token_field: "max_tokens",
-        },
-      }] };
-    },
-  }, () => new Date(NOW));
-  const history = new SqliteResponsesHistory(database, { nowMs: () => NOW, ttlDays: snapshot.history.ttlDays });
-  const telemetry = new TelemetryRecorder(database, () => NOW);
-  const registry = new ModelCapabilityRegistry(catalog, {
-    get: () => null,
-  });
-  let endpointFetches = 0;
-  const endpointDiscovery = new EndpointDiscovery(async (account, signal) => {
-    endpointFetches += 1;
-    return await endpointSource(account, signal);
-  });
-  const application: ApplicationContext = {
-    database,
-    credentials,
-    accountCoordinator,
-    directory,
-    registry,
-    copilot: new ScriptedCopilotBackend({}),
-    history,
-    telemetry,
-    endpointDiscovery,
-    runtime,
-    async close() {
-      await telemetry.flush();
-      await registry.close();
-      await endpointDiscovery.close();
-      closeDatabase(database);
-    },
-  };
-  return {
-    startup: parseStartupConfig(["--data-dir", "daemon-composition", "--port", String(PORT)], {}),
-    application,
-    database,
-    directory,
-    registry,
-    history,
-    telemetry,
-    runtime,
-    endpointDiscovery,
-    catalogFetchCount: () => catalogFetches,
-    endpointFetchCount: () => endpointFetches,
-  };
 }
 
 async function control(

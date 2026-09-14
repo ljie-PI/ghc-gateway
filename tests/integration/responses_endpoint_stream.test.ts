@@ -1,19 +1,12 @@
 import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
-import {
-  ScriptedCopilotBackend,
-  type BoundCopilot,
-  type CopilotBackend,
-} from "../../src/copilot/backend.js";
-import type {
-  NativeResponsesUpstreamRequest,
-  UpstreamByteStream,
-} from "../../src/copilot/upstream_types.js";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
+import type { HttpExpectation } from "../../scripts/tooling/test_support/copilot_http.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -78,38 +71,18 @@ class RecordingHistory implements ResponsesHistory {
 describe("Responses endpoint stream integration", () => {
   it("owns native terminal cleanup and admission through the public response body", async () => {
     const wire = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n";
-    const cancelStarted = deferred<void>();
-    const releaseCancel = deferred<void>();
-    const counts = { cancel: 0, returned: 0 };
-    const source = singleOwnedChunk(bytes(wire), () => {
-      counts.returned += 1;
-    });
-    let streams = 0;
-    const backend = withResponsesStream(
-      new ScriptedCopilotBackend({ responsesStream: [bytes(wire)] }),
-      async (request, fallback) => {
-        streams += 1;
-        if (streams > 1) {
-          return await fallback.openResponsesStream(request);
-        }
-        return {
-          status: 200,
-          headers: new Headers({ "content-type": "text/event-stream" }),
-          bytes: source,
-          cancel: async () => {
-            counts.cancel += 1;
-            cancelStarted.resolve();
-            await releaseCancel.promise;
-          },
-        };
-      },
-    );
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/responses", body: jsonStream(true), times: 2,
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
+        await exchange.write(bytes(wire));
+        await exchange.waitForClose();
+      } },
+    }];
     const history = new RecordingHistory();
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.admission.activeMax = 1;
     runtime.admission.queueMax = 0;
-    const opened = await streamGateway(history, backend, { runtime, usageUpdates });
+    const opened = await streamGateway(history, expectations, { runtime, usageUpdates });
     try {
       const response = await opened.gateway.fetch(responsesRequest("native"));
       expect(response.status).toBe(200);
@@ -118,16 +91,10 @@ describe("Responses endpoint stream integration", () => {
       expect(response.headers.get("x-request-id")).toBe("req_stream");
       expect(response.headers.get("x-ghcg-upstream-protocol")).toBe("responses");
 
-      const delivered = response.text();
-      await cancelStarted.promise;
-      expect(counts).toEqual({ cancel: 1, returned: 1 });
-      const held = await opened.gateway.fetch(responsesRequest("native"));
-      expect(held.status).toBe(503);
-      await held.arrayBuffer();
-
-      releaseCancel.resolve();
-      expect(await delivered).toBe(wire);
-      expect(counts).toEqual({ cancel: 1, returned: 1 });
+      expect(await response.text()).toBe(wire);
+      await waitForHttp(() => opened.upstream.streams[0]?.closed === true);
+      expect(opened.upstream.streams[0]?.ended).toBe(false);
+      assertTransportReleased(opened.backend);
       expect(usageUpdates.filter((update) => update.outcome === "success")).toMatchObject([{
         protocol: "openai_responses_native",
         outcome: "success",
@@ -140,8 +107,10 @@ describe("Responses endpoint stream integration", () => {
       expect(afterRelease.status).toBe(200);
       expect(await afterRelease.text()).toBe(wire);
       expect(usageUpdates.filter((update) => update.outcome === "success")).toHaveLength(2);
+      await waitForHttp(() => opened.upstream.streams[1]?.closed === true);
+      assertTransportReleased(opened.backend);
+      opened.upstream.assertSatisfied();
     } finally {
-      releaseCancel.resolve();
       await opened.close();
     }
   });
@@ -157,13 +126,11 @@ describe("Responses endpoint stream integration", () => {
         await releaseCheckpoint.promise;
       }
     });
-    const backend = new ScriptedCopilotBackend({
-      chatStream: [
-        bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
-        bytes("data: [DONE]\n\n"),
-      ],
-    });
-    const opened = await streamGateway(history, backend);
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+      bytes("data: [DONE]\n\n"),
+    ]) } }];
+    const opened = await streamGateway(history, expectations);
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       const reader = response.body?.getReader();
@@ -202,17 +169,14 @@ describe("Responses endpoint stream integration", () => {
 
   it("keeps only the route receipt when the client cancels before a checkpoint forms", async () => {
     const history = new RecordingHistory();
-    let returned = 0;
     const usageUpdates: UsageUpdate[] = [];
-    const backend = new ScriptedCopilotBackend({
-      chatStream: singleOwnedChunk(
-        bytes("data: {\"id\":\"chatcmpl_cancel\",\"choices\":[{\"delta\":{\"content\":\"unfinished\"},\"finish_reason\":null}]}\n\n"),
-        () => {
-          returned += 1;
-        },
-      ),
-    });
-    const opened = await streamGateway(history, backend, { usageUpdates });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
+        await exchange.write(bytes("data: {\"id\":\"chatcmpl_cancel\",\"choices\":[{\"delta\":{\"content\":\"unfinished\"},\"finish_reason\":null}]}\n\n"));
+        await exchange.waitForClose();
+      } },
+    }];
+    const opened = await streamGateway(history, expectations, { usageUpdates });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       expect(response.status).toBe(200);
@@ -235,7 +199,9 @@ describe("Responses endpoint stream integration", () => {
       expect(delivered).not.toContain("response.completed");
 
       await reader.cancel();
-      expect(returned).toBe(1);
+      await waitForHttp(() => opened.upstream.streams[0]?.closed === true);
+      expect(opened.upstream.streams[0]?.ended).toBe(false);
+      assertTransportReleased(opened.backend);
       expect(history.receiptStates).toEqual(["route_only"]);
       expect(history.checkpointStates).toEqual([]);
       expect(history.records).toEqual([]);
@@ -260,8 +226,8 @@ describe("Responses endpoint stream integration", () => {
   ])("does not checkpoint an unfinished $item item when the upstream truncates", async ({ upstream, progressEvent }) => {
     const history = new RecordingHistory();
     const usageUpdates: UsageUpdate[] = [];
-    const backend = new ScriptedCopilotBackend({ chatStream: [bytes(upstream)] });
-    const opened = await streamGateway(history, backend, { usageUpdates });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([bytes(upstream)]) } }];
+    const opened = await streamGateway(history, expectations, { usageUpdates });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       expect(response.status).toBe(200);
@@ -293,14 +259,12 @@ describe("Responses endpoint stream integration", () => {
   it("fails before exposing a converted response ID when its receipt cannot persist", async () => {
     const history = new RecordingHistory("receipt");
     const usageUpdates: UsageUpdate[] = [];
-    const backend = new ScriptedCopilotBackend({
-      chatStream: [
-        bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
-        bytes("data: [DONE]\n\n"),
-      ],
-    });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+      bytes("data: [DONE]\n\n"),
+    ]) } }];
 
-    const opened = await streamGateway(history, backend, { usageUpdates });
+    const opened = await streamGateway(history, expectations, { usageUpdates });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       expect(response.status).toBe(500);
@@ -323,20 +287,16 @@ describe("Responses endpoint stream integration", () => {
     "fails before exposing a native %s response ID when its receipt cannot persist",
     async (mode) => {
       const history = new RecordingHistory("receipt");
-      const backend = mode === "stream"
-        ? new ScriptedCopilotBackend({
-          responsesStream: [
-            bytes("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_native_secret\",\"output\":[]}}\n\n"),
-          ],
-        })
-        : new ScriptedCopilotBackend({
-          responses: {
-            status: 200,
-            headers: new Headers(),
-            body: bytes("{\"id\":\"resp_native_secret\",\"output\":[]}"),
-          },
-        });
-      const opened = await streamGateway(history, backend);
+      const expectations: HttpExpectation[] = mode === "stream"
+        ? [{ method: "POST", path: "/responses", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+          bytes("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_native_secret\",\"output\":[]}}\n\n"),
+        ]) } }]
+        : [{ method: "POST", path: "/responses", body: jsonStream(false), reply: {
+          status: 200,
+          headers: {},
+          body: bytes("{\"id\":\"resp_native_secret\",\"output\":[]}"),
+        } }];
+      const opened = await streamGateway(history, expectations);
       try {
         const response = await opened.gateway.fetch(responsesRequest("native", mode === "stream"));
         expect(response.status).toBe(500);
@@ -352,13 +312,11 @@ describe("Responses endpoint stream integration", () => {
   it("does not expose a tool checkpoint event when checkpoint persistence fails", async () => {
     const history = new RecordingHistory("checkpoint");
     const usageUpdates: UsageUpdate[] = [];
-    const backend = new ScriptedCopilotBackend({
-      chatStream: [
-        bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
-        bytes("data: [DONE]\n\n"),
-      ],
-    });
-    const opened = await streamGateway(history, backend, { usageUpdates });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
+      bytes("data: [DONE]\n\n"),
+    ]) } }];
+    const opened = await streamGateway(history, expectations, { usageUpdates });
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       expect(response.status).toBe(200);
@@ -389,13 +347,11 @@ describe("Responses endpoint stream integration", () => {
 
   it("persists tool-only partial and terminal checkpoints through the typed checkpoint path", async () => {
     const history = new RecordingHistory();
-    const backend = new ScriptedCopilotBackend({
-      chatStream: [
-        bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
-        bytes("data: [DONE]\n\n"),
-      ],
-    });
-    const opened = await streamGateway(history, backend);
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
+      bytes("data: [DONE]\n\n"),
+    ]) } }];
+    const opened = await streamGateway(history, expectations);
     try {
       const response = await opened.gateway.fetch(responsesRequest());
       expect(response.status).toBe(200);
@@ -413,68 +369,78 @@ describe("Responses endpoint stream integration", () => {
 
 async function streamGateway(
   history: ResponsesHistory,
-  backend: CopilotBackend,
+  expectations: readonly HttpExpectation[],
   options: {
     readonly runtime?: ReturnType<typeof defaultRuntimeConfigSnapshot>;
     readonly usageUpdates?: UsageUpdate[];
   } = {},
-): Promise<{ readonly gateway: Awaited<ReturnType<typeof createGateway>>; close(): Promise<void> }> {
-  const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-responses-stream-"));
-  const database = openDatabase({
-    path: path.join(dir, "state.db"),
-    migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
-    nowMs,
+) {
+  return await withSetupCleanup(async (own) => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-responses-stream-"));
+    own(() => rm(dir, { recursive: true, force: true }));
+    const database = openDatabase({
+      path: path.join(dir, "state.db"),
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+      nowMs,
+    });
+    own(() => closeDatabase(database));
+    const credentials = new MemoryCredentialStore();
+    const accountCoordinator = new AccountCoordinator();
+    const accounts = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return {
+          data: [{
+            id: "chat",
+            name: "Chat",
+            vendor: "github",
+            model_picker_enabled: true,
+            model_info: {
+              supported_endpoints: ["/chat/completions"],
+              chat_output_token_field: "max_tokens",
+            },
+          }, {
+            id: "native",
+            name: "Native",
+            vendor: "github",
+            model_picker_enabled: true,
+            model_info: { supported_endpoints: ["/responses"] },
+          }],
+        };
+      },
+    });
+    const http = await startHttpCopilot({ credentials, accountCoordinator, nowMs, expectations });
+    own(() => http.close());
+    const registry = testModelCapabilityRegistry(catalog);
+    own(() => registry.close());
+    const gateway = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: dir }),
+      runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
+    }, [createResponsesRoute({
+      directory: accounts,
+      registry,
+      preferences: accounts.preferences,
+      copilot: http.backend,
+      history,
+      nowUnixSeconds: () => 1_700_000_000,
+      createUuid: () => "00000000-0000-4000-8000-000000000001",
+      ...(options.usageUpdates === undefined
+        ? {}
+        : { usageRecorder: { recordUsage: (update: UsageUpdate) => options.usageUpdates?.push(update) } }),
+    })], { createRequestId: () => "req_stream" });
+    own(() => gateway.close());
+    return {
+      gateway, upstream: http.upstream, backend: http.backend,
+      async close() {
+        await closeAll([() => gateway.close(), () => registry.close(), () => http.close(), () => closeDatabase(database), () => rm(dir, { recursive: true, force: true })]);
+      },
+    };
   });
-  const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
-  await accounts.upsertAuthenticated({
-    host: "github.com",
-    userId: "1",
-    secret: { generation: 0, githubToken: "t" },
-  });
-  const catalog = new CopilotModelCatalog({
-    async fetch() {
-      return {
-        data: [{
-          id: "chat",
-          name: "Chat",
-          vendor: "github",
-          model_picker_enabled: true,
-          model_info: {
-            supported_endpoints: ["/chat/completions"],
-            chat_output_token_field: "max_tokens",
-          },
-        }, {
-          id: "native",
-          name: "Native",
-          vendor: "github",
-          model_picker_enabled: true,
-          model_info: { supported_endpoints: ["/responses"] },
-        }],
-      };
-    },
-  });
-  const gateway = await createGateway({
-    startup: parseStartupConfig([], {}, { homedir: dir }),
-    runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
-  }, [createResponsesRoute({
-    directory: accounts,
-    registry: testModelCapabilityRegistry(catalog),
-    preferences: accounts.preferences,
-    copilot: backend,
-    history,
-    nowUnixSeconds: () => 1_700_000_000,
-    createUuid: () => "00000000-0000-4000-8000-000000000001",
-    ...(options.usageUpdates === undefined
-      ? {}
-      : { usageRecorder: { recordUsage: (update: UsageUpdate) => options.usageUpdates?.push(update) } }),
-  })], { createRequestId: () => "req_stream" });
-  return {
-    gateway,
-    async close() {
-      await gateway.close();
-      closeDatabase(database);
-    },
-  };
 }
 
 function responsesRequest(model = "chat", stream = true): Request {
@@ -500,55 +466,4 @@ function deferred<T>(): Deferred<T> {
     resolve = settle;
   });
   return { promise, resolve };
-}
-
-function singleOwnedChunk(chunk: Uint8Array, onReturn: () => void): AsyncIterable<Uint8Array> {
-  return {
-    [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-      let emitted = false;
-      let returned = false;
-      const pending = deferred<IteratorResult<Uint8Array>>();
-      return {
-        async next() {
-          if (!emitted) {
-            emitted = true;
-            return { done: false, value: chunk };
-          }
-          return await pending.promise;
-        },
-        async return() {
-          if (!returned) {
-            returned = true;
-            onReturn();
-            pending.resolve({ done: true, value: undefined });
-          }
-          return { done: true, value: undefined };
-        },
-      };
-    },
-  };
-}
-
-function withResponsesStream(
-  backend: ScriptedCopilotBackend,
-  open: (
-    request: NativeResponsesUpstreamRequest,
-    fallback: BoundCopilot,
-  ) => Promise<UpstreamByteStream>,
-): CopilotBackend {
-  return {
-    async bind(account, signal) {
-      const bound = await backend.bind(account, signal);
-      return {
-        ...bound,
-        openResponsesStream: async (request) => await open(request, bound),
-      };
-    },
-    async close() {
-      await backend.close();
-    },
-    forceClose() {
-      backend.forceClose();
-    },
-  };
 }

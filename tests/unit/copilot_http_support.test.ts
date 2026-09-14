@@ -1,5 +1,11 @@
 import { connect, type Socket } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { access, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { startHttpCopilot, withSetupCleanup } from "../../scripts/tooling/test_support/http_copilot.js";
+import { openDatabase, closeDatabase } from "../../src/persistence/database.js";
+import { Server } from "node:http";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
@@ -62,6 +68,42 @@ async function waitUntil(check: () => boolean) {
 const fixed: HttpExpectation = { method: "POST", path: "/chat/completions", body: bytes("{ \"model\":\"synthetic\" }"), reply: { status: 201, headers: { "content-type": "application/json", "x-synthetic": "fixed" }, body: bytes("{ \"fixed\":true }\n") } };
 
 describe("bounded synthetic Copilot HTTP seam", () => {
+  it("closes the listener and discovery when real transport composition fails", async () => {
+    const listenerClose = vi.spyOn(Server.prototype, "close");
+    const discoveryClose = vi.spyOn(EndpointDiscovery.prototype, "close");
+    try {
+      await expect(startHttpCopilot({
+        credentials: new MemoryCredentialStore(), accountCoordinator: new AccountCoordinator(), nowMs: Date.now,
+        get refreshCopilotToken(): never { throw new Error("synthetic transport setup failure"); },
+      })).rejects.toThrow("synthetic transport setup failure");
+      expect(listenerClose).toHaveBeenCalledTimes(1);
+      expect((listenerClose.mock.contexts[0] as Server).listening).toBe(false);
+      expect(discoveryClose).toHaveBeenCalledTimes(1);
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it("rolls back every allocated HTTP/SQLite/temp resource even if an earlier cleanup fails", async () => {
+    let directory = "";
+    let http: Awaited<ReturnType<typeof startHttpCopilot>> | undefined;
+    let database: ReturnType<typeof openDatabase> | undefined;
+    await expect(withSetupCleanup(async (own) => {
+      directory = await mkdtemp(path.join(tmpdir(), "ghcg-http-setup-"));
+      own(() => rm(directory, { recursive: true, force: true }));
+      database = openDatabase({ path: path.join(directory, "state.db"), migrations: [] });
+      const openedDatabase = database;
+      own(() => closeDatabase(openedDatabase));
+      http = await startHttpCopilot({ credentials: new MemoryCredentialStore(), accountCoordinator: new AccountCoordinator(), nowMs: Date.now });
+      const openedHttp = http;
+      own(() => openedHttp.close());
+      own(() => { throw new Error("synthetic disposer failure"); });
+      throw new Error("synthetic later setup failure");
+    })).rejects.toThrow("HTTP fixture cleanup failed");
+    expect(http?.backend.inspect()).toMatchObject({ closed: true, responseLeases: 0, pools: { active: 0, waiters: 0 } });
+    expect(http?.upstream.socketCount).toBe(0);
+    expect(() => database?.prepare("SELECT 1")).toThrow();
+    await expect(access(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("uses caller credentials and real Undici wire metadata without normalizing either body", async () => {
     const server = await mock({ expectations: [
       { ...fixed, times: 2 },
@@ -109,6 +151,33 @@ describe("bounded synthetic Copilot HTTP seam", () => {
     expect(await response.text()).toBe("{\"error\":\"synthetic HTTP mismatch\"}");
     expect(() => server.assertHealthy()).toThrow("synthetic HTTP request mismatch");
     expect(() => server.assertSatisfied()).toThrow();
+  });
+
+  it.each(["string", "object", "promise", "rejected-promise"])("rejects non-boolean predicate result %s without accepting truthiness", async (kind) => {
+    const server = await mock({ expectations: [{ ...fixed, body: (() => {
+      if (kind === "promise") return Promise.resolve(true);
+      if (kind === "rejected-promise") return Promise.reject(new Error("synthetic callback failure"));
+      return kind === "string" ? "true" : {};
+    }) as unknown as (body: Uint8Array) => boolean }, fixed] });
+    const response = await fetch(`${server.origin}${fixed.path}`, { method: "POST", body: Buffer.from(fixed.body as Uint8Array) });
+    expect(response.status).toBe(409);
+    await response.text();
+    expect(() => server.assertHealthy()).toThrow("synthetic HTTP predicate failed");
+    expect(() => server.assertSatisfied()).toThrow("synthetic HTTP predicate failed");
+  });
+
+  it("accepts a reset of an already matched held HTTP response as cancellation", async () => {
+    const server = await mock({ expectations: [{ ...fixed, reply: { stream: async (exchange) => { await exchange.waitForClose(); } } }] });
+    const { backend, bound } = await transport(server.origin);
+    const controller = new AbortController();
+    const pending = bound.completeChat(request(fixed.body as Uint8Array, controller.signal));
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await waitUntil(() => server.streams.length === 1);
+    controller.abort();
+    await rejected;
+    await waitUntil(() => server.streams[0]?.closed === true);
+    idle(backend);
+    server.assertSatisfied();
   });
 
   it("sanitizes predicate exceptions and does not consume a rejected expectation", async () => {

@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { createNativeMessagesStreamResponse } from "../../src/protocols/anthropic_messages/native.js";
+import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
+import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
+import { describe, expect, it } from "vitest";
+import { jsonStream, assertTransportReleased, waitForHttp } from "../../scripts/tooling/test_support/http_copilot.js";
+import type { HttpExpectation, HttpStreamControl } from "../../scripts/tooling/test_support/copilot_http.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 import { anthropicGateway, anthropicRequest, sse } from "./anthropic_harness.js";
@@ -8,19 +12,17 @@ const decoder = new TextDecoder();
 
 describe("Anthropic stream lifecycle", () => {
   it("omits nonportable thinking signatures without changing successful terminal semantics", async () => {
-    const backend = new ScriptedCopilotBackend({
-      chatStream: [
-        sse({
-          id: "chunk_1",
-          choices: [{
-            delta: { thinking_blocks: [{ type: "thinking", thinking: "signed plan", signature: "sigT" }] },
-            finish_reason: "stop",
-          }],
-        }),
-        new TextEncoder().encode("data: [DONE]\n\n"),
-      ],
-    });
-    const { gw, close } = await anthropicGateway({ backend });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      sse({
+        id: "chunk_1",
+        choices: [{
+          delta: { thinking_blocks: [{ type: "thinking", thinking: "signed plan", signature: "sigT" }] },
+          finish_reason: "stop",
+        }],
+      }),
+      new TextEncoder().encode("data: [DONE]\n\n"),
+    ]) } }];
+    const { gw, close } = await anthropicGateway({ expectations });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
       expect(await response.text()).toBe([
@@ -34,30 +36,28 @@ describe("Anthropic stream lifecycle", () => {
   });
 
   it("rejects multi-choice streams instead of dropping one choice", async () => {
-    const backend = new ScriptedCopilotBackend({
-      chatStream: [
-        sse({
-          id: "chunk_1",
-          choices: [
-            {
-              delta: {
-                content: "A",
-                tool_calls: [{ id: "call_first", type: "function", function: { name: "first", arguments: "{\"x\":1}" } }],
-              },
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      sse({
+        id: "chunk_1",
+        choices: [
+          {
+            delta: {
+              content: "A",
+              tool_calls: [{ id: "call_first", type: "function", function: { name: "first", arguments: "{\"x\":1}" } }],
             },
-            {
-              delta: {
-                content: "B",
-                tool_calls: [{ id: "call_second", type: "function", function: { name: "second", arguments: "{\"y\":2}" } }],
-              },
-              finish_reason: "tool_calls",
+          },
+          {
+            delta: {
+              content: "B",
+              tool_calls: [{ id: "call_second", type: "function", function: { name: "second", arguments: "{\"y\":2}" } }],
             },
-          ],
-        }),
-        new TextEncoder().encode("data: [DONE]\n\n"),
-      ],
-    });
-    const { gw, close } = await anthropicGateway({ backend });
+            finish_reason: "tool_calls",
+          },
+        ],
+      }),
+      new TextEncoder().encode("data: [DONE]\n\n"),
+    ]) } }];
+    const { gw, close } = await anthropicGateway({ expectations });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
       expect(response.status).toBe(502);
@@ -71,18 +71,16 @@ describe("Anthropic stream lifecycle", () => {
 
   it("emits Python-compatible SSE for block switches, signed thinking, delayed usage, and message_stop", async () => {
     const usageUpdates: UsageUpdate[] = [];
-    const backend = new ScriptedCopilotBackend({
-      chatStream: [
-        sse({ id: "chunk_1", choices: [{ delta: { reasoning_content: "plan" } }] }),
-        sse({ id: "chunk_2", choices: [{ delta: { content: "hé" } }] }),
-        sse({ id: "chunk_3", choices: [{ delta: { tool_calls: [{ id: "call.1__thought__sigA", type: "function", function: { name: "lookup", arguments: "{\"a\":" } }] } }] }),
-        sse({ id: "chunk_4", choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 8, completion_tokens: 3 } }),
-        sse({ id: "chunk_5", choices: [], usage: { prompt_tokens: 10, completion_tokens: 4, cache_read_input_tokens: 2 } }),
-        new TextEncoder().encode("data: [DONE]\n\n"),
-      ],
-    });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      sse({ id: "chunk_1", choices: [{ delta: { reasoning_content: "plan" } }] }),
+      sse({ id: "chunk_2", choices: [{ delta: { content: "hé" } }] }),
+      sse({ id: "chunk_3", choices: [{ delta: { tool_calls: [{ id: "call.1__thought__sigA", type: "function", function: { name: "lookup", arguments: "{\"a\":" } }] } }] }),
+      sse({ id: "chunk_4", choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 8, completion_tokens: 3 } }),
+      sse({ id: "chunk_5", choices: [], usage: { prompt_tokens: 10, completion_tokens: 4, cache_read_input_tokens: 2 } }),
+      new TextEncoder().encode("data: [DONE]\n\n"),
+    ]) } }];
     const { gw, close } = await anthropicGateway({
-      backend,
+      expectations,
       createUuid: (() => {
         const values = ["00000000-0000-4000-8000-0000000000aa"];
         return () => values.shift() ?? "00000000-0000-4000-8000-0000000000ff";
@@ -118,12 +116,14 @@ describe("Anthropic stream lifecycle", () => {
 
   it("classifies post-commit parser failures without synthetic success terminals", async () => {
     const usageUpdates: UsageUpdate[] = [];
-    async function* brokenStream(): AsyncIterable<Uint8Array> {
-      yield sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] });
-      throw new TypeError("network failed");
-    }
-    const backend = new ScriptedCopilotBackend({ chatStream: brokenStream() });
-    const { gw, close } = await anthropicGateway({ backend, usageUpdates });
+    let exchange: HttpStreamControl | undefined;
+    const { gw, close } = await anthropicGateway({ usageUpdates, expectations: [{
+      method: "POST", path: "/chat/completions", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (control) => {
+        exchange = control;
+        await control.write(sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] }));
+      } },
+    }] });
     try {
       const response = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
       const reader = response.body?.getReader();
@@ -138,6 +138,7 @@ describe("Anthropic stream lifecycle", () => {
             return;
           }
           text += decoder.decode(next.value, { stream: true });
+          if (text.includes("event: content_block_delta")) exchange?.disconnect();
         }
       })()).rejects.toThrow();
       expect(text).toContain("event: content_block_delta");
@@ -154,27 +155,20 @@ describe("Anthropic stream lifecycle", () => {
 
   it("preserves native keepalive ordering while finalizing usage and iterator cleanup once", async () => {
     const usageUpdates: UsageUpdate[] = [];
-    let returned = 0;
+
     const records = [
       ": keepalive\n\n",
       "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
       "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
     ];
-    const backend = new ScriptedCopilotBackend({
-      messagesStream: (async function* () {
-        try {
-          for (const record of records) {
-            yield new TextEncoder().encode(record);
-          }
-        } finally {
-          returned += 1;
-        }
-      })(),
-    });
     const opened = await anthropicGateway({
-      backend,
-      usageUpdates,
-      catalogFetch: nativeMessagesCatalog,
+      usageUpdates, catalogFetch: nativeMessagesCatalog,
+      expectations: [{ method: "POST", path: "/v1/messages", body: jsonStream(true),
+        reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
+          for (const record of records) await exchange.write(new TextEncoder().encode(record));
+          await exchange.waitForClose();
+        } },
+      }],
     });
     try {
       const response = await opened.gw.fetch(anthropicRequest({
@@ -185,7 +179,9 @@ describe("Anthropic stream lifecycle", () => {
       }));
       expect(response.status).toBe(200);
       expect(await response.text()).toBe(records.join(""));
-      expect(returned).toBe(1);
+      await waitForHttp(() => opened.upstream.streams[0]?.closed === true);
+      expect(opened.upstream.streams[0]?.ended).toBe(false);
+      assertTransportReleased(opened.backend);
       expect(usageUpdates).toHaveLength(1);
       expect(usageUpdates).toMatchObject([{ outcome: "success", inputTokens: 2, outputTokens: 0 }]);
     } finally {
@@ -193,17 +189,52 @@ describe("Anthropic stream lifecycle", () => {
     }
   });
 
+  it("returns the native Messages raw iterator once while preserving keepalive and terminal records", async () => {
+    const records = [
+      ": keepalive\n\n",
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ];
+    let returned = 0;
+    let canceled = 0;
+    let terminals = 0;
+    const signal = new AbortController().signal;
+    const response = await createNativeMessagesStreamResponse({
+      upstream: { status: 200, headers: new Headers({ "content-type": "text/event-stream" }),
+        bytes: { async *[Symbol.asyncIterator]() {
+          try { for (const record of records) yield new TextEncoder().encode(record); }
+          finally { returned += 1; }
+        } },
+        cancel: async () => { canceled += 1; },
+      },
+      scope: { requestId: "req_test_1", signal, deliverySignal: signal, config: defaultRuntimeConfigSnapshot(),
+        attempt: createRequestAttempt({ requestId: "req_test_1", protocol: "anthropic", abortedErrorCount: 1 }),
+      },
+      onTerminal: (result) => {
+        expect(result).toMatchObject({ kind: "success", usage: { inputTokens: 2, outputTokens: 0 } });
+        terminals += 1;
+      },
+    });
+    expect(await response.text()).toBe(records.join(""));
+    await getStreamExecutionHandle(response)?.completion;
+    expect({ returned, canceled, terminals }).toEqual({ returned: 1, canceled: 1, terminals: 1 });
+  });
+
   it("times out a native keepalive-only stream before committing any stream bytes", async () => {
-    vi.useFakeTimers();
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 100;
+    runtime.timeouts.firstByteMs = 250;
     runtime.timeouts.streamIdleMs = 60_000;
-    const backend = new ScriptedCopilotBackend({
-      messagesStream: (request) => commentThenStall(request.signal),
-    });
+    let sent = false;
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/v1/messages", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
+        await exchange.write(new TextEncoder().encode(": keepalive\n\n"));
+        sent = true;
+        await exchange.waitForClose();
+      } },
+    }];
     const opened = await anthropicGateway({
-      backend,
+      expectations,
       runtime,
       usageUpdates,
       catalogFetch: nativeMessagesCatalog,
@@ -215,7 +246,7 @@ describe("Anthropic stream lifecycle", () => {
         messages: [{ role: "user", content: "hi" }],
         stream: true,
       }));
-      await vi.advanceTimersByTimeAsync(5_000);
+      await waitForHttp(() => sent);
       const response = await pending;
       expect(response.status).toBe(504);
       expect(await response.text()).toBe(
@@ -224,7 +255,6 @@ describe("Anthropic stream lifecycle", () => {
       expect(usageUpdates).toHaveLength(1);
       expect(usageUpdates).toMatchObject([{ outcome: "timeout" }]);
     } finally {
-      vi.useRealTimers();
       await opened.close();
     }
   });
@@ -232,19 +262,26 @@ describe("Anthropic stream lifecycle", () => {
   it("keeps synthetic message_start behind the first semantic deadline", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.firstByteMs = 250;
     runtime.timeouts.streamIdleMs = 60_000;
-    const backend = new ScriptedCopilotBackend({
-      chatStream: (request) => commentThenStall(request.signal),
-    });
-    const { gw, close } = await anthropicGateway({ backend, runtime, usageUpdates });
+    let sent = false;
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
+        await exchange.write(new TextEncoder().encode(": keepalive\n\n"));
+        sent = true;
+        await exchange.waitForClose();
+      } },
+    }];
+    const { gw, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
     try {
-      const response = await gw.fetch(anthropicRequest({
+      const pending = gw.fetch(anthropicRequest({
         model: "gpt",
         max_tokens: 16,
         messages: [{ role: "user", content: "hi" }],
         stream: true,
       }));
+      await waitForHttp(() => sent);
+      const response = await pending;
       expect(response.status).toBe(504);
       const body = await response.text();
       expect(body).toBe(
@@ -266,19 +303,27 @@ describe("Anthropic stream lifecycle", () => {
   it("does not let empty Chat chunks release synthetic Messages preambles", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 1;
+    runtime.timeouts.firstByteMs = 250;
     runtime.timeouts.streamIdleMs = 60_000;
-    const backend = new ScriptedCopilotBackend({
-      chatStream: (request) => emptyChunkThenStall(request.signal),
-    });
-    const { gw, close } = await anthropicGateway({ backend, runtime, usageUpdates });
+    let sent = false;
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
+        await exchange.write(sse({ id: "chunk_empty", choices: [] }));
+        await exchange.write(sse({ id: "chunk_empty_object", choices: [{}] }));
+        sent = true;
+        await exchange.waitForClose();
+      } },
+    }];
+    const { gw, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
     try {
-      const response = await gw.fetch(anthropicRequest({
+      const pending = gw.fetch(anthropicRequest({
         model: "gpt",
         max_tokens: 16,
         messages: [{ role: "user", content: "hi" }],
         stream: true,
       }));
+      await waitForHttp(() => sent);
+      const response = await pending;
       expect(response.status).toBe(504);
       expect(await response.text()).not.toContain("message_start");
       expect(usageUpdates).toHaveLength(1);
@@ -291,18 +336,25 @@ describe("Anthropic stream lifecycle", () => {
   it("records a committed Messages idle timeout without message_stop", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.streamIdleMs = 1;
-    const backend = new ScriptedCopilotBackend({
-      chatStream: contentThenStall(),
-    });
-    const { gw, close } = await anthropicGateway({ backend, runtime, usageUpdates });
+    runtime.timeouts.streamIdleMs = 250;
+    let sent = false;
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
+        await exchange.write(sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] }));
+        sent = true;
+        await exchange.waitForClose();
+      } },
+    }];
+    const { gw, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
     try {
-      const response = await gw.fetch(anthropicRequest({
+      const pending = gw.fetch(anthropicRequest({
         model: "gpt",
         max_tokens: 16,
         messages: [{ role: "user", content: "hi" }],
         stream: true,
       }));
+      await waitForHttp(() => sent);
+      const response = await pending;
       const reader = response.body?.getReader();
       let delivered = "";
       await expect((async () => {
@@ -335,24 +387,4 @@ function nativeMessagesCatalog() {
       model_info: { supported_endpoints: ["/v1/messages"] },
     }],
   };
-}
-
-async function* commentThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
-  yield new TextEncoder().encode(": keepalive\n\n");
-  await new Promise<void>((_resolve, reject) => {
-    signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
-  });
-}
-
-async function* contentThenStall(): AsyncIterable<Uint8Array> {
-  yield sse({ id: "chunk_1", choices: [{ delta: { content: "partial" } }] });
-  await new Promise<void>(() => undefined);
-}
-
-async function* emptyChunkThenStall(signal: AbortSignal): AsyncIterable<Uint8Array> {
-  yield sse({ id: "chunk_empty", choices: [] });
-  yield sse({ id: "chunk_empty_object", choices: [{}] });
-  await new Promise<void>((_resolve, reject) => {
-    signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
-  });
 }

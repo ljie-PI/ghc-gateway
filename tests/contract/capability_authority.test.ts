@@ -2,7 +2,7 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { describe, expect, it, vi } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream } from "../../scripts/tooling/test_support/http_copilot.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { parseLiveModelCapabilities } from "../../src/copilot/model_capabilities.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
@@ -26,61 +26,65 @@ const encoder = new TextEncoder();
 
 describe("effective capability authority", () => {
   it("uses one shared registry snapshot per model and inference request", async () => {
-    const database = openDatabase({
-      path: ":memory:",
-      migrations: [
-        embedMigration(runtimeConfigMigration),
-        embedMigration(accountsMigration),
-        embedMigration(historyMigration),
-        embedMigration(continuationMigration),
-      ],
-      nowMs,
-    });
-    const directory = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
-    const account = await directory.upsertAuthenticated({
-      host: "github.com",
-      userId: "1",
-      secret: { generation: 0, githubToken: "test-token" },
-    });
-    const catalog = new CopilotModelCatalog({
-      async fetch() {
-        return { data: [{
-          id: "authority",
-          name: "Authority",
-          vendor: "test",
-          model_picker_enabled: true,
-          model_info: {
-            supported_endpoints: ["/v1/responses"],
-            max_input_tokens: 100_000,
-            max_output_tokens: 12_000,
-          },
-        }] };
-      },
-    }, () => new Date(nowMs()));
-    const registry = new ModelCapabilityRegistry(catalog, {
-      get: (modelId) => modelId === "authority" ? {
-        revision: "builtin-authority-v1",
-        capabilities: parseLiveModelCapabilities({
-          supported_endpoints: ["/v1/chat/completions"],
-          max_input_tokens: 64_000,
-          max_output_tokens: 16_000,
-          chat_output_token_field: "max_tokens",
-        }),
-      } : null,
-    });
-    const snapshot = await registry.get(account, new AbortController().signal);
-    expect(snapshot.models[0]).toMatchObject({
-      modelId: "authority",
-      protocols: { value: ["responses"], source: "live", conflict: true },
-      maxInputTokens: { value: 100_000, source: "live", conflict: true },
-      maxOutputTokens: { value: 12_000, source: "live", conflict: true },
-      revision: { builtinRevision: "builtin-authority-v1" },
-    });
+    const { gateway, get, account, http, database, registry } = await withSetupCleanup(async (own) => {
+      const database = openDatabase({
+        path: ":memory:",
+        migrations: [
+          embedMigration(runtimeConfigMigration),
+          embedMigration(accountsMigration),
+          embedMigration(historyMigration),
+          embedMigration(continuationMigration),
+        ],
+        nowMs,
+      });
+      own(() => closeDatabase(database));
+      const credentials = new MemoryCredentialStore();
+      const accountCoordinator = new AccountCoordinator();
+      const directory = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
+      const account = await directory.upsertAuthenticated({
+        host: "github.com",
+        userId: "1",
+        secret: { generation: 0, githubToken: "test-token" },
+      });
+      const catalog = new CopilotModelCatalog({
+        async fetch() {
+          return { data: [{
+            id: "authority",
+            name: "Authority",
+            vendor: "test",
+            model_picker_enabled: true,
+            model_info: {
+              supported_endpoints: ["/v1/responses"],
+              max_input_tokens: 100_000,
+              max_output_tokens: 12_000,
+            },
+          }] };
+        },
+      }, () => new Date(nowMs()));
+      const registry = new ModelCapabilityRegistry(catalog, {
+        get: (modelId) => modelId === "authority" ? {
+          revision: "builtin-authority-v1",
+          capabilities: parseLiveModelCapabilities({
+            supported_endpoints: ["/v1/chat/completions"],
+            max_input_tokens: 64_000,
+            max_output_tokens: 16_000,
+            chat_output_token_field: "max_tokens",
+          }),
+        } : null,
+      });
+      own(() => registry.close());
+      const snapshot = await registry.get(account, new AbortController().signal);
+      expect(snapshot.models[0]).toMatchObject({
+        modelId: "authority",
+        protocols: { value: ["responses"], source: "live", conflict: true },
+        maxInputTokens: { value: 100_000, source: "live", conflict: true },
+        maxOutputTokens: { value: 12_000, source: "live", conflict: true },
+        revision: { builtinRevision: "builtin-authority-v1" },
+      });
 
-    const backend = new ScriptedCopilotBackend({
-      responses: {
+      const http = await startHttpCopilot({ credentials, accountCoordinator, nowMs, expectations: [{ method: "POST", path: "/responses", body: jsonStream(false), times: 3, reply: {
         status: 200,
-        headers: new Headers(),
+        headers: {},
         body: encoder.encode(JSON.stringify({
           id: "resp_authority",
           object: "response",
@@ -95,25 +99,27 @@ describe("effective capability authority", () => {
           }],
           usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
         })),
-      },
+      } }] });
+      own(() => http.close());
+      const history = new SqliteResponsesHistory(database, { nowMs });
+      const shared = {
+        directory,
+        registry,
+        preferences: directory.preferences,
+        copilot: http.backend,
+      };
+      const get = vi.spyOn(registry, "get");
+      const gateway = await createGateway({
+        startup: parseStartupConfig([], {}, { homedir: "." }),
+        runtime: defaultRuntimeConfigSnapshot(),
+      }, [
+        ...createModelCatalogRoutes(shared),
+        createOpenAiChatRoute(shared),
+        createAnthropicMessagesRoute(shared),
+        createResponsesRoute({ ...shared, history }),
+      ], { createRequestId: () => "req_authority", onClose: () => registry.close() });
+      return { gateway, get, account, http, database, registry };
     });
-    const history = new SqliteResponsesHistory(database, { nowMs });
-    const shared = {
-      directory,
-      registry,
-      preferences: directory.preferences,
-      copilot: backend,
-    };
-    const get = vi.spyOn(registry, "get");
-    const gateway = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "." }),
-      runtime: defaultRuntimeConfigSnapshot(),
-    }, [
-      ...createModelCatalogRoutes(shared),
-      createOpenAiChatRoute(shared),
-      createAnthropicMessagesRoute(shared),
-      createResponsesRoute({ ...shared, history }),
-    ], { createRequestId: () => "req_authority", onClose: () => registry.close() });
     try {
       const models = await gateway.fetch(new Request("http://127.0.0.1:31400/v1/models"));
       expect(models.status).toBe(200);
@@ -139,14 +145,14 @@ describe("effective capability authority", () => {
 
       expect(get).toHaveBeenCalledTimes(4);
       expect(get.mock.calls.every(([bound]) => bound.accountId === account.accountId)).toBe(true);
-      expect(backend.captured).toEqual([
-        { accountId: account.accountId, kind: "responses" },
-        { accountId: account.accountId, kind: "responses" },
-        { accountId: account.accountId, kind: "responses" },
-      ]);
+      expect(http.upstream.requests.map((request) => ({
+        path: request.path, authorization: request.headers.get("authorization"),
+        stream: JSON.parse(new TextDecoder().decode(request.body)).stream === true,
+      }))).toEqual(Array.from({ length: 3 }, () => ({
+        path: "/responses", authorization: "Bearer http-test-test-token", stream: false,
+      })));
     } finally {
-      await gateway.close();
-      closeDatabase(database);
+      await closeAll([() => gateway.close(), () => registry.close(), () => http.close(), () => closeDatabase(database)]);
     }
   });
 });

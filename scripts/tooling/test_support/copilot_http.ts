@@ -72,6 +72,7 @@ export async function startCopilotHttpMock(options: {
   const requests: HttpRequestObservation[] = [];
   const streams: HttpStreamControl[] = [];
   const sockets = new Set<Socket>();
+  const matchedSockets = new WeakSet<object>();
   let attempts = 0;
   let retainedBodyBytes = 0;
   let activeExchanges = 0;
@@ -91,6 +92,13 @@ export async function startCopilotHttpMock(options: {
     expectations.push({ value: expectation, remaining: times });
   }
   for (const expectation of options.expectations ?? []) add(expectation);
+  function matchesBody(predicate: (body: Uint8Array) => boolean, body: Uint8Array): boolean {
+    const result: unknown = predicate(body);
+    if (result instanceof Promise) void result.catch(() => undefined);
+    // Throw to stop matching: an invalid callback cannot fall through to a later expectation.
+    if (typeof result !== "boolean") throw new Error("invalid synthetic predicate result");
+    return result === true;
+  }
   const server = createServer({ maxHeaderSize: 16 * 1024 }, (request, response) => {
     const handler = handle(request, response).catch((error: unknown) => {
       if (!stopped && !(response.destroyed && error instanceof HttpStreamClosedError)) fail("exchange failed");
@@ -111,7 +119,13 @@ export async function startCopilotHttpMock(options: {
     socket.once("close", () => sockets.delete(socket));
     socket.setTimeout(limits.waitMs, () => { fail("socket timeout"); socket.destroy(); });
   });
-  server.on("clientError", (_error, socket) => { fail("invalid HTTP request"); socket.destroy(); });
+  server.on("clientError", (error, socket) => {
+    // Cancelling a matched response may reset the socket before its flushed headers are read.
+    if ((error as NodeJS.ErrnoException).code !== "ECONNRESET" || !matchedSockets.has(socket)) {
+      fail("invalid HTTP request");
+    }
+    socket.destroy();
+  });
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const timer = setTimeout(() => { fail("exchange timeout"); request.destroy(); response.destroy(); }, limits.waitMs);
@@ -161,7 +175,7 @@ export async function startCopilotHttpMock(options: {
       matched = expectations.find(({ value, remaining }) => remaining > 0
         && value.method === observation.method && value.path === observation.path
         && Object.entries(value.headers ?? {}).every(([key, expected]) => observation.headers.get(key) === expected)
-        && (typeof value.body === "function" ? value.body(observation.body) : Buffer.from(value.body).equals(observation.body)));
+        && (typeof value.body === "function" ? matchesBody(value.body, observation.body) : Buffer.from(value.body).equals(observation.body)));
     } catch { fail("predicate failed"); }
     if (matched === undefined) {
       fail("request mismatch");
@@ -169,6 +183,7 @@ export async function startCopilotHttpMock(options: {
       return;
     }
     matched.remaining -= 1;
+    matchedSockets.add(request.socket);
     const reply = matched.value.reply;
     response.writeHead(reply.status ?? 200, reply.headers);
     if (reply.stream === undefined) {

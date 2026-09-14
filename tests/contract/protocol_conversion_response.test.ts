@@ -75,6 +75,38 @@ describe("shared conversion response codecs", () => {
     });
   });
 
+  it("preserves the original extended-tool payload, exact envelope, checkpoint and usage independently of HTTP status", () => {
+    const plan = planProtocolExecution({ source: "responses", body: responseBody({ model: "chat", input: "render", tools: [{ type: "custom", name: "render", format: { type: "text" } }] }), stream: false, resolvedModel: "chat", capability: responseCapability() });
+    expect(plan.kind).toBe("converted");
+    if (plan.kind !== "converted") throw new Error("expected converted plan");
+    const converted = convertBufferedPlannedResponse(encoder.encode(JSON.stringify({
+      id: "chatcmpl_extended",
+      created: 1_700_000_000,
+      model: "chat",
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_render",
+            type: "function",
+            function: { name: "render", arguments: "{\"input\":\"draw\"}" },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    })), plan, {
+      maxBytes: 1_048_576, createUuid: () => "00000000-0000-4000-8000-000000000001", nowUnixSeconds: () => 1_700_000_000,
+    });
+    expect(decoder.decode(converted.bytes)).toBe("{\"id\":\"resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmNoYXQ7dXBzdHJlYW1fcHJvdG9jb2w6Y2hhdDtyZXNwb25zZV9pZDowMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDE=\",\"object\":\"response\",\"created_at\":1700000000,\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":{},\"model\":\"chat\",\"output\":[{\"type\":\"custom_tool_call\",\"id\":\"fc_00000000-0000-4000-8000-000000000001\",\"call_id\":\"call_render\",\"name\":\"render\",\"status\":\"completed\",\"input\":\"draw\"}],\"parallel_tool_calls\":true,\"temperature\":null,\"tool_choice\":\"auto\",\"tools\":[],\"top_p\":null,\"max_output_tokens\":null,\"previous_response_id\":null,\"reasoning\":null,\"text\":{},\"truncation\":\"disabled\",\"usage\":{\"input_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":3}}");
+    const body = decoded(converted.bytes);
+    expect(converted.checkpoint?.responseId).toBe(body.id);
+    expect(converted.checkpoint?.output.map((item) => decoded(serializeWireJson(item)))).toEqual(body.output);
+    expect(converted.observations.usage).toEqual({ inputTokens: 2, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 });
+  });
+
   it("restores extended Responses calls from the request-captured binding ledger", () => {
     const plan = planProtocolExecution({
       source: "responses",

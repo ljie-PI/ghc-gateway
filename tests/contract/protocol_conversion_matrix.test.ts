@@ -2,7 +2,8 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream } from "../../scripts/tooling/test_support/http_copilot.js";
+import type { CopilotHttpMock } from "../../scripts/tooling/test_support/copilot_http.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -43,7 +44,7 @@ describe("protocol conversion matrix", () => {
         expect(response.status).toBe(200);
         expect(response.headers.get("x-ghcg-upstream-protocol")).toBe(expectedKind);
         expect(await response.text()).toContain("ok");
-        expect(harness.backend.captured.map((entry) => entry.kind)).toEqual([expectedKind]);
+        expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([[{ chat: "/chat/completions", messages: "/v1/messages", responses: "/responses" }[expectedKind.replace("-stream", "") as "chat" | "messages" | "responses"], expectedKind.endsWith("-stream")]]);
       } finally {
         await harness.close();
       }
@@ -60,7 +61,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect(response.status).toBe(200);
       expect(response.headers.get("x-ghcg-upstream-protocol")).toBe("responses");
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["responses"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/responses", false]]);
       expect(JSON.parse(decoder.decode(harness.responsesBodies[0]))).toMatchObject({
         tools: [{ type: "custom", name: "render" }],
       });
@@ -78,7 +79,7 @@ describe("protocol conversion matrix", () => {
         stop: ["END"],
       }));
       expect(response.status).toBe(200);
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["messages"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/v1/messages", false]]);
       expect(JSON.parse(decoder.decode(harness.messagesBodies[0]))).toMatchObject({
         model: "responses-messages",
         stop_sequences: ["END"],
@@ -122,7 +123,7 @@ describe("protocol conversion matrix", () => {
       const response = await harness.gw.fetch(jsonRequest(path, request));
       expect(response.status).toBe(422);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -166,7 +167,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect(response.status).toBe(status);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -181,7 +182,7 @@ describe("protocol conversion matrix", () => {
       ));
       expect(response.status).toBe(400);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -196,7 +197,7 @@ describe("protocol conversion matrix", () => {
       ));
       expect(response.status).toBe(400);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -228,7 +229,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect(second.status).toBe(200);
       expect(await second.text()).toContain("ok");
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat", "chat"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/chat/completions", false], ["/chat/completions", false]]);
     } finally {
       await harness.close();
     }
@@ -271,7 +272,7 @@ describe("protocol conversion matrix", () => {
         tools,
       }));
       expect(second.status).toBe(200);
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat", "chat"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/chat/completions", false], ["/chat/completions", false]]);
     } finally {
       await harness.close();
     }
@@ -347,7 +348,7 @@ describe("protocol conversion matrix", () => {
         tools: Array<{ function: { name: string; strict?: boolean } }>;
       };
       expect(request.tools.find((tool) => tool.function.name === "ambiguous")?.function).not.toHaveProperty("strict");
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/chat/completions", false]]);
     } finally {
       await harness.close();
     }
@@ -511,7 +512,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect([400, 422]).toContain(response.status);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -552,7 +553,7 @@ describe("protocol conversion matrix", () => {
         tools: [{ type: "tool_search" }],
       }));
       expect(response.status).toBe(200);
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/chat/completions", false]]);
     } finally {
       await harness.close();
     }
@@ -579,7 +580,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect(response.status).toBe(422);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -604,7 +605,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect(response.status).toBe(422);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -630,7 +631,7 @@ describe("protocol conversion matrix", () => {
         const text = await response.text();
         expect(text).toContain("ok");
         expect(text).toContain(terminal);
-        expect(harness.backend.captured.map((entry) => entry.kind)).toEqual([expectedKind]);
+        expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([[{ chat: "/chat/completions", messages: "/v1/messages", responses: "/responses" }[expectedKind.replace("-stream", "") as "chat" | "messages" | "responses"], expectedKind.endsWith("-stream")]]);
         if (source === "chat") {
           expect(text.match(/data: \[DONE\]/gu)).toHaveLength(1);
         } else if (source === "messages") {
@@ -657,7 +658,7 @@ describe("protocol conversion matrix", () => {
       const response = await harness.gw.fetch(rawRequest(path, body));
       expect(response.status).toBe(status);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -706,7 +707,7 @@ describe("protocol conversion matrix", () => {
       }, {
         accountId: "github.com/1",
         modelId: "dual-messages",
-        upstreamOrigin: "https://api.githubcopilot.com",
+        upstreamOrigin: harness.upstream.origin,
         owner: "converted",
         upstreamProtocol: "messages",
         conversionVersion: "responses-messages-v1",
@@ -723,7 +724,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect(rejected.status).not.toBe(200);
       await rejected.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
 
       for (const content of ["", [], [{ type: "input_text", text: "" }]]) {
         const emptyContext = await harness.gw.fetch(jsonRequest("/v1/responses", {
@@ -741,7 +742,7 @@ describe("protocol conversion matrix", () => {
         expect(emptyContext.status).not.toBe(200);
         await emptyContext.text();
       }
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
 
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "dual-messages",
@@ -760,7 +761,7 @@ describe("protocol conversion matrix", () => {
         ],
       }));
       expect(response.status).toBe(200);
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["messages"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/v1/messages", false]]);
       const forwarded = decoder.decode(harness.messagesBodies[0]);
       expect(forwarded).not.toContain("previous_response_id");
       expect(forwarded).toContain("call_owned");
@@ -790,7 +791,7 @@ describe("protocol conversion matrix", () => {
       })]));
       expect(JSON.parse(decoder.decode(harness.chatBodies[0]))).toMatchObject({ max_tokens: 7 });
       expect(decoder.decode(harness.chatBodies[0])).not.toContain("max_completion_tokens");
-      expect(harness.backend.captured.map((entry) => entry.kind)).toEqual(["chat"]);
+      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/chat/completions", false]]);
     } finally {
       await harness.close();
     }
@@ -811,7 +812,7 @@ describe("protocol conversion matrix", () => {
       }));
       expect(response.status).toBe(status);
       await response.text();
-      expect(harness.backend.captured).toEqual([]);
+      expect(harness.upstream.requests).toEqual([]);
     } finally {
       await harness.close();
     }
@@ -820,7 +821,7 @@ describe("protocol conversion matrix", () => {
 
 interface MatrixHarness {
   readonly gw: Gateway;
-  readonly backend: ScriptedCopilotBackend;
+  readonly upstream: CopilotHttpMock;
   readonly history: SqliteResponsesHistory;
   readonly chatBodies: Uint8Array[];
   readonly messagesBodies: Uint8Array[];
@@ -829,256 +830,274 @@ interface MatrixHarness {
 }
 
 async function matrixGateway(): Promise<MatrixHarness> {
-  const database = openDatabase({
-    path: ":memory:",
-    migrations: [
-      embedMigration(runtimeConfigMigration),
-      embedMigration(accountsMigration),
-      embedMigration(responsesHistoryMigration),
-      embedMigration(responsesContinuationMigration),
-    ],
-    nowMs,
+  return await withSetupCleanup(async (own) => {
+    const database = openDatabase({
+      path: ":memory:",
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        embedMigration(responsesHistoryMigration),
+        embedMigration(responsesContinuationMigration),
+      ],
+      nowMs,
+    });
+    own(() => closeDatabase(database));
+    const credentials = new MemoryCredentialStore();
+    const accountCoordinator = new AccountCoordinator();
+    const directory = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
+    await directory.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "test-token" },
+    });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return {
+          data: [
+            model("native-chat", ["/v1/chat/completions"]),
+            model("native-messages", ["/v1/messages"]),
+            model("native-responses", ["/v1/responses"]),
+            model("responses-messages", ["/v1/responses", "/v1/messages"]),
+            model("dual-messages", ["/v1/responses", "/v1/messages"]),
+          ],
+        };
+      },
+    }, () => new Date(nowMs()));
+    const history = new SqliteResponsesHistory(database, { nowMs });
+    const response = {
+      id: "resp_matrix_stream",
+      object: "response",
+      created_at: 1_700_000_000,
+      status: "completed",
+      output: [{
+        id: "msg_matrix_stream",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "ok", annotations: [] }],
+      }],
+      usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+    };
+    const http = await startHttpCopilot({
+      credentials, accountCoordinator, nowMs,
+      expectations: [
+        {
+          method: "POST", path: "/chat/completions", body: jsonStream(false), times: 8,
+          reply: {
+            headers: { "content-type": "application/json" }, stream: async (exchange) => {
+              await exchange.end(matrixChatResponse(exchange.request.body));
+            }
+          }
+        },
+        {
+          method: "POST", path: "/v1/messages", body: jsonStream(false), times: 8,
+          reply: {
+            status: 200,
+            headers: {},
+            body: encoder.encode(JSON.stringify({
+              id: "msg_matrix",
+              type: "message",
+              role: "assistant",
+              model: "matrix",
+              content: [{ type: "text", text: "ok" }],
+              stop_reason: "end_turn",
+              stop_sequence: null,
+              usage: { input_tokens: 2, output_tokens: 1 },
+            })),
+          }
+        },
+        {
+          method: "POST", path: "/responses", body: jsonStream(false), times: 8,
+          reply: {
+            status: 200,
+            headers: {},
+            body: encoder.encode(JSON.stringify({
+              id: "resp_matrix",
+              object: "response",
+              created_at: 1_700_000_000,
+              status: "completed",
+              output: [{
+                id: "msg_matrix",
+                type: "message",
+                status: "completed",
+                role: "assistant",
+                content: [{ type: "output_text", text: "ok", annotations: [] }],
+              }],
+              usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+            })),
+          }
+        },
+        {
+          method: "POST", path: "/chat/completions", body: jsonStream(true), times: 8,
+          reply: {
+            headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+              encoder.encode(`data: ${JSON.stringify({
+                id: "chatcmpl_matrix_stream",
+                object: "chat.completion.chunk",
+                created: 1_700_000_000,
+                model: "matrix",
+                choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+                usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+              })}\n\n`),
+              encoder.encode("data: [DONE]\n\n"),
+            ])
+          }
+        },
+        {
+          method: "POST", path: "/v1/messages", body: jsonStream(true), times: 8,
+          reply: {
+            headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+              messagesEvent("message_start", {
+                type: "message_start",
+                message: {
+                  id: "msg_matrix_stream",
+                  type: "message",
+                  role: "assistant",
+                  content: [],
+                  model: "matrix",
+                  stop_reason: null,
+                  stop_sequence: null,
+                  usage: { input_tokens: 2, output_tokens: 0 },
+                },
+              }),
+              messagesEvent("content_block_start", {
+                type: "content_block_start",
+                index: 0,
+                content_block: { type: "text", text: "" },
+              }),
+              messagesEvent("content_block_delta", {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "text_delta", text: "ok" },
+              }),
+              messagesEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+              messagesEvent("message_delta", {
+                type: "message_delta",
+                delta: { stop_reason: "end_turn", stop_sequence: null },
+                usage: { output_tokens: 1 },
+              }),
+              messagesEvent("message_stop", { type: "message_stop" }),
+            ])
+          }
+        },
+        {
+          method: "POST", path: "/responses", body: jsonStream(true), times: 8,
+          reply: {
+            headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+              responsesEvent(0, "response.created", { response: { ...response, status: "in_progress", output: [] } }),
+              responsesEvent(1, "response.output_item.added", {
+                output_index: 0,
+                item: { ...response.output[0], status: "in_progress", content: [] },
+              }),
+              responsesEvent(2, "response.output_text.delta", {
+                item_id: "msg_matrix_stream",
+                output_index: 0,
+                content_index: 0,
+                delta: "ok",
+              }),
+              responsesEvent(3, "response.output_text.done", {
+                item_id: "msg_matrix_stream",
+                output_index: 0,
+                content_index: 0,
+                text: "ok",
+              }),
+              responsesEvent(4, "response.output_item.done", {
+                output_index: 0,
+                item: response.output[0],
+              }),
+              responsesEvent(5, "response.completed", { response }),
+            ])
+          }
+        }
+      ],
+    });
+    own(() => http.close());
+    const registry = testModelCapabilityRegistry(catalog);
+    own(() => registry.close());
+    const routeDependencies = {
+      directory,
+      registry,
+      preferences: directory.preferences,
+      copilot: http.backend,
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowMs,
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\ghc-gateway-tests\\matrix\\.home" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [
+      createOpenAiChatRoute(routeDependencies),
+      createAnthropicMessagesRoute(routeDependencies),
+      createResponsesRoute({ ...routeDependencies, history, nowUnixSeconds: () => 1_700_000_000 }),
+    ], { createRequestId: () => "req_matrix" });
+    own(() => gw.close());
+    return {
+      gw,
+      upstream: http.upstream,
+      history,
+      get chatBodies() { return http.upstream.requests.filter((request) => request.path === "/chat/completions").map((request) => request.body); },
+      get messagesBodies() { return http.upstream.requests.filter((request) => request.path === "/v1/messages").map((request) => request.body); },
+      get responsesBodies() { return http.upstream.requests.filter((request) => request.path === "/responses").map((request) => request.body); },
+      async close() {
+        await closeAll([() => gw.close(), () => registry.close(), () => http.close(), () => closeDatabase(database)]);
+      },
+    };
   });
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
-  await directory.upsertAuthenticated({
-    host: "github.com",
-    userId: "1",
-    secret: { generation: 0, githubToken: "test-token" },
-  });
-  const catalog = new CopilotModelCatalog({
-    async fetch() {
-      return {
-        data: [
-          model("native-chat", ["/v1/chat/completions"]),
-          model("native-messages", ["/v1/messages"]),
-          model("native-responses", ["/v1/responses"]),
-          model("responses-messages", ["/v1/responses", "/v1/messages"]),
-          model("dual-messages", ["/v1/responses", "/v1/messages"]),
-        ],
-      };
-    },
-  }, () => new Date(nowMs()));
-  const history = new SqliteResponsesHistory(database, { nowMs });
-  const chatBodies: Uint8Array[] = [];
-  const messagesBodies: Uint8Array[] = [];
-  const responsesBodies: Uint8Array[] = [];
-  const backend = new ScriptedCopilotBackend({
-    chat(request) {
-      chatBodies.push(request.body);
-      const captured = JSON.parse(decoder.decode(request.body)) as {
-        messages?: Array<{ role?: string }>;
-        tools?: Array<{ function?: { name?: string } }>;
-      };
-      const hasToolResult = captured.messages?.some((message) => message.role === "tool") === true;
-      const custom = captured.tools?.some((tool) => tool.function?.name === "render") === true;
-      const namespace = captured.tools?.some((tool) => tool.function?.name === "ns__lookup") === true;
-      const ordinaryMixed = decoder.decode(request.body).includes("ordinary-mixed");
-      const partialCustom = decoder.decode(request.body).includes("partial-custom");
-      const toolCall = partialCustom
+}
+
+function matrixChatResponse(raw: Uint8Array): Uint8Array {
+  const captured = JSON.parse(decoder.decode(raw)) as {
+    messages?: Array<{ role?: string }>;
+    tools?: Array<{ function?: { name?: string } }>;
+  };
+  const hasToolResult = captured.messages?.some((message) => message.role === "tool") === true;
+  const custom = captured.tools?.some((tool) => tool.function?.name === "render") === true;
+  const namespace = captured.tools?.some((tool) => tool.function?.name === "ns__lookup") === true;
+  const ordinaryMixed = decoder.decode(raw).includes("ordinary-mixed");
+  const partialCustom = decoder.decode(raw).includes("partial-custom");
+  const toolCall = partialCustom
+    ? {
+      id: "call_custom",
+      type: "function",
+      function: { name: "render", arguments: "{\"input\":\"x\"" },
+    }
+    : ordinaryMixed
+      ? {
+        id: "call_ordinary",
+        type: "function",
+        function: { name: "lookup", arguments: "{}" },
+      }
+      : namespace
         ? {
+          id: "call_namespace",
+          type: "function",
+          function: { name: "ns__lookup", arguments: "{}" },
+        }
+        : {
           id: "call_custom",
           type: "function",
-          function: { name: "render", arguments: "{\"input\":\"x\"" },
+          function: { name: "render", arguments: "{\"input\":\"hello\"}" },
+        };
+  return encoder.encode(JSON.stringify({
+    id: "chatcmpl_matrix",
+    object: "chat.completion",
+    created: 1_700_000_000,
+    model: "matrix",
+    choices: [{
+      index: 0,
+      message: (custom || namespace) && !hasToolResult
+        ? {
+          role: "assistant",
+          content: null,
+          tool_calls: [toolCall],
         }
-        : ordinaryMixed
-          ? {
-            id: "call_ordinary",
-            type: "function",
-            function: { name: "lookup", arguments: "{}" },
-          }
-          : namespace
-            ? {
-              id: "call_namespace",
-              type: "function",
-              function: { name: "ns__lookup", arguments: "{}" },
-            }
-            : {
-              id: "call_custom",
-              type: "function",
-              function: { name: "render", arguments: "{\"input\":\"hello\"}" },
-            };
-      return {
-        status: 200,
-        headers: new Headers(),
-        body: encoder.encode(JSON.stringify({
-          id: "chatcmpl_matrix",
-          object: "chat.completion",
-          created: 1_700_000_000,
-          model: "matrix",
-          choices: [{
-            index: 0,
-            message: (custom || namespace) && !hasToolResult
-              ? {
-                role: "assistant",
-                content: null,
-                tool_calls: [toolCall],
-              }
-              : { role: "assistant", content: "ok" },
-            finish_reason: partialCustom
-              ? "length"
-              : (custom || namespace) && !hasToolResult ? "tool_calls" : "stop",
-          }],
-          usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
-        })),
-      };
-    },
-    messages(request) {
-      messagesBodies.push(request.body);
-      return {
-        status: 200,
-        headers: new Headers(),
-        body: encoder.encode(JSON.stringify({
-          id: "msg_matrix",
-          type: "message",
-          role: "assistant",
-          model: "matrix",
-          content: [{ type: "text", text: "ok" }],
-          stop_reason: "end_turn",
-          stop_sequence: null,
-          usage: { input_tokens: 2, output_tokens: 1 },
-        })),
-      };
-    },
-    responses(request) {
-      responsesBodies.push(request.body);
-      return {
-        status: 200,
-        headers: new Headers(),
-        body: encoder.encode(JSON.stringify({
-          id: "resp_matrix",
-          object: "response",
-          created_at: 1_700_000_000,
-          status: "completed",
-          output: [{
-            id: "msg_matrix",
-            type: "message",
-            status: "completed",
-            role: "assistant",
-            content: [{ type: "output_text", text: "ok", annotations: [] }],
-          }],
-          usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
-        })),
-      };
-    },
-    chatStream(request) {
-      chatBodies.push(request.body);
-      return [
-        encoder.encode(`data: ${JSON.stringify({
-          id: "chatcmpl_matrix_stream",
-          object: "chat.completion.chunk",
-          created: 1_700_000_000,
-          model: "matrix",
-          choices: [{ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
-        })}\n\n`),
-        encoder.encode("data: [DONE]\n\n"),
-      ];
-    },
-    messagesStream(request) {
-      messagesBodies.push(request.body);
-      return [
-        messagesEvent("message_start", {
-          type: "message_start",
-          message: {
-            id: "msg_matrix_stream",
-            type: "message",
-            role: "assistant",
-            content: [],
-            model: "matrix",
-            stop_reason: null,
-            stop_sequence: null,
-            usage: { input_tokens: 2, output_tokens: 0 },
-          },
-        }),
-        messagesEvent("content_block_start", {
-          type: "content_block_start",
-          index: 0,
-          content_block: { type: "text", text: "" },
-        }),
-        messagesEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: 0,
-          delta: { type: "text_delta", text: "ok" },
-        }),
-        messagesEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
-        messagesEvent("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: "end_turn", stop_sequence: null },
-          usage: { output_tokens: 1 },
-        }),
-        messagesEvent("message_stop", { type: "message_stop" }),
-      ];
-    },
-    responsesStream(request) {
-      responsesBodies.push(request.body);
-      const response = {
-        id: "resp_matrix_stream",
-        object: "response",
-        created_at: 1_700_000_000,
-        status: "completed",
-        output: [{
-          id: "msg_matrix_stream",
-          type: "message",
-          status: "completed",
-          role: "assistant",
-          content: [{ type: "output_text", text: "ok", annotations: [] }],
-        }],
-        usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
-      };
-      return [
-        responsesEvent(0, "response.created", { response: { ...response, status: "in_progress", output: [] } }),
-        responsesEvent(1, "response.output_item.added", {
-          output_index: 0,
-          item: { ...response.output[0], status: "in_progress", content: [] },
-        }),
-        responsesEvent(2, "response.output_text.delta", {
-          item_id: "msg_matrix_stream",
-          output_index: 0,
-          content_index: 0,
-          delta: "ok",
-        }),
-        responsesEvent(3, "response.output_text.done", {
-          item_id: "msg_matrix_stream",
-          output_index: 0,
-          content_index: 0,
-          text: "ok",
-        }),
-        responsesEvent(4, "response.output_item.done", {
-          output_index: 0,
-          item: response.output[0],
-        }),
-        responsesEvent(5, "response.completed", { response }),
-      ];
-    },
-  });
-  const routeDependencies = {
-    directory,
-    registry: testModelCapabilityRegistry(catalog),
-    preferences: directory.preferences,
-    copilot: backend,
-    createUuid: () => "00000000-0000-4000-8000-000000000104",
-    nowMs,
-  };
-  const gw = await createGateway({
-    startup: parseStartupConfig([], {}, { homedir: "Q:\\ghc-gateway-tests\\matrix\\.home" }),
-    runtime: defaultRuntimeConfigSnapshot(),
-  }, [
-    createOpenAiChatRoute(routeDependencies),
-    createAnthropicMessagesRoute(routeDependencies),
-    createResponsesRoute({ ...routeDependencies, history, nowUnixSeconds: () => 1_700_000_000 }),
-  ], { createRequestId: () => "req_matrix" });
-  return {
-    gw,
-    backend,
-    history,
-    chatBodies,
-    messagesBodies,
-    responsesBodies,
-    async close() {
-      await gw.close();
-      closeDatabase(database);
-    },
-  };
+        : { role: "assistant", content: "ok" },
+      finish_reason: partialCustom
+        ? "length"
+        : (custom || namespace) && !hasToolResult ? "tool_calls" : "stop",
+    }],
+    usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+  }));
 }
 
 function model(id: string, supportedEndpoints: string[]) {

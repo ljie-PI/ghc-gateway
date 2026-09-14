@@ -1,3 +1,5 @@
+import { boundedHttpWait } from "../../scripts/tooling/test_support/copilot_http.js";
+import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
 import { describe, expect, it, vi } from "vitest";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -730,6 +732,133 @@ describe("stream route lifecycle", () => {
     }
   });
 
+  it("holds admission and public delivery while semantic-success cancellation is pending", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    const cancelStarted = barrier();
+    const releaseCancel = barrier();
+    const counts = { cancel: 0, returned: 0, terminal: 0 };
+    let calls = 0;
+    let handle: ReturnType<typeof getStreamExecutionHandle>;
+    const route: RouteRegistration = {
+      method: "POST", path: "/v1/semantic-barrier", admission: "inference", body: "none",
+      presentFailure: () => new Response("blocked", { status: 503 }),
+      endpoint: async (_request, scope) => {
+        if (calls++ > 0) return new Response("next");
+        const response = await createStreamExecutionResponse({
+          upstream: { status: 200, headers: new Headers(), bytes: { async *[Symbol.asyncIterator]() {} },
+            cancel: async () => { counts.cancel += 1; cancelStarted.release(); await releaseCancel.promise; },
+          },
+          emissions: { [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
+            let first = true;
+            return {
+              next: async () => {
+                if (first) { first = false; return { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("terminal") } }; }
+                return { done: false, value: { kind: "terminal", outcome: { kind: "success", value: "done" }, writerMode: "close" } };
+              },
+              return: async () => { counts.returned += 1; return { done: true, value: undefined }; },
+            };
+          } },
+          signal: scope.signal, deliverySignal: scope.deliverySignal,
+          onTerminal: () => { counts.terminal += 1; }, normalizeFailure: (error) => error,
+        });
+        handle = getStreamExecutionHandle(response);
+        return response;
+      },
+    };
+    const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime }, [route]);
+    const request = () => new Request("http://127.0.0.1:31400/v1/semantic-barrier", { method: "POST" });
+    try {
+      const response = await gw.fetch(request());
+      let delivered = false;
+      const delivery = response.text().then((text) => { delivered = true; return text; });
+      await boundedHttpWait(cancelStarted.promise);
+      expect(handle?.state).toBe("terminating");
+      expect(handle?.cause).toBe("semantic_success");
+      expect(delivered).toBe(false);
+      // The owner emission iterator returns AFTER cancellation, unlike the native raw source.
+      expect(counts).toMatchObject({ cancel: 1, returned: 0 });
+      const blocked = await gw.fetch(request());
+      expect(blocked.status).toBe(503);
+      await blocked.text();
+      expect(delivered).toBe(false);
+      releaseCancel.release();
+      expect(await boundedHttpWait(delivery)).toBe("terminal");
+      await handle?.completion;
+      expect(handle?.state).toBe("completed");
+      expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
+      const next = await gw.fetch(request());
+      expect(next.status).toBe(200);
+      expect(await next.text()).toBe("next");
+    } finally { releaseCancel.release(); await gw.close(); }
+  });
+
+  it("awaits the converted raw Chat iterator-return chain before application close hooks", async () => {
+    const returnStarted = barrier();
+    const releaseReturn = barrier();
+    const readStarted = barrier();
+    let rawReturned = 0;
+    let canceled = 0;
+    let closeSawReturn = false;
+    let closed = false;
+    const route: RouteRegistration = {
+      method: "POST", path: "/v1/converted-return", admission: "inference", body: "none",
+      presentFailure: () => new Response("failure", { status: 502 }),
+      endpoint: async (_request, scope) => await createConvertedStreamResponse({
+        upstream: { status: 200, headers: new Headers({ "content-type": "text/event-stream" }),
+          bytes: { [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+            let first = true;
+            return {
+              next: async () => {
+                if (first) { first = false; return { done: false, value: new TextEncoder().encode("data: {\"id\":\"chatcmpl_live\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n") }; }
+                readStarted.release();
+                await new Promise<void>((resolve) => {
+                  if (scope.signal.aborted) resolve();
+                  else scope.signal.addEventListener("abort", () => resolve(), { once: true });
+                });
+                throw new DOMException("aborted", "AbortError");
+              },
+              return: async () => { returnStarted.release(); await releaseReturn.promise; rawReturned += 1; return { done: true, value: undefined }; },
+            };
+          } },
+          cancel: async () => { canceled += 1; },
+        },
+        plan: { kind: "converted", source: "responses", target: "chat", stream: true, requestModel: "chat",
+          request: { body: { kind: "object", members: [] }, bytes: new TextEncoder().encode("{}"), stream: true,
+            hasVisionInput: false, initiator: "user", messagesBetaFeatures: [], degradations: [] },
+        },
+        scope, model: "chat", createUuid: () => "00000000-0000-4000-8000-000000000001", nowUnixSeconds: () => 1_700_000_000,
+        headers: { "content-type": "text/event-stream" }, onTerminal: () => undefined,
+      }),
+    };
+    const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime: defaultRuntimeConfigSnapshot() }, [route], {
+      onClose: () => { closeSawReturn = rawReturned === 1; },
+    });
+    try {
+      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/converted-return", { method: "POST" }));
+      const reader = response.body!.getReader();
+      let delivered = "";
+      const consumption = (async () => {
+        try { for (;;) { const next = await reader.read(); if (next.done) break; delivered += new TextDecoder().decode(next.value); } }
+        catch { /* Shutdown can abort an already committed public stream. */ }
+      })();
+      await boundedHttpWait(readStarted.promise);
+      expect(delivered).toContain("response.output_text.delta");
+      const closing = gw.close().then(() => { closed = true; });
+      await boundedHttpWait(returnStarted.promise);
+      expect(closed).toBe(false);
+      expect(closeSawReturn).toBe(false);
+      expect(rawReturned).toBe(0);
+      releaseReturn.release();
+      await boundedHttpWait(closing);
+      await consumption;
+      expect(rawReturned).toBe(1);
+      expect(canceled).toBe(1);
+      expect(closeSawReturn).toBe(true);
+    } finally { releaseReturn.release(); await gw.close(); }
+  });
+
   it("waits for the claimed Stream Execution barrier before application close hooks", async () => {
     let releaseCancel: (() => void) | undefined;
     const cancelBarrier = new Promise<void>((resolve) => {
@@ -1152,3 +1281,9 @@ describe("stream route lifecycle", () => {
     await gw.close();
   });
 });
+
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
