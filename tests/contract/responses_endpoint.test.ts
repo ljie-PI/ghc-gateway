@@ -509,8 +509,6 @@ describe("Responses endpoint", () => {
   it.each(["native", "chat"] as const)("normalizes %s transport timeout before commitment", async (model) => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.firstByteMs = 1_000;
-    runtime.timeouts.connectMs = 2_000;
-    runtime.timeouts.totalMs = 4_000;
     const { gw, upstream, backend, close } = await responsesGateway({ runtime, expectations: [{
       method: "POST", path: model === "native" ? "/responses" : "/chat/completions", body: jsonStream(false),
       reply: { stream: async (exchange) => { await exchange.waitForClose(); } },
@@ -559,9 +557,6 @@ describe("Responses endpoint", () => {
     const timeoutUsage: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.totalMs = 1_500;
-    runtime.timeouts.firstByteMs = 3_000;
-    runtime.timeouts.streamIdleMs = 4_000;
-    runtime.timeouts.connectMs = 4_500;
     const timedOutGateway = await responsesGateway({
       runtime,
       expectations: [{ method: "POST", path: model === "native" ? "/responses" : "/chat/completions", body: jsonStream(true),
@@ -621,9 +616,6 @@ describe("Responses endpoint", () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.firstByteMs = 1_000;
-    runtime.timeouts.connectMs = 2_000;
-    runtime.timeouts.totalMs = 4_000;
-    runtime.timeouts.streamIdleMs = 3_000;
     const { gw, upstream, backend, close } = await responsesGateway({
       runtime,
       usageUpdates,
@@ -659,9 +651,6 @@ describe("Responses endpoint", () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.firstByteMs = 1_000;
-    runtime.timeouts.connectMs = 2_000;
-    runtime.timeouts.totalMs = 4_000;
-    runtime.timeouts.streamIdleMs = 3_000;
     const { gw, upstream, backend, close } = await responsesGateway({
       runtime,
       usageUpdates,
@@ -752,10 +741,9 @@ describe("Responses endpoint", () => {
   ])("keeps postcommit $model $deadline timeout terminal semantics and one usage", async ({ model, deadline }) => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 3_000;
-    runtime.timeouts.connectMs = 4_500;
-    runtime.timeouts.streamIdleMs = deadline === "idle" ? 1_000 : 3_000;
-    runtime.timeouts.totalMs = deadline === "total" ? 1_500 : 4_000;
+    // Competing deadlines exceed the HTTP mock's failure bound and cannot mask this one.
+    runtime.timeouts.streamIdleMs = deadline === "idle" ? 1_000 : 60_000;
+    runtime.timeouts.totalMs = deadline === "total" ? 1_500 : 60_000;
     const { gw, upstream, backend, close } = await responsesGateway({
       runtime,
       usageUpdates,

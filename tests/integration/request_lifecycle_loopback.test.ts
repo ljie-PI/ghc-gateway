@@ -193,7 +193,6 @@ async function responsesGateway(options: {
     own(() => registry.close());
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.totalMs = options.totalMs;
-    runtime.timeouts.firstByteMs = 3_000;
     const port = await availablePort();
     const gateway = await createGateway({
       startup: parseStartupConfig(["--port", String(port)], {}, { homedir: "Q:\\ghc-gateway-loopback" }),

@@ -238,9 +238,8 @@ describe("Anthropic request route", () => {
 
   it("normalizes transport timeout and malformed buffered output before commitment", async () => {
     const runtime = defaultRuntimeConfigSnapshot();
+    // Other deadlines must not substitute for the transport first-byte deadline.
     runtime.timeouts.firstByteMs = 1_000;
-    runtime.timeouts.connectMs = 2_000;
-    runtime.timeouts.totalMs = 4_000;
     const timeoutGateway = await anthropicGateway({
       runtime,
       expectations: [{ method: "POST", path: "/chat/completions", body: jsonStream(false),
