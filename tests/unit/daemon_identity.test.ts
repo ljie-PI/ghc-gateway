@@ -196,6 +196,43 @@ describe("daemon identity file", () => {
     expect(existsSync(directory)).toBe(false);
   });
 
+  it.each(["preserved", "substituted"] as const)("handles %s Unicode paths in icacls output without repairing permissions", async (outputPath) => {
+    const directory = path.join(await temporaryDirectory(), "雪");
+    let creations = 0;
+    let aclReads = 0;
+    const files = new ProtectedFileSystem(directory, {
+      platform: "win32",
+      runCommand: (command, args, environment) => {
+        if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
+          creations += 1;
+          mkdirSync(environment.GHCG_DIRECTORY_PATH, { recursive: true, mode: 0o700 });
+          return "0\r\n";
+        }
+        if (command === "icacls") {
+          expect(args).toEqual([directory]);
+          aclReads += 1;
+          // Model the captured tool output, not a Unicode ban or a parser bypass.
+          const displayed = outputPath === "preserved" ? directory : directory.replaceAll("雪", "?");
+          return `${displayed} CONTOSO\\current:(OI)(CI)(F)\r\n`;
+        }
+        return windowsSecurityCommand(command, args, directory, "CONTOSO\\current");
+      },
+    });
+    try {
+      for (const attempt of ["first creation", "existing directory"]) {
+        let caught: unknown;
+        try { files.ensureProtectedDirectory(); } catch (error: unknown) { caught = error; }
+        if (outputPath === "preserved") expect(caught, attempt).toBeUndefined();
+        else {
+          expect(caught, attempt).toMatchObject({ code: "unsafe_permissions" });
+          expect(daemonRuntimeCliError(caught)).toBe("security_error");
+        }
+      }
+      expect(creations).toBe(1);
+      expect(aclReads).toBe(2);
+    } finally { await rm(path.dirname(path.dirname(directory)), { recursive: true, force: true }); }
+  });
+
   it("publishes protected daemon.json while holding an exclusive lease", async () => {
     const directory = await temporaryDirectory();
     const file = new DaemonIdentityFile(directory);
