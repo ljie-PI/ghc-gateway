@@ -18,10 +18,6 @@ if (process.env.GHC_GATEWAY_CI_NETWORK_GUARD === "1") {
   await import("./ci_network_guard.ts");
 }
 
-if ((process.env.GHCG_WINDOWS_LIFECYCLE_DIAGNOSTICS_DIR?.length ?? 0) > 0) {
-  await import("../../.github/diagnostics/windows_lifecycle_diagnostics.mjs");
-}
-
 const { pathToFileURL } = await import("node:url");
 const path = await import("node:path");
 const invokedAsMain = process.argv[1] !== undefined
