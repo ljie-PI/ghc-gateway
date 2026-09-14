@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { InvalidWindowsIdentityError, WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
+import { createWindowsPrivateDirectory, type WindowsDirectoryCommand } from "../security/windows_directory.js";
 
 export type DaemonIdentityFileErrorCode =
   | "invalid_identity"
@@ -37,13 +38,13 @@ export class DaemonIdentityFileError extends Error {
 
 export interface ProtectedFileOptions {
   readonly platform?: NodeJS.Platform;
-  readonly runCommand?: (file: string, args: readonly string[]) => string;
+  readonly runCommand?: WindowsDirectoryCommand;
 }
 
 export class ProtectedFileSystem {
   readonly directory: string;
   private readonly platform: NodeJS.Platform;
-  private readonly runCommand: (file: string, args: readonly string[]) => string;
+  private readonly runCommand: WindowsDirectoryCommand;
   private readonly windowsAcl: WindowsAcl;
 
   constructor(directory: string, options: Readonly<ProtectedFileOptions> = {}) {
@@ -54,10 +55,12 @@ export class ProtectedFileSystem {
   }
 
   ensureProtectedDirectory(): void {
-    let created = false;
     if (!this.pathExists(this.directory)) {
-      mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-      created = true;
+      if (this.platform === "win32") {
+        createWindowsPrivateDirectory(this.directory, this.currentWindowsIdentity().sid, this.runCommand);
+      } else {
+        mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+      }
     }
     const stat = lstatSync(this.directory);
     if (!stat.isDirectory() || stat.isSymbolicLink() || this.isWindowsReparsePoint(this.directory)) {
@@ -65,7 +68,6 @@ export class ProtectedFileSystem {
     }
     this.assertOwner(stat);
     if (this.platform === "win32") {
-      if (created) this.restrictWindowsAcl(this.directory, true);
       this.assertWindowsAcl(this.directory);
     } else if ((stat.mode & 0o777) !== 0o700) {
       throw new DaemonIdentityFileError("unsafe_permissions", "daemon directory permissions must be 0700");
@@ -228,12 +230,13 @@ function isNotFound(error: unknown): boolean {
 const WINDOWS_SECURITY_COMMAND_TIMEOUT_MS = 5_000;
 const WINDOWS_SECURITY_COMMAND_MAX_BUFFER_BYTES = 1024 * 1024;
 
-function defaultRunCommand(file: string, args: readonly string[]): string {
+function defaultRunCommand(file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
   const resolved = process.platform === "win32" && (file === "whoami" || file === "icacls")
     ? windowsCommandPath(file)
     : file;
   return execFileSync(resolved, [...args], {
     encoding: "utf8",
+    ...(environment === undefined ? {} : { env: { ...process.env, ...environment } }),
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
     timeout: WINDOWS_SECURITY_COMMAND_TIMEOUT_MS,
