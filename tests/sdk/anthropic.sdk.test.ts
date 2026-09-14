@@ -1,17 +1,12 @@
+import { CHAT_MODEL, MESSAGES_MODEL, NATIVE_RESPONSES_MODEL, PNG_BASE64, REASONING_MODEL, getWeather } from "./synthetic_scenarios.js";
 import Anthropic from "@anthropic-ai/sdk";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  CHAT_MODEL,
   decodeCapturedBody,
-  getWeather,
-  MESSAGES_MODEL,
-  NATIVE_RESPONSES_MODEL,
-  type OfflineSdkHarness,
-  PNG_BASE64,
-  REASONING_MODEL,
-  startOfflineSdkHarness,
+  type SyntheticSdkHarness,
+  startSyntheticSdkHarness,
   waitFor,
-} from "./harness.js";
+} from "./replay_harness.js";
 
 const WEATHER_TOOL = {
   name: "get_weather",
@@ -38,12 +33,17 @@ const CHAT_WEATHER_TOOL = {
 };
 
 describe("official Anthropic SDK", () => {
-  let harness: OfflineSdkHarness;
+  let harness: SyntheticSdkHarness;
   let client: Anthropic;
 
   beforeAll(async () => {
-    harness = await startOfflineSdkHarness();
+    harness = await startSyntheticSdkHarness();
     client = new Anthropic({ apiKey: "local", baseURL: harness.baseUrl, fetch: harness.fetch, maxRetries: 0 });
+  });
+  afterEach(async () => {
+    await waitFor(() => harness.transport.inspect().responseLeases === 0);
+    expect(harness.transport.inspect()).toMatchObject({ closed: false, responseLeases: 0, pools: { active: 0, waiters: 0 } });
+    harness.upstream.assertHealthy();
   });
   afterAll(async () => {
     await harness.close();
@@ -72,12 +72,12 @@ describe("official Anthropic SDK", () => {
     }
     expect(eventTypes[0]).toBe("message_start");
     expect(eventTypes.at(-1)).toBe("message_stop");
-    expect(decodeCapturedBody(harness.chatRequests[0]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[0]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "sdk-anthropic-nonstream" }],
       max_tokens: 8,
     });
-    expect(decodeCapturedBody(harness.chatRequests[1]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[1]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "sdk-anthropic-stream" }],
       max_tokens: 8,
@@ -87,8 +87,8 @@ describe("official Anthropic SDK", () => {
   });
 
   it("uses native Messages and converts Messages directly to Responses", async () => {
-    const messagesIndex = harness.messagesRequests.length;
-    const responsesIndex = harness.responsesRequests.length;
+    const messagesIndex = harness.requests("/v1/messages").length;
+    const responsesIndex = harness.requests("/responses").length;
     const native = await client.messages.create({
       model: MESSAGES_MODEL,
       max_tokens: 8,
@@ -102,12 +102,12 @@ describe("official Anthropic SDK", () => {
 
     expect(native.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
     expect(converted.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
-    expect(decodeCapturedBody(harness.messagesRequests[messagesIndex]!)).toMatchObject({
+    expect(decodeCapturedBody(harness.requests("/v1/messages")[messagesIndex]!)).toMatchObject({
       model: MESSAGES_MODEL,
       max_tokens: 8,
       messages: [{ role: "user", content: "messages-native" }],
     });
-    expect(decodeCapturedBody(harness.responsesRequests[responsesIndex]!)).toMatchObject({
+    expect(decodeCapturedBody(harness.requests("/responses")[responsesIndex]!)).toMatchObject({
       model: NATIVE_RESPONSES_MODEL,
       max_output_tokens: 8,
       input: [{
@@ -119,7 +119,7 @@ describe("official Anthropic SDK", () => {
   });
 
   it("translates a system prompt and ordinary multi-turn messages", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const message = await client.messages.create({
       model: CHAT_MODEL,
       max_tokens: 16,
@@ -132,7 +132,7 @@ describe("official Anthropic SDK", () => {
     });
 
     expect(message.content).toContainEqual(expect.objectContaining({ type: "text", text: "pong" }));
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [
         { role: "system", content: "Answer concisely." },
@@ -142,11 +142,11 @@ describe("official Anthropic SDK", () => {
       ],
       max_tokens: 16,
     });
-    expect(harness.chatRequests[requestIndex]!.hasVisionInput).toBe(false);
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
   });
 
   it("sends a base64 PNG as a Chat image input", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const message = await client.messages.create({
       model: CHAT_MODEL,
       max_tokens: 16,
@@ -160,7 +160,7 @@ describe("official Anthropic SDK", () => {
     });
 
     expect(message.content).toContainEqual(expect.objectContaining({ type: "text", text: "Image accepted." }));
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{
         role: "user",
@@ -171,11 +171,11 @@ describe("official Anthropic SDK", () => {
       }],
       max_tokens: 16,
     });
-    expect(harness.chatRequests[requestIndex]!.hasVisionInput).toBe(true);
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
   });
 
   it("performs a tool call and sends its tool_use and tool_result in a second HTTP request", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const first = await client.messages.create({
       model: CHAT_MODEL,
       max_tokens: 32,
@@ -222,14 +222,14 @@ describe("official Anthropic SDK", () => {
     });
 
     expect(second.content).toContainEqual(expect.objectContaining({ type: "text", text: "Tool result accepted." }));
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "What is the weather in Tokyo?" }],
       max_tokens: 32,
       tools: [CHAT_WEATHER_TOOL],
     });
-    expect(harness.chatRequests[requestIndex]!.hasVisionInput).toBe(false);
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex + 1]!)).toEqual({
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex + 1]!)).toEqual({
       model: CHAT_MODEL,
       messages: [
         { role: "user", content: "What is the weather in Tokyo?" },
@@ -247,11 +247,11 @@ describe("official Anthropic SDK", () => {
       max_tokens: 32,
       tools: [CHAT_WEATHER_TOOL],
     });
-    expect(harness.chatRequests[requestIndex + 1]!.hasVisionInput).toBe(false);
+    expect(harness.requests("/chat/completions")[requestIndex + 1]!.headers.get("copilot-vision-request")).toBe(null);
   });
 
   it("preserves image input and tool declarations in one request", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const message = await client.messages.create({
       model: CHAT_MODEL,
       max_tokens: 32,
@@ -266,7 +266,7 @@ describe("official Anthropic SDK", () => {
     });
 
     expect(message.content).toContainEqual(expect.objectContaining({ type: "tool_use", name: "get_weather" }));
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{
         role: "user",
@@ -278,11 +278,11 @@ describe("official Anthropic SDK", () => {
       max_tokens: 32,
       tools: [CHAT_WEATHER_TOOL],
     });
-    expect(harness.chatRequests[requestIndex]!.hasVisionInput).toBe(true);
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
   });
 
   it("assembles fragmented streamed tool arguments through MessageStream.finalMessage", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const stream = client.messages.stream({
       model: CHAT_MODEL,
       max_tokens: 32,
@@ -298,7 +298,7 @@ describe("official Anthropic SDK", () => {
       name: "get_weather",
       input: { city: "Tokyo" },
     }));
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "Stream the weather tool call." }],
       max_tokens: 32,
@@ -306,11 +306,11 @@ describe("official Anthropic SDK", () => {
       stream_options: { include_usage: true },
       tools: [CHAT_WEATHER_TOOL],
     });
-    expect(harness.chatRequests[requestIndex]!.hasVisionInput).toBe(false);
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
   });
 
   it("maps official reasoning effort and thinking budget parameters", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const effort = await client.messages.create({
       model: REASONING_MODEL,
       max_tokens: 16_384,
@@ -333,27 +333,27 @@ describe("official Anthropic SDK", () => {
     expect(effort.content).toContainEqual(expect.objectContaining({ type: "text", text: "Reasoned answer." }));
     expect(budget.content).toContainEqual(expect.objectContaining({ type: "text", text: "Reasoned answer." }));
     expect(extraHigh.content).toContainEqual(expect.objectContaining({ type: "text", text: "Reasoned answer." }));
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: REASONING_MODEL,
       messages: [{ role: "user", content: "Reason with maximum effort." }],
       max_tokens: 16_384,
       reasoning_effort: "xhigh",
     });
-    expect(harness.chatRequests[requestIndex]!.hasVisionInput).toBe(false);
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex + 1]!)).toEqual({
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex + 1]!)).toEqual({
       model: REASONING_MODEL,
       messages: [{ role: "user", content: "Reason within this budget." }],
       max_tokens: 16_384,
       reasoning_effort: "medium",
     });
-    expect(harness.chatRequests[requestIndex + 1]!.hasVisionInput).toBe(false);
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex + 2]!)).toEqual({
+    expect(harness.requests("/chat/completions")[requestIndex + 1]!.headers.get("copilot-vision-request")).toBe(null);
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex + 2]!)).toEqual({
       model: REASONING_MODEL,
       messages: [{ role: "user", content: "Reason with extra-high effort." }],
       max_tokens: 16_384,
       reasoning_effort: "xhigh",
     });
-    expect(harness.chatRequests[requestIndex + 2]!.hasVisionInput).toBe(false);
+    expect(harness.requests("/chat/completions")[requestIndex + 2]!.headers.get("copilot-vision-request")).toBe(null);
   });
 
   it("surfaces the official API error class and gateway request ID", async () => {
@@ -374,8 +374,13 @@ describe("official Anthropic SDK", () => {
     });
     const iterator = stream[Symbol.asyncIterator]();
     expect((await iterator.next()).done).toBe(false);
+    const exchange = harness.upstream.streams.at(-1)!;
+    expect(exchange).toMatchObject({ closed: false, ended: false });
+    expect(harness.transport.inspect()).toMatchObject({ responseLeases: 1, pools: { active: 1 } });
     stream.abort();
-    await waitFor(() => harness.cancelled.chat > 0);
-    expect(harness.backendKinds).toContain("chat-stream");
+    await exchange.waitForClose();
+    expect(exchange.ended).toBe(false);
+    expect(exchange.request.path).toBe("/chat/completions");
+    expect(decodeCapturedBody(exchange.request)).toMatchObject({ stream: true });
   });
 });

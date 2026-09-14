@@ -14,13 +14,13 @@ describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", 
   let harness: ReplaySdkHarness;
   let clients: SdkClients;
 
-  beforeAll(async () => {
-    harness = await startReplaySdkHarness();
-    clients = createSdkClients(harness);
-  });
-  afterAll(async () => { await harness.close(); });
-
   describe.each(SDK_PROTOCOLS)("%s downstream", (downstream) => {
+    beforeAll(async () => {
+      harness = await startReplaySdkHarness({ reasoningDownstream: downstream });
+      clients = createSdkClients(harness);
+    });
+    afterAll(async () => { await harness.close(); });
+
     it.each(REPLAY_TARGETS)("$protocol upstream preserves native reasoning or approved converted omission", async (target) => {
       const exchangeId = `replay.${target.protocol}.reasoning-effort.nonstream`;
       const exchange = harness.corpus.exchanges.find((candidate) => candidate.caseId === exchangeId)!;

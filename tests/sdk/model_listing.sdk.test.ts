@@ -1,13 +1,14 @@
+import { CHAT_MODEL } from "./synthetic_scenarios.js";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CHAT_MODEL, type OfflineSdkHarness, startOfflineSdkHarness } from "./harness.js";
+import { type SyntheticSdkHarness, startSyntheticSdkHarness } from "./replay_harness.js";
 
 describe("official SDK model listing", () => {
-  let harness: OfflineSdkHarness;
+  let harness: SyntheticSdkHarness;
 
   beforeAll(async () => {
-    harness = await startOfflineSdkHarness();
+    harness = await startSyntheticSdkHarness();
   });
   afterAll(async () => {
     await harness.close();
@@ -24,6 +25,7 @@ describe("official SDK model listing", () => {
 
     expect(openAiModels.data.map((model) => model.id)).toContain(CHAT_MODEL);
     expect(anthropicModels.data.map((model) => model.id)).toContain(CHAT_MODEL);
-    expect(harness.backendKinds).toEqual([]);
+    expect(harness.upstream.requests.map(({ method, path }) => ({ method, path }))).toEqual([{ method: "GET", path: "/models" }]);
+    expect(harness.transport.inspect()).toMatchObject({ closed: false, responseLeases: 0, pools: { active: 0, waiters: 0 } });
   });
 });

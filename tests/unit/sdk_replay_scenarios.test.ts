@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { parseReplayManifestText, validateReplayScenarios } from "../../src/replay/server.js";
 import { createReplayScenarios } from "../sdk/replay_scenarios.js";
+import { syntheticSdkExpectations } from "../sdk/synthetic_scenarios.js";
+import { REPLAY_TARGETS } from "../sdk/client.js";
 import { matchesSessionRequest } from "../sdk/session_expectations.js";
 import {
   expectedForecastArguments, FORECAST_COMPARE_PROMPT, FORECAST_TOOL_OPENAI, IMAGE_ANALYSIS_SYSTEM,
@@ -11,9 +13,9 @@ import {
   WEATHER_PARAMETERS, WEATHER_PROMPT, WEATHER_RESULT,
 } from "../sdk/scenarios.js";
 
-async function catalogue() {
+async function catalogue(reasoningDownstream?: "chat" | "messages" | "responses") {
   const manifest = parseReplayManifestText(await readFile(new URL("../sdk/corpus/manifest.json", import.meta.url), "utf8"));
-  return { manifest, scenarios: validateReplayScenarios(manifest.exchanges, await createReplayScenarios(manifest)) };
+  return { manifest, scenarios: validateReplayScenarios(manifest.exchanges, await createReplayScenarios(manifest, reasoningDownstream === undefined ? {} : { reasoningDownstream })) };
 }
 
 function predicate(scenarios: Awaited<ReturnType<typeof catalogue>>["scenarios"], id: string, step = 1) {
@@ -32,6 +34,80 @@ describe("structured SDK replay catalogue", () => {
     for (const scenario of scenarios) {
       expect(scenario.steps.map((step) => step.ordinal)).toEqual(scenario.steps.map((_, index) => index + 1));
       expect(scenario.steps.length).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it("matches complete authored synthetic request bodies, not prompt substrings or tool presence", () => {
+    const expectations = syntheticSdkExpectations().filter((entry) => entry.path === "/chat/completions");
+    const matches = (body: unknown) => expectations.some((entry) => typeof entry.body === "function" && entry.body(Buffer.from(JSON.stringify(body))));
+    const valid = { model: "chat-sdk", messages: [{ role: "user", content: "sdk-chat-nonstream" }] };
+    expect(matches(valid)).toBe(true);
+    expect(matches({ ...valid, unexpected: true })).toBe(false);
+    expect(matches({ ...valid, tools: [] })).toBe(false);
+    expect(matches({ ...valid, model: "unowned" })).toBe(false);
+    expect(matches({ ...valid, messages: [{ role: "assistant", content: "sdk-chat-nonstream" }] })).toBe(false);
+    expect(matches({ ...valid, messages: [{ role: "user", content: "prefix sdk-chat-nonstream suffix" }] })).toBe(false);
+  });
+
+  it("initializes replay target model IDs independently of harness imports", () => {
+    expect(REPLAY_TARGETS).toEqual([
+      { protocol: "chat", model: "gemini-3.5-flash" },
+      { protocol: "responses", model: "gpt-5.5" },
+      { protocol: "messages", model: "claude-sonnet-4" },
+    ]);
+  });
+
+  it.each(["chat", "messages", "responses"] as const)("pins native reasoning and only the approved converted absence for %s", async (downstream) => {
+    const { scenarios } = await catalogue(downstream);
+    for (const protocol of ["chat", "messages", "responses"] as const) {
+      const matches = predicate(scenarios, `replay.${protocol}.reasoning-effort.nonstream`);
+      const base = protocol === "responses"
+        ? { input: "Explain quantum entanglement in 20 words." }
+        : { messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }] };
+      const reasoning = protocol === "chat" ? { reasoning_effort: "low" }
+        : protocol === "responses" ? { reasoning: { effort: "low" } } : { output_config: { effort: "low" } };
+      expect(matches({ ...base, ...reasoning })).toBe(protocol === downstream);
+      expect(matches(base)).toBe(protocol !== downstream);
+      expect(matches(JSON.parse(JSON.stringify({ ...base, ...reasoning }).replace("\"low\"", "\"high\"")))).toBe(false);
+      expect(matches({ ...base, thinking: { type: "enabled", budget_tokens: 8000 } })).toBe(false);
+      expect(matches({ ...base, tools: [] })).toBe(false);
+      expect(matches(protocol === "responses" ? { input: "wrong" } : { messages: [{ role: "user", content: "wrong" }] })).toBe(false);
+    }
+  });
+
+  it.each(["chat", "messages"] as const)("matches exact normalized %s weather history, not arbitrary minimal transcripts", async (protocol) => {
+    const { manifest, scenarios } = await catalogue();
+    const file = manifest.exchanges.find((entry) => entry.caseId === `replay.${protocol}.tool-call.nonstream`)!.response.bodyFile;
+    const response = JSON.parse(await readFile(new URL(`../sdk/corpus/${file}`, import.meta.url), "utf8"));
+    const id: string = protocol === "chat" ? response.choices[0].message.tool_calls[0].id
+      : response.content.find((item: { type: string }) => item.type === "tool_use").id;
+    const call = protocol === "chat"
+      ? { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name: "get_weather", arguments: "{\"city\":\"Tokyo\"}" } }] }
+      : { role: "assistant", content: [{ type: "tool_use", id, name: "get_weather", input: { city: "Tokyo" } }] };
+    const result = protocol === "chat" ? { role: "tool", tool_call_id: id, content: WEATHER_RESULT }
+      : { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text: WEATHER_RESULT }] }] };
+    const user = { role: "user", content: protocol === "chat" ? WEATHER_PROMPT : [{ type: "text", text: WEATHER_PROMPT }] };
+    const matches = predicate(scenarios, `replay.${protocol}.weather-roundtrip`, 2);
+    const valid = { messages: [user, call, result] };
+    expect(matches(valid)).toBe(true);
+    expect(matches({ messages: [call, result] })).toBe(protocol === "chat");
+    if (protocol === "messages") expect(matches({ messages: [
+      { role: "user", content: [{ type: "text", text: "Use the tool result for the original task." }] }, call, result,
+    ] })).toBe(true);
+    expect(matches({ messages: [result, call] })).toBe(false);
+    expect(matches({ messages: [user, user, call, result] })).toBe(false);
+    expect(matches({ messages: [user, result] })).toBe(false);
+    expect(matches({ ...valid, previous_response_id: "resp_unowned" })).toBe(false);
+    expect(matches(JSON.parse(JSON.stringify(valid).replaceAll(id, "wrong_id")))).toBe(false);
+    expect(matches(JSON.parse(JSON.stringify(valid).replace("get_weather", "wrong_function")))).toBe(false);
+    expect(matches(JSON.parse(JSON.stringify(valid).replace("Tokyo", "Paris")))).toBe(false);
+    if (protocol === "messages") {
+      const mutated = structuredClone(valid) as { messages: { content: unknown }[] };
+      mutated.messages[0]!.content = [{ type: "text", text: WEATHER_PROMPT }, { type: "text", text: "extra" }];
+      expect(matches(mutated)).toBe(false);
+      mutated.messages[0]!.content = [{ type: "image", source: { type: "url", url: "https://example.invalid/image" } }];
+      expect(matches(mutated)).toBe(false);
+      expect(matches({ messages: [user, call, { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text: WEATHER_RESULT }, { type: "text", text: "extra" }] }] }] })).toBe(false);
     }
   });
 
