@@ -82,6 +82,7 @@ jobs:
       - name: Test
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          GHCG_WINDOWS_LIFECYCLE_DIAGNOSTICS_DIR: ${{ runner.os == 'Windows' && format('{0}/artifacts/ci/windows-lifecycle', github.workspace) || '' }}
           NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm test
       - name: Verify fixtures
@@ -107,6 +108,7 @@ jobs:
       - name: Installed package smoke
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          GHCG_WINDOWS_LIFECYCLE_DIAGNOSTICS_DIR: ${{ runner.os == 'Windows' && format('{0}/artifacts/ci/windows-lifecycle', github.workspace) || '' }}
           NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm run pack
       - uses: actions/upload-artifact@v4

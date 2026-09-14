@@ -119,10 +119,12 @@ export class DaemonController {
         context.signal,
       );
     } catch (error: unknown) {
+      emitWindowsLifecycleDiagnostic("inspection", "identity_read_error");
       rethrowCancellation(error, context.signal);
       throw new CliError("security_error");
     }
     if (identity === null) {
+      emitWindowsLifecycleDiagnostic("inspection", "identity_missing");
       return { result: emptyResult("stopped", resolvedDataDir), identity };
     }
 
@@ -141,6 +143,7 @@ export class DaemonController {
         context.deadlineMs,
         context.signal,
       );
+      emitWindowsLifecycleDiagnostic("inspection", removed ? "stale_removed" : "stale_remove_failed");
       return {
         result: identityResult(removed ? "stale" : "conflict", identity, resolvedDataDir),
         identity,
@@ -156,15 +159,19 @@ export class DaemonController {
         context.deadlineMs,
         context.signal,
       );
+      const valid = validControlResponse(response, identity, true);
+      emitWindowsLifecycleDiagnostic("inspection", valid ? "status_valid" : "status_invalid");
       return {
-        result: identityResult(validControlResponse(response, identity, true) ? "running" : "conflict", identity, resolvedDataDir),
+        result: identityResult(valid ? "running" : "conflict", identity, resolvedDataDir),
         identity,
       };
     } catch (error: unknown) {
       rethrowCancellation(error, context.signal);
       if (error instanceof CliError && (error.code === "security_error" || error.code === "daemon_conflict")) {
+        emitWindowsLifecycleDiagnostic("inspection", "status_conflict");
         return { result: identityResult("conflict", identity, resolvedDataDir), identity };
       }
+      emitWindowsLifecycleDiagnostic("inspection", "status_unreachable");
       return { result: identityResult("unreachable", identity, resolvedDataDir), identity };
     }
   }
@@ -183,6 +190,18 @@ export class DaemonController {
     startup: Readonly<StartupConfig>,
     context: Readonly<DaemonLifecycleContext>,
   ): Promise<CliLifecycleResult> {
+    try {
+      return await this.performStartWithinLane(startup, context);
+    } catch (error: unknown) {
+      emitWindowsLifecycleDiagnostic("start", "start_failed");
+      throw error;
+    }
+  }
+
+  private async performStartWithinLane(
+    startup: Readonly<StartupConfig>,
+    context: Readonly<DaemonLifecycleContext>,
+  ): Promise<CliLifecycleResult> {
     const resolvedDataDir = path.resolve(startup.dataDir);
     const deadline = this.dependencies.nowMs() + START_TIMEOUT_MS;
     let existing: CliLifecycleResult;
@@ -193,27 +212,44 @@ export class DaemonController {
       })).result;
     } catch (error: unknown) {
       if (isDeadlineTimeout(error)) {
-        return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+        const result = identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+        emitWindowsLifecycleDiagnostic("start", "start_result", result.state);
+        return result;
       }
       throw error;
     }
+    emitWindowsLifecycleDiagnostic("start", "start_initial_state", existing.state);
     if (existing.state === "running" || existing.state === "conflict" || existing.state === "unreachable") {
+      emitWindowsLifecycleDiagnostic("start", "start_result", existing.state);
       return existing;
     }
 
     context.signal?.throwIfAborted();
     if (this.dependencies.nowMs() >= deadline) {
-      return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+      const result = identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+      emitWindowsLifecycleDiagnostic("start", "start_result", result.state);
+      return result;
     }
-    const child = await this.runBeforeDeadline(
-      (dependencyContext) => this.dependencies.spawn(startup, dependencyContext),
-      deadline,
-      undefined,
-      true,
-    );
+    let child: SpawnedDaemon;
+    try {
+      child = await this.runBeforeDeadline(
+        (dependencyContext) => this.dependencies.spawn(startup, dependencyContext),
+        deadline,
+        undefined,
+        true,
+      );
+    } catch (error: unknown) {
+      emitWindowsLifecycleDiagnostic("start", "start_spawn_failure");
+      throw error;
+    }
+    emitWindowsLifecycleDiagnostic("start", "start_spawned");
     let spawned: ProcessIdentityReference | null = null;
     try {
       spawned = await this.captureSpawnedIdentity(child.pid);
+      emitWindowsLifecycleDiagnostic(
+        "start",
+        spawned === null ? "start_identity_missing" : "start_identity_captured",
+      );
       context.signal?.throwIfAborted();
       while (this.dependencies.nowMs() < deadline) {
         try {
@@ -236,6 +272,8 @@ export class DaemonController {
         try {
           const inspection = await this.inspectWithinLane(startup.dataDir, { ...context, deadlineMs: deadline });
           if (inspection.result.state === "running") {
+            emitWindowsLifecycleDiagnostic("start", "start_running", inspection.result.state);
+            emitWindowsLifecycleDiagnostic("start", "start_result", inspection.result.state);
             return inspection.result;
           }
         } catch (error: unknown) {
@@ -246,10 +284,26 @@ export class DaemonController {
         }
       }
 
-      await this.cleanupFailedStart(startup.dataDir, child.pid, spawned);
-      return identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+      emitWindowsLifecycleDiagnostic("start", "start_readiness_expired");
+      try {
+        await this.cleanupFailedStart(startup.dataDir, child.pid, spawned);
+        emitWindowsLifecycleDiagnostic("start", "start_cleanup_complete");
+      } catch (error: unknown) {
+        emitWindowsLifecycleDiagnostic("start", "start_cleanup_failure");
+        throw error;
+      }
+      const result = identityResult("unreachable", await this.readIdentityOrNull(startup.dataDir), resolvedDataDir);
+      emitWindowsLifecycleDiagnostic("start", "start_result", result.state);
+      return result;
     } catch (error: unknown) {
-      await this.cleanupFailedStart(startup.dataDir, child.pid, spawned);
+      emitWindowsLifecycleDiagnostic("start", "start_error_cleanup");
+      try {
+        await this.cleanupFailedStart(startup.dataDir, child.pid, spawned);
+        emitWindowsLifecycleDiagnostic("start", "start_cleanup_complete");
+      } catch (cleanupError: unknown) {
+        emitWindowsLifecycleDiagnostic("start", "start_cleanup_failure");
+        throw cleanupError;
+      }
       rethrowCancellation(error, context.signal);
       throw error;
     } finally {
@@ -291,9 +345,11 @@ export class DaemonController {
     }
     const identity = inspection.identity;
     if (identity === null) {
+      emitWindowsLifecycleDiagnostic("stop", "stop_identity_missing");
       return identityResult("conflict", identity, resolvedDataDir);
     }
     if (!identity.managed) {
+      emitWindowsLifecycleDiagnostic("stop", "stop_unmanaged");
       return identityResult("conflict", identity, resolvedDataDir);
     }
 
@@ -310,13 +366,16 @@ export class DaemonController {
       );
       if (this.dependencies.nowMs() > stopRequestDeadline) throw new CliError("timeout");
       if (!validControlResponse(response, identity, false)) {
+        emitWindowsLifecycleDiagnostic("stop", "stop_response_invalid");
         return identityResult("conflict", identity, resolvedDataDir);
       }
     } catch (error: unknown) {
       if (!isDeadlineTimeout(error)) {
         rethrowCancellation(error, context.signal);
+        emitWindowsLifecycleDiagnostic("stop", "stop_request_unreachable");
         return identityResult("unreachable", identity, resolvedDataDir);
       }
+      emitWindowsLifecycleDiagnostic("stop", "stop_request_timeout");
     }
 
     const graceDeadline = this.dependencies.nowMs() + STOP_TIMEOUT_MS;
@@ -340,10 +399,15 @@ export class DaemonController {
         throw error;
       }
       if (processState.kind === "dead") {
+        emitWindowsLifecycleDiagnostic("stop", "grace_process_dead");
         await this.removeIdentityBeforeDeadline(resolvedDataDir, identity, graceDeadline);
         return emptyResult("stopped", resolvedDataDir);
       }
       if (processState.kind !== "same") {
+        emitWindowsLifecycleDiagnostic(
+          "stop",
+          processState.kind === "different" ? "grace_process_different" : "grace_process_unknown",
+        );
         return identityResult("conflict", identity, resolvedDataDir);
       }
       if (remainingMs(graceDeadline, this.dependencies.nowMs()) <= POLL_INTERVAL_MS) {
@@ -351,6 +415,7 @@ export class DaemonController {
       }
     }
 
+    emitWindowsLifecycleDiagnostic("stop", "grace_expired");
     const forceDeadline = this.dependencies.nowMs() + FORCE_STOP_TIMEOUT_MS;
     let terminationError: unknown;
     try {
@@ -360,8 +425,10 @@ export class DaemonController {
         undefined,
         true,
       );
+      emitWindowsLifecycleDiagnostic("stop", "terminate_success");
     } catch (error: unknown) {
       terminationError = error;
+      emitWindowsLifecycleDiagnostic("stop", "terminate_failure");
     }
     let afterTerminate = await this.waitForTermination(
       identity,
@@ -378,6 +445,7 @@ export class DaemonController {
       );
     }
     if (afterTerminate.kind === "dead") {
+      emitWindowsLifecycleDiagnostic("stop", "force_process_dead");
       await this.removeIdentityBeforeDeadline(
         resolvedDataDir,
         identity,
@@ -386,8 +454,15 @@ export class DaemonController {
       return emptyResult("stopped", resolvedDataDir);
     }
     if (afterTerminate.kind === "same" && await this.readIdentityOrNull(resolvedDataDir) === null) {
+      emitWindowsLifecycleDiagnostic("stop", "force_same_identity_missing");
       return emptyResult("stopped", resolvedDataDir);
     }
+    emitWindowsLifecycleDiagnostic(
+      "stop",
+      afterTerminate.kind === "same"
+        ? "force_process_same"
+        : afterTerminate.kind === "different" ? "force_process_different" : "force_process_unknown",
+    );
     if (terminationError !== undefined && afterTerminate.kind === "same") throw terminationError;
     return identityResult(afterTerminate.kind === "same" ? "unreachable" : "conflict", identity, resolvedDataDir);
   }
@@ -415,8 +490,12 @@ export class DaemonController {
           if (stopped.state !== "unreachable") break;
         }
       }
+      emitWindowsLifecycleDiagnostic("restart", "restart_stop_result", stopped.state);
       if (stopped.state !== "stopped" && stopped.state !== "stale") return stopped;
-      return await this.startWithinLane(effectiveStartup, withinContext);
+      emitWindowsLifecycleDiagnostic("restart", "restart_start");
+      const restarted = await this.startWithinLane(effectiveStartup, withinContext);
+      emitWindowsLifecycleDiagnostic("restart", "restart_start_result", restarted.state);
+      return restarted;
     });
   }
 
@@ -455,11 +534,15 @@ export class DaemonController {
     initiallyCaptured: Readonly<ProcessIdentityReference> | null,
   ): Promise<void> {
     const spawned = initiallyCaptured ?? await this.captureSpawnedIdentity(pid, true);
-    if (spawned === null) return;
+    if (spawned === null) {
+      emitWindowsLifecycleDiagnostic("start", "start_cleanup_no_identity");
+      return;
+    }
     const forceDeadline = this.dependencies.nowMs() + FORCE_STOP_TIMEOUT_MS;
     const fresh = await this.readProcessIdentity(spawned, undefined, forceDeadline);
     if (fresh.kind !== "same") {
       await this.removeSpawnedIdentityIfOwned(dataDir, spawned);
+      emitWindowsLifecycleDiagnostic("start", "start_cleanup_not_same");
       return;
     }
     let terminationFailed = false;
@@ -480,7 +563,10 @@ export class DaemonController {
     );
     if (afterTerminate.kind === "dead") {
       await this.removeSpawnedIdentityIfOwned(dataDir, spawned);
+      emitWindowsLifecycleDiagnostic("start", "start_cleanup_dead");
+      return;
     }
+    emitWindowsLifecycleDiagnostic("start", "start_cleanup_incomplete");
   }
 
   private async removeSpawnedIdentityIfOwned(
@@ -568,10 +654,17 @@ export class DaemonController {
         signal,
       );
       if (actual === null) {
+        emitWindowsLifecycleDiagnostic("process_identity", "process_dead");
         return { kind: "dead" };
       }
-      return { kind: actual === identity.processStartIdentity ? "same" : "different" };
+      const kind = actual === identity.processStartIdentity ? "same" : "different";
+      emitWindowsLifecycleDiagnostic(
+        "process_identity",
+        kind === "same" ? "process_same" : "process_different",
+      );
+      return { kind };
     } catch (error: unknown) {
+      emitWindowsLifecycleDiagnostic("process_identity", "process_unknown");
       rethrowCancellation(error, signal);
       return { kind: "unknown" };
     }
@@ -654,6 +747,39 @@ function rethrowCancellation(error: unknown, signal: AbortSignal | undefined): v
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type WindowsLifecycleDiagnosticPhase = "inspection" | "start" | "stop" | "restart" | "process_identity";
+type WindowsLifecycleDiagnosticDecision =
+  | "identity_missing" | "identity_read_error" | "process_same" | "process_different" | "process_dead" | "process_unknown"
+  | "stale_removed" | "stale_remove_failed" | "status_valid" | "status_invalid" | "status_conflict" | "status_unreachable"
+  | "start_initial_state" | "start_spawn_failure" | "start_spawned" | "start_identity_missing" | "start_identity_captured"
+  | "start_running" | "start_readiness_expired" | "start_error_cleanup" | "start_cleanup_no_identity"
+  | "start_cleanup_not_same" | "start_cleanup_dead" | "start_cleanup_incomplete" | "start_cleanup_complete"
+  | "start_cleanup_failure" | "start_failed" | "start_result"
+  | "stop_identity_missing" | "stop_unmanaged" | "stop_response_invalid" | "stop_request_timeout" | "stop_request_unreachable"
+  | "grace_process_dead" | "grace_process_different" | "grace_process_unknown" | "grace_expired"
+  | "terminate_success" | "terminate_failure" | "force_process_dead" | "force_same_identity_missing" | "force_process_same"
+  | "force_process_different" | "force_process_unknown" | "restart_stop_result" | "restart_start" | "restart_start_result";
+
+function emitWindowsLifecycleDiagnostic(
+  phase: WindowsLifecycleDiagnosticPhase,
+  decision: WindowsLifecycleDiagnosticDecision,
+  state?: CliLifecycleResult["state"],
+): void {
+  if (process.platform !== "win32") return;
+  const hook = (globalThis as unknown as {
+    __ghcgWindowsLifecycleDiagnostic?: (event: Readonly<Record<string, unknown>>) => void;
+  }).__ghcgWindowsLifecycleDiagnostic;
+  try {
+    hook?.({
+      phase,
+      decision,
+      ...(state === undefined ? {} : { state }),
+    });
+  } catch {
+    // Diagnostics must never affect lifecycle decisions.
+  }
 }
 
 async function withCooperativeDeadline<T>(
