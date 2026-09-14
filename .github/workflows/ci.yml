@@ -85,6 +85,14 @@ jobs:
           GHCG_WINDOWS_LIFECYCLE_DIAGNOSTICS_DIR: ${{ runner.os == 'Windows' && format('{0}/artifacts/ci/windows-lifecycle', github.workspace) || '' }}
           NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm test
+      - name: Diagnostic installed package smoke after Windows test failure
+        if: failure() && runner.os == 'Windows'
+        continue-on-error: true
+        env:
+          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
+          GHCG_WINDOWS_LIFECYCLE_DIAGNOSTICS_DIR: ${{ format('{0}/artifacts/ci/windows-lifecycle', github.workspace) }}
+          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
+        run: npm run pack
       - name: Verify fixtures
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"

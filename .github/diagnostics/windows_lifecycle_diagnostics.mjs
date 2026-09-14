@@ -80,7 +80,10 @@ function install(directory) {
       finish(active, { outcome: "success" });
       return result;
     } catch (error) {
-      finish(active, { outcome: "failure", ...errorEvidence(error, active?.evidence.timeoutMs) });
+      finish(active, {
+        outcome: "failure",
+        ...errorEvidence(error, active?.evidence.timeoutMs, active?.evidence.purpose),
+      });
       throw error;
     }
   };
@@ -320,7 +323,7 @@ function lifecycleEvidence(event) {
   };
 }
 
-function errorEvidence(error, timeoutMs = null) {
+function errorEvidence(error, timeoutMs = null, purpose = null) {
   const rawCode = error !== null && typeof error === "object" && typeof error.code === "string"
     ? error.code : null;
   const knownCodes = new Map([
@@ -339,7 +342,20 @@ function errorEvidence(error, timeoutMs = null) {
       : null,
     childProcessId: error !== null && typeof error === "object" ? safeProcessId(error.pid) : null,
     signal: safeSignal(error !== null && typeof error === "object" ? error.signal : null),
+    directoryPhase: purpose === "directory_create" ? safeDirectoryPhase(error) : null,
   };
+}
+
+function safeDirectoryPhase(error) {
+  const output = error !== null && typeof error === "object" ? error.stdout : undefined;
+  const text = Buffer.isBuffer(output) ? output.toString("utf8") : typeof output === "string" ? output : "";
+  if (Buffer.byteLength(text, "utf8") > 1024) return null;
+  const allowed = new Set(["script_started", "sid_ready", "security_ready", "create_begin", "create_complete"]);
+  const phases = text.split(/\r?\n/u).flatMap((line) => {
+    const match = /^GHCG_PHASE:(.+)$/u.exec(line);
+    return match?.[1] !== undefined && allowed.has(match[1]) ? [match[1]] : [];
+  });
+  return phases.at(-1) ?? null;
 }
 
 function processRole(argv, environment) {
