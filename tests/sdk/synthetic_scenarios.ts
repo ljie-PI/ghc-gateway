@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { HttpExpectation } from "../../scripts/tooling/test_support/copilot_http.js";
+import type { HttpExpectation, HttpRequestObservation } from "../../scripts/tooling/test_support/copilot_http.js";
 
 export const CHAT_MODEL = "chat-sdk";
 export const REASONING_MODEL = "gpt-5";
@@ -321,8 +321,9 @@ function messagesSse(event: string, value: unknown): Uint8Array {
   return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`);
 }
 
-/** Authored synthetic requests; response bytes are fixed before the HTTP listener sees a request. */
-export function syntheticSdkExpectations(): readonly HttpExpectation[] {
+/** Optional single-use fixture catalog; each SDK case separately asserts its exact HTTP operation delta.
+ * Response bytes are fixed before the HTTP listener sees a request. */
+export function syntheticSdkFixtureCatalog(): readonly HttpExpectation[] {
   const requests: { path: string; body: Record<string, unknown> }[] = [];
   const chat = (body: Record<string, unknown>) => requests.push({ path: "/chat/completions", body });
   const responses = (body: Record<string, unknown>) => requests.push({ path: "/responses", body });
@@ -382,7 +383,7 @@ export function syntheticSdkExpectations(): readonly HttpExpectation[] {
   for (const text of ["chat-to-messages", "responses-to-messages"]) messages({ model: MESSAGES_MODEL, max_tokens: 4096, messages: [user([{ type: "text", text }])] });
   messages({ model: MESSAGES_MODEL, max_tokens: 8, messages: [user("messages-native")] });
   return [
-    { method: "GET", path: "/models", body: new Uint8Array(), times: 8, reply: { headers: { "content-type": "application/json" }, body: jsonBytes(SYNTHETIC_MODELS) } },
+    { method: "GET", path: "/models", body: new Uint8Array(), reply: { headers: { "content-type": "application/json" }, body: jsonBytes(SYNTHETIC_MODELS) } },
     ...requests.map(({ path, body }): HttpExpectation => {
       const bytes = jsonBytes(body);
       const streaming = body.stream === true;
@@ -394,7 +395,7 @@ export function syntheticSdkExpectations(): readonly HttpExpectation[] {
           : [responsesSse("response.created", { type: "response.created", response: responsesObject("in_progress") })]
         : protocol === "chat" ? syntheticChatStream(bytes) : protocol === "responses" ? syntheticResponsesStream(bytes) : syntheticMessagesStream(bytes);
       return {
-        method: "POST", path, times: 8,
+        method: "POST", path,
         headers: { "content-type": "application/json" },
         body: (actual) => isDeepStrictEqual(decodedBody(actual), body),
         reply: streaming ? { headers, async stream(exchange) {
@@ -405,4 +406,15 @@ export function syntheticSdkExpectations(): readonly HttpExpectation[] {
       };
     }),
   ];
+}
+
+export type SyntheticOperation = readonly [path: "/chat/completions" | "/responses" | "/v1/messages", stream: boolean];
+
+/** Catalog discovery is counted separately for the suite; every inference is ordered and counted per case. */
+export function assertSyntheticOperations(requests: readonly HttpRequestObservation[], expected: readonly SyntheticOperation[]): void {
+  const actual = requests.filter((request) => !(request.method === "GET" && request.path === "/models"))
+    .map((request) => [request.method, request.path, decodedBody(request.body).stream === true]);
+  if (!isDeepStrictEqual(actual, expected.map(([path, stream]) => ["POST", path, stream]))) {
+    throw new Error("synthetic SDK HTTP operation sequence mismatch");
+  }
 }

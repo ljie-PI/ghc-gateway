@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { Socket } from "node:net";
+import { Socket } from "node:net";
 
 /** Synthetic data only. Never point credentials or captured upstream content at this responder. */
 export interface HttpRequestObservation {
@@ -45,7 +45,9 @@ export interface HttpMockLimits {
   readonly retainedBodyBytes: number;
   readonly activeExchanges: number;
   readonly sockets: number;
+  /** At least 3ms, leaving room for Node's header deadline and its checking interval. */
   readonly waitMs: number;
+  readonly keepAliveMs: number;
 }
 
 class HttpStreamClosedError extends Error {
@@ -54,7 +56,7 @@ class HttpStreamClosedError extends Error {
 
 const DEFAULT_LIMITS: HttpMockLimits = {
   requests: 128, bodyBytes: 1024 * 1024, responseBytes: 8 * 1024 * 1024,
-  retainedBodyBytes: 8 * 1024 * 1024, activeExchanges: 8, sockets: 16, waitMs: 5_000,
+  retainedBodyBytes: 8 * 1024 * 1024, activeExchanges: 8, sockets: 16, waitMs: 5_000, keepAliveMs: 1_000,
 };
 
 /** A bounded HTTP seam, deliberately independent of Vitest and CopilotBackend. */
@@ -64,7 +66,8 @@ export async function startCopilotHttpMock(options: {
 } = {}) {
   const limits = { ...DEFAULT_LIMITS, ...options.limits };
   for (const [key, value] of Object.entries(limits)) {
-    if (!Number.isSafeInteger(value) || value <= 0 || value > DEFAULT_LIMITS[key as keyof HttpMockLimits]) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > DEFAULT_LIMITS[key as keyof HttpMockLimits]
+      || (key === "waitMs" && value < 3)) {
       throw new Error("invalid synthetic HTTP limit");
     }
   }
@@ -73,6 +76,7 @@ export async function startCopilotHttpMock(options: {
   const streams: HttpStreamControl[] = [];
   const sockets = new Set<Socket>();
   const matchedSockets = new WeakSet<object>();
+  const socketWork = new WeakMap<Socket, { unfinished: number; completedReadBytes: number | undefined }>();
   let attempts = 0;
   let retainedBodyBytes = 0;
   let activeExchanges = 0;
@@ -99,16 +103,26 @@ export async function startCopilotHttpMock(options: {
     if (typeof result !== "boolean") throw new Error("invalid synthetic predicate result");
     return result === true;
   }
-  const server = createServer({ maxHeaderSize: 16 * 1024 }, (request, response) => {
+  const keepAliveTimeout = Math.min(limits.keepAliveMs, limits.waitMs);
+  const keepAliveTimeoutBuffer = 1_000;
+  // Let Node's parser reject even partial pipelined headers before either socket timer
+  // can mistake them for idle. The header deadline plus checking interval uses at most
+  // two thirds of the earlier deadline, including at the minimum configurable wait.
+  const headerCheckMs = Math.floor(Math.min(limits.waitMs, keepAliveTimeout + keepAliveTimeoutBuffer) / 3);
+  const server = createServer({
+    maxHeaderSize: 16 * 1024, headersTimeout: headerCheckMs,
+    connectionsCheckingInterval: headerCheckMs, requestTimeout: limits.waitMs,
+  }, (request, response) => {
     const handler = handle(request, response).catch((error: unknown) => {
       if (!stopped && !(response.destroyed && error instanceof HttpStreamClosedError)) fail("exchange failed");
       response.destroy();
     }).finally(() => handlers.delete(handler));
     handlers.add(handler);
   });
-  server.requestTimeout = limits.waitMs;
-  server.headersTimeout = limits.waitMs;
-  server.keepAliveTimeout = Math.min(1_000, limits.waitMs);
+  // Node restores server.timeout when a keep-alive connection starts another request.
+  server.timeout = limits.waitMs;
+  server.keepAliveTimeout = keepAliveTimeout;
+  server.keepAliveTimeoutBuffer = keepAliveTimeoutBuffer;
   server.on("connection", (socket) => {
     if (stopped || sockets.size >= limits.sockets) {
       fail("socket limit");
@@ -116,18 +130,36 @@ export async function startCopilotHttpMock(options: {
       return;
     }
     sockets.add(socket);
+    const work = { unfinished: 0, completedReadBytes: undefined as number | undefined };
+    socketWork.set(socket, work);
     socket.once("close", () => sockets.delete(socket));
-    socket.setTimeout(limits.waitMs, () => { fail("socket timeout"); socket.destroy(); });
+    socket.setTimeout(limits.waitMs, () => {
+      // Node reuses this listener for keep-alive expiry after a completed response.
+      // Later socket reads and unfinished (including pipelined) responses are not idle.
+      if (work.unfinished !== 0 || work.completedReadBytes !== socket.bytesRead) fail("socket timeout");
+      socket.destroy();
+    });
   });
   server.on("clientError", (error, socket) => {
     // Cancelling a matched response may reset the socket before its flushed headers are read.
-    if ((error as NodeJS.ErrnoException).code !== "ECONNRESET" || !matchedSockets.has(socket)) {
+    if ((error as NodeJS.ErrnoException).code === "ERR_HTTP_REQUEST_TIMEOUT") {
+      // Undici may open a spare connection without sending any HTTP bytes.
+      if (!(socket instanceof Socket && socket.bytesRead === 0)) fail("request timeout");
+    } else if ((error as NodeJS.ErrnoException).code !== "ECONNRESET" || !matchedSockets.has(socket)) {
       fail("invalid HTTP request");
     }
     socket.destroy();
   });
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const socket = request.socket;
+    const work = socketWork.get(socket)!;
+    work.unfinished += 1;
+    response.once("finish", () => {
+      work.unfinished -= 1;
+      if (work.unfinished === 0) work.completedReadBytes = socket.bytesRead;
+    });
+    response.once("close", () => { if (!response.writableFinished) work.unfinished -= 1; });
     const timer = setTimeout(() => { fail("exchange timeout"); request.destroy(); response.destroy(); }, limits.waitMs);
     response.once("close", () => clearTimeout(timer));
     if (activeExchanges >= limits.activeExchanges) {

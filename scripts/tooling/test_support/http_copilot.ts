@@ -1,6 +1,6 @@
 import { EndpointDiscovery } from "../../../src/copilot/endpoint_discovery.js";
 import { HttpCopilotBackend, type CopilotTransportDeps } from "../../../src/copilot/transport.js";
-import { startCopilotHttpMock, type HttpExpectation } from "./copilot_http.js";
+import { startCopilotHttpMock, type CopilotHttpMock, type HttpExpectation } from "./copilot_http.js";
 
 /** Compose the production transport, with synthetic credentials supplied by the caller. */
 export async function startHttpCopilot(options: {
@@ -70,6 +70,19 @@ export async function waitForHttp(check: () => boolean): Promise<void> {
     if (Date.now() >= deadline) throw new Error("HTTP fixture barrier timed out");
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
+}
+
+/** Prove a matched held response was canceled, not hidden by fixture teardown or pre-dispatch failure. */
+export async function assertHeldHttpExchangeReleased(upstream: CopilotHttpMock, backend: HttpCopilotBackend): Promise<void> {
+  upstream.assertSatisfied();
+  if (upstream.requests.length !== 1 || upstream.streams.length !== 1 || upstream.streams[0]!.ended) {
+    throw new Error("HTTP fixture expected one unfinished matched exchange");
+  }
+  await upstream.streams[0]!.waitForClose();
+  await waitForHttp(() => upstream.socketCount === 0 && upstream.activeExchanges === 0);
+  if (backend.inspect().closed) throw new Error("HTTP fixture transport already closed");
+  upstream.assertSatisfied();
+  assertTransportReleased(backend);
 }
 
 export function assertTransportReleased(backend: HttpCopilotBackend): void {

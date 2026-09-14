@@ -1,3 +1,4 @@
+import { assertSyntheticOperations } from "./synthetic_scenarios.js";
 import { CHAT_MODEL } from "./synthetic_scenarios.js";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
@@ -15,6 +16,7 @@ describe("official SDK model listing", () => {
   });
 
   it("deserializes the shared catalog with OpenAI and Anthropic clients", async () => {
+    const httpStart = harness.upstream.requests.length;
     const openai = new OpenAI({ apiKey: "local", baseURL: harness.openAiBaseUrl, fetch: harness.fetch, maxRetries: 0 });
     const anthropic = new Anthropic({ apiKey: "local", baseURL: harness.baseUrl, fetch: harness.fetch, maxRetries: 0 });
 
@@ -27,5 +29,6 @@ describe("official SDK model listing", () => {
     expect(anthropicModels.data.map((model) => model.id)).toContain(CHAT_MODEL);
     expect(harness.upstream.requests.map(({ method, path }) => ({ method, path }))).toEqual([{ method: "GET", path: "/models" }]);
     expect(harness.transport.inspect()).toMatchObject({ closed: false, responseLeases: 0, pools: { active: 0, waiters: 0 } });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), []);
   });
 });

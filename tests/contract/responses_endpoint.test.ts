@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
-import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream, waitForHttp, assertTransportReleased, assertHeldHttpExchangeReleased } from "../../scripts/tooling/test_support/http_copilot.js";
 import type { HttpExpectation } from "../../scripts/tooling/test_support/copilot_http.js";
 import type { CopilotTransportDeps } from "../../src/copilot/transport.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
@@ -483,6 +483,7 @@ describe("Responses endpoint", () => {
         "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
       );
       expect(timeoutUsage).toMatchObject([{ outcome: "timeout" }]);
+      expect(timeoutGateway.upstream.requests).toHaveLength(0);
     } finally {
       await timeoutGateway.close();
     }
@@ -507,17 +508,22 @@ describe("Responses endpoint", () => {
 
   it.each(["native", "chat"] as const)("normalizes %s transport timeout before commitment", async (model) => {
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 250;
-    const { gw, close } = await responsesGateway({ runtime, expectations: [{
+    runtime.timeouts.firstByteMs = 1_000;
+    runtime.timeouts.connectMs = 2_000;
+    runtime.timeouts.totalMs = 4_000;
+    const { gw, upstream, backend, close } = await responsesGateway({ runtime, expectations: [{
       method: "POST", path: model === "native" ? "/responses" : "/chat/completions", body: jsonStream(false),
       reply: { stream: async (exchange) => { await exchange.waitForClose(); } },
     }] });
     try {
-      const response = await gw.fetch(responsesRequest({ model, input: "hi" }));
+      const pending = gw.fetch(responsesRequest({ model, input: "hi" }));
+      await waitForHttp(() => upstream.streams.length === 1);
+      const response = await pending;
       expect(response.status).toBe(504);
       expect(await response.text()).toBe(
         "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
       );
+      await assertHeldHttpExchangeReleased(upstream, backend);
     } finally {
       await close();
     }
@@ -552,7 +558,10 @@ describe("Responses endpoint", () => {
   it.each(["native", "chat"] as const)("keeps %s internal deadline distinct from client abort before commitment", async (model) => {
     const timeoutUsage: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.totalMs = 250;
+    runtime.timeouts.totalMs = 1_500;
+    runtime.timeouts.firstByteMs = 3_000;
+    runtime.timeouts.streamIdleMs = 4_000;
+    runtime.timeouts.connectMs = 4_500;
     const timedOutGateway = await responsesGateway({
       runtime,
       expectations: [{ method: "POST", path: model === "native" ? "/responses" : "/chat/completions", body: jsonStream(true),
@@ -561,7 +570,9 @@ describe("Responses endpoint", () => {
       usageUpdates: timeoutUsage,
     });
     try {
-      const response = await timedOutGateway.gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
+      const pending = timedOutGateway.gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
+      await waitForHttp(() => timedOutGateway.upstream.streams.length === 1);
+      const response = await pending;
       expect(response.status).toBe(504);
       expect(response.headers.get("x-request-id")).toBe("req_responses");
       expect(await response.text()).toBe(
@@ -572,6 +583,7 @@ describe("Responses endpoint", () => {
         protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
         outcome: "timeout",
       }]);
+      await assertHeldHttpExchangeReleased(timedOutGateway.upstream, timedOutGateway.backend);
     } finally {
       await timedOutGateway.close();
     }
@@ -598,8 +610,7 @@ describe("Responses endpoint", () => {
         protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
         outcome: "aborted",
       }]);
-      await waitForHttp(() => clientGateway.upstream.streams[0]?.closed === true);
-      clientGateway.upstream.assertHealthy();
+      await assertHeldHttpExchangeReleased(clientGateway.upstream, clientGateway.backend);
     } finally {
       await clientGateway.close();
     }
@@ -609,9 +620,11 @@ describe("Responses endpoint", () => {
     let sent = false;
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 250;
-    runtime.timeouts.streamIdleMs = 60_000;
-    const { gw, close } = await responsesGateway({
+    runtime.timeouts.firstByteMs = 1_000;
+    runtime.timeouts.connectMs = 2_000;
+    runtime.timeouts.totalMs = 4_000;
+    runtime.timeouts.streamIdleMs = 3_000;
+    const { gw, upstream, backend, close } = await responsesGateway({
       runtime,
       usageUpdates,
       expectations: [{ method: "POST", path: model === "native" ? "/responses" : "/chat/completions", body: jsonStream(true),
@@ -635,6 +648,7 @@ describe("Responses endpoint", () => {
         protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
         outcome: "timeout",
       }]);
+      await assertHeldHttpExchangeReleased(upstream, backend);
     } finally {
       await close();
     }
@@ -644,9 +658,11 @@ describe("Responses endpoint", () => {
     let sent = false;
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 250;
-    runtime.timeouts.streamIdleMs = 60_000;
-    const { gw, close } = await responsesGateway({
+    runtime.timeouts.firstByteMs = 1_000;
+    runtime.timeouts.connectMs = 2_000;
+    runtime.timeouts.totalMs = 4_000;
+    runtime.timeouts.streamIdleMs = 3_000;
+    const { gw, upstream, backend, close } = await responsesGateway({
       runtime,
       usageUpdates,
       expectations: [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
@@ -670,6 +686,7 @@ describe("Responses endpoint", () => {
         protocol: "openai_responses_bridge",
         outcome: "timeout",
       }]);
+      await assertHeldHttpExchangeReleased(upstream, backend);
     } finally {
       await close();
     }
@@ -735,9 +752,11 @@ describe("Responses endpoint", () => {
   ])("keeps postcommit $model $deadline timeout terminal semantics and one usage", async ({ model, deadline }) => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.streamIdleMs = deadline === "idle" ? 250 : 60_000;
-    runtime.timeouts.totalMs = deadline === "total" ? 500 : 60_000;
-    const { gw, close } = await responsesGateway({
+    runtime.timeouts.firstByteMs = 3_000;
+    runtime.timeouts.connectMs = 4_500;
+    runtime.timeouts.streamIdleMs = deadline === "idle" ? 1_000 : 3_000;
+    runtime.timeouts.totalMs = deadline === "total" ? 1_500 : 4_000;
+    const { gw, upstream, backend, close } = await responsesGateway({
       runtime,
       usageUpdates,
       expectations: [{ method: "POST", path: model === "native" ? "/responses" : "/chat/completions", body: jsonStream(true),
@@ -750,7 +769,9 @@ describe("Responses endpoint", () => {
       }],
     });
     try {
-      const response = await gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
+      const pending = gw.fetch(responsesRequest({ model, input: "hi", stream: true }));
+      await waitForHttp(() => upstream.streams.length === 1);
+      const response = await pending;
       expect(response.status).toBe(200);
       const reader = response.body?.getReader();
       let delivered = "";
@@ -763,12 +784,14 @@ describe("Responses endpoint", () => {
           delivered += new TextDecoder().decode(next.value, { stream: true });
         }
       })()).rejects.toThrow();
+      expect(delivered).toContain(model === "native" ? "event: response.created" : "event: response.output_text.delta");
       expect(delivered).not.toContain("response.completed");
       expect(usageUpdates).toHaveLength(1);
       expect(usageUpdates).toMatchObject([{
         protocol: model === "native" ? "openai_responses_native" : "openai_responses_bridge",
         outcome: "timeout",
       }]);
+      await assertHeldHttpExchangeReleased(upstream, backend);
     } finally {
       await close();
     }

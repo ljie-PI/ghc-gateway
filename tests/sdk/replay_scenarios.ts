@@ -26,7 +26,7 @@ export function replayScenarioId(caseId: string): string {
 }
 
 /** Build the one harness-owned scenario catalogue from authored inputs and fixed identity fields. */
-export async function createReplayScenarios(manifest: ReplayScenarioManifest, options: { readonly reasoningDownstream?: SdkProtocol } = {}): Promise<readonly ReplayScenario[]> {
+export async function createReplayScenarios(manifest: ReplayScenarioManifest, options: { readonly reasoningDownstream?: SdkProtocol; readonly toolDownstream?: SdkProtocol } = {}): Promise<readonly ReplayScenario[]> {
   const imageBase64 = (await readFile(new URL("./images/vergil.jpg", import.meta.url))).toString("base64");
   const scenarios: ReplayScenario[] = [];
   for (const protocol of ["chat", "responses", "messages"] as const) {
@@ -49,7 +49,7 @@ export async function createReplayScenarios(manifest: ReplayScenarioManifest, op
       steps: [
         step(1, `replay.${protocol}.tool-call.nonstream`, false, (body) => matchesWeatherCall(body, protocol)),
         step(2, `replay.${protocol}.tool-result.nonstream`, false,
-          (body) => matchesWeatherResult(body, protocol, toolCallId, previousResponseId)),
+          (body) => matchesWeatherResult(body, protocol, toolCallId, previousResponseId, options.toolDownstream ?? protocol)),
       ],
     });
     for (const stream of [false, true]) {
@@ -189,7 +189,7 @@ function userProjection(body: unknown, protocol: SdkProtocol): { text: string; i
   return text === undefined ? undefined : { text, ...(image === undefined ? {} : { image }) };
 }
 
-function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: string, previousResponseId: string | undefined): boolean {
+function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: string, previousResponseId: string | undefined, downstream: SdkProtocol): boolean {
   const request = record(body);
   if (request === undefined || request.tools !== undefined) return false;
   const items = protocol === "responses" ? request.input : request.messages;
@@ -250,8 +250,9 @@ function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: stri
     return protocol === "responses" && request.previous_response_id === previousResponseId && projected.length === 1;
   }
   const callIndex = projected.findIndex((entry) => entry[0] === "call");
-  // Chat bridge continuation restores only the owned call, not the original prompt.
-  if ((callIndex !== 1 && !(protocol === "chat" && callIndex === 0)) || callIndex !== projected.length - 2) return false;
+  // Only an explicitly selected Responses downstream continuation restores the minimal owned Chat call.
+  const expectedCallIndex = protocol === "chat" && downstream === "responses" ? 0 : 1;
+  if (callIndex !== expectedCallIndex || callIndex !== projected.length - 2) return false;
   if (callIndex === 1 && projected[0]?.[0] !== "user") return false;
   return isDeepStrictEqual(projected[callIndex], ["call", callId, "get_weather", { city: "Tokyo" }]);
 }

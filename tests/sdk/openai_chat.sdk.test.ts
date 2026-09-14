@@ -1,3 +1,4 @@
+import { assertSyntheticOperations } from "./synthetic_scenarios.js";
 import { CHAT_MODEL, MESSAGES_MODEL, NATIVE_RESPONSES_MODEL, PNG_DATA_URL, REASONING_MODEL, getWeather } from "./synthetic_scenarios.js";
 import OpenAI from "openai";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -39,6 +40,7 @@ describe("official OpenAI Chat SDK", () => {
   });
 
   it("deserializes non-stream and iterates stream responses while capturing exact Chat requests", async () => {
+    const httpStart = harness.upstream.requests.length;
     const nonstream = await client.chat.completions.create({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "sdk-chat-nonstream" }],
@@ -67,9 +69,11 @@ describe("official OpenAI Chat SDK", () => {
       stream: true,
       stream_options: { include_usage: true },
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false], ["/chat/completions", true]]);
   });
 
   it("converts official Chat requests directly to Responses and Messages operations", async () => {
+    const httpStart = harness.upstream.requests.length;
     const responsesIndex = harness.requests("/responses").length;
     const messagesIndex = harness.requests("/v1/messages").length;
     const viaResponses = await client.chat.completions.create({
@@ -99,9 +103,11 @@ describe("official OpenAI Chat SDK", () => {
       }],
       max_tokens: 4096,
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", false], ["/v1/messages", false]]);
   });
 
   it("preserves system instructions and an ordinary multi-turn conversation", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const messages: OpenAI.ChatCompletionMessageParam[] = [
       { role: "system", content: "Answer concisely." },
@@ -118,9 +124,11 @@ describe("official OpenAI Chat SDK", () => {
       messages,
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("sends a PNG image input and marks the upstream request as vision", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const messages: OpenAI.ChatCompletionMessageParam[] = [{
       role: "user",
@@ -138,9 +146,11 @@ describe("official OpenAI Chat SDK", () => {
       messages,
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("sends image and tool input together through the official Chat SDK", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const messages: OpenAI.ChatCompletionMessageParam[] = [{
       role: "user",
@@ -165,9 +175,11 @@ describe("official OpenAI Chat SDK", () => {
       tools: [WEATHER_TOOL],
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("parses a tool call and sends its result in an actual second Chat request", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const userMessage = { role: "user", content: "What is the weather in Tokyo?" } as const;
     const first = await client.chat.completions.create({
@@ -224,9 +236,11 @@ describe("official OpenAI Chat SDK", () => {
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
     expect(harness.requests("/chat/completions")[requestIndex + 1]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false], ["/chat/completions", false]]);
   });
 
   it("parses fragmented streaming tool calls through the official SDK stream", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const argumentDeltas: string[] = [];
     let callId: string | undefined;
@@ -258,9 +272,11 @@ describe("official OpenAI Chat SDK", () => {
       stream_options: { include_usage: true },
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", true]]);
   });
 
   it("sends Chat reasoning_effort and preserves reasoning content from the SDK response", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const completion = await client.chat.completions.create({
       model: REASONING_MODEL,
@@ -275,18 +291,22 @@ describe("official OpenAI Chat SDK", () => {
       reasoning_effort: "high",
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("surfaces the official API error class and gateway request ID", async () => {
+    const httpStart = harness.upstream.requests.length;
     const error = await client.chat.completions.create({
       model: "missing-sdk-model",
       messages: [{ role: "user", content: "sdk-error" }],
     }).then(() => undefined, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(OpenAI.APIError);
     expect(error).toMatchObject({ status: 404, requestID: "req_sdk_loopback" });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), []);
   });
 
   it("breaks the official Chat iterator and cancels the unfinished HTTP response", async () => {
+    const httpStart = harness.upstream.requests.length;
     const stream = await client.chat.completions.create({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "cancel-sdk-request" }],
@@ -307,5 +327,6 @@ describe("official OpenAI Chat SDK", () => {
     expect(exchange.ended).toBe(false);
     expect(exchange.request.path).toBe("/chat/completions");
     expect(decodeCapturedBody(exchange.request)).toMatchObject({ stream: true });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", true]]);
   });
 });

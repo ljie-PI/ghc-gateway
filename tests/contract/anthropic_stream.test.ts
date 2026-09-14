@@ -2,7 +2,7 @@ import { createNativeMessagesStreamResponse } from "../../src/protocols/anthropi
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
 import { describe, expect, it } from "vitest";
-import { jsonStream, assertTransportReleased, waitForHttp } from "../../scripts/tooling/test_support/http_copilot.js";
+import { jsonStream, assertTransportReleased, assertHeldHttpExchangeReleased, waitForHttp } from "../../scripts/tooling/test_support/http_copilot.js";
 import type { HttpExpectation, HttpStreamControl } from "../../scripts/tooling/test_support/copilot_http.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
@@ -223,8 +223,10 @@ describe("Anthropic stream lifecycle", () => {
   it("times out a native keepalive-only stream before committing any stream bytes", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 250;
-    runtime.timeouts.streamIdleMs = 60_000;
+    runtime.timeouts.firstByteMs = 1_000;
+    runtime.timeouts.connectMs = 2_000;
+    runtime.timeouts.totalMs = 4_000;
+    runtime.timeouts.streamIdleMs = 3_000;
     let sent = false;
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/v1/messages", body: jsonStream(true),
       reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
@@ -254,6 +256,7 @@ describe("Anthropic stream lifecycle", () => {
       );
       expect(usageUpdates).toHaveLength(1);
       expect(usageUpdates).toMatchObject([{ outcome: "timeout" }]);
+      await assertHeldHttpExchangeReleased(opened.upstream, opened.backend);
     } finally {
       await opened.close();
     }
@@ -262,8 +265,10 @@ describe("Anthropic stream lifecycle", () => {
   it("keeps synthetic message_start behind the first semantic deadline", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 250;
-    runtime.timeouts.streamIdleMs = 60_000;
+    runtime.timeouts.firstByteMs = 1_000;
+    runtime.timeouts.connectMs = 2_000;
+    runtime.timeouts.totalMs = 4_000;
+    runtime.timeouts.streamIdleMs = 3_000;
     let sent = false;
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
       reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
@@ -272,7 +277,7 @@ describe("Anthropic stream lifecycle", () => {
         await exchange.waitForClose();
       } },
     }];
-    const { gw, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
+    const { gw, upstream, backend, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
     try {
       const pending = gw.fetch(anthropicRequest({
         model: "gpt",
@@ -295,6 +300,7 @@ describe("Anthropic stream lifecycle", () => {
         resolvedModel: "gpt",
         outcome: "timeout",
       }]);
+      await assertHeldHttpExchangeReleased(upstream, backend);
     } finally {
       await close();
     }
@@ -303,8 +309,10 @@ describe("Anthropic stream lifecycle", () => {
   it("does not let empty Chat chunks release synthetic Messages preambles", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 250;
-    runtime.timeouts.streamIdleMs = 60_000;
+    runtime.timeouts.firstByteMs = 1_000;
+    runtime.timeouts.connectMs = 2_000;
+    runtime.timeouts.totalMs = 4_000;
+    runtime.timeouts.streamIdleMs = 3_000;
     let sent = false;
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
       reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
@@ -314,7 +322,7 @@ describe("Anthropic stream lifecycle", () => {
         await exchange.waitForClose();
       } },
     }];
-    const { gw, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
+    const { gw, upstream, backend, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
     try {
       const pending = gw.fetch(anthropicRequest({
         model: "gpt",
@@ -328,6 +336,7 @@ describe("Anthropic stream lifecycle", () => {
       expect(await response.text()).not.toContain("message_start");
       expect(usageUpdates).toHaveLength(1);
       expect(usageUpdates).toMatchObject([{ outcome: "timeout" }]);
+      await assertHeldHttpExchangeReleased(upstream, backend);
     } finally {
       await close();
     }
@@ -336,7 +345,10 @@ describe("Anthropic stream lifecycle", () => {
   it("records a committed Messages idle timeout without message_stop", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.streamIdleMs = 250;
+    runtime.timeouts.streamIdleMs = 1_000;
+    runtime.timeouts.firstByteMs = 3_000;
+    runtime.timeouts.connectMs = 4_500;
+    runtime.timeouts.totalMs = 4_000;
     let sent = false;
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true),
       reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => {
@@ -345,7 +357,7 @@ describe("Anthropic stream lifecycle", () => {
         await exchange.waitForClose();
       } },
     }];
-    const { gw, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
+    const { gw, upstream, backend, close } = await anthropicGateway({ expectations, runtime, usageUpdates });
     try {
       const pending = gw.fetch(anthropicRequest({
         model: "gpt",
@@ -370,6 +382,7 @@ describe("Anthropic stream lifecycle", () => {
       expect(delivered).not.toContain("event: message_stop");
       expect(usageUpdates).toHaveLength(1);
       expect(usageUpdates).toMatchObject([{ outcome: "timeout" }]);
+      await assertHeldHttpExchangeReleased(upstream, backend);
     } finally {
       await close();
     }

@@ -1,3 +1,4 @@
+import { assertSyntheticOperations } from "./synthetic_scenarios.js";
 import { CHAT_MODEL, MESSAGES_MODEL, NATIVE_RESPONSES_MODEL, PNG_BASE64, REASONING_MODEL, getWeather } from "./synthetic_scenarios.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -50,6 +51,7 @@ describe("official Anthropic SDK", () => {
   });
 
   it("deserializes Messages non-stream and iterates the complete event stream", async () => {
+    const httpStart = harness.upstream.requests.length;
     const message = await client.messages.create({
       model: CHAT_MODEL,
       max_tokens: 8,
@@ -84,9 +86,11 @@ describe("official Anthropic SDK", () => {
       stream: true,
       stream_options: { include_usage: true },
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false], ["/chat/completions", true]]);
   });
 
   it("uses native Messages and converts Messages directly to Responses", async () => {
+    const httpStart = harness.upstream.requests.length;
     const messagesIndex = harness.requests("/v1/messages").length;
     const responsesIndex = harness.requests("/responses").length;
     const native = await client.messages.create({
@@ -116,9 +120,11 @@ describe("official Anthropic SDK", () => {
         content: [{ type: "input_text", text: "messages-to-responses" }],
       }],
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/v1/messages", false], ["/responses", false]]);
   });
 
   it("translates a system prompt and ordinary multi-turn messages", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const message = await client.messages.create({
       model: CHAT_MODEL,
@@ -143,9 +149,11 @@ describe("official Anthropic SDK", () => {
       max_tokens: 16,
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("sends a base64 PNG as a Chat image input", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const message = await client.messages.create({
       model: CHAT_MODEL,
@@ -172,9 +180,11 @@ describe("official Anthropic SDK", () => {
       max_tokens: 16,
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("performs a tool call and sends its tool_use and tool_result in a second HTTP request", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const first = await client.messages.create({
       model: CHAT_MODEL,
@@ -248,9 +258,11 @@ describe("official Anthropic SDK", () => {
       tools: [CHAT_WEATHER_TOOL],
     });
     expect(harness.requests("/chat/completions")[requestIndex + 1]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false], ["/chat/completions", false]]);
   });
 
   it("preserves image input and tool declarations in one request", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const message = await client.messages.create({
       model: CHAT_MODEL,
@@ -279,9 +291,11 @@ describe("official Anthropic SDK", () => {
       tools: [CHAT_WEATHER_TOOL],
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("assembles fragmented streamed tool arguments through MessageStream.finalMessage", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const stream = client.messages.stream({
       model: CHAT_MODEL,
@@ -307,9 +321,11 @@ describe("official Anthropic SDK", () => {
       tools: [CHAT_WEATHER_TOOL],
     });
     expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", true]]);
   });
 
   it("maps official reasoning effort and thinking budget parameters", async () => {
+    const httpStart = harness.upstream.requests.length;
     const requestIndex = harness.requests("/chat/completions").length;
     const effort = await client.messages.create({
       model: REASONING_MODEL,
@@ -354,9 +370,11 @@ describe("official Anthropic SDK", () => {
       reasoning_effort: "xhigh",
     });
     expect(harness.requests("/chat/completions")[requestIndex + 2]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false], ["/chat/completions", false], ["/chat/completions", false]]);
   });
 
   it("surfaces the official API error class and gateway request ID", async () => {
+    const httpStart = harness.upstream.requests.length;
     const error = await client.messages.create({
       model: "missing-sdk-model",
       max_tokens: 1,
@@ -364,9 +382,11 @@ describe("official Anthropic SDK", () => {
     }).then(() => undefined, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(Anthropic.APIError);
     expect(error).toMatchObject({ status: 404, requestID: "req_sdk_loopback" });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), []);
   });
 
   it("cancels an in-flight official MessageStream", async () => {
+    const httpStart = harness.upstream.requests.length;
     const stream = client.messages.stream({
       model: CHAT_MODEL,
       max_tokens: 8,
@@ -382,5 +402,6 @@ describe("official Anthropic SDK", () => {
     expect(exchange.ended).toBe(false);
     expect(exchange.request.path).toBe("/chat/completions");
     expect(decodeCapturedBody(exchange.request)).toMatchObject({ stream: true });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", true]]);
   });
 });

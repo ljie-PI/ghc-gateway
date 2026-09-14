@@ -22,7 +22,7 @@ import type { SdkProtocol } from "./client.js";
 import type { ReplayScenarioManifest } from "../../src/replay/types.js";
 import { createReplayScenarios } from "./replay_scenarios.js";
 import { startCopilotHttpMock, type CopilotHttpMock, type HttpRequestObservation } from "../../scripts/tooling/test_support/copilot_http.js";
-import { syntheticSdkExpectations } from "./synthetic_scenarios.js";
+import { syntheticSdkFixtureCatalog } from "./synthetic_scenarios.js";
 export { CHAT_MODEL, NATIVE_RESPONSES_MODEL, MESSAGES_MODEL } from "./replay_models.js";
 
 export const SDK_TEST_GUARD = "GHC_GATEWAY_SDK_TESTS";
@@ -51,6 +51,7 @@ export function assertOfflineSdkTestsEnabled(env: NodeJS.ProcessEnv = process.en
 export async function startReplaySdkHarness(options: {
   readonly manifestPath?: string;
   readonly reasoningDownstream?: SdkProtocol;
+  readonly toolDownstream?: SdkProtocol;
 } = {}): Promise<ReplaySdkHarness> {
   assertOfflineSdkTestsEnabled();
 
@@ -90,7 +91,7 @@ export interface SyntheticSdkHarness extends HttpSdkGateway {
 
 export async function startSyntheticSdkHarness(): Promise<SyntheticSdkHarness> {
   assertOfflineSdkTestsEnabled();
-  const upstream = await startCopilotHttpMock({ expectations: syntheticSdkExpectations() });
+  const upstream = await startCopilotHttpMock({ expectations: syntheticSdkFixtureCatalog() });
   try {
     const gateway = await startHttpSdkGateway(upstream.origin, "req_sdk_loopback");
     return {
@@ -100,6 +101,9 @@ export async function startSyntheticSdkHarness(): Promise<SyntheticSdkHarness> {
         try { await gateway.close(); }
         finally { await upstream.stop(); }
         upstream.assertHealthy();
+        if (upstream.requests.filter((request) => request.method === "GET" && request.path === "/models").length !== 1) {
+          throw new Error("synthetic SDK expected exactly one catalog discovery");
+        }
       },
     };
   } catch (error: unknown) {

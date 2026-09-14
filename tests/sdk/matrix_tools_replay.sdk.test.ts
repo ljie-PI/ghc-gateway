@@ -50,28 +50,33 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
   let openai: OpenAI;
   let anthropic: Anthropic;
 
-  beforeAll(async () => {
-    harness = await startReplaySdkHarness();
-    openai = new OpenAI({
-      apiKey: "local-gateway",
-      baseURL: harness.openAiBaseUrl,
-      fetch: harness.fetch,
-      maxRetries: 0,
-    });
-    anthropic = new Anthropic({
-      apiKey: "local-gateway",
-      baseURL: harness.baseUrl,
-      fetch: harness.fetch,
-      maxRetries: 0,
-    });
-  });
+  function tools(downstream: "chat" | "messages" | "responses", title: string, tests: () => void): void {
+    describe(title, () => {
+      beforeAll(async () => {
+        harness = await startReplaySdkHarness({ toolDownstream: downstream });
+        openai = new OpenAI({
+          apiKey: "local-gateway",
+          baseURL: harness.openAiBaseUrl,
+          fetch: harness.fetch,
+          maxRetries: 0,
+        });
+        anthropic = new Anthropic({
+          apiKey: "local-gateway",
+          baseURL: harness.baseUrl,
+          fetch: harness.fetch,
+          maxRetries: 0,
+        });
+      });
 
-  afterAll(async () => {
-    await harness.close();
-  });
-  afterEach(() => { harness.replayServer.abortScenario(); });
+      afterAll(async () => {
+        await harness.close();
+      });
+      afterEach(() => { harness.replayServer.abortScenario(); });
+      tests();
+    });
+  }
 
-  describe("C -> C (Chat -> Chat tools roundtrip)", () => {
+  tools("chat", "C -> C (Chat -> Chat tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("chat");
       const first = await openai.chat.completions.create({
@@ -99,7 +104,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("C -> R (Chat -> Responses tools roundtrip)", () => {
+  tools("chat", "C -> R (Chat -> Responses tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("responses");
       const first = await openai.chat.completions.create({
@@ -127,7 +132,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("C -> M (Chat -> Messages tools roundtrip)", () => {
+  tools("chat", "C -> M (Chat -> Messages tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("messages");
       const first = await openai.chat.completions.create({
@@ -155,7 +160,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("M -> C (Messages -> Chat tools roundtrip)", () => {
+  tools("messages", "M -> C (Messages -> Chat tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("chat");
       const first = await anthropic.messages.create({
@@ -181,7 +186,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("M -> M (Messages -> Messages tools roundtrip)", () => {
+  tools("messages", "M -> M (Messages -> Messages tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("messages");
       const first = await anthropic.messages.create({
@@ -207,7 +212,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("M -> R (Messages -> Responses tools roundtrip)", () => {
+  tools("messages", "M -> R (Messages -> Responses tools roundtrip)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("responses");
       const first = await anthropic.messages.create({
@@ -233,7 +238,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("R -> C (Responses -> Chat tools & continuation)", () => {
+  tools("responses", "R -> C (Responses -> Chat tools & continuation)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("chat");
       const first = await openai.responses.create({
@@ -261,7 +266,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("R -> M (Responses -> Messages tools & continuation)", () => {
+  tools("responses", "R -> M (Responses -> Messages tools & continuation)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("messages");
       const first = await openai.responses.create({
@@ -293,7 +298,7 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
     });
   });
 
-  describe("R -> R (Responses -> Responses native tools & continuation)", () => {
+  tools("responses", "R -> R (Responses -> Responses native tools & continuation)", () => {
     it("executes tool call and second request tool result", async () => {
       const receiptStart = select("responses");
       const first = await openai.responses.create({

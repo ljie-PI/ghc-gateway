@@ -2,7 +2,8 @@ import { connect, type Socket } from "node:net";
 import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { startHttpCopilot, withSetupCleanup } from "../../scripts/tooling/test_support/http_copilot.js";
+import { assertSyntheticOperations, syntheticSdkFixtureCatalog } from "../sdk/synthetic_scenarios.js";
+import { startHttpCopilot, withSetupCleanup, assertHeldHttpExchangeReleased } from "../../scripts/tooling/test_support/http_copilot.js";
 import { openDatabase, closeDatabase } from "../../src/persistence/database.js";
 import { Server } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -180,6 +181,50 @@ describe("bounded synthetic Copilot HTTP seam", () => {
     server.assertSatisfied();
   });
 
+  it("rejects a duplicate identical SDK operation instead of accepting the first capture only", async () => {
+    const server = await mock({ expectations: syntheticSdkFixtureCatalog() });
+    const body = JSON.stringify({ model: "chat-sdk", messages: [
+      { role: "system", content: "Answer concisely." }, { role: "user", content: "Hello" },
+      { role: "assistant", content: "Hi there" }, { role: "user", content: "What did I say?" },
+    ] });
+    const send = () => fetch(`${server.origin}/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body });
+    const first = await send();
+    expect(first.status).toBe(200);
+    await first.arrayBuffer();
+    assertSyntheticOperations(server.requests, [["/chat/completions", false]]);
+    const duplicate = await send();
+    expect(duplicate.status).toBe(409);
+    await duplicate.arrayBuffer();
+    expect(server.requests).toHaveLength(2);
+    expect(() => assertSyntheticOperations(server.requests, [["/chat/completions", false]])).toThrow("HTTP operation sequence mismatch");
+    expect(() => server.assertHealthy()).toThrow("request mismatch");
+  });
+
+  it("checks SDK operation path, stream mode and ordered multi-request cases", async () => {
+    const server = await mock({ expectations: syntheticSdkFixtureCatalog() });
+    for (const [path, body] of [
+      ["/chat/completions", { model: "chat-sdk", messages: [{ role: "user", content: "sdk-chat-nonstream" }] }],
+      ["/responses", { model: "responses-sdk", input: "sdk-responses-stream", stream: true }],
+    ] as const) {
+      await (await fetch(`${server.origin}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).arrayBuffer();
+    }
+    assertSyntheticOperations(server.requests, [["/chat/completions", false], ["/responses", true]]);
+    for (const expected of [
+      [["/chat/completions", false]],
+      [["/responses", true], ["/chat/completions", false]],
+      [["/chat/completions", true], ["/responses", true]],
+      [["/v1/messages", false], ["/responses", true]],
+    ] as const) expect(() => assertSyntheticOperations(server.requests, expected)).toThrow("HTTP operation sequence mismatch");
+  });
+
+  it("rejects timeout cleanup evidence when setup expired without a matched HTTP exchange", async () => {
+    const server = await mock({ expectations: [{ ...fixed, reply: { stream: async () => undefined } }] });
+    const { backend } = await transport(server.origin);
+    expect(server.requests).toHaveLength(0);
+    idle(backend);
+    await expect(assertHeldHttpExchangeReleased(server, backend)).rejects.toThrow("expectations pending");
+  });
+
   it("sanitizes predicate exceptions and does not consume a rejected expectation", async () => {
     const server = await mock({ expectations: [{ ...fixed, body: () => { throw new Error("synthetic-private"); } }] });
     const response = await fetch(server.origin + fixed.path, { method: "POST", body: "{}" });
@@ -218,6 +263,88 @@ describe("bounded synthetic Copilot HTTP seam", () => {
     expect(server.requests).toHaveLength(0);
     expect(server.retainedBodyBytes).toBe(0);
     expect(() => server.assertHealthy()).toThrow("request body limit");
+  });
+
+  it("closes an unused preconnected idle socket without claiming unfinished HTTP work", async () => {
+    const server = await mock({ limits: { waitMs: 300 } });
+    const peer = await socket(server.origin);
+    peer.resume();
+    await closed(peer);
+    await waitUntil(() => server.socketCount === 0);
+    expect(server.requests).toHaveLength(0);
+    expect(server.activeExchanges).toBe(0);
+    server.assertSatisfied();
+  });
+
+  it("treats completed-response keep-alive expiry as healthy idle cleanup", async () => {
+    const server = await mock({ limits: { keepAliveMs: 20 }, expectations: [{ ...fixed,
+      reply: { ...fixed.reply, headers: { ...fixed.reply.headers, "content-length": String(fixed.reply.body!.byteLength) } },
+    }] });
+    const peer = await socket(server.origin);
+    let received = "";
+    peer.on("data", (chunk: Buffer) => { received += chunk.toString(); });
+    peer.write(`POST ${fixed.path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${(fixed.body as Uint8Array).byteLength}\r\n\r\n`);
+    peer.write(fixed.body as Uint8Array);
+    await waitUntil(() => received.endsWith(Buffer.from(fixed.reply.body!).toString()));
+    expect(received).toContain("HTTP/1.1 201");
+    expect(received.toLowerCase()).toContain("connection: keep-alive");
+    expect(peer.destroyed).toBe(false);
+    server.assertSatisfied();
+    // Real Node keepAliveTimeout + buffer expiry, not mock timers or harness teardown.
+    await closed(peer);
+    await waitUntil(() => server.socketCount === 0);
+    expect(server.activeExchanges).toBe(0);
+    server.assertSatisfied();
+  });
+
+  it.each([100, 5_000])("rejects partial pipelined headers in the same TCP write with a %ims work limit", async (waitMs) => {
+    const server = await mock({ limits: { waitMs, keepAliveMs: 20 }, expectations: [{ ...fixed,
+      reply: { ...fixed.reply, headers: { ...fixed.reply.headers, "content-length": String(fixed.reply.body!.byteLength) } },
+    }] });
+    const peer = await socket(server.origin);
+    let received = "";
+    peer.on("data", (chunk: Buffer) => { received += chunk.toString(); });
+    // bytesRead already includes the next partial header when the first response finishes.
+    peer.write(Buffer.concat([
+      bytes(`POST ${fixed.path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${(fixed.body as Uint8Array).byteLength}\r\n\r\n`),
+      fixed.body as Uint8Array, bytes("POST /chat/completions HTTP/1.1\r\nHost:"),
+    ]));
+    await closed(peer);
+    await waitUntil(() => server.socketCount === 0);
+    expect(received).toContain("HTTP/1.1 201");
+    expect(server.requests).toHaveLength(1);
+    expect(server.activeExchanges).toBe(0);
+    expect(() => server.assertHealthy()).toThrow("synthetic HTTP request timeout");
+  });
+
+  it.each(["headers", "body"] as const)("still fails stalled follow-up %s after a healthy completed response", async (part) => {
+    const server = await mock({ limits: { waitMs: 400, keepAliveMs: 20 }, expectations: [{ ...fixed,
+      reply: { ...fixed.reply, headers: { ...fixed.reply.headers, "content-length": String(fixed.reply.body!.byteLength) } },
+    }] });
+    const peer = await socket(server.origin);
+    let received = "";
+    peer.on("data", (chunk: Buffer) => { received += chunk.toString(); });
+    peer.write(`POST ${fixed.path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: ${(fixed.body as Uint8Array).byteLength}\r\n\r\n`);
+    peer.write(fixed.body as Uint8Array);
+    await waitUntil(() => received.endsWith(Buffer.from(fixed.reply.body!).toString()));
+    server.assertSatisfied();
+    peer.write(part === "headers" ? "POST /chat/completions HTTP/1.1\r\nHost:"
+      : "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n1");
+    await closed(peer);
+    await waitUntil(() => server.socketCount === 0);
+    expect(server.requests).toHaveLength(1);
+    expect(() => server.assertHealthy()).toThrow(/synthetic HTTP (socket|exchange|request) timeout/u);
+  });
+
+  it.each(["headers", "body"] as const)("fails a genuinely stalled request %s without another failure masking it", async (part) => {
+    const server = await mock({ limits: { waitMs: 100 } });
+    const peer = await socket(server.origin);
+    peer.write(part === "headers" ? "POST /chat/completions HTTP/1.1\r\nHost:"
+      : "POST /chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n1");
+    await closed(peer);
+    await waitUntil(() => server.socketCount === 0);
+    expect(server.requests).toHaveLength(0);
+    expect(() => server.assertHealthy()).toThrow(/synthetic HTTP (socket|exchange|request) timeout/u);
   });
 
   it("bounds sockets and times out incomplete requests", async () => {
@@ -336,6 +463,7 @@ describe("bounded synthetic Copilot HTTP seam", () => {
 
   it("rejects invalid setup and times out barriers without leaking unbounded waits", async () => {
     await expect(startCopilotHttpMock({ limits: { requests: 0 } })).rejects.toThrow("invalid synthetic HTTP limit");
+    for (const waitMs of [1, 2]) await expect(startCopilotHttpMock({ limits: { waitMs } })).rejects.toThrow("invalid synthetic HTTP limit");
     await expect(startCopilotHttpMock({ expectations: [{ ...fixed, times: 129 }] })).rejects.toThrow("invalid synthetic HTTP expectation");
     await expect(boundedHttpWait(new Promise<void>(() => undefined), 10)).rejects.toThrow("synthetic HTTP wait timeout");
   });

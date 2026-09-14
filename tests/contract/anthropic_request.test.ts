@@ -5,7 +5,7 @@ import { HttpCopilotBackend } from "../../src/copilot/transport.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { EndpointDiscovery } from "../../src/copilot/endpoint_discovery.js";
 import { anthropicGateway, anthropicRequest, decodeChatBody } from "./anthropic_harness.js";
-import { jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
+import { jsonStream, waitForHttp, assertHeldHttpExchangeReleased } from "../../scripts/tooling/test_support/http_copilot.js";
 import type { HttpRequestObservation } from "../../scripts/tooling/test_support/copilot_http.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
@@ -238,7 +238,9 @@ describe("Anthropic request route", () => {
 
   it("normalizes transport timeout and malformed buffered output before commitment", async () => {
     const runtime = defaultRuntimeConfigSnapshot();
-    runtime.timeouts.firstByteMs = 250;
+    runtime.timeouts.firstByteMs = 1_000;
+    runtime.timeouts.connectMs = 2_000;
+    runtime.timeouts.totalMs = 4_000;
     const timeoutGateway = await anthropicGateway({
       runtime,
       expectations: [{ method: "POST", path: "/chat/completions", body: jsonStream(false),
@@ -246,16 +248,17 @@ describe("Anthropic request route", () => {
       }],
     });
     try {
-      const response = await timeoutGateway.gw.fetch(anthropicRequest({
+      const pending = timeoutGateway.gw.fetch(anthropicRequest({
         model: "gpt",
         max_tokens: 1,
         messages: [{ role: "user", content: "hi" }],
       }));
+      await waitForHttp(() => timeoutGateway.upstream.streams.length === 1);
+      const response = await pending;
       expect(response.status).toBe(504);
       expect(await response.text()).toContain("\"type\":\"timeout_error\"");
       expect(timeoutGateway.upstream.requests).toHaveLength(1);
-      await waitForHttp(() => timeoutGateway.upstream.activeExchanges === 0);
-      assertTransportReleased(timeoutGateway.backend);
+      await assertHeldHttpExchangeReleased(timeoutGateway.upstream, timeoutGateway.backend);
     } finally {
       await timeoutGateway.close();
     }
