@@ -93,7 +93,7 @@ function passingRun(run: number): BenchmarkRunResult {
     browserIncluded: false,
     offlineScripted: true,
     listener: "loopback",
-    idle: { limitBytes: 64 * 1024 * 1024, launchArgs: ["--jitless"], resident, passed: true },
+    idle: { limitBytes: 80 * 1024 * 1024, launchArgs: ["--jitless"], resident, passed: true },
     adminPage: { browserIncluded: false, assetCount: 2, resident, deltaFromIdleBytes: 0 },
     streams: {
       warmupCount: 1_000,
@@ -122,6 +122,8 @@ describe("benchmark gate contract", () => {
 
     const failed: BenchmarkRunResult = { ...runs[1]!, checkpoint: { ...runs[1]!.checkpoint, passed: false } };
     expect(evaluateBenchmarkRuns([runs[0]!, failed, runs[2]!])).toBe(false);
+    const idleFailed: BenchmarkRunResult = { ...runs[1]!, idle: { ...runs[1]!.idle, passed: false } };
+    expect(evaluateBenchmarkRuns([runs[0]!, idleFailed, runs[2]!])).toBe(false);
   });
 
   it("records process-resident memory and excludes browser memory", () => {

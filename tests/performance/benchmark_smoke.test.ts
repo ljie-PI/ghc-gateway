@@ -161,6 +161,8 @@ describe("full-gateway benchmark smoke", () => {
 
     expect(result.offlineScripted).toBe(true);
     expect(result.listener).toBe("loopback");
+    expect(result.idle.limitBytes).toBe(80 * 1024 * 1024);
+    expect(result.streams.limitBytes).toBe(16 * 1024 * 1024);
     expect(result.streams.executionCount).toBe(10);
     expect(result.buffered.valuesMs).toHaveLength(20);
     expect(result.streamEvent.valuesMs).toHaveLength(20);

@@ -1,4 +1,4 @@
-import { readFileSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync, writeSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, readdir, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -238,11 +238,11 @@ describe("daemon operation lease", () => {
 
   it("fails closed when Windows reports the persistent database as a reparse point", async () => {
     const directory = await temporaryDirectory();
-    const runCommand = (file: string, args: readonly string[]): string => {
+    const runCommand = (file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string => {
       const script = args.at(-1) ?? "";
       if (file === "powershell.exe" && script.includes("ReparsePoint")
         && script.includes("daemon.operation.db")) return "true\r\n";
-      return fakeWindowsSecurityCommand(file, args);
+      return fakeWindowsSecurityCommand(file, args, environment);
     };
     await expect(operationLease({ platform: "win32", runCommand }).acquire(directory))
       .rejects.toMatchObject({ code: "unsafe_path" });
@@ -345,7 +345,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-function fakeWindowsSecurityCommand(file: string, args: readonly string[]): string {
+function fakeWindowsSecurityCommand(file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
+  if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
+    mkdirSync(environment.GHCG_DIRECTORY_PATH, { recursive: true, mode: 0o700 });
+    return "0\r\n";
+  }
   if (file === "whoami") return "\"CONTOSO\\User\",\"S-1-5-21-1000\"\r\n";
   if (file === "powershell.exe") {
     return args.at(-1)?.includes("Get-Acl") === true ? "CONTOSO\\User\r\n" : "false\r\n";
