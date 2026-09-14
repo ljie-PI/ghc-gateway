@@ -122,8 +122,13 @@ function install(directory) {
     let child;
     const promise = new Promise((resolve, reject) => {
       child = execFile(...args, (error, stdout, stderr) => {
-        if (error !== null) reject(error);
-        else resolve({ stdout, stderr });
+        if (error !== null) {
+          error.stdout = stdout;
+          error.stderr = stderr;
+          reject(error);
+        } else {
+          resolve({ stdout, stderr });
+        }
       });
     });
     promise.child = child;

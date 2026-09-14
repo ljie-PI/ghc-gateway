@@ -19,7 +19,7 @@ if (process.env.GHC_GATEWAY_CI_NETWORK_GUARD === "1") {
 }
 
 if ((process.env.GHCG_WINDOWS_LIFECYCLE_DIAGNOSTICS_DIR?.length ?? 0) > 0) {
-  await import("./windows_lifecycle_diagnostics.mjs");
+  await import("../../.github/diagnostics/windows_lifecycle_diagnostics.mjs");
 }
 
 const { pathToFileURL } = await import("node:url");
