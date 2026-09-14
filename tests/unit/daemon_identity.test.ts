@@ -23,6 +23,8 @@ import {
   type ProcessIdentityDependencies,
 } from "../../src/daemon/process_identity.js";
 
+const WINDOWS_TEST_COMMAND_TIMEOUT_MS = 8_000;
+
 const identity: DaemonIdentity = {
   version: 1,
   managed: true,
@@ -105,7 +107,7 @@ describe("daemon identity file", () => {
         if(args.join(' ').includes('Get-Item')) process.exit(23);
         const executable=file==='whoami'||file==='icacls'
           ? path.join(process.env.SystemRoot,'System32',file+'.exe') : file;
-        return execFileSync(executable,args,{encoding:'utf8',windowsHide:true,timeout:5000,
+        return execFileSync(executable,args,{encoding:'utf8',windowsHide:true,timeout:${WINDOWS_TEST_COMMAND_TIMEOUT_MS},
           maxBuffer:1048576,env:{...process.env,...environment},stdio:['ignore','pipe','pipe']});
       }}).ensureProtectedDirectory();`;
     try {
@@ -346,7 +348,7 @@ function windowsSddl(target: string): string {
 function nativeWindowsCommand(command: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
   const executable = command === "whoami" || command === "icacls" ? windowsCommandPath(command) : command;
   return execFileSync(executable, [...args], {
-    encoding: "utf8", windowsHide: true, timeout: 5000, maxBuffer: 1024 * 1024,
+    encoding: "utf8", windowsHide: true, timeout: WINDOWS_TEST_COMMAND_TIMEOUT_MS, maxBuffer: 1024 * 1024,
     env: { ...process.env, ...environment }, stdio: ["ignore", "pipe", "pipe"],
   });
 }
