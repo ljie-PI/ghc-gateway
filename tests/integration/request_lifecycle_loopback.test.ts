@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -21,7 +21,7 @@ describe("request lifecycle over loopback", () => {
   const closing: HostedGateway[] = [];
 
   afterEach(async () => {
-    await Promise.allSettled(closing.splice(0).map(async (gateway) => await gateway.close()));
+    await closeAll(closing.splice(0).map((gateway) => () => gateway.close()));
   });
 
   it("writes an exact Content-Length for each loopback probe response", async () => {
@@ -59,24 +59,30 @@ describe("request lifecycle over loopback", () => {
 
   it("delivers a nonempty precommit 504 when an internal deadline cancels only upstream work", async () => {
     const usage: UsageUpdate[] = [];
-    const gateway = await responsesGateway({
-      totalMs: 20,
+    const opened = await responsesGateway({
+      totalMs: 1_500,
       usage,
-      stream: (signal) => stalledBytes(signal),
     });
+    const { gateway } = opened;
     closing.push(gateway);
     const { port } = await gateway.listen();
 
-    const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+    const pending = fetch(`http://127.0.0.1:${port}/v1/responses`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: "native", input: "hi", stream: true }),
     });
 
+    await waitForHttp(() => opened.upstream.streams.length === 1);
+    const response = await pending;
     expect(response.status).toBe(504);
     expect(await response.text()).toBe(
       "{\"error\":{\"message\":\"upstream timeout\",\"type\":\"api_error\",\"param\":null,\"code\":null}}",
     );
+    await waitForHttp(() => opened.upstream.streams[0]?.closed === true);
+    assertTransportReleased(opened.backend);
+    expect(opened.upstream.requests).toHaveLength(1);
+    opened.upstream.assertSatisfied();
     expect(usage).toHaveLength(1);
     expect(usage).toMatchObject([{
       protocol: "openai_responses_native",
@@ -86,11 +92,11 @@ describe("request lifecycle over loopback", () => {
 
   it("keeps a real client disconnect distinct and fabricates no timeout response", async () => {
     const usage: UsageUpdate[] = [];
-    const gateway = await responsesGateway({
+    const opened = await responsesGateway({
       totalMs: 60_000,
       usage,
-      stream: (signal) => stalledBytes(signal),
     });
+    const { gateway } = opened;
     closing.push(gateway);
     const { port } = await gateway.listen();
     const controller = new AbortController();
@@ -100,11 +106,18 @@ describe("request lifecycle over loopback", () => {
       body: JSON.stringify({ model: "native", input: "hi", stream: true }),
       signal: controller.signal,
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForHttp(() => opened.upstream.streams.length === 1);
     controller.abort();
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    await waitFor(() => usage.length === 1);
+    await waitForHttp(() => {
+      const state = opened.backend.inspect();
+      return usage.length === 1 && opened.upstream.streams[0]?.closed === true
+        && state.responseLeases === 0 && state.pools.active === 0 && state.pools.waiters === 0;
+    });
+    assertTransportReleased(opened.backend);
+    expect(opened.upstream.requests).toHaveLength(1);
+    opened.upstream.assertSatisfied();
     expect(usage).toMatchObject([{
       protocol: "openai_responses_native",
       outcome: "aborted",
@@ -114,21 +127,26 @@ describe("request lifecycle over loopback", () => {
   it("claims shutdown finalization before close hooks and keeps cleanup bounded", async () => {
     const usage: UsageUpdate[] = [];
     let finalizedBeforeClose = false;
-    const gateway = await responsesGateway({
+    const opened = await responsesGateway({
       totalMs: 60_000,
       usage,
-      stream: (signal) => stalledBytes(signal),
       onClose: () => {
         finalizedBeforeClose = usage.length === 1;
       },
     });
+    const { gateway } = opened;
+    closing.push(gateway);
     const pending = gateway.fetch(responsesRequest());
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await waitForHttp(() => opened.upstream.streams.length === 1);
     const started = Date.now();
     await gateway.close();
     expect(Date.now() - started).toBeLessThan(2_000);
     expect((await pending).body).toBeNull();
     expect(finalizedBeforeClose).toBe(true);
+    await waitForHttp(() => opened.upstream.streams[0]?.closed === true);
+    assertTransportReleased(opened.backend);
+    expect(opened.upstream.requests).toHaveLength(1);
+    opened.upstream.assertSatisfied();
     expect(usage).toHaveLength(1);
     expect(usage).toMatchObject([{ outcome: "aborted" }]);
   });
@@ -137,60 +155,66 @@ describe("request lifecycle over loopback", () => {
 async function responsesGateway(options: {
   readonly totalMs: number;
   readonly usage: UsageUpdate[];
-  readonly stream: (signal: AbortSignal) => AsyncIterable<Uint8Array>;
   readonly onClose?: () => void;
-}): Promise<HostedGateway> {
-  const database = openDatabase({
-    path: ":memory:",
-    migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+}) {
+  return await withSetupCleanup(async (own) => {
+    const database = openDatabase({
+      path: ":memory:",
+      migrations: [embedMigration(runtimeConfigMigration), embedMigration(accountsMigration)],
+    });
+    own(() => closeDatabase(database));
+    const credentials = new MemoryCredentialStore();
+    const accountCoordinator = new AccountCoordinator();
+    const accounts = new AccountDirectory(database, credentials, accountCoordinator);
+    await accounts.upsertAuthenticated({
+      host: "github.com",
+      userId: "1",
+      secret: { generation: 0, githubToken: "t" },
+    });
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return {
+          data: [{
+            id: "native",
+            name: "Native",
+            vendor: "github",
+            model_picker_enabled: true,
+            model_info: { supported_endpoints: ["/responses"] },
+          }],
+        };
+      },
+    });
+    const http = await startHttpCopilot({ credentials, accountCoordinator, nowMs: Date.now, expectations: [{
+      method: "POST", path: "/responses", body: jsonStream(true),
+      reply: { headers: { "content-type": "text/event-stream" }, stream: async (exchange) => { await exchange.waitForClose(); } },
+    }] });
+    own(() => http.close());
+    const registry = testModelCapabilityRegistry(catalog);
+    own(() => registry.close());
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.timeouts.totalMs = options.totalMs;
+    const port = await availablePort();
+    const gateway = await createGateway({
+      startup: parseStartupConfig(["--port", String(port)], {}, { homedir: "Q:\\ghc-gateway-loopback" }),
+      runtime,
+    }, [createResponsesRoute({
+      directory: accounts,
+      registry,
+      preferences: accounts.preferences,
+      copilot: http.backend,
+      history: EMPTY_HISTORY,
+      usageRecorder: { recordUsage: (update) => options.usage.push(update) },
+    })], {
+      onClose: async () => {
+        await closeAll([
+          () => options.onClose?.(),
+          () => assertTransportReleased(http.backend),
+          () => registry.close(), () => http.close(), () => closeDatabase(database),
+        ]);
+      },
+    });
+    return { gateway, upstream: http.upstream, backend: http.backend };
   });
-  const accounts = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator());
-  await accounts.upsertAuthenticated({
-    host: "github.com",
-    userId: "1",
-    secret: { generation: 0, githubToken: "t" },
-  });
-  const catalog = new CopilotModelCatalog({
-    async fetch() {
-      return {
-        data: [{
-          id: "native",
-          name: "Native",
-          vendor: "github",
-          model_picker_enabled: true,
-          model_info: { supported_endpoints: ["/responses"] },
-        }],
-      };
-    },
-  });
-  const backend = new ScriptedCopilotBackend({
-    responsesStream: (request) => options.stream(request.signal),
-  });
-  const runtime = defaultRuntimeConfigSnapshot();
-  runtime.timeouts.totalMs = options.totalMs;
-  runtime.timeouts.firstByteMs = 1_000;
-  const port = await availablePort();
-  const gateway = await createGateway({
-    startup: parseStartupConfig(["--port", String(port)], {}, { homedir: "Q:\\ghc-gateway-loopback" }),
-    runtime,
-  }, [createResponsesRoute({
-    directory: accounts,
-    registry: testModelCapabilityRegistry(catalog),
-    preferences: accounts.preferences,
-    copilot: backend,
-    history: EMPTY_HISTORY,
-    usageRecorder: { recordUsage: (update) => options.usage.push(update) },
-  })], {
-    ...(options.onClose === undefined
-      ? { onClose: () => closeDatabase(database) }
-      : {
-        onClose: () => {
-          options.onClose?.();
-          closeDatabase(database);
-        },
-      }),
-  });
-  return gateway;
 }
 
 const EMPTY_HISTORY: ResponsesHistory = {
@@ -212,21 +236,6 @@ function responsesRequest(): Request {
   });
 }
 
-function stalledBytes(signal: AbortSignal): AsyncIterable<Uint8Array> {
-  return {
-    [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-      return {
-        next: async () => {
-          await new Promise<void>((_resolve, reject) => {
-            signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
-          });
-          return { done: true, value: undefined };
-        },
-      };
-    },
-  };
-}
-
 async function availablePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -241,14 +250,4 @@ async function availablePort(): Promise<number> {
     server.close((error) => error === undefined ? resolve() : reject(error));
   });
   return address.port;
-}
-
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let index = 0; index < 100; index += 1) {
-    if (predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("condition not reached");
 }

@@ -4,8 +4,8 @@ import {
   CHAT_MODEL,
   MESSAGES_MODEL,
   NATIVE_RESPONSES_MODEL,
-  type ReplaySdkHarness,
-} from "./replay_harness.js";
+} from "./replay_models.js";
+import type { ReplaySdkHarness } from "./replay_harness.js";
 
 export const SDK_PROTOCOLS = ["chat", "messages", "responses"] as const;
 export type SdkProtocol = typeof SDK_PROTOCOLS[number];

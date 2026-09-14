@@ -26,7 +26,7 @@ export function replayScenarioId(caseId: string): string {
 }
 
 /** Build the one harness-owned scenario catalogue from authored inputs and fixed identity fields. */
-export async function createReplayScenarios(manifest: ReplayScenarioManifest): Promise<readonly ReplayScenario[]> {
+export async function createReplayScenarios(manifest: ReplayScenarioManifest, options: { readonly reasoningDownstream?: SdkProtocol; readonly toolDownstream?: SdkProtocol } = {}): Promise<readonly ReplayScenario[]> {
   const imageBase64 = (await readFile(new URL("./images/vergil.jpg", import.meta.url))).toString("base64");
   const scenarios: ReplayScenario[] = [];
   for (const protocol of ["chat", "responses", "messages"] as const) {
@@ -39,7 +39,7 @@ export async function createReplayScenarios(manifest: ReplayScenarioManifest): P
     }
     const reasoningCase = `replay.${protocol}.reasoning-effort.nonstream`;
     scenarios.push(single(reasoningCase, protocol, false, (body) =>
-      matchesTextRequest(body, protocol, { prompt: REASONING_PROMPT }, undefined) && matchesReasoning(body, protocol)));
+      matchesTextRequest(body, protocol, { prompt: REASONING_PROMPT }, undefined) && matchesReasoning(body, protocol, options.reasoningDownstream ?? protocol)));
 
     const toolCallId = await fixedToolCallId(manifest, `replay.${protocol}.tool-call.nonstream`, protocol);
     const previousResponseId = protocol === "responses"
@@ -49,7 +49,7 @@ export async function createReplayScenarios(manifest: ReplayScenarioManifest): P
       steps: [
         step(1, `replay.${protocol}.tool-call.nonstream`, false, (body) => matchesWeatherCall(body, protocol)),
         step(2, `replay.${protocol}.tool-result.nonstream`, false,
-          (body) => matchesWeatherResult(body, protocol, toolCallId, previousResponseId)),
+          (body) => matchesWeatherResult(body, protocol, toolCallId, previousResponseId, options.toolDownstream ?? protocol)),
       ],
     });
     for (const stream of [false, true]) {
@@ -92,9 +92,13 @@ function exchange(manifest: ReplayScenarioManifest, caseId: string): ReplayExcha
   return found;
 }
 
-function matchesReasoning(body: unknown, protocol: SdkProtocol): boolean {
+function matchesReasoning(body: unknown, protocol: SdkProtocol, downstream: SdkProtocol): boolean {
   const request = record(body);
   if (request === undefined) return false;
+  // The recorded catalog does not advertise portable reasoning. Conversion omits it;
+  // native requests must still carry the authored effort rather than matching absence.
+  if (downstream !== protocol) return request.reasoning_effort === undefined
+    && request.reasoning === undefined && request.output_config === undefined && request.thinking === undefined;
   if (protocol === "chat") return request.reasoning_effort === "low";
   if (protocol === "responses") return record(request.reasoning)?.effort === "low";
   return record(request.output_config)?.effort === "low";
@@ -185,7 +189,7 @@ function userProjection(body: unknown, protocol: SdkProtocol): { text: string; i
   return text === undefined ? undefined : { text, ...(image === undefined ? {} : { image }) };
 }
 
-function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: string, previousResponseId: string | undefined): boolean {
+function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: string, previousResponseId: string | undefined, downstream: SdkProtocol): boolean {
   const request = record(body);
   if (request === undefined || request.tools !== undefined) return false;
   const items = protocol === "responses" ? request.input : request.messages;
@@ -217,8 +221,19 @@ function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: stri
     } else if (protocol === "messages" && item.role === "user" && Array.isArray(item.content)) {
       if (!boundedArray(item.content, 1)) return false;
       const result = record(item.content[0]);
-      if (result?.type !== "tool_result") return false;
-      projected.push(["result", result.tool_use_id, result.content]);
+      if (result?.type === "text") {
+        if (![WEATHER_PROMPT, WEATHER_RESPONSES_PROMPT, "Use the tool result for the original task."].includes(String(result.text))) return false;
+        projected.push(["user", result.text]);
+      } else {
+        if (result?.type !== "tool_result" || result.is_error === true) return false;
+        let content = result.content;
+        if (boundedArray(content, 1)) {
+          const text = record(content[0]);
+          if (text?.type !== "text") return false;
+          content = text.text;
+        }
+        projected.push(["result", result.tool_use_id, content]);
+      }
     } else if (item.role === "user" && typeof item.content === "string") {
       if (![WEATHER_PROMPT, WEATHER_RESPONSES_PROMPT, "Use the tool result for the original task."].includes(item.content)) return false;
       projected.push(["user", item.content]);
@@ -232,11 +247,13 @@ function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: stri
   const result = projected.at(-1);
   if (!isDeepStrictEqual(result, ["result", callId, WEATHER_RESULT])) return false;
   if (request.previous_response_id !== undefined) {
-    return protocol === "responses" && request.previous_response_id === previousResponseId && projected.length <= 2
-      && projected.every((entry) => entry[0] !== "call");
+    return protocol === "responses" && request.previous_response_id === previousResponseId && projected.length === 1;
   }
   const callIndex = projected.findIndex((entry) => entry[0] === "call");
-  if (callIndex < 1 || callIndex !== projected.length - 2) return false;
+  // Only an explicitly selected Responses downstream continuation restores the minimal owned Chat call.
+  const expectedCallIndex = protocol === "chat" && downstream === "responses" ? 0 : 1;
+  if (callIndex !== expectedCallIndex || callIndex !== projected.length - 2) return false;
+  if (callIndex === 1 && projected[0]?.[0] !== "user") return false;
   return isDeepStrictEqual(projected[callIndex], ["call", callId, "get_weather", { city: "Tokyo" }]);
 }
 

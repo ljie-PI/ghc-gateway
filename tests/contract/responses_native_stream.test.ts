@@ -18,6 +18,19 @@ describe("native Responses stream", () => {
     ].join(""));
   });
 
+  it("returns the still-open raw source once on native terminal without requesting EOF", async () => {
+    const wire = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_native\",\"output\":[],\"usage\":{\"input_tokens\":5,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":1}}}}\n\n";
+    let reads = 0;
+    let returned = 0;
+    const source: AsyncIterable<Uint8Array> = { [Symbol.asyncIterator]() { return {
+      async next() { reads += 1; if (reads === 1) return { done: false, value: new TextEncoder().encode(wire) }; throw new Error("terminal must not read EOF"); },
+      async return() { returned += 1; return { done: true, value: undefined }; },
+    }; } };
+    expect(await collect(normalizeNativeResponsesStream(source, 4096))).toBe(wire);
+    expect(reads).toBe(1);
+    expect(returned).toBe(1);
+  });
+
   it("rejects DONE markers, event type mismatches, and EOF before terminal", async () => {
     await expect(collect(normalizeNativeResponsesStream(streamBytes(["data: [DONE]\n\n"]), 4096)))
       .rejects.toBeInstanceOf(GatewayFailureError);

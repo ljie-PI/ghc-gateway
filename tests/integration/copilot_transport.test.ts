@@ -1,3 +1,4 @@
+import { startHttpCopilot, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
 import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -9,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import type { BoundAccount } from "../../src/accounts/account_directory.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
-import { outboundHeaders, ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { outboundHeaders } from "../../src/copilot/backend.js";
 import { EndpointDiscovery, fallbackEndpoint, stripSecretsOnRedirect } from "../../src/copilot/endpoint_discovery.js";
 import { copilotHeaders } from "../../src/copilot/identity.js";
 import { HttpCopilotBackend } from "../../src/copilot/transport.js";
@@ -384,27 +385,26 @@ describe("Copilot transport", () => {
     }
   });
 
-  it("binds a scripted backend to the provided account only", async () => {
-    const backend = new ScriptedCopilotBackend({
-      chat: {
-        status: 200,
-        headers: new Headers(),
-        body: new TextEncoder().encode("{}"),
-      },
+  it("binds HTTP inference to the provided account and its distinguishable credentials only", async () => {
+    const credentials = new MemoryCredentialStore();
+    await credentials.putGeneration("github.com/1", 1, { generation: 1, githubToken: "account-one" });
+    await credentials.putGeneration("github.com/2", 1, { generation: 1, githubToken: "account-two" });
+    const http = await startHttpCopilot({ credentials, accountCoordinator: new AccountCoordinator(), nowMs: Date.now,
+      expectations: [{ method: "POST", path: "/chat/completions", body: new Uint8Array(),
+        headers: { authorization: "Bearer http-test-account-one", "copilot-vision-request": null },
+        reply: { body: new TextEncoder().encode("{}") },
+      }],
     });
-    const bound = await backend.bind(account(), new AbortController().signal);
-    expect(bound.accountId).toBe("github.com/1");
-    await bound.completeChat({
-      model: "gpt",
-      body: new Uint8Array(),
-      stream: false,
-      hasVisionInput: false,
-      nonstreamBodyBytes: 1_000,
-      connectTimeoutMs: 1_000,
-      firstByteTimeoutMs: 1_000,
-      signal: new AbortController().signal,
-    });
-    expect(backend.captured).toEqual([{ accountId: "github.com/1", kind: "chat" }]);
+    try {
+      const bound = await http.backend.bind(account(), new AbortController().signal);
+      expect(bound.accountId).toBe("github.com/1");
+      await bound.completeChat({ model: "gpt", body: new Uint8Array(), stream: false, hasVisionInput: false,
+        nonstreamBodyBytes: 1000, connectTimeoutMs: 1000, firstByteTimeoutMs: 1000, signal: new AbortController().signal,
+      });
+      expect(http.upstream.requests).toHaveLength(1);
+      http.upstream.assertSatisfied();
+      assertTransportReleased(http.backend);
+    } finally { await http.close(); }
   });
 
   it("sends JSON and vision headers only from typed Chat request state", async () => {

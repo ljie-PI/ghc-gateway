@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
-import type { BoundAccount } from "../../src/accounts/account_directory.js";
-import type { BoundCopilot } from "../../src/copilot/backend.js";
-import type { NativeResponsesUpstreamRequest, UpstreamByteStream } from "../../src/copilot/upstream_types.js";
+import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
+import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
+import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
+import { startHttpCopilot, jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
 import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
 import {
   completeNativeResponses,
@@ -24,42 +24,40 @@ describe("native Responses execution", () => {
   });
 
   it("builds upstream request metadata for native transport without invoking Chat", async () => {
-    let captured: NativeResponsesUpstreamRequest | undefined;
-    const backend = new ScriptedCopilotBackend({
-      responses(request) {
-        captured = request;
-        return {
-          status: 200,
-          headers: new Headers(),
-          body: new TextEncoder().encode("{\"id\":\"resp_1\",\"output\":[]}"),
-        };
-      },
-    });
-    const bound = await backend.bind({ accountId: "github.com/1" } as BoundAccount, new AbortController().signal);
-    const plan = nativePlan("{\"input\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,abc\"}]}");
-    const request = nativeResponsesUpstreamRequest(plan, {
-      requestId: "req_native",
-      nonstreamBodyBytes: 1024,
-      connectTimeoutMs: 30,
-      firstByteTimeoutMs: 120,
-      signal: new AbortController().signal,
-    });
-    await completeNativeResponses(bound, plan, {
-      requestId: "req_native",
-      nonstreamBodyBytes: 1024,
-      connectTimeoutMs: 30,
-      firstByteTimeoutMs: 120,
-      signal: request.signal,
-    });
-    expect(backend.captured.map((entry) => entry.kind)).toEqual(["responses"]);
-    expect(captured).toMatchObject({
-      hasVisionInput: true,
-      initiator: "user",
-      requestId: "req_native",
-      nonstreamBodyBytes: 1024,
-      connectTimeoutMs: 30,
-      firstByteTimeoutMs: 120,
-    });
+    const http = await nativeHttp();
+    try {
+      const bound = await http.backend.bind(nativeAccount, new AbortController().signal);
+      const plan = nativePlan("{\"input\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,abc\"}]}");
+      const request = nativeResponsesUpstreamRequest(plan, {
+        requestId: "req_native",
+        nonstreamBodyBytes: 1024,
+        connectTimeoutMs: 30,
+        firstByteTimeoutMs: 120,
+        signal: new AbortController().signal,
+      });
+      http.upstream.expect({ method: "POST", path: "/responses", body: request.body,
+        headers: { "copilot-vision-request": "true", "x-initiator": "user", "x-request-id": "req_native" },
+        reply: { body: new TextEncoder().encode("{\"id\":\"resp_1\",\"output\":[]}") },
+      });
+      await completeNativeResponses(bound, plan, {
+        requestId: "req_native",
+        nonstreamBodyBytes: 1024,
+        connectTimeoutMs: 30,
+        firstByteTimeoutMs: 120,
+        signal: request.signal,
+      });
+      expect(http.upstream.requests).toHaveLength(1);
+      http.upstream.assertSatisfied();
+      expect(request).toMatchObject({
+        hasVisionInput: true,
+        initiator: "user",
+        requestId: "req_native",
+        nonstreamBodyBytes: 1024,
+        connectTimeoutMs: 30,
+        firstByteTimeoutMs: 120,
+      });
+      assertTransportReleased(http.backend);
+    } finally { await http.close(); }
   });
 
   it("preserves valid native non-stream bodies and rejects malformed 2xx bodies", () => {
@@ -72,70 +70,27 @@ describe("native Responses execution", () => {
     }, 1024)).toThrow(/GatewayFailureError|invalid/u);
   });
 
-  it("rejects malformed native executor responses and non-SSE native streams", async () => {
+  it("rejects malformed native executor responses and releases non-SSE native streams", async () => {
     const plan = nativePlan("{\"model\":\"requested\",\"input\":\"hi\",\"stream\":true}");
     const signal = new AbortController().signal;
-    const invalidBody = await scriptedBound({
-      responses: {
-        status: 200,
-        headers: new Headers(),
-        body: new TextEncoder().encode("[]"),
-      },
-    });
-    await expect(completeNativeResponses(invalidBody, plan, {
-      requestId: "req_native",
-      nonstreamBodyBytes: 1024,
-      connectTimeoutMs: 30,
-      firstByteTimeoutMs: 120,
-      signal,
-    })).rejects.toThrow();
-
-    let canceled = 0;
-    const invalidStream = await scriptedBound({
-      stream: {
-        status: 200,
-        headers: new Headers({ "content-type": "application/json" }),
-        bytes: emptyStream(),
-        cancel: async () => { canceled += 1; },
-      },
-    });
-    await expect(openNativeResponsesStream(invalidStream, plan, {
-      requestId: "req_native",
-      nonstreamBodyBytes: 1024,
-      connectTimeoutMs: 30,
-      firstByteTimeoutMs: 120,
-      signal,
-    })).rejects.toThrow();
-    expect(canceled).toBe(1);
+    const http = await nativeHttp();
+    try {
+      const bound = await http.backend.bind(nativeAccount, signal);
+      const options = { requestId: "req_native", nonstreamBodyBytes: 1024, connectTimeoutMs: 1000, firstByteTimeoutMs: 1000, signal };
+      http.upstream.expect({ method: "POST", path: "/responses", body: jsonStream(true), reply: { body: new TextEncoder().encode("[]") } });
+      await expect(completeNativeResponses(bound, plan, options)).rejects.toThrow();
+      assertTransportReleased(http.backend);
+      http.upstream.expect({ method: "POST", path: "/responses", body: jsonStream(true),
+        reply: { headers: { "content-type": "application/json" }, stream: async (exchange) => { await exchange.waitForClose(); } },
+      });
+      await expect(openNativeResponsesStream(bound, plan, options)).rejects.toThrow();
+      await waitForHttp(() => http.upstream.streams[0]?.closed === true);
+      expect(http.upstream.streams[0]?.ended).toBe(false);
+      assertTransportReleased(http.backend);
+      expect(http.upstream.requests).toHaveLength(2);
+      http.upstream.assertSatisfied();
+    } finally { await http.close(); }
   });
-
-  async function scriptedBound(options: {
-    readonly responses?: Awaited<ReturnType<BoundCopilot["completeResponses"]>>;
-    readonly stream?: UpstreamByteStream;
-  }): Promise<BoundCopilot> {
-    return {
-      accountId: "github.com/1",
-      target: { endpoint: "https://api.githubcopilot.com", token: "secret" },
-      completeChat: async () => { throw new Error("chat must not be called"); },
-      openChatStream: async () => { throw new Error("chat stream must not be called"); },
-      completeResponses: async () => {
-        if (options.responses === undefined) {
-          throw new Error("responses missing");
-        }
-        return options.responses;
-      },
-      openResponsesStream: async () => {
-        if (options.stream === undefined) {
-          throw new Error("stream missing");
-        }
-        return options.stream;
-      },
-      completeMessages: async () => { throw new Error("messages must not be called"); },
-      openMessagesStream: async () => { throw new Error("messages stream must not be called"); },
-    };
-  }
-
-  async function* emptyStream(): AsyncIterable<Uint8Array> {}
 
   function nativePlan(json: string): NativeResponsesPlan {
     const request = decode(json);
@@ -178,3 +133,13 @@ describe("native Responses execution", () => {
     return decodeResponsesRequest(parsed);
   }
 });
+
+const nativeAccount = {
+  accountId: "github.com/1", environment: resolveGitHubEnvironment("github.com"), userId: "1",
+  login: "octo", displayName: "Octo", credentialGeneration: 1,
+};
+async function nativeHttp() {
+  const credentials = new MemoryCredentialStore();
+  await credentials.putGeneration(nativeAccount.accountId, 1, { generation: 1, githubToken: "native-test" });
+  return await startHttpCopilot({ credentials, accountCoordinator: new AccountCoordinator(), nowMs: () => 1_700_000_000_000 });
+}

@@ -2,7 +2,7 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream } from "../../scripts/tooling/test_support/http_copilot.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -147,7 +147,7 @@ describe("content-free protocol usage accounting", () => {
             }
             await harness.recorder.flush();
           }
-          expect(harness.backend.captured.map((entry) => entry.kind)).toEqual([stream ? `${source}-stream` : source, stream ? `${source}-stream` : source]);
+          expect(harness.upstream.requests.map((entry) => ({ path: entry.path, stream: JSON.parse(new TextDecoder().decode(entry.body)).stream === true }))).toEqual(Array.from({ length: 2 }, () => ({ path: source === "chat" ? "/chat/completions" : source === "messages" ? "/v1/messages" : "/responses", stream })));
           expect(harness.updates).toHaveLength(2);
           for (const update of harness.updates) {
             expect(update).toEqual({ occurredAtMs: nowMs(), accountId: "github.com/1", protocol: target === "chat" ? "openai_chat" : target === "messages" ? "anthropic" : source === "responses" ? "openai_responses_native" : "openai_responses_bridge", resolvedModel: "test-model", outcome: "success", requestCount: 1, errorCount: 0, inputTokens: 31, outputTokens: 22, cacheTokens: 8, latencyMs: 0 });
@@ -244,22 +244,30 @@ function request(target: InferenceProtocol, stream: boolean): Request {
   return new Request(`http://127.0.0.1:31400${route}`, { method: "POST", headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" }, body: JSON.stringify({ model: "test-model", ...input, max_tokens: target === "messages" ? 100 : undefined, stream }) });
 }
 async function usageGateway(source: InferenceProtocol, updates: Counters[], usage: Counters, status = 200) {
-  const database = openDatabase({ path: ":memory:", migrations: [configMigration, accountsMigration, telemetryMigration, historyMigration, ownershipMigration].map(embedMigration), nowMs });
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), new AccountCoordinator(), nowMs);
-  await directory.upsertAuthenticated({ host: "github.com", userId: "1", secret: { generation: 0, githubToken: "test-token" } });
-  const catalog = new CopilotModelCatalog({ async fetch() { return { data: [{ id: "test-model", name: "Test", vendor: "test", model_picker_enabled: true, model_info: { supported_endpoints: [source === "chat" ? "/chat/completions" : `/v1/${source}`], chat_output_token_field: "max_tokens" } }] }; } }, () => new Date(nowMs()));
-  const backend = new ScriptedCopilotBackend({
-    chat: () => ({ status, headers: new Headers(), body: buffered(source, usage) }),
-    messages: () => ({ status, headers: new Headers(), body: buffered(source, usage) }),
-    responses: () => ({ status, headers: new Headers(), body: buffered(source, usage) }),
-    chatStream: [encoder.encode(streamWire(source, updates))],
-    messagesStream: [encoder.encode(streamWire(source, updates))],
-    responsesStream: [encoder.encode(streamWire(source, updates))],
+  return await withSetupCleanup(async (own) => {
+    const database = openDatabase({ path: ":memory:", migrations: [configMigration, accountsMigration, telemetryMigration, historyMigration, ownershipMigration].map(embedMigration), nowMs });
+    own(() => closeDatabase(database));
+    const credentials = new MemoryCredentialStore();
+    const accountCoordinator = new AccountCoordinator();
+    const directory = new AccountDirectory(database, credentials, accountCoordinator, nowMs);
+    await directory.upsertAuthenticated({ host: "github.com", userId: "1", secret: { generation: 0, githubToken: "test-token" } });
+    const catalog = new CopilotModelCatalog({ async fetch() { return { data: [{ id: "test-model", name: "Test", vendor: "test", model_picker_enabled: true, model_info: { supported_endpoints: [source === "chat" ? "/chat/completions" : `/v1/${source}`], chat_output_token_field: "max_tokens" } }] }; } }, () => new Date(nowMs()));
+    const upstreamPath = source === "chat" ? "/chat/completions" : source === "messages" ? "/v1/messages" : "/responses";
+    const http = await startHttpCopilot({ credentials, accountCoordinator, nowMs, expectations: [
+      { method: "POST", path: upstreamPath, body: jsonStream(false), times: 8,
+        reply: { status, body: buffered(source, usage) } },
+      { method: "POST", path: upstreamPath, body: jsonStream(true), times: 8,
+        reply: { headers: { "content-type": "text/event-stream" }, body: encoder.encode(streamWire(source, updates)) } },
+    ] });
+    own(() => http.close());
+    const registry = testModelCapabilityRegistry(catalog);
+    own(() => registry.close());
+    const recorder = new TelemetryRecorder(database, nowMs);
+    const observations: UsageUpdate[] = [];
+    const dependencies = { directory, preferences: directory.preferences, registry, copilot: http.backend, nowMs, createUuid: uuid, usageRecorder: { recordUsage(update: UsageUpdate) { observations.push(update); recorder.recordUsage(update); } } };
+    const history = new SqliteResponsesHistory(database, { nowMs });
+    const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime: defaultRuntimeConfigSnapshot() }, [createOpenAiChatRoute(dependencies), createAnthropicMessagesRoute(dependencies), createResponsesRoute({ ...dependencies, history, nowUnixSeconds: () => nowMs() / 1000 })], { createRequestId: () => "req_usage" });
+    own(() => gw.close());
+    return { gw, database, recorder, updates: observations, upstream: http.upstream, close: async () => { await closeAll([() => gw.close(), () => registry.close(), () => http.close(), () => closeDatabase(database)]); } };
   });
-  const recorder = new TelemetryRecorder(database, nowMs);
-  const observations: UsageUpdate[] = [];
-  const dependencies = { directory, preferences: directory.preferences, registry: testModelCapabilityRegistry(catalog), copilot: backend, nowMs, createUuid: uuid, usageRecorder: { recordUsage(update: UsageUpdate) { observations.push(update); recorder.recordUsage(update); } } };
-  const history = new SqliteResponsesHistory(database, { nowMs });
-  const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime: defaultRuntimeConfigSnapshot() }, [createOpenAiChatRoute(dependencies), createAnthropicMessagesRoute(dependencies), createResponsesRoute({ ...dependencies, history, nowUnixSeconds: () => nowMs() / 1000 })], { createRequestId: () => "req_usage" });
-  return { gw, database, recorder, updates: observations, backend, close: async () => { await gw.close(); closeDatabase(database); } };
 }

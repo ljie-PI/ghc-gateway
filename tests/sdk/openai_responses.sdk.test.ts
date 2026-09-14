@@ -1,17 +1,13 @@
+import { assertSyntheticOperations } from "./synthetic_scenarios.js";
+import { CHAT_MODEL, MESSAGES_MODEL, NATIVE_RESPONSES_MODEL, PNG_DATA_URL, REASONING_MODEL, getWeather } from "./synthetic_scenarios.js";
 import OpenAI from "openai";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  CHAT_MODEL,
   decodeCapturedBody,
-  getWeather,
-  MESSAGES_MODEL,
-  NATIVE_RESPONSES_MODEL,
-  PNG_DATA_URL,
-  REASONING_MODEL,
-  type OfflineSdkHarness,
-  startOfflineSdkHarness,
+  type SyntheticSdkHarness,
+  startSyntheticSdkHarness,
   waitFor,
-} from "./harness.js";
+} from "./replay_harness.js";
 
 const WEATHER_TOOL = {
   type: "function",
@@ -26,18 +22,24 @@ const WEATHER_TOOL = {
 } as const;
 
 describe("official OpenAI Responses SDK", () => {
-  let harness: OfflineSdkHarness;
+  let harness: SyntheticSdkHarness;
   let client: OpenAI;
 
   beforeAll(async () => {
-    harness = await startOfflineSdkHarness();
+    harness = await startSyntheticSdkHarness();
     client = new OpenAI({ apiKey: "local", baseURL: harness.openAiBaseUrl, fetch: harness.fetch, maxRetries: 0 });
+  });
+  afterEach(async () => {
+    await waitFor(() => harness.transport.inspect().responseLeases === 0);
+    expect(harness.transport.inspect()).toMatchObject({ closed: false, responseLeases: 0, pools: { active: 0, waiters: 0 } });
+    harness.upstream.assertHealthy();
   });
   afterAll(async () => {
     await harness.close();
   });
 
   it("deserializes non-stream and iterates a terminal native Responses stream", async () => {
+    const httpStart = harness.upstream.requests.length;
     const nonstream = await client.responses.create({ model: NATIVE_RESPONSES_MODEL, input: "sdk-responses-nonstream" });
     expect(nonstream.id).toBe("resp_sdk");
     expect(nonstream.output_text).toBe("pong");
@@ -52,18 +54,20 @@ describe("official OpenAI Responses SDK", () => {
       eventTypes.push(event.type);
     }
     expect(eventTypes).toEqual(["response.completed"]);
-    expect(decodeCapturedBody(harness.responsesRequests[0]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/responses")[0]!)).toEqual({
       model: NATIVE_RESPONSES_MODEL,
       input: "sdk-responses-nonstream",
     });
-    expect(decodeCapturedBody(harness.responsesRequests[1]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/responses")[1]!)).toEqual({
       model: NATIVE_RESPONSES_MODEL,
       input: "sdk-responses-stream",
       stream: true,
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", false], ["/responses", true]]);
   });
 
   it("deserializes non-stream and iterates a terminal Chat-bridge Responses stream", async () => {
+    const httpStart = harness.upstream.requests.length;
     const nonstream = await client.responses.create({ model: CHAT_MODEL, input: "sdk-bridge-nonstream" });
     expect(nonstream.id).toMatch(/^resp_/u);
     expect(nonstream.output_text).toBe("pong");
@@ -79,19 +83,21 @@ describe("official OpenAI Responses SDK", () => {
       eventTypes.push(event.type);
     }
     expect(eventTypes).toContain("response.completed");
-    expect(harness.backendKinds).toContain("chat");
-    expect(harness.backendKinds).toContain("chat-stream");
+    expect(harness.requests("/chat/completions").some((request) => !(decodeCapturedBody(request) as { stream?: boolean }).stream)).toBe(true);
+    expect(harness.requests("/chat/completions").some((request) => (decodeCapturedBody(request) as { stream?: boolean }).stream === true)).toBe(true);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false], ["/chat/completions", true]]);
   });
 
   it("converts an official Responses request directly to Messages", async () => {
-    const requestIndex = harness.messagesRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/v1/messages").length;
     const response = await client.responses.create({
       model: MESSAGES_MODEL,
       input: "responses-to-messages",
     });
 
     expect(response.output_text).toBe("pong");
-    expect(decodeCapturedBody(harness.messagesRequests[requestIndex]!)).toMatchObject({
+    expect(decodeCapturedBody(harness.requests("/v1/messages")[requestIndex]!)).toMatchObject({
       model: MESSAGES_MODEL,
       max_tokens: 4096,
       messages: [{
@@ -99,10 +105,12 @@ describe("official OpenAI Responses SDK", () => {
         content: [{ type: "text", text: "responses-to-messages" }],
       }],
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/v1/messages", false]]);
   });
 
   it("converts instructions and ordinary multi-turn input through Chat-bridge Responses", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const input = [
       { role: "user" as const, content: "Hello" },
       { role: "assistant" as const, content: "Hi" },
@@ -115,17 +123,19 @@ describe("official OpenAI Responses SDK", () => {
     });
 
     expect(response.output_text).toBe("pong");
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [
         { role: "system", content: "Answer concisely." },
         ...input,
       ],
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("restores a Chat-bridge tool call for an actual second Responses request", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const first = await client.responses.create({
       model: CHAT_MODEL,
       input: "What is the weather in Tokyo?",
@@ -148,7 +158,7 @@ describe("official OpenAI Responses SDK", () => {
     });
 
     expect(second.output_text).toBe("Tool result accepted.");
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex + 1]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex + 1]!)).toEqual({
       model: CHAT_MODEL,
       messages: [
         {
@@ -163,10 +173,12 @@ describe("official OpenAI Responses SDK", () => {
         { role: "tool", tool_call_id: "call_weather", content: JSON.stringify(weather) },
       ],
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false], ["/chat/completions", false]]);
   });
 
   it("converts mixed PNG and tool input through Chat-bridge Responses", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const response = await client.responses.create({
       model: CHAT_MODEL,
       input: [{
@@ -183,8 +195,8 @@ describe("official OpenAI Responses SDK", () => {
       type: "function_call",
       call_id: "call_weather",
     }));
-    expect(harness.chatRequests[requestIndex]?.hasVisionInput).toBe(true);
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{
         role: "user",
@@ -203,10 +215,12 @@ describe("official OpenAI Responses SDK", () => {
         },
       }],
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("converts standalone PNG input through Chat-bridge Responses", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     await client.responses.create({
       model: CHAT_MODEL,
       input: [{
@@ -218,8 +232,8 @@ describe("official OpenAI Responses SDK", () => {
       }],
     });
 
-    expect(harness.chatRequests[requestIndex]?.hasVisionInput).toBe(true);
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{
         role: "user",
@@ -229,10 +243,12 @@ describe("official OpenAI Responses SDK", () => {
         ],
       }],
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("sends mixed PNG and tool input natively, then carries the tool result in a second request", async () => {
-    const requestIndex = harness.responsesRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/responses").length;
     const input = [{
       role: "user" as const,
       content: [
@@ -268,22 +284,24 @@ describe("official OpenAI Responses SDK", () => {
     });
 
     expect(second.output_text).toBe("pong");
-    expect(decodeCapturedBody(harness.responsesRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/responses")[requestIndex]!)).toEqual({
       model: NATIVE_RESPONSES_MODEL,
       input,
       tools: [WEATHER_TOOL],
     });
-    expect(decodeCapturedBody(harness.responsesRequests[requestIndex + 1]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/responses")[requestIndex + 1]!)).toEqual({
       model: NATIVE_RESPONSES_MODEL,
       previous_response_id: first.id,
       input: [toolOutput],
     });
-    expect(harness.responsesRequests[requestIndex]?.hasVisionInput).toBe(true);
-    expect(harness.responsesRequests[requestIndex + 1]?.hasVisionInput).toBe(false);
+    expect(harness.requests("/responses")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    expect(harness.requests("/responses")[requestIndex + 1]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", false], ["/responses", false]]);
   });
 
   it("preserves native Responses instructions and ordinary multi-turn input", async () => {
-    const requestIndex = harness.responsesRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/responses").length;
     const input = [
       { role: "user" as const, content: "Hello" },
       { role: "assistant" as const, content: "Hi" },
@@ -295,15 +313,17 @@ describe("official OpenAI Responses SDK", () => {
       input,
     });
 
-    expect(decodeCapturedBody(harness.responsesRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/responses")[requestIndex]!)).toEqual({
       model: NATIVE_RESPONSES_MODEL,
       instructions: "Answer concisely.",
       input,
     });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", false]]);
   });
 
   it("sends standalone native Responses PNG input as vision", async () => {
-    const requestIndex = harness.responsesRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/responses").length;
     const input = [{
       role: "user" as const,
       content: [
@@ -313,15 +333,17 @@ describe("official OpenAI Responses SDK", () => {
     }];
     await client.responses.create({ model: NATIVE_RESPONSES_MODEL, input });
 
-    expect(decodeCapturedBody(harness.responsesRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/responses")[requestIndex]!)).toEqual({
       model: NATIVE_RESPONSES_MODEL,
       input,
     });
-    expect(harness.responsesRequests[requestIndex]?.hasVisionInput).toBe(true);
+    expect(harness.requests("/responses")[requestIndex]!.headers.get("copilot-vision-request")).toBe("true");
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", false]]);
   });
 
   it("parses a fragmented native Responses tool stream through official events", async () => {
-    const requestIndex = harness.responsesRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/responses").length;
     const stream = await client.responses.create({
       model: NATIVE_RESPONSES_MODEL,
       input: "Stream the Tokyo weather call.",
@@ -340,14 +362,17 @@ describe("official OpenAI Responses SDK", () => {
       }
     }
 
+    expect(fragments).toEqual(["{\"city\":", "\"Tokyo\"}"]);
     expect(fragments.join("")).toBe("{\"city\":\"Tokyo\"}");
     expect(completedName).toBe("get_weather");
     expect(completedArguments).toBe("{\"city\":\"Tokyo\"}");
-    expect(harness.responsesRequests[requestIndex]?.hasVisionInput).toBe(false);
+    expect(harness.requests("/responses")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", true]]);
   });
 
   it("parses a fragmented Chat-bridge tool stream through official Responses events", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const stream = await client.responses.create({
       model: CHAT_MODEL,
       input: "Stream the Tokyo weather call.",
@@ -371,7 +396,7 @@ describe("official OpenAI Responses SDK", () => {
     expect(addedCallId).toBe("call_stream");
     expect(argumentDeltas.join("")).toBe("{\"city\":\"Tokyo\"}");
     expect(completedArguments).toBe("{\"city\":\"Tokyo\"}");
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: "Stream the Tokyo weather call." }],
       stream: true,
@@ -386,11 +411,13 @@ describe("official OpenAI Responses SDK", () => {
         },
       }],
     });
-    expect(harness.chatRequests[requestIndex]?.hasVisionInput).toBe(false);
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", true]]);
   });
 
   it("preserves reasoning.effort for native Responses requests", async () => {
-    const requestIndex = harness.responsesRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/responses").length;
     const response = await client.responses.create({
       model: NATIVE_RESPONSES_MODEL,
       input: "Reason natively.",
@@ -398,16 +425,18 @@ describe("official OpenAI Responses SDK", () => {
     });
 
     expect(response.output_text).toBe("pong");
-    expect(decodeCapturedBody(harness.responsesRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/responses")[requestIndex]!)).toEqual({
       model: NATIVE_RESPONSES_MODEL,
       input: "Reason natively.",
       reasoning: { effort: "high" },
     });
-    expect(harness.responsesRequests[requestIndex]?.hasVisionInput).toBe(false);
+    expect(harness.requests("/responses")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", false]]);
   });
 
   it("maps reasoning.effort through Chat-bridge Responses", async () => {
-    const requestIndex = harness.chatRequests.length;
+    const httpStart = harness.upstream.requests.length;
+    const requestIndex = harness.requests("/chat/completions").length;
     const response = await client.responses.create({
       model: REASONING_MODEL,
       input: "Reason through Chat.",
@@ -415,24 +444,28 @@ describe("official OpenAI Responses SDK", () => {
     });
 
     expect(response.output_text).toBe("Reasoned answer.");
-    expect(decodeCapturedBody(harness.chatRequests[requestIndex]!)).toEqual({
+    expect(decodeCapturedBody(harness.requests("/chat/completions")[requestIndex]!)).toEqual({
       model: REASONING_MODEL,
       messages: [{ role: "user", content: "Reason through Chat." }],
       reasoning_effort: "high",
     });
-    expect(harness.chatRequests[requestIndex]?.hasVisionInput).toBe(false);
+    expect(harness.requests("/chat/completions")[requestIndex]!.headers.get("copilot-vision-request")).toBe(null);
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/chat/completions", false]]);
   });
 
   it("surfaces the official API error class and gateway request ID", async () => {
+    const httpStart = harness.upstream.requests.length;
     const error = await client.responses.create({
       model: "missing-sdk-model",
       input: "sdk-error",
     }).then(() => undefined, (caught: unknown) => caught);
     expect(error).toBeInstanceOf(OpenAI.APIError);
     expect(error).toMatchObject({ status: 404, requestID: "req_sdk_loopback" });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), []);
   });
 
   it("cancels an in-flight official Responses stream", async () => {
+    const httpStart = harness.upstream.requests.length;
     const stream = await client.responses.create({
       model: NATIVE_RESPONSES_MODEL,
       input: "cancel-sdk-request",
@@ -440,9 +473,15 @@ describe("official OpenAI Responses SDK", () => {
     });
     const iterator = stream[Symbol.asyncIterator]();
     expect((await iterator.next()).done).toBe(false);
+    const exchange = harness.upstream.streams.at(-1)!;
+    expect(exchange).toMatchObject({ closed: false, ended: false });
+    expect(harness.transport.inspect()).toMatchObject({ responseLeases: 1, pools: { active: 1 } });
     stream.controller.abort();
-    await waitFor(() => harness.cancelled.responses > 0);
-    expect(harness.backendKinds).toContain("responses-stream");
+    await exchange.waitForClose();
+    expect(exchange.ended).toBe(false);
+    expect(exchange.request.path).toBe("/responses");
+    expect(decodeCapturedBody(exchange.request)).toMatchObject({ stream: true });
+    assertSyntheticOperations(harness.upstream.requests.slice(httpStart), [["/responses", true]]);
   });
 });
 

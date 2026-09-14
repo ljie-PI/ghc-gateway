@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { DeviceFlowService, type DeviceOAuthClient } from "../../src/accounts/device_flow.js";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream } from "../../scripts/tooling/test_support/http_copilot.js";
 import { createCopilotEndpointDiscovery, refreshCopilotToken } from "../../src/copilot/credential_provider.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
@@ -461,7 +461,7 @@ describe("CLI commands", () => {
       const removed = await client.request("accounts.remove", { accountId: "github.com/42" }, { dataDir: "unused" });
       expect(removed.state).toBe("removed");
     } finally {
-      harness.close();
+      await harness.close();
     }
   });
 
@@ -475,7 +475,7 @@ describe("CLI commands", () => {
       expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "expired" });
       expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "expired" });
     } finally {
-      expiredHarness.close();
+      await expiredHarness.close();
     }
 
     const failedHarness = await dispatcherHarness({ device: failedDeviceClient() });
@@ -486,7 +486,7 @@ describe("CLI commands", () => {
       expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "failed" });
       expect(await client.request("auth.login.poll", { flowId: started.flowId }, { dataDir: "unused" })).toEqual({ state: "failed" });
     } finally {
-      failedHarness.close();
+      await failedHarness.close();
     }
   });
 
@@ -509,7 +509,7 @@ describe("CLI commands", () => {
       expect(error).toMatchObject({ code: "remote_error" });
       expect(exitCodeForError((error as CliError).code)).toBe(5);
     } finally {
-      harness.close();
+      await harness.close();
     }
   });
 
@@ -793,7 +793,7 @@ describe("CLI commands", () => {
         await gateway.close();
       }
     } finally {
-      harness.close();
+      await harness.close();
     }
   });
 
@@ -897,67 +897,71 @@ async function dispatcherHarness(options: {
   readonly accountCoordinator: AccountCoordinator;
   readonly directory: AccountDirectory;
   readonly registry: ModelCapabilityRegistry;
-  readonly backend: ScriptedCopilotBackend;
+  readonly backend: Awaited<ReturnType<typeof startHttpCopilot>>["backend"];
   readonly history: SqliteResponsesHistory;
   readonly runtimeConfig: RuntimeConfigStore;
   capiModels: Array<{ readonly id: string; readonly name: string; readonly vendor: string; readonly model_picker_enabled: boolean }>;
-  readonly close: () => void;
+  readonly close: () => Promise<void>;
   readonly advanceTime: (milliseconds: number) => void;
 }> {
-  const clock = { value: 1_800_000_000_000 };
-  const now = options.now ?? (() => clock.value);
-  const database = openDatabase({
-    path: ":memory:",
-    migrations: [
-      embedMigration(runtimeConfigMigration),
-      embedMigration(accountsMigration),
-      embedMigration(telemetryMigration),
-      embedMigration(historyMigration),
-      embedMigration(continuationMigration),
-    ],
-    nowMs: now,
+  return await withSetupCleanup(async (own) => {
+    const clock = { value: 1_800_000_000_000 };
+    const now = options.now ?? (() => clock.value);
+    const database = openDatabase({
+      path: ":memory:",
+      migrations: [
+        embedMigration(runtimeConfigMigration),
+        embedMigration(accountsMigration),
+        embedMigration(telemetryMigration),
+        embedMigration(historyMigration),
+        embedMigration(continuationMigration),
+      ],
+      nowMs: now,
+    });
+    own(() => closeDatabase(database));
+    const accountCoordinator = new AccountCoordinator();
+    const credentials = new MemoryCredentialStore();
+    const directory = new AccountDirectory(database, credentials, accountCoordinator, now);
+    const harness = {
+      capiModels: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }],
+    };
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return { data: harness.capiModels };
+      },
+    });
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
+    own(() => registry.close());
+    const runtimeConfig = new RuntimeConfigStore(database, now);
+    runtimeConfig.seedIfEmpty({});
+    const history = new SqliteResponsesHistory(database, { nowMs: now });
+    const http = await startHttpCopilot({ credentials, accountCoordinator, nowMs: now, expectations: [{ method: "POST", path: "/chat/completions", body: jsonStream(false), reply: { status: 200, headers: {}, body: encoder.encode("{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}") } },
+      { method: "POST", path: "/responses", body: jsonStream(false), reply: { status: 200, headers: {}, body: encoder.encode("{}") } }] });
+    own(() => http.close());
+    const dispatcher = new CommandDispatcher({
+      directory,
+      deviceFlows: new DeviceFlowService(directory, options.device ?? deviceClient(), now),
+      registry,
+      runtimeConfig,
+    });
+    return {
+      dispatcher,
+      accountCoordinator,
+      directory,
+      registry,
+      backend: http.backend,
+      history,
+      runtimeConfig,
+      advanceTime: (milliseconds) => { clock.value += milliseconds; },
+      get capiModels() {
+        return harness.capiModels;
+      },
+      set capiModels(value) {
+        harness.capiModels = value;
+      },
+      close: () => closeAll([() => registry.close(), () => http.close(), () => closeDatabase(database)]),
+    };
   });
-  const accountCoordinator = new AccountCoordinator();
-  const directory = new AccountDirectory(database, new MemoryCredentialStore(), accountCoordinator, now);
-  const harness = {
-    capiModels: [{ id: "gpt", name: "GPT", vendor: "openai", model_picker_enabled: true }],
-  };
-  const catalog = new CopilotModelCatalog({
-    async fetch() {
-      return { data: harness.capiModels };
-    },
-  });
-  const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
-  const runtimeConfig = new RuntimeConfigStore(database, now);
-  runtimeConfig.seedIfEmpty({});
-  const history = new SqliteResponsesHistory(database, { nowMs: now });
-  const backend = new ScriptedCopilotBackend({
-    chat: { status: 200, headers: new Headers(), body: encoder.encode("{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}") },
-    responses: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
-  });
-  const dispatcher = new CommandDispatcher({
-    directory,
-    deviceFlows: new DeviceFlowService(directory, options.device ?? deviceClient(), now),
-    registry,
-    runtimeConfig,
-  });
-  return {
-    dispatcher,
-    accountCoordinator,
-    directory,
-    registry,
-    backend,
-    history,
-    runtimeConfig,
-    advanceTime: (milliseconds) => { clock.value += milliseconds; },
-    get capiModels() {
-      return harness.capiModels;
-    },
-    set capiModels(value) {
-      harness.capiModels = value;
-    },
-    close: () => closeDatabase(database),
-  };
 }
 
 function expiringDeviceClient(): DeviceOAuthClient {

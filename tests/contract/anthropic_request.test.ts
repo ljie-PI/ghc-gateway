@@ -1,13 +1,38 @@
-import { describe, expect, it } from "vitest";
+import { Server } from "node:http";
+import { DatabaseSync } from "node:sqlite";
+import { describe, expect, it, vi } from "vitest";
+import { HttpCopilotBackend } from "../../src/copilot/transport.js";
+import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
+import { EndpointDiscovery } from "../../src/copilot/endpoint_discovery.js";
 import { anthropicGateway, anthropicRequest, decodeChatBody } from "./anthropic_harness.js";
-import { ScriptedCopilotBackend } from "../../src/copilot/backend.js";
+import { jsonStream, waitForHttp, assertHeldHttpExchangeReleased } from "../../scripts/tooling/test_support/http_copilot.js";
+import type { HttpRequestObservation } from "../../scripts/tooling/test_support/copilot_http.js";
+import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
-import { UpstreamTimeoutError } from "../../src/copilot/transport.js";
-import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("Anthropic request route", () => {
+  it("rolls back SQLite, registry, real transport and HTTP listener when gateway construction fails", async () => {
+    const backendClose = vi.spyOn(HttpCopilotBackend.prototype, "close");
+    const registryClose = vi.spyOn(ModelCapabilityRegistry.prototype, "close");
+    const discoveryClose = vi.spyOn(EndpointDiscovery.prototype, "close");
+    const listenerClose = vi.spyOn(Server.prototype, "close");
+    const databaseClose = vi.spyOn(DatabaseSync.prototype, "close");
+    try {
+      await expect(anthropicGateway({
+        get runtime(): never { throw new Error("synthetic gateway setup failure"); },
+      })).rejects.toThrow("synthetic gateway setup failure");
+      expect(backendClose).toHaveBeenCalledTimes(1);
+      expect(registryClose).toHaveBeenCalledTimes(1);
+      expect(discoveryClose).toHaveBeenCalledTimes(1);
+      expect(listenerClose).toHaveBeenCalledTimes(1);
+      expect(databaseClose).toHaveBeenCalledTimes(1);
+      expect((listenerClose.mock.contexts[0] as Server).listening).toBe(false);
+      expect((backendClose.mock.contexts[0] as HttpCopilotBackend).inspect()).toMatchObject({ closed: true, responseLeases: 0, pools: { active: 0, waiters: 0 } });
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it("degrades prompt-caching beta hints on converted requests instead of rejecting them", async () => {
     const { gw, capturedRequests, close } = await anthropicGateway();
     try {
@@ -112,6 +137,7 @@ describe("Anthropic request route", () => {
       expect(ok.status).toBe(200);
       expect(capturedRequests).toHaveLength(1);
       expect(new TextDecoder().decode(capturedRequests[0]?.body)).not.toContain("anthropic-version");
+      expect(capturedRequests[0]?.headers.has("anthropic-version")).toBe(false);
     } finally {
       await close();
     }
@@ -126,7 +152,7 @@ describe("Anthropic request route", () => {
         stream: false,
       }));
       expect(defaulted.status).toBe(200);
-      expect(decodeChatBody(capturedRequests[0] as ChatRequest).max_tokens).toBe(4096);
+      expect(decodeChatBody(capturedRequests[0] as HttpRequestObservation).max_tokens).toBe(4096);
 
       const invalid = await gw.fetch(anthropicRequest({
         model: "gpt",
@@ -146,7 +172,7 @@ describe("Anthropic request route", () => {
     try {
       const preferred = await gw.fetch(anthropicRequest({ max_tokens: 1, messages: [{ role: "user", content: "hi" }], stream: false }));
       expect(preferred.status).toBe(200);
-      expect(decodeChatBody(capturedRequests[0] as ChatRequest).model).toBe("gpt");
+      expect(decodeChatBody(capturedRequests[0] as HttpRequestObservation).model).toBe("gpt");
 
       const unknown = await gw.fetch(anthropicRequest({ model: "no-such-model", max_tokens: 1, messages: [{ role: "user", content: "hi" }], stream: false }));
       expect(unknown.status).toBe(404);
@@ -189,8 +215,11 @@ describe("Anthropic request route", () => {
     [new TokenRefreshError("timeout", "private upstream URL"), 504, "timeout"],
   ])("normalizes bind failure %# for Messages", async (bindError, status, outcome) => {
     const usageUpdates: UsageUpdate[] = [];
-    const backend = new ScriptedCopilotBackend({ bindError });
-    const { gw, close } = await anthropicGateway({ backend, usageUpdates });
+    const { gw, upstream, close } = await anthropicGateway({
+      usageUpdates,
+      missingCredentials: bindError.code === "missing",
+      refreshCopilotToken: async () => { throw bindError; },
+    });
     try {
       const response = await gw.fetch(anthropicRequest({
         model: "gpt",
@@ -201,39 +230,42 @@ describe("Anthropic request route", () => {
       expect(response.headers.get("request-id")).toBe("req_test_1");
       expect(await response.text()).not.toContain("secret-token");
       expect(usageUpdates).toMatchObject([{ outcome }]);
+      expect(upstream.requests).toHaveLength(0);
     } finally {
       await close();
     }
   });
 
   it("normalizes transport timeout and malformed buffered output before commitment", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    // Other deadlines must not substitute for the transport first-byte deadline.
+    runtime.timeouts.firstByteMs = 1_000;
     const timeoutGateway = await anthropicGateway({
-      backend: new ScriptedCopilotBackend({
-        chat() {
-          throw new UpstreamTimeoutError();
-        },
-      }),
+      runtime,
+      expectations: [{ method: "POST", path: "/chat/completions", body: jsonStream(false),
+        reply: { stream: async (exchange) => { await exchange.waitForClose(); } },
+      }],
     });
     try {
-      const response = await timeoutGateway.gw.fetch(anthropicRequest({
+      const pending = timeoutGateway.gw.fetch(anthropicRequest({
         model: "gpt",
         max_tokens: 1,
         messages: [{ role: "user", content: "hi" }],
       }));
+      await waitForHttp(() => timeoutGateway.upstream.streams.length === 1);
+      const response = await pending;
       expect(response.status).toBe(504);
       expect(await response.text()).toContain("\"type\":\"timeout_error\"");
+      expect(timeoutGateway.upstream.requests).toHaveLength(1);
+      await assertHeldHttpExchangeReleased(timeoutGateway.upstream, timeoutGateway.backend);
     } finally {
       await timeoutGateway.close();
     }
 
     const parserGateway = await anthropicGateway({
-      backend: new ScriptedCopilotBackend({
-        chat: {
-          status: 200,
-          headers: new Headers(),
-          body: new TextEncoder().encode("{\"choices\":"),
-        },
-      }),
+      expectations: [{ method: "POST", path: "/chat/completions", body: jsonStream(false),
+        reply: { status: 200, body: new TextEncoder().encode("{\"choices\":") },
+      }],
     });
     try {
       const response = await parserGateway.gw.fetch(anthropicRequest({
@@ -249,14 +281,7 @@ describe("Anthropic request route", () => {
   });
 
   it("rejects unknown fields and lossy legacy schema/media behavior before inference", async () => {
-    const captured: ChatRequest[] = [];
-    const backend = new ScriptedCopilotBackend({
-      chatStream(request) {
-        captured.push(request);
-        return [new TextEncoder().encode("data: [DONE]\n\n")];
-      },
-    });
-    const { gw, close } = await anthropicGateway({ backend });
+    const { gw, upstream, close } = await anthropicGateway({ expectations: [] });
     try {
       const response = await gw.fetch(anthropicRequest({
         model: "gpt-5",
@@ -315,7 +340,7 @@ describe("Anthropic request route", () => {
       }));
 
       expect(response.status).toBe(400);
-      expect(captured).toEqual([]);
+      expect(upstream.requests).toEqual([]);
     } finally {
       await close();
     }
@@ -332,7 +357,7 @@ describe("Anthropic request route", () => {
       }));
 
       expect(response.status).toBe(200);
-      expect(decodeChatBody(capturedRequests[0] as ChatRequest)).toMatchObject({
+      expect(decodeChatBody(capturedRequests[0] as HttpRequestObservation)).toMatchObject({
         model: "gpt-5",
         reasoning_effort: "xhigh",
       });
@@ -342,22 +367,7 @@ describe("Anthropic request route", () => {
   });
 
   it("rejects orphan parallel tool results instead of converting them to user text", async () => {
-    const captured: ChatRequest[] = [];
-    const backend = new ScriptedCopilotBackend({
-      chat(request) {
-        captured.push(request);
-        return {
-          status: 200,
-          headers: new Headers(),
-          body: new TextEncoder().encode(JSON.stringify({
-            id: "chatcmpl_1",
-            model: "gpt",
-            choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
-          })),
-        };
-      },
-    });
-    const { gw, close } = await anthropicGateway({ backend });
+    const { gw, upstream, close } = await anthropicGateway({ expectations: [] });
     try {
       const response = await gw.fetch(anthropicRequest({
         model: "gpt",
@@ -378,7 +388,7 @@ describe("Anthropic request route", () => {
       }));
 
       expect(response.status).toBe(400);
-      expect(captured).toEqual([]);
+      expect(upstream.requests).toEqual([]);
     } finally {
       await close();
     }
