@@ -1,7 +1,7 @@
 import type { InferenceProtocol } from "./types.js";
 
 const RESPONSE_ID_PREFIX = "resp_";
-const MANAGED_RESPONSE_NAMESPACE = "ghc-gateway:managed_response;";
+const MANAGED_RESPONSE_NAMESPACE = "ghc-gateway:";
 const LEGACY_MANAGED_RESPONSE_NAMESPACE = Buffer.from(
   "bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOg==",
   "base64",
@@ -26,10 +26,10 @@ export function managedConvertedResponseId(
   nonce: string,
 ): string {
   return encodeManagedResponseId([
-    "provider:github_copilot",
-    `model_id:${model}`,
-    `upstream_protocol:${upstreamProtocol}`,
-    `response_id:${nonce}`,
+    "github_copilot",
+    model,
+    upstreamProtocol,
+    nonce,
   ]);
 }
 
@@ -39,9 +39,9 @@ export function managedUpstreamResponseId(
   upstreamResponseId: string,
 ): string {
   return encodeManagedResponseId([
-    `provider:${provider}`,
-    `model_id:${model}`,
-    `response_id:${upstreamResponseId}`,
+    provider,
+    model,
+    upstreamResponseId,
   ]);
 }
 

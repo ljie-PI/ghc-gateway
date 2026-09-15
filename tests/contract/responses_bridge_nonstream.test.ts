@@ -133,12 +133,15 @@ describe("Responses bridge non-stream conversion", () => {
     const request = requestFromJson(JSON.stringify({ model: "gpt", tools: [{ type: "custom", name: "render" }, { type: "tool_search" }] }));
     const managed = managedResponseId("chatcmpl_2", undefined, undefined);
     expect(Buffer.from(managed.slice("resp_".length), "base64").toString("utf8")).toBe(
-      "ghc-gateway:managed_response;provider:None;model_id:None;response_id:chatcmpl_2",
+      "ghc-gateway:None;None;chatcmpl_2",
     );
     expect(isGatewayManagedResponseId(managed)).toBe(true);
-    const previouslyManaged = "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmdwdDtyZXNwb25zZV9pZDpjaGF0Y21wbF8y";
-    expect(isGatewayManagedResponseId(previouslyManaged)).toBe(true);
-    expect(managedResponseId(previouslyManaged, undefined, undefined)).toBe(previouslyManaged);
+    const previousGatewayManaged = "resp_Z2hjLWdhdGV3YXk6bWFuYWdlZF9yZXNwb25zZTtwcm92aWRlcjpnaXRodWJfY29waWxvdDttb2RlbF9pZDpncHQ7cmVzcG9uc2VfaWQ6Y2hhdGNtcGxfMg==";
+    expect(isGatewayManagedResponseId(previousGatewayManaged)).toBe(true);
+    expect(managedResponseId(previousGatewayManaged, undefined, undefined)).toBe(previousGatewayManaged);
+    const olderManaged = "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmdwdDtyZXNwb25zZV9pZDpjaGF0Y21wbF8y";
+    expect(isGatewayManagedResponseId(olderManaged)).toBe(true);
+    expect(managedResponseId(olderManaged, undefined, undefined)).toBe(olderManaged);
     const empty = convertChatResponseToResponses(wireObject(JSON.stringify({ id: managed, model: "gpt", choices: [] })), {
       originalRequest: request,
       toolContext: buildRequestToolContext(request),
