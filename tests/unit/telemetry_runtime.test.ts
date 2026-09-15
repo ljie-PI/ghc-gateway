@@ -104,7 +104,7 @@ describe("telemetry runtime", () => {
             metric: "event_loop_p95_ms",
             status: "degraded",
             actualMs: 20,
-            thresholdMs: 10,
+            thresholdMs: 5,
           },
         },
         {
@@ -114,7 +114,7 @@ describe("telemetry runtime", () => {
             metric: "event_loop_p95_ms",
             status: "healthy",
             actualMs: 0,
-            thresholdMs: 10,
+            thresholdMs: 5,
           },
         },
       ]);
