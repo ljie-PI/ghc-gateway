@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { parseReplayManifestText, validateReplayScenarios } from "../../src/replay/server.js";
+import { parseReplayManifestText, validateReplayScenarios } from "../support/replay/server.js";
 import { createReplayScenarios } from "../sdk/replay_scenarios.js";
 import { syntheticSdkFixtureCatalog } from "../sdk/synthetic_scenarios.js";
 import { REPLAY_TARGETS } from "../sdk/client.js";

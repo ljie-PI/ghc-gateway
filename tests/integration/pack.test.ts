@@ -78,6 +78,14 @@ describe("package evidence", () => {
       ["package.json", "dist/src/main.js", "src/main.ts"],
       ["package.json", "dist/src/main.js", "dist/admin/index.html"],
     )).toThrow("unexpected=[src/main.ts], missing=[dist/admin/index.html]");
+    expect(() => assertExactManifest(
+      ["package.json", "dist/src/replay/server.js"],
+      ["package.json", "dist/src/replay/server.js"],
+    )).toThrow("npm package includes replay test support");
+    expect(() => assertExactManifest(
+      ["package.json", "tests/support/replay/server.ts"],
+      ["package.json", "tests/support/replay/server.ts"],
+    )).toThrow("npm package includes replay test support");
   });
 
   it.each(["preinstall", "install", "postinstall"])("rejects a transitive runtime %s hook before packaging can invoke a native build", async (hook) => {

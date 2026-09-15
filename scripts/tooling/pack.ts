@@ -132,6 +132,11 @@ export function assertExactManifest(
 ): void {
   const normalizedActual = [...actual].map(normalizePath).sort();
   const normalizedExpected = [...expected].map(normalizePath).sort();
+  const forbiddenReplayFiles = normalizedActual.filter((file) =>
+    file.startsWith("dist/src/replay/") || file.startsWith("tests/support/replay/"));
+  if (forbiddenReplayFiles.length > 0) {
+    throw new Error(`npm package includes replay test support: ${forbiddenReplayFiles.join(", ")}`);
+  }
   if (JSON.stringify(normalizedActual) !== JSON.stringify(normalizedExpected)) {
     const expectedSet = new Set(normalizedExpected);
     const actualSet = new Set(normalizedActual);

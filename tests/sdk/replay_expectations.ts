@@ -5,7 +5,7 @@ import type OpenAI from "openai";
 import { expect } from "vitest";
 import type { SdkMode, SdkProtocol, SdkResult } from "./client.js";
 import type { TextScenario } from "./scenarios.js";
-import type { ReplayExchangeRecord } from "../../src/replay/types.js";
+import type { ReplayExchangeRecord } from "../support/replay/types.js";
 
 type CapturedUsage = NonNullable<NonNullable<ReplayExchangeRecord["downstreamExpectation"]>["usage"]>;
 

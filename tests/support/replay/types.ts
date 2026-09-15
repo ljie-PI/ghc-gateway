@@ -1,4 +1,4 @@
-import type { InferenceProtocol } from "../protocols/conversion/types.js";
+import type { InferenceProtocol } from "../../../src/protocols/conversion/types.js";
 
 /** Versioned replay exchange format. Response bytes remain the corpus authority. */
 export interface ReplayExchangeRecord {

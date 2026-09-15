@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseReplayManifest, parseReplayManifestText, validateReplayCorpus, validateReplayScenarios } from "../../src/replay/server.js";
+import { parseReplayManifest, parseReplayManifestText, validateReplayCorpus, validateReplayScenarios } from "../support/replay/server.js";
 import { createReplayScenarios } from "../sdk/replay_scenarios.js";
 
 const corpusDirectory = path.resolve("tests/sdk/corpus");
