@@ -260,42 +260,9 @@
 {/if}
 
 <style>
-  .account-toolbar {
-    align-items: center;
-  }
-
-  .account-toolbar label {
-    margin-bottom: 0;
-  }
-
-  .account-toolbar select {
-    width: 280px;
-    max-width: 100%;
-  }
-
-  .model-table {
-    min-width: 980px;
-  }
-
-  .model-summary {
-    max-width: 240px;
-  }
-
-  .model-summary strong,
-  .model-summary code {
-    display: block;
-  }
-
-  .model-summary code {
-    color: var(--muted);
-    font-size: 13px;
-  }
-
-  .tag-group {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-  }
+  .account-toolbar { align-items: center; }
+  .account-toolbar label { margin-bottom: 0; }
+  .account-toolbar select { width: 280px; max-width: 100%; }
 
   .catalog-help {
     margin-bottom: 16px;
@@ -332,56 +299,5 @@
     display: grid;
     gap: 4px;
     white-space: nowrap;
-  }
-
-  .model-details-row td {
-    padding: 0 0 18px;
-  }
-
-  .model-details {
-    padding: 18px 20px;
-    border: 1px solid var(--line);
-    border-top: 0;
-    background: var(--soft);
-  }
-
-  .model-details summary {
-    width: max-content;
-    cursor: pointer;
-    font-weight: 700;
-  }
-
-  .capability-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    margin-top: 16px;
-  }
-
-  .capability-grid dl {
-    margin: 0;
-  }
-
-  .capability-grid dl div {
-    display: grid;
-    grid-template-columns: minmax(130px, .8fr) minmax(0, 1.2fr);
-    gap: 12px;
-    padding: 9px 0;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .capability-grid dt {
-    color: var(--muted);
-  }
-
-  .capability-grid dd {
-    margin: 0;
-    overflow-wrap: anywhere;
-  }
-
-  @media (max-width: 600px) {
-    .capability-grid dl div {
-      grid-template-columns: 1fr;
-      gap: 2px;
-    }
   }
 </style>
