@@ -50,7 +50,7 @@ describe("performance windows", () => {
   it("uses the checkpoint and event-loop budgets at their exact boundaries", () => {
     const windows = new PerformanceWindows();
     for (let index = 0; index < MIN_OBSERVATIONS; index += 1) {
-      windows.observeCheckpoint(8);
+      windows.observeCheckpoint(10);
       windows.observeEventLoop(5);
     }
     const boundary = windows.evaluateWindow();
@@ -58,7 +58,7 @@ describe("performance windows", () => {
     expect(boundary.snapshot.metrics.eventLoopMs.status).toBe("healthy");
 
     for (let index = 0; index < MIN_OBSERVATIONS; index += 1) {
-      windows.observeCheckpoint(8.001);
+      windows.observeCheckpoint(10.001);
       windows.observeEventLoop(5.001);
     }
     const exceeded = windows.evaluateWindow();
