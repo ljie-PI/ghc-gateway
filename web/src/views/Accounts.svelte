@@ -373,7 +373,7 @@
       <div class="device-code">
         <code>{flow.userCode}</code>
         <button
-          class="copy-code"
+          class="centered-control copy-code"
           type="button"
           aria-label="Copy device code"
           title="Copy device code"
@@ -475,10 +475,10 @@
               <td data-label="Authenticated">{account.authenticatedAt ? new Date(account.authenticatedAt).toLocaleString() : "Not active"}</td>
               <td data-label="Request identity">
                 {#if defaultAccountId === account.accountId}
-                  <button class="account-choice in-use" disabled>In use</button>
+                  <button class="centered-control account-choice in-use" disabled>In use</button>
                 {:else if account.state === "active"}
                   <button
-                    class="primary account-choice"
+                    class="centered-control primary account-choice"
                     onclick={() => useAccount(account.accountId)}
                     disabled={busy !== ""}
                   >{busy === account.accountId ? "Switching..." : "Use this account"}</button>
@@ -528,29 +528,13 @@
     align-content: start;
   }
 
-  .device-heading .eyebrow,
-  .device-heading h2 {
-    margin: 0;
-  }
-
-  .device-code {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-
   .device-code code {
     min-width: 0;
-    overflow-wrap: anywhere;
   }
 
   .copy-code {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
     flex: 0 0 44px;
     width: 44px;
-    height: 44px;
     padding: 0;
   }
 
@@ -560,13 +544,8 @@
   }
 
   .account-choice {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
     width: 180px;
     max-width: 100%;
-    height: 44px;
-    padding: 6px 13px;
     white-space: nowrap;
   }
 

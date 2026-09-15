@@ -270,10 +270,6 @@
     font-size: 14px;
   }
 
-  .catalog-help summary {
-    cursor: pointer;
-  }
-
   .catalog-help[open] summary {
     margin-bottom: 8px;
   }
@@ -284,7 +280,6 @@
 
   .model-source {
     display: flex;
-    flex-wrap: nowrap;
     align-items: center;
     gap: 5px;
     white-space: nowrap;
