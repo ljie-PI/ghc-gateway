@@ -4,7 +4,7 @@ export const MAX_WINDOW_SAMPLES = 4_096;
 export const THRESHOLDS = {
   bufferedMs: 5,
   eventMs: 2,
-  checkpointMs: 8,
+  checkpointMs: 10,
   eventLoopMs: 5,
 } as const;
 
