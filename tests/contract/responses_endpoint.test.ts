@@ -210,7 +210,7 @@ describe("Responses endpoint", () => {
         }));
 
         expect(response.status).toBe(200);
-        expect(await response.text()).toBe("{\"id\":\"resp_Z2hjLWdhdGV3YXk6bWFuYWdlZF9yZXNwb25zZTtwcm92aWRlcjpnaXRodWJfY29waWxvdDttb2RlbF9pZDpjaGF0O3Vwc3RyZWFtX3Byb3RvY29sOmNoYXQ7cmVzcG9uc2VfaWQ6MDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx\",\"object\":\"response\",\"created_at\":1700000000,\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":{},\"model\":\"chat\",\"output\":[{\"type\":\"custom_tool_call\",\"id\":\"fc_00000000-0000-4000-8000-000000000001\",\"call_id\":\"call_render\",\"name\":\"render\",\"status\":\"completed\",\"input\":\"draw\"}],\"parallel_tool_calls\":true,\"temperature\":null,\"tool_choice\":\"auto\",\"tools\":[],\"top_p\":null,\"max_output_tokens\":null,\"previous_response_id\":null,\"reasoning\":null,\"text\":{},\"truncation\":\"disabled\",\"usage\":{\"input_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":3}}");
+        expect(await response.text()).toBe("{\"id\":\"resp_Z2hjLWdhdGV3YXk6Z2l0aHViX2NvcGlsb3Q7Y2hhdDtjaGF0OzAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMQ==\",\"object\":\"response\",\"created_at\":1700000000,\"status\":\"completed\",\"error\":null,\"incomplete_details\":null,\"instructions\":null,\"metadata\":{},\"model\":\"chat\",\"output\":[{\"type\":\"custom_tool_call\",\"id\":\"fc_00000000-0000-4000-8000-000000000001\",\"call_id\":\"call_render\",\"name\":\"render\",\"status\":\"completed\",\"input\":\"draw\"}],\"parallel_tool_calls\":true,\"temperature\":null,\"tool_choice\":\"auto\",\"tools\":[],\"top_p\":null,\"max_output_tokens\":null,\"previous_response_id\":null,\"reasoning\":null,\"text\":{},\"truncation\":\"disabled\",\"usage\":{\"input_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":1,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":3}}");
         expect(history.inspect()).toEqual({
           revision: 1,
           count: 1,
@@ -402,6 +402,11 @@ describe("Responses endpoint", () => {
         { model: "native", previous_response_id: "resp_chat_route", input: "hi" },
         { model: "native", previous_response_id: "resp_other_origin", input: "hi" },
         { model: "chat", previous_response_id: "external_unknown", input: "hi" },
+        {
+          model: "native",
+          previous_response_id: "resp_Z2hjLWdhdGV3YXk6Z2l0aHViX2NvcGlsb3Q7bmF0aXZlO3Jlc3BfdW5rbm93bg==",
+          input: "hi",
+        },
         {
           model: "native",
           previous_response_id: "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmNoYXQ7cmVzcG9uc2VfaWQ6b2xk",
