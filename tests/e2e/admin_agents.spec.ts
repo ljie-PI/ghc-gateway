@@ -195,7 +195,9 @@ test("agents cards stay responsive without horizontal scrolling", async ({ page 
 
 test("agents mapping rows are keyboard operable with unique accessible labels", async ({ page }) => {
   await openAgents(page);
-  const names = await page.locator(".agent-card input").evaluateAll((inputs) => inputs.map((input) =>
+  const inputs = page.locator(".agent-card input");
+  await expect(inputs).toHaveCount(8);
+  const names = await inputs.evaluateAll((elements) => elements.map((input) =>
     (input as HTMLInputElement).labels?.[0]?.textContent?.replace(/\s+/gu, " ").trim() ?? ""));
   expect(names.length).toBe(8);
   expect(names.every((name) => name !== "")).toBe(true);
