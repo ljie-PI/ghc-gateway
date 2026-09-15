@@ -151,6 +151,5 @@
 {/if}
 
 <style>
-  .usage-note { color: var(--muted); font-size: 13px; }
   .usage-window + .usage-window { margin-top: 24px; }
 </style>
