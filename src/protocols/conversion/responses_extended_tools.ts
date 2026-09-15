@@ -10,6 +10,11 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import {
+  TOOL_RESULT_ERROR_MARKER,
+  TOOL_RESULT_MEDIA_REPLACEMENT,
+  toolResultMediaReference,
+} from "./compatibility_markers.js";
 import { isOpenAiStrictSchemaCompatible } from "./strict_schema.js";
 import type {
   ResponsesToolBindingLedger,
@@ -608,7 +613,7 @@ function extractCompatibilityMedia(value: WireJson, depth = 0): CompatibilityExt
   }
   const media = compatibilityMediaPart(value);
   if (media !== undefined) {
-    return { value: "[cc-switch: tool result media moved to the following user message]", media: [media] };
+    return { value: TOOL_RESULT_MEDIA_REPLACEMENT, media: [media] };
   }
   if (isWireJsonArray(value)) {
     const items: WireJson[] = [];
@@ -661,7 +666,7 @@ function compatibilityMediaPart(value: WireJson): WireJsonObject | undefined {
 
 function compatibilityMediaMessage(callId: string, media: readonly WireJsonObject[]): WireJsonObject {
   return chatMessage("user", array([
-    object([["type", "text"], ["text", `[cc-switch: media output of tool call ${callId}]`]]),
+    object([["type", "text"], ["text", toolResultMediaReference(callId)]]),
     ...media,
   ]));
 }
@@ -1330,7 +1335,7 @@ export function projectResponsesToolResultContentForCompatibility(item: WireJson
   if (memberValues(item, "status")[0] !== "failed") {
     return content;
   }
-  return `[cc-switch:tool-result-error]${content.length === 0 ? "" : `\n${content}`}`;
+  return `${TOOL_RESULT_ERROR_MARKER}${content.length === 0 ? "" : `\n${content}`}`;
 }
 
 export function projectResponsesToolChoiceForCompatibility(

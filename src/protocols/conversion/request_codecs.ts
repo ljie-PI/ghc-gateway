@@ -43,6 +43,11 @@ import {
   wireNumber,
   wireObject,
 } from "./wire.js";
+import {
+  TOOL_RESULT_ERROR_MARKER,
+  TOOL_RESULT_MEDIA_REPLACEMENT,
+  toolResultMediaReference,
+} from "./compatibility_markers.js";
 import { isOpenAiStrictSchemaCompatible } from "./strict_schema.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
 
@@ -907,7 +912,7 @@ function decodeToolResultContent(
         && new TextEncoder().encode(trimmed).byteLength >= 8192
       ) {
         return {
-          value: "[cc-switch: tool result media moved to the following user message]",
+          value: TOOL_RESULT_MEDIA_REPLACEMENT,
           media: [imageContent(trimmed, undefined, "REQ-MEDIA-DATA-URL")],
         };
       }
@@ -949,14 +954,14 @@ function decodeToolResultContent(
     if (type === "image") {
       assertAllowedKeys(value, new Set(["type", "source"]), "REQ-TOOL-RESULT-EMBEDDED-IMAGE");
       return {
-        value: "[cc-switch: tool result media moved to the following user message]",
+        value: TOOL_RESULT_MEDIA_REPLACEMENT,
         media: [decodeMessagesImage(oneMember(value, "source", "REQ-TOOL-RESULT-EMBEDDED-IMAGE"))],
       };
     }
     if (type === "input_image") {
       assertAllowedKeys(value, new Set(["type", "image_url", "detail"]), "REQ-TOOL-RESULT-EMBEDDED-IMAGE");
       return {
-        value: "[cc-switch: tool result media moved to the following user message]",
+        value: TOOL_RESULT_MEDIA_REPLACEMENT,
         media: [imageContent(
           requiredString(
             oneMember(value, "image_url", "REQ-TOOL-RESULT-EMBEDDED-URL"),
@@ -978,7 +983,7 @@ function decodeToolResultContent(
       );
       assertAllowedKeys(image, new Set(["url", "detail"]), "REQ-TOOL-RESULT-EMBEDDED-IMAGE");
       return {
-        value: "[cc-switch: tool result media moved to the following user message]",
+        value: TOOL_RESULT_MEDIA_REPLACEMENT,
         media: [imageContent(
           requiredString(
             oneMember(image, "url", "REQ-TOOL-RESULT-EMBEDDED-URL"),
@@ -1633,11 +1638,11 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
         ["tool_call_id", result.callId],
         ["content", images.length === 0
           ? toolResultText(text, result.isError)
-          : `${toolResultText(text, result.isError)}${text.length === 0 && !result.isError ? "" : "\n"}[cc-switch: tool result media moved to the following user message]`],
+          : `${toolResultText(text, result.isError)}${text.length === 0 && !result.isError ? "" : "\n"}${TOOL_RESULT_MEDIA_REPLACEMENT}`],
       ]));
       if (images.length > 0) {
         mediaContent.push(
-          wireObject([["type", "text"], ["text", `[cc-switch: media output of tool call ${result.callId}]`]]),
+          wireObject([["type", "text"], ["text", toolResultMediaReference(result.callId)]]),
           ...images.map(encodeChatImage),
         );
       }
@@ -1816,7 +1821,7 @@ function encodeResponsesToolResultContent(
   }
   return wireArray([
     ...(isError
-      ? [wireObject([["type", "input_text"], ["text", "[cc-switch:tool-result-error]"]])]
+      ? [wireObject([["type", "input_text"], ["text", TOOL_RESULT_ERROR_MARKER]])]
       : []),
     ...content.map((part) => encodeResponsesContent(part, false)),
   ]);
@@ -2163,7 +2168,7 @@ function textContent(content: readonly SemanticContent[]): string | undefined {
 
 function toolResultText(text: string, isError: boolean): string {
   return isError
-    ? `[cc-switch:tool-result-error]${text.length === 0 ? "" : `\n${text}`}`
+    ? `${TOOL_RESULT_ERROR_MARKER}${text.length === 0 ? "" : `\n${text}`}`
     : text;
 }
 

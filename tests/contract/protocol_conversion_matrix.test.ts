@@ -416,7 +416,7 @@ describe("protocol conversion matrix", () => {
         }],
       }));
       expect(second.status).toBe(200);
-      expect(decoder.decode(harness.chatBodies[1])).toContain("[cc-switch:tool-result-error]");
+      expect(decoder.decode(harness.chatBodies[1])).toContain("[ghc-gateway:tool-result-error]");
 
       const incomplete = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "native-chat",

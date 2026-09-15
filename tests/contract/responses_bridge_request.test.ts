@@ -429,12 +429,12 @@ describe("Responses bridge request conversion", () => {
         {
           role: "tool",
           tool_call_id: "call_media",
-          content: "{\"call_id\":\"call_media\",\"output\":[\"[cc-switch: tool result media moved to the following user message]\"],\"type\":\"custom_tool_call_output\"}",
+          content: "{\"call_id\":\"call_media\",\"output\":[\"[ghc-gateway: tool result media moved to the following user message]\"],\"type\":\"custom_tool_call_output\"}",
         },
         {
           role: "user",
           content: [
-            { type: "text", text: "[cc-switch: media output of tool call call_media]" },
+            { type: "text", text: "[ghc-gateway: media output of tool call call_media]" },
             { type: "image_url", image_url: { url: dataUrl } },
           ],
         },
@@ -444,7 +444,7 @@ describe("Responses bridge request conversion", () => {
           content: JSON.stringify({
             call_id: "call_json_media",
             output: JSON.stringify({
-              media: "[cc-switch: tool result media moved to the following user message]",
+              media: "[ghc-gateway: tool result media moved to the following user message]",
               residual,
             }),
             tools: [],
@@ -454,7 +454,7 @@ describe("Responses bridge request conversion", () => {
         {
           role: "user",
           content: [
-            { type: "text", text: "[cc-switch: media output of tool call call_json_media]" },
+            { type: "text", text: "[ghc-gateway: media output of tool call call_json_media]" },
             { type: "image_url", image_url: { url: dataUrl } },
           ],
         },

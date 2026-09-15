@@ -11,7 +11,10 @@ import {
 import type { ResponsesHistoryRecord } from "./history.js";
 import type { RequestToolContext, ToolBinding } from "./tool_context.js";
 import type { ResponsesRequest } from "./dto.js";
-import { isGatewayManagedResponseId } from "../conversion/ids.js";
+import {
+  isGatewayManagedResponseId,
+  managedUpstreamResponseId,
+} from "../conversion/ids.js";
 import { projectRestoredResponsesToolCallForCompatibility } from "../conversion/responses_extended_tools.js";
 
 export { isGatewayManagedResponseId } from "../conversion/ids.js";
@@ -78,10 +81,11 @@ export function managedResponseId(
   if (id.length === 0 || isGatewayManagedResponseId(id)) {
     return id;
   }
-  const provider = customLlmProvider ?? "None";
-  const model = modelId ?? "None";
-  const encoded = Buffer.from(`litellm:custom_llm_provider:${provider};model_id:${model};response_id:${id}`, "utf8").toString("base64");
-  return `resp_${encoded}`;
+  return managedUpstreamResponseId(
+    customLlmProvider ?? "None",
+    modelId ?? "None",
+    id,
+  );
 }
 
 function responseOutput(
