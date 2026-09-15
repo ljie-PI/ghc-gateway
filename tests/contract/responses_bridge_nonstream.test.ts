@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { convertChatResponseToResponses, managedResponseId } from "../../src/protocols/responses/bridge_nonstream.js";
+import {
+  convertChatResponseToResponses,
+  isGatewayManagedResponseId,
+  managedResponseId,
+} from "../../src/protocols/responses/bridge_nonstream.js";
 import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
 import { buildRequestToolContext } from "../../src/protocols/responses/tool_context.js";
 import { isWireJsonArray, isWireJsonObject, parseWireJson, serializeWireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
@@ -128,6 +132,13 @@ describe("Responses bridge non-stream conversion", () => {
   it("handles empty choices, incomplete status, images, idempotent managed IDs, and malformed custom/search args", () => {
     const request = requestFromJson(JSON.stringify({ model: "gpt", tools: [{ type: "custom", name: "render" }, { type: "tool_search" }] }));
     const managed = managedResponseId("chatcmpl_2", undefined, undefined);
+    expect(Buffer.from(managed.slice("resp_".length), "base64").toString("utf8")).toBe(
+      "ghc-gateway:managed_response;provider:None;model_id:None;response_id:chatcmpl_2",
+    );
+    expect(isGatewayManagedResponseId(managed)).toBe(true);
+    const previouslyManaged = "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmdwdDtyZXNwb25zZV9pZDpjaGF0Y21wbF8y";
+    expect(isGatewayManagedResponseId(previouslyManaged)).toBe(true);
+    expect(managedResponseId(previouslyManaged, undefined, undefined)).toBe(previouslyManaged);
     const empty = convertChatResponseToResponses(wireObject(JSON.stringify({ id: managed, model: "gpt", choices: [] })), {
       originalRequest: request,
       toolContext: buildRequestToolContext(request),

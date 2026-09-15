@@ -1092,7 +1092,7 @@ describe("shared conversion request codecs", () => {
         type: "function_call_output",
         call_id: "call_1",
         output: [
-          { type: "input_text", text: "[cc-switch:tool-result-error]" },
+          { type: "input_text", text: "[ghc-gateway:tool-result-error]" },
           { type: "input_text", text: "failed" },
         ],
       }],
@@ -1104,7 +1104,7 @@ describe("shared conversion request codecs", () => {
       "target",
       capability(["chat"]),
     ).bytes));
-    expect(chat).toContain("[cc-switch:tool-result-error]");
+    expect(chat).toContain("[ghc-gateway:tool-result-error]");
   });
 
   it("extracts nested JSON-encoded Responses tool-result images on the approved content path", () => {

@@ -13,7 +13,10 @@ import {
   CopilotModelCatalog,
   parseCapiModels,
 } from "../../src/copilot/model_catalog.js";
-import { productionModelInfoLookup } from "../../src/copilot/model_metadata.js";
+import {
+  BUILTIN_MODEL_CAPABILITIES_REVISION,
+  productionModelInfoLookup,
+} from "../../src/copilot/model_metadata.js";
 import { registrySnapshotFromDiscovery, testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 import { CapiFetchError, HttpCopilotModelsSource } from "../../src/copilot/models_source.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
@@ -38,7 +41,10 @@ const CAPI = {
 };
 
 describe("CAPI parse and cache", () => {
-  it("provides pinned production getModelInfo metadata without guessing unknown models", () => {
+  it("provides pinned production model metadata without guessing unknown models", () => {
+    expect(BUILTIN_MODEL_CAPABILITIES_REVISION).toBe(
+      "builtin-ae7e50f096a8722bad14d63b6a0d4634d59bf475",
+    );
     expect(productionModelInfoLookup.get("gpt-5.1-codex-max")).toEqual({
       mode: "responses",
       max_input_tokens: 128_000,

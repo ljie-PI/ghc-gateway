@@ -53,7 +53,7 @@ function coerceTokenLimit(value: unknown): number | undefined {
   return undefined;
 }
 
-// Pinned LiteLLM getModelInfo data for the GitHub Copilot provider.
+// Pinned model metadata snapshot for the built-in GitHub Copilot models.
 const PRODUCTION_MODEL_INFO: Readonly<Record<string, RawModelInfo>> = {
   "claude-haiku-4.5": chatInfo(128_000, 16_000, ["/v1/chat/completions"]),
   "claude-opus-4.5": chatInfo(128_000, 16_000, ["/v1/chat/completions"]),
@@ -96,7 +96,7 @@ export const productionModelInfoLookup: ModelInfoLookup = {
   },
 };
 
-export const BUILTIN_MODEL_CAPABILITIES_REVISION = "litellm-ae7e50f096a8722bad14d63b6a0d4634d59bf475";
+export const BUILTIN_MODEL_CAPABILITIES_REVISION = "builtin-ae7e50f096a8722bad14d63b6a0d4634d59bf475";
 
 export const productionBuiltinModelCapabilities: BuiltinModelCapabilityLookup = {
   get(modelId) {
