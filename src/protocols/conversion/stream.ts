@@ -1,7 +1,7 @@
 import { GatewayFailureError } from "../../gateway/failures.js";
-import { encodeAnthropicSse } from "../anthropic_messages/wire.js";
-import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk } from "../openai_chat/wire.js";
-import { encodeResponsesSseEvent } from "../responses/wire.js";
+import { encodeAnthropicMessagesSseEvent } from "../anthropic_messages/wire.js";
+import { encodeOpenaiChatCompletionsDone, encodeOpenaiChatCompletionsSseChunk } from "../openai_chat_completions/wire.js";
+import { encodeOpenaiResponsesSseEvent } from "../openai_responses/wire.js";
 import { SemanticItemLedger } from "./ledger.js";
 import { decodeProtocolStream } from "./stream_decoders.js";
 import type {
@@ -388,7 +388,7 @@ class ChatEmitter implements StreamEmitter {
     yield this.chunk(wireObject([]), chatFinish(terminal.finishReason));
     yield {
       kind: "wire",
-      bytes: encodeOpenAiChatSseChunk(wireObject([
+      bytes: encodeOpenaiChatCompletionsSseChunk(wireObject([
         ["id", this.id],
         ["object", "chat.completion.chunk"],
         ["created", wireNumber(this.created)],
@@ -397,7 +397,7 @@ class ChatEmitter implements StreamEmitter {
         ["usage", chatUsage(usage)],
       ])),
     };
-    yield { kind: "wire", bytes: encodeOpenAiChatDone() };
+    yield { kind: "wire", bytes: encodeOpenaiChatCompletionsDone() };
   }
 
   private *emitBufferedResponseItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
@@ -541,7 +541,7 @@ class ChatEmitter implements StreamEmitter {
   private chunk(delta: ReturnType<typeof wireObject>, finish?: string): ConvertedStreamEmission {
     return {
       kind: "wire",
-      bytes: encodeOpenAiChatSseChunk(wireObject([
+      bytes: encodeOpenaiChatCompletionsSseChunk(wireObject([
         ["id", this.id],
         ["object", "chat.completion.chunk"],
         ["created", wireNumber(this.created)],
@@ -919,7 +919,7 @@ class MessagesEmitter implements StreamEmitter {
   private event(value: Record<string, unknown>): ConvertedStreamEmission {
     return {
       kind: "wire",
-      bytes: encodeAnthropicSse(value as { readonly type: string; readonly [key: string]: unknown }),
+      bytes: encodeAnthropicMessagesSseEvent(value as { readonly type: string; readonly [key: string]: unknown }),
     };
   }
 }
@@ -1255,7 +1255,7 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   private event(value: ReturnType<typeof wireObject>): ConvertedStreamEmission {
-    return { kind: "wire", bytes: encodeResponsesSseEvent(value) };
+    return { kind: "wire", bytes: encodeOpenaiResponsesSseEvent(value) };
   }
 }
 

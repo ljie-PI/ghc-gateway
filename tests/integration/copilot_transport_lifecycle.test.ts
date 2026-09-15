@@ -14,7 +14,7 @@ import {
   UpstreamTimeoutError,
 } from "../../src/copilot/transport.js";
 import { MESSAGES_VERSION } from "../../src/copilot/upstream_types.js";
-import type { ChatRequest } from "../../src/protocols/chat_completions/types.js";
+import type { ChatCompletionsUpstreamRequest } from "../../src/copilot/upstream_types.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -715,7 +715,7 @@ function syntheticAccount(userId: string, suffix: string): BoundAccount {
   };
 }
 
-function chatRequest(overrides: Partial<ChatRequest> = {}): ChatRequest {
+function chatRequest(overrides: Partial<ChatCompletionsUpstreamRequest> = {}): ChatCompletionsUpstreamRequest {
   return {
     model: "gpt-test",
     body: encoder.encode("{}"),

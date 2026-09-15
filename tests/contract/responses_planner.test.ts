@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { GatewayFailureError } from "../../src/gateway/failures.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
-import { planResponsesExecution } from "../../src/protocols/responses/planner.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
+import { planResponsesExecution } from "../../src/protocols/openai_responses/planner.js";
 import { isWireJsonObject, parseWireJson } from "../../src/serialization/wire_json.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 

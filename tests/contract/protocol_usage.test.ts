@@ -15,9 +15,9 @@ import { migration as telemetryMigration } from "../../src/persistence/migration
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as ownershipMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_messages/endpoint.js";
-import { createOpenAiChatRoute } from "../../src/protocols/openai_chat/endpoint.js";
-import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
-import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_chat_completions/endpoint.js";
+import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
 import { convertProtocolStream } from "../../src/protocols/conversion/stream.js";
 import type { InferenceProtocol, SemanticUsage } from "../../src/protocols/conversion/types.js";
@@ -266,7 +266,7 @@ async function usageGateway(source: InferenceProtocol, updates: Counters[], usag
     const observations: UsageUpdate[] = [];
     const dependencies = { directory, preferences: directory.preferences, registry, copilot: http.backend, nowMs, createUuid: uuid, usageRecorder: { recordUsage(update: UsageUpdate) { observations.push(update); recorder.recordUsage(update); } } };
     const history = new SqliteResponsesHistory(database, { nowMs });
-    const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime: defaultRuntimeConfigSnapshot() }, [createOpenAiChatRoute(dependencies), createAnthropicMessagesRoute(dependencies), createResponsesRoute({ ...dependencies, history, nowUnixSeconds: () => nowMs() / 1000 })], { createRequestId: () => "req_usage" });
+    const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime: defaultRuntimeConfigSnapshot() }, [createOpenaiChatCompletionsRoute(dependencies), createAnthropicMessagesRoute(dependencies), createOpenaiResponsesRoute({ ...dependencies, history, nowUnixSeconds: () => nowMs() / 1000 })], { createRequestId: () => "req_usage" });
     own(() => gw.close());
     return { gw, database, recorder, updates: observations, upstream: http.upstream, close: async () => { await closeAll([() => gw.close(), () => registry.close(), () => http.close(), () => closeDatabase(database)]); } };
   });

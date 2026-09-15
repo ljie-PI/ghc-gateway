@@ -12,11 +12,11 @@ import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { formatAccountId, normalizeGitHubHost } from "../../src/accounts/github_environment.js";
 import { assertNode24 } from "./node_version.js";
 import { outboundHeaders } from "../../src/copilot/backend.js";
-import { parseChatSse } from "../../src/copilot/chat_sse.js";
+import { parseOpenaiChatCompletionsSse } from "../../src/protocols/openai_chat_completions/native.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
-import { serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
+import { serializeOpenaiModels } from "../../src/protocols/model_catalog/wire.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway } from "../../src/gateway/create_gateway.js";
@@ -26,18 +26,18 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
-import { anthropicErrorBody } from "../../src/protocols/anthropic_messages/wire.js";
-import { decodeOpenAiChatRequest, prepareOpenAiChatRequest } from "../../src/protocols/openai_chat/endpoint.js";
-import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk, serializeOpenAiErrorBody } from "../../src/protocols/openai_chat/wire.js";
-import { convertResponsesRequest, buildChatBridgeRequest, type ReasoningConfig } from "../../src/protocols/responses/bridge_request.js";
-import { convertChatResponseToResponses } from "../../src/protocols/responses/bridge_nonstream.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
-import type { ResponsesRequest } from "../../src/protocols/responses/dto.js";
-import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
-import { SqliteResponsesHistory, type ResponsesHistory } from "../../src/protocols/responses/history.js";
-import { normalizeNativeResponsesStream, serializeNativeResponsesRequest, validatedNativeResponsesBody } from "../../src/protocols/responses/native.js";
-import { planResponsesExecution, type ChatBridgePlan, type NativeResponsesPlan } from "../../src/protocols/responses/planner.js";
-import { buildRequestToolContext } from "../../src/protocols/responses/tool_context.js";
+import { serializeAnthropicMessagesErrorBody } from "../../src/protocols/anthropic_messages/wire.js";
+import { decodeOpenaiChatCompletionsRequest, prepareOpenaiChatCompletionsRequest } from "../../src/protocols/openai_chat_completions/endpoint.js";
+import { encodeOpenaiChatCompletionsDone, encodeOpenaiChatCompletionsSseChunk, serializeOpenaiChatCompletionsErrorBody } from "../../src/protocols/openai_chat_completions/wire.js";
+import { convertResponsesRequest, buildChatBridgeRequest, type ReasoningConfig } from "../../src/protocols/openai_responses/bridge_request.js";
+import { convertChatResponseToResponses } from "../../src/protocols/openai_responses/bridge_nonstream.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
+import type { ResponsesRequest } from "../../src/protocols/openai_responses/dto.js";
+import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
+import { SqliteResponsesHistory, type ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
+import { normalizeNativeResponsesStream, serializeNativeResponsesRequest, validatedNativeResponsesBody } from "../../src/protocols/openai_responses/native.js";
+import { planResponsesExecution, type ChatBridgePlan, type NativeResponsesPlan } from "../../src/protocols/openai_responses/planner.js";
+import { buildRequestToolContext } from "../../src/protocols/openai_responses/tool_context.js";
 import { canonicalizeWireJson } from "../../src/serialization/canonical_json.js";
 import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, WireJsonError, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
@@ -63,7 +63,7 @@ const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, F
   ["accounts", expectedAccountFixture],
   ["copilot-transport", expectedCopilotTransportFixture],
   ["model-catalog", expectedModelCatalogFixture],
-  ["openai-chat", expectedOpenAiChatFixture],
+  ["openai-chat", expectedOpenaiChatCompletionsFixture],
   ["anthropic", expectedAnthropicFixture],
   ["responses-history", expectedResponsesHistoryFixture],
   ["responses-native", expectedResponsesNativeFixture],
@@ -298,7 +298,7 @@ async function expectedCopilotTransportFixture(entry: FixtureManifestEntry): Pro
   if (entry.caseId !== "copilot-transport.sse.done") {
     return undefined;
   }
-  for await (const frame of parseChatSse(asBytes(await readFile(path.join(fixtureFamilyRoot(entry), entry.input), "utf8")))) {
+  for await (const frame of parseOpenaiChatCompletionsSse(asBytes(await readFile(path.join(fixtureFamilyRoot(entry), entry.input), "utf8")))) {
     if (frame.kind === "done") {
       return "done";
     }
@@ -315,7 +315,7 @@ async function expectedModelCatalogFixture(entry: FixtureManifestEntry): Promise
     readonly fetchedAt: string;
     readonly generation: number;
   };
-  return serializeOpenAiModels({
+  return serializeOpenaiModels({
     accountId: input.accountId,
     credentialGeneration: 0,
     catalogGeneration: input.generation,
@@ -364,7 +364,7 @@ async function expectedResponsesHistoryFixture(entry: FixtureManifestEntry): Pro
   }
 }
 
-async function expectedOpenAiChatFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
+async function expectedOpenaiChatCompletionsFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
   const inputPath = path.join(FIXTURE_ROOT, "openai-chat", entry.input);
   switch (entry.caseId) {
   case "openai-chat.request.model-rewrite": {
@@ -377,7 +377,7 @@ async function expectedOpenAiChatFixture(entry: FixtureManifestEntry): Promise<s
   }
   case "openai-chat.presenter.model-not-found":
     await readFile(inputPath, "utf8");
-    return serializeOpenAiErrorBody("model not found", "not_found_error");
+    return serializeOpenaiChatCompletionsErrorBody("model not found", "not_found_error");
   case "openai-chat.buffered.success": {
     return decodeBytes(serializeWireJson(await readWireObject(inputPath)));
   }
@@ -414,12 +414,12 @@ async function readWireObject(inputPath: string): Promise<WireJsonObject> {
 }
 
 function prepareRequestFixture(body: WireJsonObject, upstreamModel: string): string {
-  const prepared = prepareOpenAiChatRequest(decodeOpenAiChatRequest(body), resolvedModel(upstreamModel));
+  const prepared = prepareOpenaiChatCompletionsRequest(decodeOpenaiChatCompletionsRequest(body), resolvedModel(upstreamModel));
   return decodeBytes(prepared.bytes);
 }
 
 function requestCaptureFixture(body: WireJsonObject): string {
-  const prepared = prepareOpenAiChatRequest(decodeOpenAiChatRequest(body), resolvedModel("gpt"));
+  const prepared = prepareOpenaiChatCompletionsRequest(decodeOpenaiChatCompletionsRequest(body), resolvedModel("gpt"));
   const extra = new Headers({ "content-type": "application/json" });
   if (prepared.hasVisionInput) {
     extra.set("copilot-vision-request", "true");
@@ -443,11 +443,11 @@ function requestCaptureFixture(body: WireJsonObject): string {
 
 async function streamFixture(input: string): Promise<string> {
   let output = "";
-  for await (const frame of parseChatSse(asBytes(input))) {
+  for await (const frame of parseOpenaiChatCompletionsSse(asBytes(input))) {
     if (frame.kind === "chunk") {
-      output += decodeBytes(encodeOpenAiChatSseChunk(frame.chunk.payload));
+      output += decodeBytes(encodeOpenaiChatCompletionsSseChunk(frame.chunk.payload));
     } else if (frame.kind === "done") {
-      output += decodeBytes(encodeOpenAiChatDone());
+      output += decodeBytes(encodeOpenaiChatCompletionsDone());
     } else {
       throw new Error("openai-chat stream fixture produced an error frame");
     }
@@ -494,7 +494,7 @@ async function expectedAnthropicFixture(entry: FixtureManifestEntry): Promise<st
     return undefined;
   }
   await readFile(inputPath);
-  return anthropicErrorBody("rate_limit_error", "upstream request failed", "req_fixture");
+  return serializeAnthropicMessagesErrorBody("rate_limit_error", "upstream request failed", "req_fixture");
 }
 
 async function expectedResponsesNativeFixture(entry: FixtureManifestEntry): Promise<string | Uint8Array | undefined> {
@@ -841,7 +841,7 @@ async function createResponsesFixtureGateway(expectations: readonly HttpExpectat
     const gateway = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: dir }),
       runtime: defaultRuntimeConfigSnapshot(),
-    }, [createResponsesRoute({
+    }, [createOpenaiResponsesRoute({
       directory: accounts,
       registry,
       preferences: accounts.preferences,

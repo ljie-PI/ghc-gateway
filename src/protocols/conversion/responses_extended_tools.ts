@@ -15,7 +15,7 @@ import {
   TOOL_RESULT_MEDIA_REPLACEMENT,
   toolResultMediaReference,
 } from "./compatibility_markers.js";
-import { isOpenAiStrictSchemaCompatible } from "./strict_schema.js";
+import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import type {
   ResponsesToolBindingLedger,
   ResponsesToolCallBinding,
@@ -847,7 +847,7 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
   if (strictValue !== undefined && typeof strictValue !== "boolean") {
     invalid("REQ-R-EXT-FUNCTION-STRICT");
   }
-  const projectedStrict = strictValue ?? (isOpenAiStrictSchemaCompatible(parameters) ? true : undefined);
+  const projectedStrict = strictValue ?? (isOpenaiStrictSchemaCompatible(parameters) ? true : undefined);
   const chatName = namespace === undefined ? sourceName : projectedNamespaceName(namespace, sourceName);
   addBinding(state, {
     kind: namespace === undefined ? "function" : "namespace",
@@ -1469,7 +1469,7 @@ function projectOrdinaryResponsesToolsForCompatibility(
     ];
     if (strictValue === true || strictValue === false) {
       functionMembers.push(["strict", strictValue]);
-    } else if (isOpenAiStrictSchemaCompatible(parameters)) {
+    } else if (isOpenaiStrictSchemaCompatible(parameters)) {
       functionMembers.push(["strict", true]);
     }
     const binding: ResponsesToolSourceBinding = {

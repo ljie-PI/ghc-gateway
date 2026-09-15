@@ -4,7 +4,6 @@ import type { Dispatcher } from "undici";
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { AccountCoordinator } from "../accounts/account_coordinator.js";
 import type { CredentialStore } from "../accounts/credential_store.js";
-import type { ChatResponse } from "../protocols/chat_completions/types.js";
 import { type EndpointDiscovery, MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
 import {
   BoundedInferencePoolRegistry,
@@ -241,7 +240,7 @@ export class HttpCopilotBackend implements CopilotBackend {
     connectTimeoutMs: number | undefined,
     firstByteTimeoutMs: number | undefined,
     extraHeaders?: Headers,
-  ): Promise<ChatResponse & UpstreamByteResponse> {
+  ): Promise<UpstreamByteResponse> {
     const response = await this.exchange(
       url,
       token,

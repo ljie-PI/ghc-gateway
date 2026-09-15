@@ -7,13 +7,13 @@ import type { CopilotBackend } from "../../src/copilot/backend.js";
 import type { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import type { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import type { RuntimeConfigStore } from "../../src/config/runtime_config.js";
-import type { ResponsesHistory } from "../../src/protocols/responses/history.js";
+import type { ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import type { ApplicationContext } from "../../src/main.js";
 import { createPublicRouteRegistrations } from "../../src/main.js";
 import type { ModelCatalogRouteDependencies } from "../../src/protocols/model_catalog/routes.js";
-import type { OpenAiChatRouteDependencies } from "../../src/protocols/openai_chat/endpoint.js";
+import type { OpenaiChatCompletionsRouteDependencies } from "../../src/protocols/openai_chat_completions/endpoint.js";
 import type { AnthropicMessagesRouteDependencies } from "../../src/protocols/anthropic_messages/endpoint.js";
-import type { ResponsesRouteDependencies } from "../../src/protocols/responses/endpoint.js";
+import type { OpenaiResponsesRouteDependencies } from "../../src/protocols/openai_responses/endpoint.js";
 import type { CommandDispatcherDependencies } from "../../src/cli/commands/dispatcher.js";
 
 const directory = {} as AccountDirectory;
@@ -29,9 +29,9 @@ const deviceFlows = {} as Pick<DeviceFlowService, "start" | "poll" | "cancel">;
 // Compile-time authority contract: every effective consumer requires the registry.
 const validApplication: ApplicationContext = { accountCoordinator, directory, registry, copilot, history };
 const validModels: ModelCatalogRouteDependencies = { directory, registry, preferences };
-const validChat: OpenAiChatRouteDependencies = { directory, registry, preferences, copilot };
+const validChat: OpenaiChatCompletionsRouteDependencies = { directory, registry, preferences, copilot };
 const validMessages: AnthropicMessagesRouteDependencies = { directory, registry, preferences, copilot };
-const validResponses: ResponsesRouteDependencies = { directory, registry, preferences, copilot, history };
+const validResponses: OpenaiResponsesRouteDependencies = { directory, registry, preferences, copilot, history };
 const validDispatcher: CommandDispatcherDependencies = { directory, registry, deviceFlows, runtimeConfig };
 void [validApplication, validModels, validChat, validMessages, validResponses, validDispatcher];
 
@@ -40,11 +40,11 @@ const invalidApplication: ApplicationContext = { directory, catalog, copilot, hi
 // @ts-expect-error model routes require registry
 const invalidModels: ModelCatalogRouteDependencies = { directory, catalog, preferences };
 // @ts-expect-error Chat requires registry
-const invalidChat: OpenAiChatRouteDependencies = { directory, catalog, preferences, copilot };
+const invalidChat: OpenaiChatCompletionsRouteDependencies = { directory, catalog, preferences, copilot };
 // @ts-expect-error Messages requires registry
 const invalidMessages: AnthropicMessagesRouteDependencies = { directory, catalog, preferences, copilot };
 // @ts-expect-error Responses requires registry
-const invalidResponses: ResponsesRouteDependencies = { directory, catalog, preferences, copilot, history };
+const invalidResponses: OpenaiResponsesRouteDependencies = { directory, catalog, preferences, copilot, history };
 // @ts-expect-error CLI dispatcher requires registry
 const invalidDispatcher: CommandDispatcherDependencies = { directory, catalog, deviceFlows, runtimeConfig };
 void [invalidApplication, invalidModels, invalidChat, invalidMessages, invalidResponses, invalidDispatcher];

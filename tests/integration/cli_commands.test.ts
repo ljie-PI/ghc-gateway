@@ -28,7 +28,7 @@ import { migration as telemetryMigration } from "../../src/persistence/migration
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { bootstrapGateway, createPublicRouteRegistrations } from "../../src/main.js";
-import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { windowsCmdCommandLine } from "../../scripts/tooling/windows_cmd.js";
 
 const encoder = new TextEncoder();

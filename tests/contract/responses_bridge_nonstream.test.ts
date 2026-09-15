@@ -3,9 +3,9 @@ import {
   convertChatResponseToResponses,
   isGatewayManagedResponseId,
   managedResponseId,
-} from "../../src/protocols/responses/bridge_nonstream.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
-import { buildRequestToolContext } from "../../src/protocols/responses/tool_context.js";
+} from "../../src/protocols/openai_responses/bridge_nonstream.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
+import { buildRequestToolContext } from "../../src/protocols/openai_responses/tool_context.js";
 import { isWireJsonArray, isWireJsonObject, parseWireJson, serializeWireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 
 const LIMITS = { maxBytes: 65_536, maxDepth: 64 } as const;

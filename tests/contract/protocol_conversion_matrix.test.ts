@@ -15,9 +15,9 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_messages/endpoint.js";
-import { createOpenAiChatRoute } from "../../src/protocols/openai_chat/endpoint.js";
-import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
-import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_chat_completions/endpoint.js";
+import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 
 const encoder = new TextEncoder();
@@ -1026,9 +1026,9 @@ async function matrixGateway(): Promise<MatrixHarness> {
       startup: parseStartupConfig([], {}, { homedir: "Q:\\ghc-gateway-tests\\matrix\\.home" }),
       runtime: defaultRuntimeConfigSnapshot(),
     }, [
-      createOpenAiChatRoute(routeDependencies),
+      createOpenaiChatCompletionsRoute(routeDependencies),
       createAnthropicMessagesRoute(routeDependencies),
-      createResponsesRoute({ ...routeDependencies, history, nowUnixSeconds: () => 1_700_000_000 }),
+      createOpenaiResponsesRoute({ ...routeDependencies, history, nowUnixSeconds: () => 1_700_000_000 }),
     ], { createRequestId: () => "req_matrix" });
     own(() => gw.close());
     return {

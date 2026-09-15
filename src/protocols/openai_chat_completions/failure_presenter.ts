@@ -5,11 +5,16 @@ import {
   type GatewayFailure,
 } from "../../gateway/failures.js";
 import { safeCapabilityFailureMessage } from "../../copilot/model_capabilities.js";
-import { RESPONSES_JSON_HEADERS, serializeResponsesErrorBody } from "./wire.js";
+import { serializeOpenaiChatCompletionsErrorBody } from "./wire.js";
 
-export function presentResponsesFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
+const JSON_HEADERS = {
+  "Content-Type": "application/json; charset=utf-8",
+  "Cache-Control": "no-store",
+} as const;
+
+export function presentOpenaiChatCompletionsFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
   const status = defaultFailureStatus(failure);
-  const headers = new Headers({ ...RESPONSES_JSON_HEADERS, "x-request-id": requestId });
+  const headers = new Headers({ ...JSON_HEADERS, "x-request-id": requestId });
   const retryAfter = failure.kind === "upstream_http" && failure.status === 429
     ? safeRetryAfter(failure.retryAfter)
     : undefined;
@@ -17,7 +22,7 @@ export function presentResponsesFailure(failure: Readonly<GatewayFailure>, reque
     headers.set("retry-after", retryAfter);
   }
   const message = safeCapabilityFailureMessage(failure.kind === "unsupported_semantics" ? failure.cause : undefined, safeFailureMessage(failure));
-  return new Response(serializeResponsesErrorBody(message, errorTypeForStatus(status)), {
+  return new Response(serializeOpenaiChatCompletionsErrorBody(message, errorTypeForStatus(status)), {
     status,
     headers,
   });
@@ -36,7 +41,8 @@ function errorTypeForStatus(status: number): string {
   if (status === 429) {
     return "rate_limit_error";
   }
-  return status === 400 || status === 409 || status === 413 || status === 415 || status === 422
-    ? "invalid_request_error"
-    : "api_error";
+  if (status === 400 || status === 409 || status === 413 || status === 415 || status === 422) {
+    return "invalid_request_error";
+  }
+  return "api_error";
 }

@@ -8,7 +8,7 @@ import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "..
 import type { RouteRegistration } from "../../gateway/hono_app.js";
 import {
   serializeAnthropicModels,
-  serializeOpenAiModels,
+  serializeOpenaiModels,
 } from "./wire.js";
 import { reconcilePreferredModelIfCurrent } from "./preferred.js";
 import { presentModelCatalogFailure } from "./failure_presenter.js";
@@ -38,7 +38,7 @@ export function createModelCatalogRoutes(dependencies: ModelCatalogRouteDependen
         const anthropic = request.headers.has("anthropic-version");
         const body = anthropic
           ? serializeAnthropicModels(catalog)
-          : serializeOpenAiModels(catalog);
+          : serializeOpenaiModels(catalog);
         return new Response(body, {
           headers: { ...JSON_HEADERS, "x-request-id": scope.requestId },
         });

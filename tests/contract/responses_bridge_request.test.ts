@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
 import {
   buildChatBridgeRequest,
   convertResponsesRequest,
-} from "../../src/protocols/responses/bridge_request.js";
-import type { ChatBridgePlan } from "../../src/protocols/responses/planner.js";
-import { buildRequestToolContext } from "../../src/protocols/responses/tool_context.js";
+} from "../../src/protocols/openai_responses/bridge_request.js";
+import type { ChatBridgePlan } from "../../src/protocols/openai_responses/planner.js";
+import { buildRequestToolContext } from "../../src/protocols/openai_responses/tool_context.js";
 import {
   isWireJsonObject,
   parseWireJson,

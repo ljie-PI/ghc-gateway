@@ -9,8 +9,8 @@ import { PreferenceRevisionError } from "../../src/accounts/model_preferences.js
 import { RuntimeConfigError, RuntimeConfigStore } from "../../src/config/runtime_config.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { MIGRATION_MANIFEST } from "../../src/persistence/generated_migrations.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
-import { ResponsesHistoryAdminError, SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
+import { ResponsesHistoryAdminError, SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { isWireJsonObject, parseWireJson, type WireJson } from "../../src/serialization/wire_json.js";
 import { SqliteAdminTelemetry } from "../../src/telemetry/admin.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";

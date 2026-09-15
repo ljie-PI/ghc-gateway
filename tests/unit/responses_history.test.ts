@@ -4,14 +4,14 @@ import { applyMigrations, embedMigration } from "../../src/persistence/migration
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
 import {
   ResponsesContinuationError,
   SqliteResponsesHistory,
   type ResponsesContinuationOwnership,
   type ResponsesHistoryRecord,
   type ResponsesRouteReceipt,
-} from "../../src/protocols/responses/history.js";
+} from "../../src/protocols/openai_responses/history.js";
 import {
   isWireJsonArray,
   isWireJsonObject,
