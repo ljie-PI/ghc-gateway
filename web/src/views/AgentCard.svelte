@@ -129,3 +129,85 @@
     </dl>
   </details>
 </section>
+
+<style>
+  .agent-card {
+    min-width: 0;
+    padding: 24px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .agent-card-head,
+  .agent-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .agent-card-head {
+    justify-content: space-between;
+  }
+
+  .agent-card fieldset {
+    min-width: 0;
+    margin: 20px 0;
+  }
+
+  .agent-mapping-row {
+    display: flex;
+    gap: 12px;
+    align-items: end;
+    margin: 16px 0;
+    flex-wrap: wrap;
+  }
+
+  .agent-mapping-row label {
+    display: grid;
+    gap: 6px;
+    flex: 1 1 200px;
+    min-width: 0;
+  }
+
+  .agent-mapping-row input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .agent-actions p {
+    flex: 1 1 180px;
+  }
+
+  .agent-details {
+    margin-top: 20px;
+  }
+
+  .agent-card summary {
+    cursor: pointer;
+    padding: 8px 0;
+  }
+
+  .agent-details dd {
+    margin: 6px 0 16px;
+  }
+
+  .agent-details code {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+
+  @media (max-width: 600px) {
+    .agent-card {
+      padding: 16px;
+    }
+
+    .agent-mapping-row {
+      align-items: stretch;
+    }
+
+    .agent-mapping-row label {
+      flex-basis: 100%;
+    }
+  }
+</style>
