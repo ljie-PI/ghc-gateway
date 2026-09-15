@@ -58,3 +58,11 @@
     {/each}
   </div>
 {:else if loading}<p class="loading-line" aria-busy="true">Reading agent configuration...</p>{/if}
+
+<style>
+  .agent-cards {
+    display: grid;
+    gap: 24px;
+    margin-top: 24px;
+  }
+</style>

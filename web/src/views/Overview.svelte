@@ -86,7 +86,7 @@
       <p>Health remains OK. Limits and routing are unchanged while metrics recover.</p>
     </section>
   {/if}
-  <section class="hero-metrics" aria-label="Gateway status">
+  <section class="summary-grid hero-metrics" aria-label="Gateway status">
     <article>
       <p>Gateway</p>
       <strong>{current.health === "ok" ? "Running" : current.health}</strong>
@@ -151,6 +151,195 @@
 {/if}
 
 <style>
-  .usage-note { color: var(--muted); font-size: 13px; }
-  .usage-window + .usage-window { margin-top: 24px; }
+  .degraded {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    margin: 0 0 18px;
+    padding: 14px 16px;
+    border: 1px solid rgba(146, 99, 10, .45);
+    background: var(--soft);
+    color: #6b4806;
+  }
+
+  .degraded p {
+    margin: 4px 0 0;
+  }
+
+  .degraded h2 {
+    margin: 0;
+    color: var(--ink);
+  }
+
+  .skeleton-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border: 1px solid var(--line);
+  }
+
+  .skeleton-grid i {
+    height: 150px;
+    border-right: 1px solid var(--line);
+    background: var(--soft);
+  }
+
+  .skeleton-grid i:last-child {
+    border: 0;
+  }
+
+  .hero-metrics {
+    margin-bottom: 30px;
+  }
+
+  .hero-metrics p {
+    display: block;
+    margin-bottom: 7px;
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: .6px;
+    text-transform: uppercase;
+  }
+
+  .hero-metrics article {
+    display: flex;
+    min-height: 145px;
+    flex-direction: column;
+  }
+
+  .hero-metrics article > strong {
+    margin: auto 0 5px;
+    font-size: 32px;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+
+  .hero-metrics article > small {
+    color: var(--muted);
+  }
+
+  .hero-metrics meter {
+    width: 100%;
+    height: 6px;
+    margin-top: 10px;
+    accent-color: var(--ink);
+  }
+
+  .usage-note {
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .usage-window + .usage-window {
+    margin-top: 24px;
+  }
+
+  .stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1px;
+    margin-top: 14px;
+    border: 1px solid var(--line);
+    background: var(--line);
+  }
+
+  .stat-row > div {
+    min-width: 0;
+    flex: 1 1 180px;
+    padding: 17px 20px;
+    background: var(--canvas);
+  }
+
+  .stat-row span {
+    display: block;
+    margin-bottom: 7px;
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: .6px;
+    text-transform: uppercase;
+  }
+
+  .stat-row strong {
+    display: block;
+    font-size: 20px;
+    overflow-wrap: anywhere;
+  }
+
+  .split-panels {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 28px;
+  }
+
+  .metric-list,
+  .storage-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .metric-list li,
+  .storage-list li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 18px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 14px;
+  }
+
+  .metric-list li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .metric-list small,
+  .storage-list span {
+    color: var(--muted);
+  }
+
+  @media (max-width: 1100px) {
+    .stat-row > div {
+      padding: 15px;
+    }
+  }
+
+  @media (max-width: 850px) {
+    .hero-metrics,
+    .skeleton-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .hero-metrics article,
+    .skeleton-grid i {
+      min-height: 110px;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .hero-metrics article:last-child,
+    .skeleton-grid i:last-child {
+      border-bottom: 0;
+    }
+  }
+
+  @media (max-width: 600px) {
+    .stat-row > div {
+      flex-basis: 100%;
+      padding: 12px 16px;
+    }
+
+    .split-panels {
+      grid-template-columns: 1fr;
+    }
+
+    .metric-list li {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .metric-list small {
+      grid-column: 1 / -1;
+    }
+  }
 </style>
