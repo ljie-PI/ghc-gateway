@@ -5,6 +5,13 @@ export interface UpstreamRequestLimits {
   readonly signal: AbortSignal;
 }
 
+export interface ChatCompletionsUpstreamRequest extends UpstreamRequestLimits {
+  readonly model: string;
+  readonly body: Uint8Array;
+  readonly stream: boolean;
+  readonly hasVisionInput: boolean;
+}
+
 export interface NativeResponsesUpstreamRequest extends UpstreamRequestLimits {
   readonly body: Uint8Array;
   readonly hasVisionInput: boolean;

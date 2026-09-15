@@ -33,7 +33,7 @@ import {
   SqliteResponsesHistory,
   type ResponsesContinuationOwnership,
   type ResponsesHistoryRecord,
-} from "../../src/protocols/responses/history.js";
+} from "../../src/protocols/openai_responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 import { nearestRankP95, THRESHOLDS } from "../../src/telemetry/performance.js";
 import { assertNode24 } from "./node_version.js";

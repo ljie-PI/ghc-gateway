@@ -27,7 +27,7 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
-import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 
 const NOW = Date.parse("2026-09-03T12:00:00.000Z");

@@ -15,7 +15,7 @@ export function coerceTokenLimit(value: unknown): number | undefined {
   return undefined;
 }
 
-export function serializeOpenAiModels(
+export function serializeOpenaiModels(
   catalog: CapabilityCatalogSnapshot,
   created = DEFAULT_MODEL_CREATED_AT_TIME,
 ): string {
@@ -63,7 +63,7 @@ export function serializeAnthropicModels(
   });
 }
 
-export function serializeOpenAiModelsError(status: number): string {
+export function serializeOpenaiModelsError(status: number): string {
   const type = status === 401 || status === 403
     ? "authentication_error"
     : status === 429

@@ -21,8 +21,8 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
-import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
-import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
+import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 const nowMs = (): number => 1_700_000_000_000;
@@ -845,7 +845,7 @@ describe("Responses endpoint", () => {
       const gw = await createGateway({
         startup: parseStartupConfig([], {}, { homedir: dir }),
         runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
-      }, [createResponsesRoute({
+      }, [createOpenaiResponsesRoute({
         directory: accounts,
         registry,
         preferences: accounts.preferences,

@@ -5,14 +5,14 @@ import {
   type GatewayFailure,
 } from "../../gateway/failures.js";
 import { safeCapabilityFailureMessage } from "../../copilot/model_capabilities.js";
-import { anthropicErrorBody, type AnthropicErrorType } from "./wire.js";
+import { serializeAnthropicMessagesErrorBody, type AnthropicMessagesErrorType } from "./wire.js";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
 } as const;
 
-export function presentAnthropicFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
+export function presentAnthropicMessagesFailure(failure: Readonly<GatewayFailure>, requestId: string): Response {
   const status = anthropicStatus(failure);
   const headers = new Headers({ ...JSON_HEADERS, "request-id": requestId });
   const retryAfter = failure.kind === "upstream_http" && failure.status === 429
@@ -22,7 +22,7 @@ export function presentAnthropicFailure(failure: Readonly<GatewayFailure>, reque
     headers.set("retry-after", retryAfter);
   }
   return new Response(
-    anthropicErrorBody(
+    serializeAnthropicMessagesErrorBody(
       anthropicErrorType(status),
       safeCapabilityFailureMessage(
         failure.kind === "unsupported_semantics" ? failure.cause : undefined,
@@ -44,7 +44,7 @@ function anthropicStatus(failure: Readonly<GatewayFailure>): number {
   return defaultFailureStatus(failure);
 }
 
-function anthropicErrorType(status: number): AnthropicErrorType {
+function anthropicErrorType(status: number): AnthropicMessagesErrorType {
   if (status === 400 || status === 415 || status === 422) {
     return "invalid_request_error";
   }

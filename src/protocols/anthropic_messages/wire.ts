@@ -1,4 +1,4 @@
-export type AnthropicErrorType =
+export type AnthropicMessagesErrorType =
   | "invalid_request_error"
   | "request_too_large"
   | "authentication_error"
@@ -10,12 +10,12 @@ export type AnthropicErrorType =
   | "billing_error"
   | "rate_limit_error";
 
-export interface AnthropicEvent {
+export interface AnthropicMessagesEvent {
   readonly type: string;
   readonly [key: string]: unknown;
 }
 
-export function anthropicErrorBody(type: AnthropicErrorType, message: string, requestId: string): string {
+export function serializeAnthropicMessagesErrorBody(type: AnthropicMessagesErrorType, message: string, requestId: string): string {
   return JSON.stringify({
     type: "error",
     error: { type, message },
@@ -23,7 +23,7 @@ export function anthropicErrorBody(type: AnthropicErrorType, message: string, re
   });
 }
 
-export function encodeAnthropicSse(event: AnthropicEvent): Uint8Array {
+export function encodeAnthropicMessagesSseEvent(event: AnthropicMessagesEvent): Uint8Array {
   return new TextEncoder().encode(`event: ${event.type}\ndata: ${pythonJsonDumps(event)}\n\n`);
 }
 

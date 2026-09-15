@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseChatSse } from "../../src/copilot/chat_sse.js";
-import { encodeOpenAiChatDone, encodeOpenAiChatSseChunk } from "../../src/protocols/openai_chat/wire.js";
+import { parseOpenaiChatCompletionsSse } from "../../src/protocols/openai_chat_completions/native.js";
+import { encodeOpenaiChatCompletionsDone, encodeOpenaiChatCompletionsSseChunk } from "../../src/protocols/openai_chat_completions/wire.js";
 import { isWireJsonObject } from "../../src/serialization/wire_json.js";
 
 const encoder = new TextEncoder();
@@ -17,11 +17,11 @@ describe("OpenAI Chat stream wire", () => {
     ].join("");
     for (let split = 1; split <= encoder.encode(upstream).byteLength; split += 1) {
       const chunks: string[] = [];
-      for await (const frame of parseChatSse(streamFromText(upstream, split))) {
+      for await (const frame of parseOpenaiChatCompletionsSse(streamFromText(upstream, split))) {
         if (frame.kind === "chunk") {
-          chunks.push(decoder.decode(encodeOpenAiChatSseChunk(frame.chunk.payload)));
+          chunks.push(decoder.decode(encodeOpenaiChatCompletionsSseChunk(frame.chunk.payload)));
         } else if (frame.kind === "done") {
-          chunks.push(decoder.decode(encodeOpenAiChatDone()));
+          chunks.push(decoder.decode(encodeOpenaiChatCompletionsDone()));
         }
       }
       expect(chunks.join(""), `split ${split}`).toBe(
@@ -32,7 +32,7 @@ describe("OpenAI Chat stream wire", () => {
 
   it("preserves multibyte UTF-8 split across transport chunks", async () => {
     const frames = [];
-    for await (const frame of parseChatSse(streamFromText("data: {\"choices\":[],\"text\":\"你好\"}\n\ndata: [DONE]\n\n", 1))) {
+    for await (const frame of parseOpenaiChatCompletionsSse(streamFromText("data: {\"choices\":[],\"text\":\"你好\"}\n\ndata: [DONE]\n\n", 1))) {
       frames.push(frame);
     }
     expect(frames).toHaveLength(2);
@@ -43,7 +43,7 @@ describe("OpenAI Chat stream wire", () => {
 
   it("rejects invalid UTF-8 instead of rewriting it", async () => {
     await expect(async () => {
-      for await (const _frame of parseChatSse(bytes([
+      for await (const _frame of parseOpenaiChatCompletionsSse(bytes([
         new Uint8Array([0x64, 0x61, 0x74, 0x61, 0x3a, 0x20, 0xff, 0x0a, 0x0a]),
       ]))) {
         void _frame;
@@ -53,7 +53,7 @@ describe("OpenAI Chat stream wire", () => {
 
   it("classifies root error objects as upstream error frames", async () => {
     const frames = [];
-    for await (const frame of parseChatSse(streamFromText("data: {\"error\":{\"message\":\"secret\"}}\n\n", 8))) {
+    for await (const frame of parseOpenaiChatCompletionsSse(streamFromText("data: {\"error\":{\"message\":\"secret\"}}\n\n", 8))) {
       frames.push(frame);
     }
     expect(frames).toHaveLength(1);
@@ -62,7 +62,7 @@ describe("OpenAI Chat stream wire", () => {
 
   it("classifies malformed Chat chunks as upstream error frames", async () => {
     const frames = [];
-    for await (const frame of parseChatSse(streamFromText("data: {\"id\":\"missing-choices\"}\n\n", 8))) {
+    for await (const frame of parseOpenaiChatCompletionsSse(streamFromText("data: {\"id\":\"missing-choices\"}\n\n", 8))) {
       frames.push(frame);
     }
     expect(frames).toHaveLength(1);
@@ -71,7 +71,7 @@ describe("OpenAI Chat stream wire", () => {
 
   it("requires a Done terminal", async () => {
     await expect(async () => {
-      for await (const _frame of parseChatSse(streamFromText("data: {\"choices\":[]}\n\n", 2))) {
+      for await (const _frame of parseOpenaiChatCompletionsSse(streamFromText("data: {\"choices\":[]}\n\n", 2))) {
         void _frame;
       }
     }).rejects.toMatchObject({ code: "truncated" });

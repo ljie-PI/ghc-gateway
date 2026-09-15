@@ -7,7 +7,7 @@ import {
   type StreamExecutionEmission,
 } from "./stream_execution.js";
 import { GatewayFailureError, failureFromSignal } from "./failures.js";
-import { normalizeChatStreamFailure } from "../copilot/failures.js";
+import { normalizeChatCompletionsStreamFailure } from "../copilot/failures.js";
 import { convertProtocolStream } from "../protocols/conversion/stream.js";
 import type {
   ConversionCheckpointIntent,
@@ -155,7 +155,7 @@ function normalizeStreamFailure(
     return error;
   }
   if (input.plan.target === "chat") {
-    return normalizeChatStreamFailure(error, input.scope.signal);
+    return normalizeChatCompletionsStreamFailure(error, input.scope.signal);
   }
   if (input.scope.signal.aborted) {
     return new GatewayFailureError(failureFromSignal(input.scope.signal, {

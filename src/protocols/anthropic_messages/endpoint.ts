@@ -26,7 +26,7 @@ import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import type { TelemetryRecorder } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
-import { presentAnthropicFailure } from "./failure_presenter.js";
+import { presentAnthropicMessagesFailure } from "./failure_presenter.js";
 import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
 import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
@@ -62,7 +62,7 @@ export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRout
     path: "/v1/messages",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: presentAnthropicFailure,
+    presentFailure: presentAnthropicMessagesFailure,
     createAttempt: (requestId, config) => createRequestAttempt({
       requestId,
       config,

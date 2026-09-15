@@ -3,15 +3,15 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
 import { startHttpCopilot, jsonStream, waitForHttp, assertTransportReleased } from "../../scripts/tooling/test_support/http_copilot.js";
-import { decodeResponsesRequest } from "../../src/protocols/responses/decoder.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
 import {
   completeNativeResponses,
   nativeResponsesUpstreamRequest,
   openNativeResponsesStream,
   serializeNativeResponsesRequest,
   validatedNativeResponsesBody,
-} from "../../src/protocols/responses/native.js";
-import { planResponsesExecution, type NativeResponsesPlan } from "../../src/protocols/responses/planner.js";
+} from "../../src/protocols/openai_responses/native.js";
+import { planResponsesExecution, type NativeResponsesPlan } from "../../src/protocols/openai_responses/planner.js";
 import { isWireJsonObject, parseWireJson } from "../../src/serialization/wire_json.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 

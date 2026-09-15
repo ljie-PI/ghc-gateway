@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { GatewayFailureError } from "../../src/gateway/failures.js";
-import { normalizeNativeResponsesStream } from "../../src/protocols/responses/native.js";
+import { normalizeNativeResponsesStream } from "../../src/protocols/openai_responses/native.js";
 
 describe("native Responses stream", () => {
   it("normalizes only item IDs by output index and preserves compact Responses SSE bytes", async () => {

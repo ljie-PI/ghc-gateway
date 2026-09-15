@@ -1,5 +1,5 @@
-import { ChatSseError } from "../../copilot/chat_sse.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import { SseDecodeError } from "../../serialization/sse.js";
 
 export interface SseRecord {
   readonly eventName?: string;
@@ -22,7 +22,7 @@ export async function* decodeSseRecords(
   const reserve = (value: string): void => {
     recordBytes += encoder.encode(value).byteLength;
     if (recordBytes > eventLimitBytes) {
-      throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+      throw new SseDecodeError("event_too_large", "SSE event exceeds limit");
     }
   };
   const finishLine = (): void => {
@@ -96,11 +96,11 @@ export async function* decodeSseRecords(
       yield ready.shift() as SseRecord;
     }
   } catch (error: unknown) {
-    if (error instanceof GatewayFailureError || error instanceof ChatSseError) {
+    if (error instanceof GatewayFailureError || error instanceof SseDecodeError) {
       throw error;
     }
     if (error instanceof TypeError) {
-      throw new ChatSseError("invalid_utf8", "invalid UTF-8 in SSE stream");
+      throw new SseDecodeError("invalid_utf8", "invalid UTF-8 in SSE stream", { cause: error });
     }
     throw error;
   }
