@@ -1,6 +1,7 @@
 {
   "extends": "./tsconfig.test.json",
   "include": [
+    "tests/support/replay/**/*.ts",
     "tests/sdk/**/*.ts",
     "vitest.sdk.config.ts"
   ],

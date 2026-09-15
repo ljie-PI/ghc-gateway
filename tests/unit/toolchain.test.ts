@@ -268,7 +268,7 @@ describe("package entrypoints and toolchain", () => {
       .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()).toEqual(["tooling"]);
     expect((await readdir("tests", { withFileTypes: true }))
       .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort()).toEqual([
-      "contract", "e2e", "fixtures", "integration", "performance", "sdk", "unit",
+      "contract", "e2e", "fixtures", "integration", "performance", "sdk", "support", "unit",
     ]);
     for (const current of [
       "scripts/tooling/bootstrap.mjs",

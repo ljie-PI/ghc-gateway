@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import type { ReplayScenarioManifest } from "../../src/replay/types.js";
+import type { ReplayScenarioManifest } from "../support/replay/types.js";
 import { expectReasoningResult, expectScenarioResult, expectUsage, readExpectedExchangeResult, type ExpectedResult } from "../sdk/replay_expectations.js";
 import { expectSessionTurn } from "../sdk/session_expectations.js";
 import type { SdkResult } from "../sdk/client.js";
