@@ -12,7 +12,7 @@ function checkpointDiagnostics(): CheckpointDiagnostics {
   const timing = { count: 1, totalMs: 1, maxMs: 1 };
   return {
     observedCount: 2,
-    thresholdMs: 5,
+    thresholdMs: 8,
     thresholdExceededCount: 0,
     retainedSlowestLimit: 8,
     states: { partial: timing, complete: timing },
@@ -109,8 +109,8 @@ function passingRun(run: number): BenchmarkRunResult {
     },
     buffered: latency,
     streamEvent: { ...latency, thresholdMs: 2 },
-    checkpoint: { ...latency, diagnostics: checkpointDiagnostics() },
-    eventLoop: { ...latency, thresholdMs: 10 },
+    checkpoint: { ...latency, thresholdMs: 8, diagnostics: checkpointDiagnostics() },
+    eventLoop: { ...latency, thresholdMs: 5 },
     passed: true,
   };
 }
@@ -158,7 +158,7 @@ describe("benchmark gate contract", () => {
         checkpointP95Ms: 1,
         checkpointDiagnostics: {
           observedCount: 2,
-          thresholdMs: 5,
+          thresholdMs: 8,
           thresholdExceededCount: 0,
           partialCount: 1,
           completeCount: 1,

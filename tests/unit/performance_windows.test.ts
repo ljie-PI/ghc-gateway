@@ -47,6 +47,25 @@ describe("performance windows", () => {
     expect(cleared.snapshot.status).toBe("healthy");
   });
 
+  it("uses the checkpoint and event-loop budgets at their exact boundaries", () => {
+    const windows = new PerformanceWindows();
+    for (let index = 0; index < MIN_OBSERVATIONS; index += 1) {
+      windows.observeCheckpoint(8);
+      windows.observeEventLoop(5);
+    }
+    const boundary = windows.evaluateWindow();
+    expect(boundary.snapshot.metrics.checkpointMs.status).toBe("healthy");
+    expect(boundary.snapshot.metrics.eventLoopMs.status).toBe("healthy");
+
+    for (let index = 0; index < MIN_OBSERVATIONS; index += 1) {
+      windows.observeCheckpoint(8.001);
+      windows.observeEventLoop(5.001);
+    }
+    const exceeded = windows.evaluateWindow();
+    expect(exceeded.snapshot.metrics.checkpointMs.status).toBe("over");
+    expect(exceeded.snapshot.metrics.eventLoopMs.status).toBe("over");
+  });
+
   it("does not advance consecutive counters on insufficient_data", () => {
     const windows = new PerformanceWindows();
     windows.observeBuffered(50);
