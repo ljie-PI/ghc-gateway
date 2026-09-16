@@ -116,14 +116,40 @@ function passingRun(run: number): BenchmarkRunResult {
 }
 
 describe("benchmark gate contract", () => {
-  it("requires every metric in every repetition to pass", () => {
+  it("requires two latency passes and every memory pass across three repetitions", () => {
     const runs = [passingRun(1), passingRun(2), passingRun(3)];
     expect(evaluateBenchmarkRuns(runs)).toBe(true);
 
-    const failed: BenchmarkRunResult = { ...runs[1]!, checkpoint: { ...runs[1]!.checkpoint, passed: false } };
-    expect(evaluateBenchmarkRuns([runs[0]!, failed, runs[2]!])).toBe(false);
-    const idleFailed: BenchmarkRunResult = { ...runs[1]!, idle: { ...runs[1]!.idle, passed: false } };
+    const oneCheckpointFailure: BenchmarkRunResult = {
+      ...runs[1]!,
+      checkpoint: { ...runs[1]!.checkpoint, p95Ms: 120, passed: false },
+      passed: false,
+    };
+    expect(evaluateBenchmarkRuns([runs[0]!, oneCheckpointFailure, runs[2]!])).toBe(true);
+
+    const secondCheckpointFailure: BenchmarkRunResult = {
+      ...runs[2]!,
+      checkpoint: { ...runs[2]!.checkpoint, p95Ms: 11, passed: false },
+      passed: false,
+    };
+    expect(evaluateBenchmarkRuns([runs[0]!, oneCheckpointFailure, secondCheckpointFailure])).toBe(false);
+
+    const oneEventLoopFailure: BenchmarkRunResult = {
+      ...runs[2]!,
+      eventLoop: { ...runs[2]!.eventLoop, p95Ms: 6, passed: false },
+      passed: false,
+    };
+    expect(evaluateBenchmarkRuns([runs[0]!, oneCheckpointFailure, oneEventLoopFailure])).toBe(true);
+
+    const idleFailed: BenchmarkRunResult = { ...runs[1]!, idle: { ...runs[1]!.idle, passed: false }, passed: false };
     expect(evaluateBenchmarkRuns([runs[0]!, idleFailed, runs[2]!])).toBe(false);
+    const streamsFailed: BenchmarkRunResult = {
+      ...runs[1]!, streams: { ...runs[1]!.streams, passed: false }, passed: false,
+    };
+    expect(evaluateBenchmarkRuns([runs[0]!, streamsFailed, runs[2]!])).toBe(false);
+
+    expect(evaluateBenchmarkRuns([runs[0]!, oneCheckpointFailure])).toBe(false);
+    expect(evaluateBenchmarkRuns([runs[0]!, runs[0]!, runs[2]!])).toBe(false);
   });
 
   it("records process-resident memory and excludes browser memory", () => {
@@ -154,6 +180,13 @@ describe("benchmark gate contract", () => {
     const summary = benchmarkCliSummary("artifacts/bench/full-gateway.json", artifact);
     expect(summary).toMatchObject({
       passed: false,
+      latencyPasses: {
+        required: 1,
+        buffered: 1,
+        streamEvent: 1,
+        checkpoint: 0,
+        eventLoop: 1,
+      },
       runs: [{
         checkpointP95Ms: 1,
         checkpointDiagnostics: {
@@ -169,6 +202,23 @@ describe("benchmark gate contract", () => {
       }],
     });
     expect(JSON.stringify(summary)).not.toContain("generatedAt");
+
+    const extremeRun: BenchmarkRunResult = {
+      ...passingRun(2),
+      checkpoint: { ...passingRun(2).checkpoint, p95Ms: 120, passed: false },
+      passed: false,
+    };
+    const threeRunSummary = benchmarkCliSummary("artifacts/bench/full-gateway.json", {
+      ...artifact,
+      repeat: 3,
+      runs: [passingRun(1), extremeRun, passingRun(3)],
+      passed: true,
+    });
+    expect(threeRunSummary).toMatchObject({
+      passed: true,
+      latencyPasses: { required: 2, checkpoint: 2 },
+      runs: [{ checkpointP95Ms: 1 }, { checkpointP95Ms: 120 }, { checkpointP95Ms: 1 }],
+    });
   });
 
   it.each([
