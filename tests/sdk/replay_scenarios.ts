@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
-import type { ReplayExchangeRecord, ReplayScenario, ReplayScenarioManifest } from "../../src/replay/types.js";
+import type { ReplayExchangeRecord, ReplayScenario, ReplayScenarioManifest } from "../support/replay/types.js";
 import type { SdkProtocol, SdkToolCall } from "./client.js";
 import { matchesTextRequest } from "./replay_expectations.js";
 import { matchesSessionRequest } from "./session_expectations.js";

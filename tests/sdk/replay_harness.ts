@@ -17,9 +17,9 @@ import { migration as responsesHistoryMigration } from "../../src/persistence/mi
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { bootstrapGateway } from "../../src/main.js";
-import { MockCopilotReplayServer, parseReplayManifestText, type ReplayReceipt } from "../../src/replay/server.js";
+import { MockCopilotReplayServer, parseReplayManifestText, type ReplayReceipt } from "../support/replay/server.js";
 import type { SdkProtocol } from "./client.js";
-import type { ReplayScenarioManifest } from "../../src/replay/types.js";
+import type { ReplayScenarioManifest } from "../support/replay/types.js";
 import { createReplayScenarios } from "./replay_scenarios.js";
 import { startCopilotHttpMock, type CopilotHttpMock, type HttpRequestObservation } from "../../scripts/tooling/test_support/copilot_http.js";
 import { syntheticSdkFixtureCatalog } from "./synthetic_scenarios.js";
