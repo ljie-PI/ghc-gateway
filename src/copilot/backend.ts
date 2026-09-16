@@ -1,13 +1,8 @@
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { AccountId } from "../accounts/credential_store.js";
 import { copilotHeaders } from "./identity.js";
-import { parseChatSse } from "./chat_sse.js";
 import type {
-  ChatRequest,
-  ChatResponse,
-  ChatStreamFrame,
-} from "../protocols/chat_completions/types.js";
-import type {
+  ChatCompletionsUpstreamRequest,
   MessagesUpstreamRequest,
   NativeResponsesUpstreamRequest,
   UpstreamByteResponse,
@@ -22,8 +17,8 @@ export interface CopilotTarget {
 export interface BoundCopilot {
   readonly accountId: AccountId;
   readonly target: Readonly<CopilotTarget>;
-  completeChat(request: Readonly<ChatRequest>): Promise<ChatResponse>;
-  openChatStream(request: Readonly<ChatRequest>): Promise<UpstreamByteStream>;
+  completeChat(request: Readonly<ChatCompletionsUpstreamRequest>): Promise<UpstreamByteResponse>;
+  openChatStream(request: Readonly<ChatCompletionsUpstreamRequest>): Promise<UpstreamByteStream>;
   completeResponses(request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteResponse>;
   openResponsesStream(request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteStream>;
   completeMessages(request: Readonly<MessagesUpstreamRequest>): Promise<UpstreamByteResponse>;
@@ -34,10 +29,6 @@ export interface CopilotBackend {
   bind(account: Readonly<BoundAccount>, signal: AbortSignal): Promise<BoundCopilot>;
   close(): Promise<void>;
   forceClose(): void;
-}
-
-export async function* iterateChatFrames(stream: UpstreamByteStream): AsyncGenerator<ChatStreamFrame> {
-  yield* parseChatSse(stream.bytes);
 }
 
 export function outboundHeaders(token: string, extra?: Headers): Headers {

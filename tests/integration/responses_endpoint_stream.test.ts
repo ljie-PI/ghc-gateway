@@ -15,14 +15,14 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
-import type { ResponsesRequest } from "../../src/protocols/responses/dto.js";
-import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
+import type { ResponsesRequest } from "../../src/protocols/openai_responses/dto.js";
+import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
 import type {
   ResponsesHistory,
   ResponsesHistoryRecord,
   ResponsesReceiptRecord,
-} from "../../src/protocols/responses/history.js";
+} from "../../src/protocols/openai_responses/history.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 const nowMs = (): number => 1_700_000_000_000;
@@ -421,7 +421,7 @@ async function streamGateway(
     const gateway = await createGateway({
       startup: parseStartupConfig([], {}, { homedir: dir }),
       runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
-    }, [createResponsesRoute({
+    }, [createOpenaiResponsesRoute({
       directory: accounts,
       registry,
       preferences: accounts.preferences,

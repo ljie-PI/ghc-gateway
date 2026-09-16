@@ -4,20 +4,20 @@ import {
   type GatewayFailure,
 } from "../../src/gateway/failures.js";
 import {
-  createOpenAiChatRoute,
-  type OpenAiChatRouteDependencies,
-} from "../../src/protocols/openai_chat/endpoint.js";
-import { presentOpenAiChatFailure } from "../../src/protocols/openai_chat/failure_presenter.js";
+  createOpenaiChatCompletionsRoute,
+  type OpenaiChatCompletionsRouteDependencies,
+} from "../../src/protocols/openai_chat_completions/endpoint.js";
+import { presentOpenaiChatCompletionsFailure } from "../../src/protocols/openai_chat_completions/failure_presenter.js";
 import {
   createAnthropicMessagesRoute,
   type AnthropicMessagesRouteDependencies,
 } from "../../src/protocols/anthropic_messages/endpoint.js";
-import { presentAnthropicFailure } from "../../src/protocols/anthropic_messages/failure_presenter.js";
+import { presentAnthropicMessagesFailure } from "../../src/protocols/anthropic_messages/failure_presenter.js";
 import {
-  createResponsesRoute,
-  type ResponsesRouteDependencies,
-} from "../../src/protocols/responses/endpoint.js";
-import { presentResponsesFailure } from "../../src/protocols/responses/failure_presenter.js";
+  createOpenaiResponsesRoute,
+  type OpenaiResponsesRouteDependencies,
+} from "../../src/protocols/openai_responses/endpoint.js";
+import { presentOpenaiResponsesFailure } from "../../src/protocols/openai_responses/failure_presenter.js";
 import { presentModelCatalogFailure } from "../../src/protocols/model_catalog/failure_presenter.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
@@ -57,9 +57,9 @@ describe("semantic failure presenters", () => {
   ]>)(
     "projects $0 without changing protocol exceptions",
     async (failure, openAiStatus, anthropicStatus, outcome, message, openAiType, anthropicType) => {
-      const chat = presentOpenAiChatFailure(failure, requestId);
-      const messages = presentAnthropicFailure(failure, requestId);
-      const responses = presentResponsesFailure(failure, requestId);
+      const chat = presentOpenaiChatCompletionsFailure(failure, requestId);
+      const messages = presentAnthropicMessagesFailure(failure, requestId);
+      const responses = presentOpenaiResponsesFailure(failure, requestId);
 
       expect(chat.status).toBe(openAiStatus);
       expect(messages.status).toBe(anthropicStatus);
@@ -119,9 +119,9 @@ describe("semantic failure presenters", () => {
       status: 429,
       retryAfter: "120, https://unsafe.example/private",
     };
-    expect(presentOpenAiChatFailure(failure, requestId).headers.get("retry-after")).toBeNull();
-    expect(presentAnthropicFailure(failure, requestId).headers.get("retry-after")).toBeNull();
-    expect(presentResponsesFailure(failure, requestId).headers.get("retry-after")).toBeNull();
+    expect(presentOpenaiChatCompletionsFailure(failure, requestId).headers.get("retry-after")).toBeNull();
+    expect(presentAnthropicMessagesFailure(failure, requestId).headers.get("retry-after")).toBeNull();
+    expect(presentOpenaiResponsesFailure(failure, requestId).headers.get("retry-after")).toBeNull();
     expect(presentModelCatalogFailure(failure, requestId, openAiModelsRequest).headers.get("retry-after")).toBeNull();
   });
 
@@ -132,18 +132,18 @@ describe("semantic failure presenters", () => {
     const registry = new ModelCapabilityRegistry(new CopilotModelCatalog({
       async fetch() { return { data: [] }; },
     }), { get: () => null });
-    const chat = createOpenAiChatRoute({
+    const chat = createOpenaiChatCompletionsRoute({
       registry,
       usageRecorder: { recordUsage },
-    } as unknown as OpenAiChatRouteDependencies);
+    } as unknown as OpenaiChatCompletionsRouteDependencies);
     const messages = createAnthropicMessagesRoute({
       registry,
       usageRecorder: { recordUsage },
     } as unknown as AnthropicMessagesRouteDependencies);
-    const responses = createResponsesRoute({
+    const responses = createOpenaiResponsesRoute({
       registry,
       usageRecorder: { recordUsage },
-    } as unknown as ResponsesRouteDependencies);
+    } as unknown as OpenaiResponsesRouteDependencies);
 
     chat.presentFailure(failure, requestId, request);
     messages.presentFailure(failure, requestId, request);

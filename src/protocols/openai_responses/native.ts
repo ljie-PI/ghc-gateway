@@ -1,7 +1,7 @@
-import { ChatSseError } from "../../copilot/chat_sse.js";
 import type { BoundCopilot } from "../../copilot/backend.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import { boundedCleanup } from "../../gateway/stream_execution.js";
+import { SseDecodeError } from "../../serialization/sse.js";
 import {
   isWireJsonArray,
   isWireJsonNumber,
@@ -19,7 +19,7 @@ import type {
 } from "../../copilot/upstream_types.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import type { NativeResponsesPlan } from "./planner.js";
-import { encodeResponsesSseEvent } from "./wire.js";
+import { encodeOpenaiResponsesSseEvent } from "./wire.js";
 
 export interface NativeResponsesRequestOptions {
   readonly requestId: string;
@@ -137,7 +137,7 @@ export async function* normalizeNativeResponsesStream(
       } catch (_error: unknown) {
         // Side observation cannot affect native Responses bytes.
       }
-      return encodeResponsesSseEvent(normalized);
+      return encodeOpenaiResponsesSseEvent(normalized);
     });
     yield encoded;
     if (TERMINAL_EVENTS.has(type)) {
@@ -199,14 +199,14 @@ async function* parseResponsesSse(
         const boundary = normalized.indexOf("\n\n");
         if (boundary === -1) {
           if (new TextEncoder().encode(normalized).byteLength > eventLimitBytes) {
-            throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+            throw new SseDecodeError("event_too_large", "SSE event exceeds limit");
           }
           pending = normalized;
           break;
         }
         const raw = normalized.slice(0, boundary);
         if (new TextEncoder().encode(`${raw}\n\n`).byteLength > eventLimitBytes) {
-          throw new ChatSseError("event_too_large", "SSE event exceeds limit");
+          throw new SseDecodeError("event_too_large", "SSE event exceeds limit");
         }
         pending = normalized.slice(boundary + 2);
         const parsed = parseSseRecord(raw);
@@ -227,7 +227,7 @@ async function* parseResponsesSse(
         phase: "stream",
       });
     }
-    if (error instanceof ChatSseError) {
+    if (error instanceof SseDecodeError) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });
     }
     throw new GatewayFailureError({ kind: "invalid_upstream_response", cause: error });

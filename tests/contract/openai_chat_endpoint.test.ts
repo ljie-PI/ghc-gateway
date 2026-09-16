@@ -17,13 +17,13 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
-import { createOpenAiChatRoute } from "../../src/protocols/openai_chat/endpoint.js";
+import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_chat_completions/endpoint.js";
 import type {
+  ChatCompletionsUpstreamRequest,
   NativeResponsesUpstreamRequest,
   UpstreamByteResponse,
   UpstreamByteStream,
 } from "../../src/copilot/upstream_types.js";
-import type { ChatRequest, ChatResponse } from "../../src/protocols/chat_completions/types.js";
 import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 
 const encoder = new TextEncoder();
@@ -31,15 +31,15 @@ const decoder = new TextDecoder();
 const nowMs = (): number => 1_700_000_000_000;
 
 class CapturingCopilotBackend implements CopilotBackend {
-  readonly chatRequests: ChatRequest[] = [];
-  readonly chatStreamRequests: ChatRequest[] = [];
+  readonly chatRequests: ChatCompletionsUpstreamRequest[] = [];
+  readonly chatStreamRequests: ChatCompletionsUpstreamRequest[] = [];
 
   constructor(
     private readonly options: {
       readonly bindError?: unknown;
-      readonly chat?: ChatResponse;
+      readonly chat?: UpstreamByteResponse;
       readonly chatError?: unknown;
-      readonly chatPromise?: Promise<ChatResponse>;
+      readonly chatPromise?: Promise<UpstreamByteResponse>;
       readonly chatStream?: UpstreamByteStream;
     },
   ) {}
@@ -166,7 +166,7 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   const gw = await createGateway({
     startup: parseStartupConfig([], {}, { homedir: dir }),
     runtime: options.runtime ?? defaultRuntimeConfigSnapshot(),
-  }, [createOpenAiChatRoute(routeDependencies)], dependencies);
+  }, [createOpenaiChatCompletionsRoute(routeDependencies)], dependencies);
   return {
     gw,
     close: async () => {
@@ -594,8 +594,8 @@ describe("OpenAI Chat endpoint", () => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.admission.activeMax = 1;
     runtime.admission.queueMax = 0;
-    let release!: (response: ChatResponse) => void;
-    const chatPromise = new Promise<ChatResponse>((resolve) => {
+    let release!: (response: UpstreamByteResponse) => void;
+    const chatPromise = new Promise<UpstreamByteResponse>((resolve) => {
       release = resolve;
     });
     const backend = new CapturingCopilotBackend({ chatPromise });
@@ -623,7 +623,7 @@ describe("OpenAI Chat endpoint", () => {
     const runtime = defaultRuntimeConfigSnapshot();
     runtime.timeouts.firstByteMs = 1;
     const backend = new CapturingCopilotBackend({
-      chatPromise: new Promise<ChatResponse>(() => undefined),
+      chatPromise: new Promise<UpstreamByteResponse>(() => undefined),
     });
     const { gw, close } = await openAiGateway(backend, { runtime, requestId: "req_timeout" });
     try {
@@ -1058,15 +1058,15 @@ function exactSseEventText(size: number): string {
 }
 
 async function withScriptedFirstByteTimeout(
-  response: Promise<ChatResponse>,
+  response: Promise<UpstreamByteResponse>,
   ms: number | undefined,
-): Promise<ChatResponse> {
+): Promise<UpstreamByteResponse> {
   if (ms === undefined) {
     return await response;
   }
   return await Promise.race([
     response,
-    new Promise<ChatResponse>((_resolve, reject) => {
+    new Promise<UpstreamByteResponse>((_resolve, reject) => {
       setTimeout(() => reject(new UpstreamTimeoutError()), ms);
     }),
   ]);

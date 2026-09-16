@@ -1,4 +1,3 @@
-import { parseChatSse } from "../../copilot/chat_sse.js";
 import { upstreamStreamEventFailure } from "../../copilot/failures.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import {
@@ -19,7 +18,13 @@ import type {
   SemanticUsage,
 } from "./types.js";
 import { decodeSseRecords } from "./sse.js";
-import { chatUsageFromCounters, mergeChatUsageCounters, mergeMessagesUsage, type ChatUsageCounters } from "./usage.js";
+import { mergeMessagesUsage } from "./usage.js";
+import {
+  chatCompletionsUsageFromCounters,
+  mergeChatCompletionsUsageCounters,
+  parseOpenaiChatCompletionsSse,
+  type ChatCompletionsUsageCounters,
+} from "../openai_chat_completions/native.js";
 
 export function decodeProtocolStream(
   source: InferenceProtocol,
@@ -54,7 +59,7 @@ async function* decodeChatStream(
   }>();
   let nextToolToStart = 0;
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
-  let observedUsage: ChatUsageCounters = {};
+  let observedUsage: ChatCompletionsUsageCounters = {};
   let chatText = "";
   let chatRefusal = "";
   let toolObserved = false;
@@ -112,7 +117,7 @@ async function* decodeChatStream(
       }
     }
   };
-  for await (const frame of parseChatSse(bytes, eventLimitBytes, measureEvent)) {
+  for await (const frame of parseOpenaiChatCompletionsSse(bytes, eventLimitBytes, measureEvent)) {
     if (frame.kind === "error") {
       throw upstreamStreamEventFailure();
     }
@@ -161,8 +166,8 @@ async function* decodeChatStream(
     }
     const usage = nullableObjectMember(payload, "usage");
     if (usage !== undefined) {
-      observedUsage = mergeChatUsageCounters(observedUsage, chatUsage(usage));
-      yield { kind: "usage", usage: chatUsageFromCounters(observedUsage) };
+      observedUsage = mergeChatCompletionsUsageCounters(observedUsage, chatUsage(usage));
+      yield { kind: "usage", usage: chatCompletionsUsageFromCounters(observedUsage) };
     }
     const choices = arrayMember(payload, "choices");
     if (choices === undefined || choices.items.length === 0) {
@@ -1685,7 +1690,7 @@ function messagesFinish(value: string): SemanticResponse["finishReason"] {
   invalid();
 }
 
-function chatUsage(value: WireJsonObject): ChatUsageCounters {
+function chatUsage(value: WireJsonObject): ChatCompletionsUsageCounters {
   const promptDetails = objectMember(value, "prompt_tokens_details");
   const completionDetails = objectMember(value, "completion_tokens_details");
   const detailedReasoningTokens = optionalNonnegativeIntegerMember(completionDetails, "reasoning_tokens");

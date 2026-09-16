@@ -4,8 +4,8 @@ import {
   safeRetryAfter,
   type GatewayFailure,
 } from "../../gateway/failures.js";
-import { anthropicErrorBody, type AnthropicErrorType } from "../anthropic_messages/wire.js";
-import { serializeOpenAiModelsError } from "./wire.js";
+import { serializeAnthropicMessagesErrorBody, type AnthropicMessagesErrorType } from "../anthropic_messages/wire.js";
+import { serializeOpenaiModelsError } from "./wire.js";
 
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
@@ -30,12 +30,12 @@ export function presentModelCatalogFailure(
     headers.set("retry-after", retryAfter);
   }
   const body = anthropic
-    ? anthropicErrorBody(anthropicErrorType(status), safeFailureMessage(failure), requestId)
-    : serializeOpenAiModelsError(status);
+    ? serializeAnthropicMessagesErrorBody(anthropicErrorType(status), safeFailureMessage(failure), requestId)
+    : serializeOpenaiModelsError(status);
   return new Response(body, { status, headers });
 }
 
-function anthropicErrorType(status: number): AnthropicErrorType {
+function anthropicErrorType(status: number): AnthropicMessagesErrorType {
   if (status === 401) {
     return "authentication_error";
   }

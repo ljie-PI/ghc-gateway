@@ -2,7 +2,7 @@ import { serializeWireJson, type WireJson } from "../../serialization/wire_json.
 
 const encoder = new TextEncoder();
 
-export function encodeOpenAiChatSseChunk(value: WireJson): Uint8Array {
+export function encodeOpenaiChatCompletionsSseChunk(value: WireJson): Uint8Array {
   return concat([
     encoder.encode("data: "),
     serializeWireJson(value),
@@ -10,11 +10,11 @@ export function encodeOpenAiChatSseChunk(value: WireJson): Uint8Array {
   ]);
 }
 
-export function encodeOpenAiChatDone(): Uint8Array {
+export function encodeOpenaiChatCompletionsDone(): Uint8Array {
   return encoder.encode("data: [DONE]\n\n");
 }
 
-export function serializeOpenAiErrorBody(message: string, type: string): string {
+export function serializeOpenaiChatCompletionsErrorBody(message: string, type: string): string {
   return JSON.stringify({
     error: {
       message,

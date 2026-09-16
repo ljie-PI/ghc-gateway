@@ -45,10 +45,10 @@ import {
   type ResponsesHistory,
 } from "./history.js";
 import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
-import { RESPONSES_JSON_HEADERS, RESPONSES_STREAM_HEADERS } from "./wire.js";
+import { OPENAI_RESPONSES_JSON_HEADERS, OPENAI_RESPONSES_STREAM_HEADERS } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
-import { presentResponsesFailure } from "./failure_presenter.js";
+import { presentOpenaiResponsesFailure } from "./failure_presenter.js";
 import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
 import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
@@ -59,7 +59,7 @@ import type {
   SemanticUsage,
 } from "../conversion/types.js";
 
-export interface ResponsesRouteDependencies {
+export interface OpenaiResponsesRouteDependencies {
   readonly directory: AccountDirectory;
   readonly registry: ModelCapabilityRegistry;
   readonly preferences: AccountModelPreferences;
@@ -72,14 +72,14 @@ export interface ResponsesRouteDependencies {
   readonly nowMs?: () => number;
 }
 
-export function createResponsesRoute(dependencies: ResponsesRouteDependencies): RouteRegistration {
+export function createOpenaiResponsesRoute(dependencies: OpenaiResponsesRouteDependencies): RouteRegistration {
   requireModelCapabilityRegistry(dependencies.registry);
   return {
     method: "POST",
     path: "/v1/responses",
     admission: "inference",
     body: "wire-json-object",
-    presentFailure: presentResponsesFailure,
+    presentFailure: presentOpenaiResponsesFailure,
     createAttempt: (requestId, config) => createRequestAttempt({
       requestId,
       config,
@@ -88,12 +88,12 @@ export function createResponsesRoute(dependencies: ResponsesRouteDependencies): 
       ...(dependencies.usageRecorder === undefined ? {} : { recorder: dependencies.usageRecorder }),
       ...(dependencies.nowMs === undefined ? {} : { nowMs: dependencies.nowMs }),
     }),
-    endpoint: (request, scope) => executeResponses(dependencies, request, scope),
+    endpoint: (request, scope) => executeOpenaiResponses(dependencies, request, scope),
   };
 }
 
-async function executeResponses(
-  dependencies: ResponsesRouteDependencies,
+async function executeOpenaiResponses(
+  dependencies: OpenaiResponsesRouteDependencies,
   request: Readonly<DecodedHttpRequest>,
   scope: Readonly<RequestScope>,
 ): Promise<Response> {
@@ -252,7 +252,7 @@ async function nativeNonstreamResponse(
   }
   return new Response(Buffer.from(upstream.body), {
     status: upstream.status,
-    headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
+    headers: { ...OPENAI_RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
 }
 
@@ -309,7 +309,7 @@ async function nativeStreamResponse(
 }
 
 async function convertedNonstreamResponse(
-  dependencies: ResponsesRouteDependencies,
+  dependencies: OpenaiResponsesRouteDependencies,
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Readonly<ConvertedProtocolPlan>,
@@ -338,12 +338,12 @@ async function convertedNonstreamResponse(
   usage.success(attemptUsage(converted.observations.usage));
   return new Response(Buffer.from(converted.bytes), {
     status: plan.request.responseBindings === undefined ? upstream.status : 200,
-    headers: { ...RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
+    headers: { ...OPENAI_RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
   });
 }
 
 async function convertedStreamResponse(
-  dependencies: ResponsesRouteDependencies,
+  dependencies: OpenaiResponsesRouteDependencies,
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Readonly<ConvertedProtocolPlan>,
@@ -363,7 +363,7 @@ async function convertedStreamResponse(
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
     performanceObserver: dependencies.performanceObserver,
-    headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
+    headers: { ...OPENAI_RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
     persistCheckpoint: async (intent) => await persistConvertedCheckpoint(
       dependencies,
       ownership,
@@ -377,7 +377,7 @@ async function convertedStreamResponse(
 }
 
 async function persistConvertedCheckpoint(
-  dependencies: ResponsesRouteDependencies,
+  dependencies: OpenaiResponsesRouteDependencies,
   ownership: Readonly<ResponsesContinuationOwnership>,
   intent: Readonly<ConversionCheckpointIntent>,
   scope: Readonly<RequestScope>,
@@ -435,7 +435,7 @@ async function streamBytesResponse(
     emissions: responseByteEmissions(bytes),
     signal: scope.signal,
     deliverySignal: scope.deliverySignal,
-    headers: { ...RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
+    headers: { ...OPENAI_RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
     firstEmissionTimeoutMs: scope.config.timeouts.firstByteMs,
     normalizeFailure: (error) => error,
     onTerminal: (result) => {
@@ -549,7 +549,7 @@ async function transportCall<T>(
 }
 
 async function loadCatalog(
-  dependencies: ResponsesRouteDependencies,
+  dependencies: OpenaiResponsesRouteDependencies,
   account: Readonly<BoundAccount>,
   observedPreference: ReturnType<AccountModelPreferences["get"]>,
   signal: AbortSignal,

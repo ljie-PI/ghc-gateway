@@ -29,11 +29,11 @@ import { MIGRATION_MANIFEST } from "./persistence/generated_migrations.js";
 import { AccountDirectory as SqliteAccountDirectory } from "./accounts/account_directory.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { createModelCatalogRoutes } from "./protocols/model_catalog/routes.js";
-import { createOpenAiChatRoute } from "./protocols/openai_chat/endpoint.js";
+import { createOpenaiChatCompletionsRoute } from "./protocols/openai_chat_completions/endpoint.js";
 import { createAnthropicMessagesRoute } from "./protocols/anthropic_messages/endpoint.js";
-import { createResponsesRoute } from "./protocols/responses/endpoint.js";
+import { createOpenaiResponsesRoute } from "./protocols/openai_responses/endpoint.js";
 import { PreferredModelManager } from "./protocols/model_catalog/preferred.js";
-import { SqliteResponsesHistory, type ResponsesHistory, type ResponsesHistoryAdmin } from "./protocols/responses/history.js";
+import { SqliteResponsesHistory, type ResponsesHistory, type ResponsesHistoryAdmin } from "./protocols/openai_responses/history.js";
 import { SqliteAdminTelemetry } from "./telemetry/admin.js";
 import { TelemetryRuntime } from "./telemetry/runtime.js";
 import type { ProtocolPerformanceObserver } from "./telemetry/runtime.js";
@@ -121,7 +121,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       registry,
       preferences,
     }),
-    createOpenAiChatRoute({
+    createOpenaiChatCompletionsRoute({
       directory: context.directory,
       registry,
       preferences,
@@ -141,7 +141,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
       ...(context.createUuid === undefined ? {} : { createUuid: context.createUuid }),
     }),
-    createResponsesRoute({
+    createOpenaiResponsesRoute({
       directory: context.directory,
       registry,
       preferences,

@@ -12,8 +12,8 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { embedMigration } from "../../src/persistence/migrations.js";
 import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
-import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
-import type { ResponsesHistory } from "../../src/protocols/responses/history.js";
+import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
+import type { ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
 
@@ -197,7 +197,7 @@ async function responsesGateway(options: {
     const gateway = await createGateway({
       startup: parseStartupConfig(["--port", String(port)], {}, { homedir: "Q:\\ghc-gateway-loopback" }),
       runtime,
-    }, [createResponsesRoute({
+    }, [createOpenaiResponsesRoute({
       directory: accounts,
       registry,
       preferences: accounts.preferences,
