@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { AccountDirectoryError } from "../../src/accounts/account_directory.js";
-import { ChatSseError } from "../../src/copilot/chat_sse.js";
+import { SseDecodeError } from "../../src/serialization/sse.js";
 import {
   normalizeAccountBindingFailure,
   normalizeCatalogFailure,
-  normalizeChatStreamFailure,
+  normalizeChatCompletionsStreamFailure,
   normalizeCopilotBindingFailure,
   normalizeTransportFailure,
 } from "../../src/copilot/failures.js";
@@ -54,8 +54,8 @@ describe("typed semantic failure normalization", () => {
       source: "transport",
       phase: "headers",
     });
-    expect(normalizeChatStreamFailure(
-      new ChatSseError("truncated", "private"),
+    expect(normalizeChatCompletionsStreamFailure(
+      new SseDecodeError("truncated", "private"),
       new AbortController().signal,
     ).failure).toMatchObject({
       kind: "upstream_stream_truncated",

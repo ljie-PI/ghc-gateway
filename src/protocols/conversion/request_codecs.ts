@@ -48,7 +48,7 @@ import {
   TOOL_RESULT_MEDIA_REPLACEMENT,
   toolResultMediaReference,
 } from "./compatibility_markers.js";
-import { isOpenAiStrictSchemaCompatible } from "./strict_schema.js";
+import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
 
 const CHAT_TOP_LEVEL = new Set([
@@ -1098,7 +1098,7 @@ function decodeMessagesTools(
       unsupported("REQ-M-TOOL-TYPE");
     }
     const decoded = semanticTool(tool, "input_schema", "REQ-M-TOOL", false);
-    if (decoded.strict === true && !isOpenAiStrictSchemaCompatible(decoded.parameters)) {
+    if (decoded.strict === true && !isOpenaiStrictSchemaCompatible(decoded.parameters)) {
       unsupported("REQ-M-TOOL-STRICT-SCHEMA");
     }
     return decoded;
@@ -1126,7 +1126,7 @@ function decodeResponsesTools(
     if (decoded.strict !== undefined) {
       return decoded;
     }
-    if (!isOpenAiStrictSchemaCompatible(decoded.parameters)) {
+    if (!isOpenaiStrictSchemaCompatible(decoded.parameters)) {
       if (allowCompatibilityStrictOmission) {
         return decoded;
       }
@@ -1278,7 +1278,7 @@ function decodeMessagesOutputFormat(value: WireJson | undefined): SemanticOutput
     unsupported("REQ-M-FORMAT-STRICT");
   }
   const schema = requiredObject(oneMember(object, "schema", "REQ-M-FORMAT-SCHEMA"), "REQ-M-FORMAT-SCHEMA");
-  validateOpenAiStrictSchema(schema, true);
+  validateOpenaiStrictSchema(schema, true);
   return {
     kind: "json_schema",
     name: optionalString(oneMember(object, "name", "REQ-M-FORMAT-NAME"), "REQ-M-FORMAT-NAME") ?? "response",
@@ -1288,8 +1288,8 @@ function decodeMessagesOutputFormat(value: WireJson | undefined): SemanticOutput
   };
 }
 
-function validateOpenAiStrictSchema(schema: WireJsonObject, root = false, depth = 0): void {
-  if (!isOpenAiStrictSchemaCompatible(schema, root, depth)) {
+function validateOpenaiStrictSchema(schema: WireJsonObject, root = false, depth = 0): void {
+  if (!isOpenaiStrictSchemaCompatible(schema, root, depth)) {
     unsupported("REQ-M-FORMAT-STRICT-SCHEMA");
   }
 }

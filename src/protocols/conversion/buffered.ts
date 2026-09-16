@@ -22,7 +22,7 @@ import type {
 } from "./types.js";
 import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
-import { chatUsageFromCounters } from "./usage.js";
+import { chatCompletionsUsageFromCounters } from "../openai_chat_completions/native.js";
 import { restoreResponsesExtendedTools } from "./responses_extended_tools.js";
 
 export interface BufferedConversionContext {
@@ -609,7 +609,7 @@ function chatUsage(value: WireJsonObject | undefined): SemanticUsage {
   const promptDetails = objectMember(value, "prompt_tokens_details");
   const completionDetails = objectMember(value, "completion_tokens_details");
   const detailedReasoningTokens = optionalNonnegativeIntegerMember(completionDetails, "reasoning_tokens");
-  return chatUsageFromCounters({
+  return chatCompletionsUsageFromCounters({
     promptTokens: optionalNonnegativeIntegerMember(value, "prompt_tokens"),
     completionTokens: optionalNonnegativeIntegerMember(value, "completion_tokens"),
     detailedReasoningTokens,

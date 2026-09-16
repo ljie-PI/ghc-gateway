@@ -15,7 +15,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
-import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { bootstrapGateway } from "../../src/main.js";
 import { MockCopilotReplayServer, parseReplayManifestText, type ReplayReceipt } from "../../src/replay/server.js";
 import type { SdkProtocol } from "./client.js";

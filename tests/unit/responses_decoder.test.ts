@@ -10,7 +10,7 @@ import {
 import {
   decodeResponsesRequest,
   ResponsesRequestDecodeError,
-} from "../../src/protocols/responses/decoder.js";
+} from "../../src/protocols/openai_responses/decoder.js";
 
 const LIMITS = { maxBytes: 4096, maxDepth: 16 } as const;
 

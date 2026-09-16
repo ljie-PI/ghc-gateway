@@ -15,7 +15,7 @@ import {
   SqliteResponsesHistory,
   type ResponsesContinuationOwnership,
   type ResponsesHistoryRecord,
-} from "../../src/protocols/responses/history.js";
+} from "../../src/protocols/openai_responses/history.js";
 import { parseWireJson, type WireJson } from "../../src/serialization/wire_json.js";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";

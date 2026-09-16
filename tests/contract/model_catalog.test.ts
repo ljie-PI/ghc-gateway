@@ -28,7 +28,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { createModelCatalogRoutes } from "../../src/protocols/model_catalog/routes.js";
 import { resolveModel } from "../../src/protocols/model_catalog/resolver.js";
-import { serializeAnthropicModels, serializeOpenAiModels } from "../../src/protocols/model_catalog/wire.js";
+import { serializeAnthropicModels, serializeOpenaiModels } from "../../src/protocols/model_catalog/wire.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 
@@ -191,7 +191,7 @@ describe("CAPI parse and cache", () => {
       chatOutputTokenField: { state: "value", value: "max_completion_tokens" },
     });
     const effective = await registrySnapshotFromDiscovery(bound("github.com/1"), snapshot);
-    expect(JSON.parse(serializeOpenAiModels(effective)).data[0]).toEqual({
+    expect(JSON.parse(serializeOpenaiModels(effective)).data[0]).toEqual({
       id: "native", object: "model", created: 1_677_610_602, owned_by: "openai",
       max_input_tokens: 128_000,
       max_output_tokens: 64_000,
@@ -925,7 +925,7 @@ describe("serializers", () => {
       }] }),
     };
     const catalog = await registrySnapshotFromDiscovery(bound("a"), discovered);
-    const openai = JSON.parse(serializeOpenAiModels(catalog)) as { data: Array<Record<string, unknown>> };
+    const openai = JSON.parse(serializeOpenaiModels(catalog)) as { data: Array<Record<string, unknown>> };
     expect(openai.data[0]?.supported_endpoints).toBeUndefined();
     expect(openai.data[0]?.supportedEndpoints).toBeUndefined();
     expect(openai.data[0]?.routing).toBeUndefined();

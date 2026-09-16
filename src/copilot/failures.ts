@@ -8,8 +8,7 @@ import {
   safeRetryAfter,
   type GatewayFailureOrigin,
 } from "../gateway/failures.js";
-import { ChatSseError } from "./chat_sse.js";
-import type { ChatStreamFrame } from "../protocols/chat_completions/types.js";
+import { SseDecodeError } from "../serialization/sse.js";
 import { CapiFetchError } from "./models_source.js";
 import { TokenRefreshError } from "./token_refresh.js";
 import {
@@ -122,7 +121,7 @@ export function normalizeTransportFailure(
   });
 }
 
-export function normalizeChatStreamFailure(
+export function normalizeChatCompletionsStreamFailure(
   error: unknown,
   signal: AbortSignal,
   phase: "stream" | "parse" = "parse",
@@ -134,7 +133,7 @@ export function normalizeChatStreamFailure(
   if (isAbortError(error)) {
     return new GatewayFailureError(failureFromSignal(signal, origin));
   }
-  if (error instanceof ChatSseError) {
+  if (error instanceof SseDecodeError) {
     const kind = error.code === "truncated" ? "upstream_stream_truncated" : "invalid_upstream_response";
     return new GatewayFailureError({ kind, ...origin, cause: error });
   }
@@ -161,17 +160,6 @@ export function upstreamStreamEventFailure(): GatewayFailureError {
     source: "parser",
     phase: "stream",
   });
-}
-
-export async function* normalizeChatFrames(
-  frames: AsyncIterable<ChatStreamFrame>,
-  signal: AbortSignal,
-): AsyncIterable<ChatStreamFrame> {
-  try {
-    yield* frames;
-  } catch (error: unknown) {
-    throw normalizeChatStreamFailure(error, signal);
-  }
 }
 
 function tokenRefreshFailure(error: TokenRefreshError): GatewayFailureError {

@@ -6,7 +6,7 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 
-export function isOpenAiStrictSchemaCompatible(
+export function isOpenaiStrictSchemaCompatible(
   schema: WireJsonObject,
   root = true,
   depth = 0,
@@ -61,7 +61,7 @@ export function isOpenAiStrictSchemaCompatible(
       || propertyNames.some((name) => !requiredNames.has(name))
       || propertyObject.members.some((member) => (
         !isWireJsonObject(member.value)
-        || !isOpenAiStrictSchemaCompatible(member.value, false, depth + 1)
+        || !isOpenaiStrictSchemaCompatible(member.value, false, depth + 1)
       ))
     ) {
       return false;
@@ -72,7 +72,7 @@ export function isOpenAiStrictSchemaCompatible(
     items.length > 1
     || (items[0] !== undefined
       && (!isWireJsonObject(items[0])
-        || !isOpenAiStrictSchemaCompatible(items[0], false, depth + 1)))
+        || !isOpenaiStrictSchemaCompatible(items[0], false, depth + 1)))
   ) {
     return false;
   }
@@ -83,7 +83,7 @@ export function isOpenAiStrictSchemaCompatible(
       && (!isWireJsonArray(anyOf[0])
         || anyOf[0].items.some((branch) => (
           !isWireJsonObject(branch)
-          || !isOpenAiStrictSchemaCompatible(branch, false, depth + 1)
+          || !isOpenaiStrictSchemaCompatible(branch, false, depth + 1)
         ))))
   ) {
     return false;
@@ -97,7 +97,7 @@ export function isOpenAiStrictSchemaCompatible(
       duplicateMemberNames(definitions[0]).length > 0
       || definitions[0].members.some((definition) => (
         !isWireJsonObject(definition.value)
-        || !isOpenAiStrictSchemaCompatible(definition.value, false, depth + 1)
+        || !isOpenaiStrictSchemaCompatible(definition.value, false, depth + 1)
       ))
     ) {
       return false;

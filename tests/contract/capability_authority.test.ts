@@ -17,9 +17,9 @@ import { migration as historyMigration } from "../../src/persistence/migrations/
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_messages/endpoint.js";
 import { createModelCatalogRoutes } from "../../src/protocols/model_catalog/routes.js";
-import { createOpenAiChatRoute } from "../../src/protocols/openai_chat/endpoint.js";
-import { createResponsesRoute } from "../../src/protocols/responses/endpoint.js";
-import { SqliteResponsesHistory } from "../../src/protocols/responses/history.js";
+import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_chat_completions/endpoint.js";
+import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 const encoder = new TextEncoder();
@@ -114,9 +114,9 @@ describe("effective capability authority", () => {
         runtime: defaultRuntimeConfigSnapshot(),
       }, [
         ...createModelCatalogRoutes(shared),
-        createOpenAiChatRoute(shared),
+        createOpenaiChatCompletionsRoute(shared),
         createAnthropicMessagesRoute(shared),
-        createResponsesRoute({ ...shared, history }),
+        createOpenaiResponsesRoute({ ...shared, history }),
       ], { createRequestId: () => "req_authority", onClose: () => registry.close() });
       return { gateway, get, account, http, database, registry };
     });
