@@ -83,7 +83,7 @@ ghcg models set <model-id>
 
 Preferred models are account-specific. If a catalog refresh removes a preferred model, it is marked invalid and must be explicitly reselected. The gateway never silently selects the first model.
 
-The Models Admin view shows read-only account-scoped native HTTP capabilities for Chat, Messages, and Responses, including metadata sources, conflicts, token limits, and catalog and built-in revisions. You can refresh the catalog and select a preferred model. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
+The Models Admin view shows read-only account-scoped native HTTP capabilities for Chat, Messages, and Responses, including metadata sources, conflicts, token limits, context windows, supported parameters, and reasoning efforts. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
 
 Unknown or malformed capability declarations remain unknown. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
 
@@ -106,14 +106,14 @@ Admin security defaults:
 - bounded, replayable SSE monitoring with no WebSocket or remote Admin access
 
 The six views are Overview, Accounts, Models, Agents, Configuration, and Events.
-The Agents view can reversibly point this machine's global Claude Code and Codex configuration at the gateway.
-Each agent edits a Model mapping of display names to exact Copilot model IDs; the first row is the client's startup model.
-Claude Code maps its Sonnet, Opus, and Haiku roles (with an optional subagent mapping), and Codex gets a generated multi-model catalog, so Codex's own model menu can switch between the mapped models.
-**Apply changes** writes the gateway endpoint and model fields only; unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude login credentials are left untouched.
-Before the first apply, the gateway privately stores the original configuration bytes and access metadata under the Gateway process user's home directory; later applies keep that first baseline.
-**Restore** writes the original bytes back (or removes files the gateway created) only while the live files still match what the gateway last wrote; outside edits are reported as conflicts and are never overwritten.
-Apply validates mappings against the current Copilot model catalog, so a signed-in account is required; inspection and restore work without one.
-Status means configuration installed, not a tested client connection. Restart the client after applying or restoring.
+The Agents view points this machine's global Claude Code and Codex configuration at the gateway.
+Each Model mapping selects an exact Copilot model ID with autocomplete; selection fills its display name, which remains editable. The first row is the client's startup model, with at most 16 rows per client.
+Claude Code keeps its Sonnet, Opus, and Haiku role rows and allows extra ordinary menu models using `modelPicker` (Claude Code **2.1.243 or newer**). The mapped menu replaces built-in options, subject to the client's Default/current-model entries and managed-settings policy. There is no separate Subagent mapping.
+Codex receives only its selected mappings in `ghcg_models.json`, referenced by `model_catalog_json` in `config.toml`. Codex reads that catalog at startup; restart it after applying changes.
+**Apply changes** can be repeated without editing the mappings. It updates gateway-owned routing and model fields in the current config; unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude login credentials are left untouched. Unsupported profiles or concurrent file changes are reported rather than silently overwritten.
+Before replacing an existing config for the first time, the gateway creates a private `config.toml.ghcg.bak` or `settings.json.ghcg.bak` alongside it. Later applies never replace that first original backup. If the original config was absent, no backup of a later generated config is created. Legacy private first originals migrate to these sidecars; old catalog files and their saved originals are retained when needed to avoid deleting existing data.
+There is no Restore operation. A recoverable interrupted write can be completed by refreshing and applying again; retain backup/recovery files and reconcile conflicting external changes if it cannot complete safely.
+Local configuration inspection loads independently of model choices and works without an account. Apply validates mappings against the current Copilot catalog and requires a signed-in account. Status means configuration installed, not a tested client connection.
 Overview shows cumulative usage for the last 24 hours, 7 days, and 28 days, using the gateway's clock
 and retained hourly Usage Buckets. These overlapping windows include only available data; shortening
 retention or clearing data cannot be undone by refreshing. Cache tokens are read + write tokens already included in input.
@@ -123,7 +123,7 @@ and credential numbers are internal versions, and fetched is the last successful
 Responses History is managed by the backend independently of the Admin UI; there is no dedicated history page.
 The Accounts view checks an active device authorization automatically at GitHub's required interval. Keep that
 view open until it reports completion; closing or leaving it stops browser polling, and no device code or token is
-stored in browser storage.
+stored in browser storage. Copying the device code marks the copy button with a checkmark; no manual checking is needed.
 
 ## HTTP Interfaces
 

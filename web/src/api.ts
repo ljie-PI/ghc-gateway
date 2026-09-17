@@ -1,4 +1,5 @@
-import type { AgentsView, AgentStatus, AgentApplyRequest, AgentRestoreRequest } from "../../src/agents/types.js";
+import type { AgentsView, AgentStatus, AgentApplyRequest } from "../../src/agents/types.js";
+import type { AdminAgentModels } from "../../src/admin/api.js";
 import type {
   AdminAccount,
   AdminAccounts,
@@ -55,15 +56,19 @@ export class AdminClient {
       signal === undefined ? undefined : { signal },
     );
   }
-  accounts(): Promise<AdminAccounts> { return this.request("/accounts"); }
-  models(accountId?: string): Promise<AdminModels> {
-    return this.request(`/models${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`);
+  accounts(signal?: AbortSignal): Promise<AdminAccounts> {
+    return this.request("/accounts", signal === undefined ? undefined : { signal });
+  }
+  models(accountId?: string, signal?: AbortSignal): Promise<AdminModels> {
+    return this.request(`/models${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`, signal === undefined ? undefined : { signal });
   }
   agents(signal?: AbortSignal): Promise<AgentsView> {
     return this.request("/agents", signal === undefined ? undefined : { signal });
   }
   applyAgent(value: AgentApplyRequest): Promise<AgentStatus> { return this.mutate("/agents/apply", "POST", value); }
-  restoreAgent(value: AgentRestoreRequest): Promise<AgentStatus> { return this.mutate("/agents/restore", "POST", value); }
+  agentModels(signal?: AbortSignal): Promise<AdminAgentModels> {
+    return this.request("/agents/models", signal === undefined ? undefined : { signal });
+  }
   config(): Promise<AdminRuntimeConfig> { return this.request("/config"); }
   history(): Promise<AdminHistorySummary> { return this.request("/history"); }
   events(cursor?: string): Promise<AdminEventPage> {
@@ -87,11 +92,8 @@ export class AdminClient {
   removeAccount(accountId: string, expectedRevision: number): Promise<AdminAccount> {
     return this.mutate(`/accounts/${encodeURIComponent(accountId)}`, "DELETE", { expectedRevision });
   }
-  refreshModels(accountId: string): Promise<AdminModels> {
-    return this.mutate("/models/refresh", "POST", { accountId });
-  }
-  preferModel(accountId: string, modelId: string, expectedRevision: number): Promise<unknown> {
-    return this.mutate("/models/preferred", "PUT", { accountId, modelId, expectedRevision });
+  refreshModels(accountId: string, signal?: AbortSignal): Promise<AdminModels> {
+    return this.mutate("/models/refresh", "POST", { accountId }, signal);
   }
   saveConfig(value: AdminRuntimeConfig): Promise<AdminRuntimeConfig> {
     return this.mutate("/config", "PUT", { expectedRevision: value.revision, config: value.config });
@@ -150,11 +152,11 @@ export function takeBootstrapToken(): string | null {
 
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.code === "agent_invalid_config") return "Unsupported or invalid client configuration. Check global configuration syntax and remove conflicting profiles or reserved providers before applying.";
+    if (error.code === "agent_invalid_config") return "Unsupported or invalid client configuration. Check global configuration syntax and remove conflicting profiles before applying.";
     if (error.code === "agent_models_unavailable") return "Use exact enabled Copilot model IDs with usable capabilities from Models, then refresh.";
     if (error.code === "agent_unsafe_path") return "The configuration path or access permissions are unsafe or unsupported. No forced overwrite is available.";
-    if (error.code === "agent_recovery_required") return "Recovery is required. Refresh to inspect; keep recovery files and do not overwrite external changes.";
-    if (error.code === "agent_conflict") return "Client configuration changed outside Gateway. Refresh and reconcile those changes before applying or restoring.";
+    if (error.code === "agent_recovery_required") return "A configuration write was interrupted. Refresh and apply again to finish a recoverable write. If it still fails, retain the backup and recovery files and reconcile external changes before retrying.";
+    if (error.code === "agent_conflict") return "The configuration or first backup changed. Refresh before applying; preserve the first backup and reconcile any conflicting backup changes.";
     if (error.code === "agent_busy") return "Another agent configuration operation is running. Try again after it finishes.";
     if (error.status === 409) return "This data changed elsewhere. Refresh before trying again.";
     if (error.status === 403) return "The security check rejected this change.";

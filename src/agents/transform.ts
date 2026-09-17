@@ -46,7 +46,7 @@ function projectClaude(source: string, mappings: readonly AgentMapping[], origin
   // Replace only the keys that route/authenticate Claude Code or pin models.
   // Stale credentials or a Bedrock/Vertex/Foundry override would bypass the
   // Gateway; unrelated keys (for example ANTHROPIC_CUSTOM_HEADERS) and the
-  // original file bytes return unchanged on Restore.
+  // original bytes are retained in the first backup.
   for (const key of [
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_REASONING_MODEL",
@@ -72,7 +72,11 @@ function projectClaude(source: string, mappings: readonly AgentMapping[], origin
     env[`ANTHROPIC_DEFAULT_${role}_MODEL`] = mappings[index]!.modelId;
     env[`ANTHROPIC_DEFAULT_${role}_MODEL_NAME`] = mappings[index]!.displayName;
   }
-  if (mappings[3]) env.CLAUDE_CODE_SUBAGENT_MODEL = mappings[3].modelId;
+  config.modelPicker = {
+    replaceBuiltInOptions: true,
+    options: mappings.filter((row, index) => mappings.findIndex((item) => item.modelId === row.modelId) === index)
+      .map((row) => ({ model: row.modelId, label: row.displayName })),
+  };
   config.env = env;
   return Buffer.from(`${JSON.stringify(config, null, 2)}\n`);
 }
@@ -88,10 +92,6 @@ function projectCodex(
   }
   const providers = config.model_providers === undefined ? {} : object(config.model_providers);
   const reserved = "ghc_gateway";
-  if (providers[reserved] !== undefined) {
-    // Reapply is projected from the FIRST baseline, so a collision is always external.
-    throw new AgentError("agent_invalid_config");
-  }
   providers[reserved] = {
     name: "GHC Gateway", base_url: `${origin}/v1`, wire_api: "responses",
     experimental_bearer_token: "ghcg-local", requires_openai_auth: false,
@@ -105,17 +105,23 @@ function projectCodex(
   for (const key of ["model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "model_context_window",
     "model_auto_compact_token_limit", "model_supports_reasoning_summaries", "review_model", "service_tier"]) delete config[key];
   const catalog = { models: mappings.map((mapping, index) => {
-    const limit = models.find((model) => model.modelId === mapping.modelId)!.maxInputTokens;
+    const model = models.find((item) => item.modelId === mapping.modelId)!;
+    const fullContext = model.metadata?.contextWindowTokens?.value ?? null;
+    const limit = model.maxInputTokens === null ? fullContext
+      : fullContext === null ? model.maxInputTokens : Math.min(model.maxInputTokens, fullContext);
     return {
       slug: mapping.modelId, display_name: mapping.displayName, description: mapping.displayName,
       base_instructions: "You are Codex, a coding agent. Help the user with their coding tasks.",
-      supported_reasoning_levels: [], shell_type: "shell_command", visibility: "list", supported_in_api: true,
+      supported_reasoning_levels: (model.metadata?.reasoningEfforts.value ?? []).map((effort) => ({
+        effort, description: effort.charAt(0).toUpperCase() + effort.slice(1),
+      })),
+      shell_type: "shell_command", visibility: "list", supported_in_api: true,
       priority: index, support_verbosity: false, supports_reasoning_summaries: false,
       supports_reasoning_summary_parameter: false, supports_parallel_tool_calls: false,
       supports_image_detail_original: false, supports_search_tool: false,
       truncation_policy: { mode: "bytes", limit: 10000 },
       experimental_supported_tools: [], input_modalities: ["text"],
-      ...(limit === null ? {} : { context_window: limit, max_context_window: limit }),
+      ...(limit === null ? {} : { context_window: limit, max_context_window: fullContext ?? limit }),
     };
   }) };
   const result = stringify(config);

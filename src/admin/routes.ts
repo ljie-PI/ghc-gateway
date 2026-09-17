@@ -47,7 +47,6 @@ const AgentApplySchema = Type.Object({
     modelId: ModelIdSchema,
   }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
 }, { additionalProperties: false });
-const AgentRestoreSchema = Type.Object({ agent: AgentIdSchema, expectedRevision: AgentRevisionSchema }, { additionalProperties: false });
 const RuntimeConfigUpdateSchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 0 }),
   config: RuntimeConfigSchema,
@@ -250,11 +249,11 @@ async function dispatch(
   case "agentsGet":
     response = success(await api.agents(context.listenerOrigin, context.signal), context.requestId);
     break;
+  case "agentModels":
+    response = success(await api.agentModels(context.signal), context.requestId);
+    break;
   case "agentsApply":
     response = success(await api.applyAgent(checked(AgentApplySchema, body), context.listenerOrigin, context.signal), context.requestId);
-    break;
-  case "agentsRestore":
-    response = success(await api.restoreAgent(checked(AgentRestoreSchema, body), context.listenerOrigin, context.signal), context.requestId);
     break;
   case "configGet":
     response = success(api.runtimeConfig(), context.requestId);
@@ -380,7 +379,7 @@ class AdminDeviceFlowOwners {
 
 type RouteId = "bootstrap" | "session" | "logout" | "status" | "usage" | "accounts" | "deviceStart"
   | "devicePoll" | "deviceCancel" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
-  | "agentsGet" | "agentsApply" | "agentsRestore"
+  | "agentsGet" | "agentModels" | "agentsApply"
   | "configGet" | "configPut" | "historyGet" | "historyDelete" | "events" | "eventStream";
 
 interface MatchedRoute {
@@ -433,8 +432,8 @@ const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([
   route("POST", "/admin/api/v1/device-flows", "deviceStart", true, true),
   route("PUT", "/admin/api/v1/accounts/default", "accountDefault", true, true),
   route("GET", "/admin/api/v1/agents", "agentsGet"),
+  route("GET", "/admin/api/v1/agents/models", "agentModels"),
   route("POST", "/admin/api/v1/agents/apply", "agentsApply", true, true),
-  route("POST", "/admin/api/v1/agents/restore", "agentsRestore", true, true),
   route("GET", "/admin/api/v1/models", "models", false, false, ["accountId"]),
   route("POST", "/admin/api/v1/models/refresh", "modelsRefresh", true, true),
   route("PUT", "/admin/api/v1/models/preferred", "modelsPreferred", true, true),

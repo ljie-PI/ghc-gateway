@@ -193,6 +193,9 @@ describe("model capability registry", () => {
       });
     }
     expect(capability(initial, "explicit").maxInputTokens.value).toBe(128_000);
+    expect(capability(initial, "explicit").profile.contextWindowTokens).toMatchObject({
+      value: 144_000, source: "live", liveState: "value",
+    });
     expect(Object.isFrozen(capability(initial, "explicit").maxInputTokens)).toBe(true);
     const otherAccount = await harness.registry.get(harness.account2, signal);
     expect(capability(otherAccount, "explicit").maxInputTokens).toEqual({

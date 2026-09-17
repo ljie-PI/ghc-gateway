@@ -135,7 +135,7 @@ test("device-flow disposal and terminal failures clean up polling", async ({ pag
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Accounts" }).click();
   await page.getByRole("button", { name: "Start login" }).click();
-  await page.getByRole("button", { name: "Check now" }).click();
+  await expect(page.getByRole("button", { name: "Check now" })).toHaveCount(0);
   expect(devicePollRequests(fixture)).toHaveLength(0);
   await page.getByRole("button", { name: "Replace login" }).click();
   await expect.poll(() => fixture.requests.filter((request) => request.url().endsWith("/device-flows")).length)
@@ -286,12 +286,9 @@ test("model-refresh-invalidates-preference", async ({ page }) => {
   await expect(page.getByText("gpt-alpha", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toBeVisible();
-  fixture.state.conflictModel = true;
-  await page.getByRole("button", { name: "Set preferred" }).click();
-  await expect(page.getByRole("alert").filter({ hasText: "changed elsewhere" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toBeVisible();
-  await page.getByRole("button", { name: "Set preferred" }).click();
-  await expect(page.getByText("claude-beta is now preferred.")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("ghcg models set <model-id>");
+  await expect(page.getByRole("button", { name: "Set preferred" })).toHaveCount(0);
+  expect(fixture.requests.some((request) => request.url().endsWith("/models/preferred"))).toBe(false);
 });
 
 test("model-account switching ignores stale responses", async ({ page }) => {

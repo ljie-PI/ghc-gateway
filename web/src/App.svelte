@@ -2,6 +2,8 @@
   import { onMount, tick } from "svelte";
   import { AdminClient, errorMessage, takeBootstrapToken } from "./api.js";
   import type { AgentStatus, AgentsView } from "../../src/agents/types.js";
+  import type { AdminAgentModels } from "../../src/admin/api.js";
+  import { SessionResource } from "./session_resource.js";
   import type {
     AdminOperationalEvent,
     AdminSessionMetadata,
@@ -35,10 +37,11 @@
   let menuButton: HTMLButtonElement | null = $state(null);
   let navigation: HTMLElement | null = $state(null);
   let agentsSnapshot: AgentsView | null = $state(null);
-  let agentsRequest: { readonly controller: AbortController; readonly promise: Promise<AgentsView> } | null = null;
-  let agentsGeneration = 0;
+  let agentModelsSnapshot: AdminAgentModels | null = $state(null);
   let pageNumber = $derived(String(views.indexOf(view) + 1).padStart(2, "0"));
   const client = new AdminClient(teardown);
+  const agentsResource = new SessionResource((signal) => client.agents(signal), (value) => { agentsSnapshot = value; });
+  const agentModelsResource = new SessionResource((signal) => client.agentModels(signal), (value) => { agentModelsSnapshot = value; });
 
   onMount(() => {
     updateNavigationMode();
@@ -47,6 +50,7 @@
     return () => {
       window.removeEventListener("resize", updateNavigationMode);
       closeStream();
+      clearAgentsSnapshot();
     };
   });
 
@@ -89,6 +93,9 @@
     });
     stream.addEventListener("operational", (event) => {
       const value = JSON.parse((event as MessageEvent<string>).data) as { event: AdminOperationalEvent };
+      if (["account_authenticated", "account_removed", "default_account_changed"].includes(value.event.kind)) {
+        clearAgentModels();
+      }
       liveEvents = [
         ...liveEvents.filter((item) => item.eventId !== value.event.eventId),
         value.event,
@@ -119,42 +126,25 @@
   }
 
   function clearAgentsSnapshot(): void {
-    agentsGeneration += 1;
-    agentsRequest?.controller.abort();
-    agentsRequest = null;
-    agentsSnapshot = null;
+    agentsResource.replace(null);
+    clearAgentModels();
+  }
+
+  function clearAgentModels(): void {
+    agentModelsResource.replace(null);
   }
 
   function loadAgents(refresh = false): Promise<AgentsView> {
-    if (!refresh && agentsSnapshot !== null) return Promise.resolve(agentsSnapshot);
-    if (agentsRequest !== null) return agentsRequest.promise;
-    const generation = agentsGeneration;
-    const controller = new AbortController();
-    let promise: Promise<AgentsView>;
-    promise = client.agents(controller.signal).then((loaded) => {
-      if (agentsGeneration === generation) agentsSnapshot = loaded;
-      return loaded;
-    }).catch((error: unknown) => {
-      if (agentsGeneration !== generation && agentsSnapshot !== null) return agentsSnapshot;
-      throw error;
-    }).finally(() => {
-      if (agentsRequest?.promise === promise) agentsRequest = null;
-    });
-    agentsRequest = { controller, promise };
-    return promise;
+    return agentsResource.load(refresh);
   }
 
   function updateAgent(status: AgentStatus): void {
     if (agentsSnapshot === null) return;
     const snapshot = agentsSnapshot;
-    agentsGeneration += 1;
-    const staleRequest = agentsRequest;
-    agentsRequest = null;
-    staleRequest?.controller.abort();
-    agentsSnapshot = {
+    agentsResource.replace({
       ...snapshot,
       items: snapshot.items.map((item) => item.id === status.id ? status : item),
-    };
+    });
   }
 
   async function logout(): Promise<void> {
@@ -277,15 +267,17 @@
           {#if view === "Overview"}
             <Overview {client} {liveStatus} {pageNumber} />
           {:else if view === "Accounts"}
-            <Accounts {client} {pageNumber} />
+            <Accounts {client} {pageNumber} onchanged={clearAgentModels} />
           {:else if view === "Models"}
-            <Models {client} {pageNumber} />
+            <Models {client} {pageNumber} onchanged={clearAgentModels} />
           {:else if view === "Agents"}
             <Agents
               {client}
               {pageNumber}
               data={agentsSnapshot}
+              catalog={agentModelsSnapshot}
               onload={loadAgents}
+              onloadmodels={(refresh) => agentModelsResource.load(refresh)}
               onchanged={updateAgent}
             />
           {:else if view === "Configuration"}

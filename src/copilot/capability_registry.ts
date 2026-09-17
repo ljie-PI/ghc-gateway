@@ -143,7 +143,10 @@ export class ModelCapabilityRegistry {
         defaultOutputTokens,
         maxOutputTokens.value,
       ),
-      profile: { chatOutputTokenField, supportedParameters, reasoningEfforts },
+      profile: {
+        chatOutputTokenField, supportedParameters, reasoningEfforts,
+        contextWindowTokens: effectiveField(live.contextWindowTokens, fallback.contextWindowTokens),
+      },
       revision: {
         credentialGeneration: account.credentialGeneration,
         catalogGeneration: catalog.generation,

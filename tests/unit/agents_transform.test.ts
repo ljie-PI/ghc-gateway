@@ -7,6 +7,20 @@ const mappings = ["real-sonnet", "real-opus", "real-haiku"].map((modelId, index)
 const models = mappings.map((row, i) => ({ modelId: row.modelId, maxInputTokens: i === 0 ? 32000 : null }));
 
 describe("agent configuration projection", () => {
+  it("exports extra Claude mappings as menu options, not a Subagent override", () => {
+    const rows = [...mappings, { modelId: "extra-one", displayName: "Extra" }, { modelId: "extra-two", displayName: "Other" }];
+    const available = [...models, { modelId: "extra-one", maxInputTokens: null }, { modelId: "extra-two", maxInputTokens: null }];
+    const config = JSON.parse(projectAgent("claude", Buffer.from("{\"env\":{\"CLAUDE_CODE_SUBAGENT_MODEL\":\"old\"}}"), rows, origin, "unused", available).config.toString());
+    expect(config.modelPicker).toMatchObject({
+      replaceBuiltInOptions: true,
+      options: [
+        { model: "real-sonnet", label: "Friendly 0" }, { model: "real-opus", label: "Friendly 1" },
+        { model: "real-haiku", label: "Friendly 2" }, { model: "extra-one", label: "Extra" },
+        { model: "extra-two", label: "Other" },
+      ],
+    });
+    expect(config.env.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  });
   it("projects Claude native roles, clears competing auth/backends and preserves hooks/MCP/unrelated settings", () => {
     const config = { env: { ANTHROPIC_API_KEY: "secret", CLAUDE_CODE_USE_BEDROCK: "1", KEEP_ME: "yes" },
       apiKeyHelper: "secret-command", model: "old", hooks: { Stop: [] }, mcpServers: { local: { command: "node" } }, theme: "dark" };
@@ -32,7 +46,23 @@ describe("agent configuration projection", () => {
     expect(catalog.models[1].context_window).toBeUndefined();
     expect(catalog.models[1].default_reasoning_level).toBeUndefined();
   });
-  it.each(["profile=\"work\"", "[profiles.work]\nmodel=\"other\"", "[agents.worker]\nconfig_file=\"other.toml\"", "[model_providers.ghc_gateway]\nname=\"external\"", "invalid=\"unterminated"])(
+  it("reapplies current Codex configuration with declared context and reasoning metadata", () => {
+    const metadata = {
+      chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      supportedParameters: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      reasoningEfforts: { value: ["none", "high"], source: "live", conflict: false, liveState: "value" },
+      contextWindowTokens: { value: 48000, source: "live", conflict: false, liveState: "value" },
+    } as const;
+    const enriched = [{ ...models[0]!, metadata }];
+    const first = projectAgent("codex", null, mappings.slice(0, 1), origin, "ghcg_models.json", enriched);
+    const second = projectAgent("codex", Buffer.from(`${first.config.toString()}\n[features]\nkeep = true\n`), mappings.slice(0, 1), origin, "ghcg_models.json", enriched);
+    expect(parse(second.config.toString()).features).toEqual({ keep: true });
+    expect(JSON.parse(second.catalog!.toString()).models[0]).toMatchObject({
+      context_window: 32000, max_context_window: 48000,
+      supported_reasoning_levels: [{ effort: "none", description: "None" }, { effort: "high", description: "High" }],
+    });
+  });
+  it.each(["profile=\"work\"", "[profiles.work]\nmodel=\"other\"", "[agents.worker]\nconfig_file=\"other.toml\"", "invalid=\"unterminated"])(
     "refuses unsupported Codex routing/configuration without parser diagnostics: %s",
     (source) => {
       expect(() => projectAgent("codex", Buffer.from(source), mappings, origin, "catalog.json", models)).toThrow("agent invalid config");
