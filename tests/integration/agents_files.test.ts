@@ -13,7 +13,8 @@ const origin = "http://127.0.0.1:32567";
 const models = ["model-a", "model-b", "model-c"].map((modelId) => ({ modelId, maxInputTokens: 32000 }));
 const mappings = models.map((model) => ({ displayName: `Label ${model.modelId}`, modelId: model.modelId }));
 function harness(options: Omit<AgentManagerOptions, "home"> = {}) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-"));
+  // Legacy images use the same canonical home anchor as the production manager.
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-")));
   homes.push(home);
   const manager = new FileAgentsManager({ home, now: () => new Date("2026-01-02T03:04:05Z"), ...options });
   const status = async (agent: AgentId) => (await manager.inspect(origin)).find((item) => item.id === agent)!;
@@ -273,7 +274,7 @@ describe("private repeatable agent configuration", () => {
 });
 
 function homeWithCrash(): string {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-"));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-")));
   homes.push(home);
   return home;
 }
