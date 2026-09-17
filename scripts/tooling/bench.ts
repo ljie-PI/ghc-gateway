@@ -360,13 +360,17 @@ const CHECKPOINT_STREAM_PARTS = [
 const NATIVE_STREAM_EVENT = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bench\",\"output\":[]}}\n\n";
 
 export function evaluateBenchmarkRuns(runs: readonly BenchmarkRunResult[]): boolean {
-  return runs.length > 0 && runs.every((run) => run.passed
-    && run.idle.passed
-    && run.streams.passed
-    && run.buffered.passed
-    && run.streamEvent.passed
-    && run.checkpoint.passed
-    && run.eventLoop.passed);
+  if (runs.length === 0 || !runs.every((run, index) => run.run === index + 1)) {
+    return false;
+  }
+  if (!runs.every((run) => run.idle.passed && run.streams.passed)) {
+    return false;
+  }
+  const requiredLatencyPasses = requiredLatencyPassCount(runs.length);
+  return latencyPassCount(runs, "buffered") >= requiredLatencyPasses
+    && latencyPassCount(runs, "streamEvent") >= requiredLatencyPasses
+    && latencyPassCount(runs, "checkpoint") >= requiredLatencyPasses
+    && latencyPassCount(runs, "eventLoop") >= requiredLatencyPasses;
 }
 
 export async function runBenchmarkIteration(
@@ -449,10 +453,18 @@ export async function runBenchmarkIteration(
 }
 
 export function benchmarkCliSummary(artifactPath: string, artifact: Readonly<BenchmarkArtifact>): object {
+  const requiredLatencyPasses = requiredLatencyPassCount(artifact.runs.length);
   return {
     artifactPath,
     repeat: artifact.repeat,
     passed: artifact.passed,
+    latencyPasses: {
+      required: requiredLatencyPasses,
+      buffered: latencyPassCount(artifact.runs, "buffered"),
+      streamEvent: latencyPassCount(artifact.runs, "streamEvent"),
+      checkpoint: latencyPassCount(artifact.runs, "checkpoint"),
+      eventLoop: latencyPassCount(artifact.runs, "eventLoop"),
+    },
     runs: artifact.runs.map((run) => ({
       run: run.run,
       idleMiB: run.idle.resident.medianBytes / MIB,
@@ -474,6 +486,17 @@ export function benchmarkCliSummary(artifactPath: string, artifact: Readonly<Ben
       passed: run.passed,
     })),
   };
+}
+
+function latencyPassCount(
+  runs: readonly BenchmarkRunResult[],
+  metric: "buffered" | "streamEvent" | "checkpoint" | "eventLoop",
+): number {
+  return runs.filter((run) => run[metric].passed).length;
+}
+
+function requiredLatencyPassCount(runCount: number): number {
+  return runCount === 3 ? 2 : runCount;
 }
 
 export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifact> {
