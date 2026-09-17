@@ -29,6 +29,7 @@ export interface DeclaredField<T> {
 }
 
 export interface DeclaredModelCapabilities {
+  readonly contextWindowTokens: DeclaredField<number>;
   readonly protocols: DeclaredField<readonly NativeModelProtocol[]>;
   readonly maxInputTokens: DeclaredField<number>;
   readonly maxOutputTokens: DeclaredField<number>;
@@ -53,6 +54,7 @@ export interface EffectiveOutputDefault {
 }
 
 export interface ModelCapabilityProfile {
+  readonly contextWindowTokens?: EffectiveCapabilityField<number>;
   readonly chatOutputTokenField: EffectiveCapabilityField<ChatOutputTokenField>;
   readonly supportedParameters: EffectiveCapabilityField<readonly string[]>;
   readonly reasoningEfforts: EffectiveCapabilityField<readonly SupportedReasoningEffort[]>;
@@ -68,6 +70,7 @@ export interface BuiltinModelCapabilityLookup {
 }
 
 export const UNKNOWN_DECLARATIONS: DeclaredModelCapabilities = Object.freeze({
+  contextWindowTokens: missing<number>(),
   protocols: missing<readonly NativeModelProtocol[]>(),
   maxInputTokens: missing<number>(),
   maxOutputTokens: missing<number>(),
@@ -85,6 +88,7 @@ export function parseLiveModelCapabilities(record: Readonly<Record<string, unkno
     ["capabilities", "limits", "max_prompt_tokens"],
   ], parsePositiveInteger);
   return Object.freeze({
+    contextWindowTokens: parseLocations(record, [["capabilities", "limits", "max_context_window_tokens"]], parsePositiveInteger),
     protocols: parseLocations(record, [
       ["supported_endpoints"],
       ["model_info", "supported_endpoints"],
@@ -147,6 +151,7 @@ export function builtinCapabilitiesFromModelInfo(
   return {
     revision,
     capabilities: Object.freeze({
+      contextWindowTokens: missing<number>(),
       protocols: Object.hasOwn(record, "supported_endpoints")
         ? parseEndpointProtocols(record.supported_endpoints)
         : missing<readonly NativeModelProtocol[]>(),

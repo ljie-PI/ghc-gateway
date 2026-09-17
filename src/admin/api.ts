@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AgentError, type AgentErrorCode, type AgentsManager, type AgentsView, type AgentApplyRequest, type AgentRestoreRequest, type AgentStatus } from "../agents/types.js";
+import { AgentError, type AgentErrorCode, type AgentsManager, type AgentsView, type AgentApplyRequest, type AgentStatus } from "../agents/types.js";
 import type { DeviceFlowCancelResult } from "../accounts/device_flow.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { BoundAccount } from "../accounts/account_directory.js";
@@ -9,6 +9,7 @@ import type {
   CapabilitySource,
   CapabilityFieldState,
   ChatOutputTokenField,
+  ModelCapabilityProfile,
 } from "../copilot/model_capabilities.js";
 import { RUNTIME_CONFIG_RANGES } from "../config/schema.js";
 import type { GatewayActivity } from "../gateway/create_gateway.js";
@@ -113,6 +114,7 @@ export interface AdminModels {
     readonly id: string;
     readonly name: string;
     readonly vendor: string;
+    readonly metadata: ModelCapabilityProfile;
     readonly protocols: readonly NativeModelProtocol[] | null;
     readonly protocolsSource: CapabilitySource;
     readonly protocolsConflict: boolean;
@@ -146,6 +148,13 @@ export interface AdminRuntimeConfig {
   readonly revision: number;
   readonly config: RuntimeConfigSnapshot;
   readonly ranges: Readonly<Record<string, { readonly min: number; readonly max: number; readonly unit: string }>>;
+}
+
+export interface AdminAgentModels {
+  readonly accountId: string;
+  readonly catalogRevision: string;
+  readonly items: AdminModels["items"];
+  readonly usableModelIds: readonly string[];
 }
 
 export interface AdminHistorySummary {
@@ -414,14 +423,18 @@ export class AdminManagementApi {
   async agents(origin: string, signal: AbortSignal): Promise<AgentsView> {
     signal.throwIfAborted();
     const items = await this.requireAgents().inspect(origin);
-    try {
-      const catalog = await this.agentCatalog(signal);
-      return { items, catalogRevision: catalog.revision, modelsAvailable: true };
-    } catch (error: unknown) {
-      signal.throwIfAborted();
-      if (error instanceof DOMException && error.name === "AbortError") throw error;
-      return { items, catalogRevision: null, modelsAvailable: false };
-    }
+    signal.throwIfAborted();
+    return { items };
+  }
+
+  async agentModels(signal: AbortSignal): Promise<AdminAgentModels> {
+    const { catalog, revision } = await this.agentCatalog(signal);
+    return {
+      accountId: catalog.accountId,
+      catalogRevision: revision,
+      items: this.modelsDto(catalog).items,
+      usableModelIds: this.dependencies.registry.modelsUsableForAgentMapping(catalog).map((model) => model.modelId),
+    };
   }
 
   async applyAgent(request: AgentApplyRequest, origin: string, signal: AbortSignal): Promise<AgentStatus> {
@@ -432,7 +445,7 @@ export class AdminManagementApi {
       if (captured.revision !== request.catalogRevision) throw new AdminApiError("revision_conflict");
       await this.requireSameCredentialGeneration(captured.account.accountId, captured.account, signal);
       const models = this.dependencies.registry.modelsUsableForAgentMapping(captured.catalog)
-        .map((model) => ({ modelId: model.modelId, maxInputTokens: model.maxInputTokens.value }));
+        .map((model) => ({ modelId: model.modelId, maxInputTokens: model.maxInputTokens.value, metadata: model.profile }));
       return await this.requireAgents().apply(request, origin, models, () => {
         signal.throwIfAborted();
         if (!this.dependencies.registry.isCurrent(captured.catalog)
@@ -442,10 +455,6 @@ export class AdminManagementApi {
         }
       }, signal);
     } finally { this.agentMutations.delete(request.agent); }
-  }
-
-  async restoreAgent(request: AgentRestoreRequest, origin: string, signal: AbortSignal): Promise<AgentStatus> {
-    return await this.requireAgents().restore(request, origin, signal);
   }
 
   private requireAgents(): AgentsManager {
@@ -604,6 +613,7 @@ export class AdminManagementApi {
         id: model.modelId,
         name: model.name,
         vendor: model.vendor,
+        metadata: model.profile,
         protocols: model.protocols.value,
         protocolsSource: model.protocols.source,
         protocolsConflict: model.protocols.conflict,

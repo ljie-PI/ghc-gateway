@@ -1,7 +1,18 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { installAdminFixture, type AdminFixture } from "./fixtures/admin_fixture.js";
 
 test.use({ locale: "en-US" });
+
+test("Models is a read-only directory with shared capability fields", async ({ page }) => {
+  const fixture = await openModels(page);
+  await expect(page.getByRole("columnheader")).toHaveText(["Model", "Native interfaces", "Per-request token limits"]);
+  await expect(page.getByRole("button", { name: /preferred/i })).toHaveCount(0);
+  await page.locator("tbody").first().getByText("Capability details", { exact: true }).click();
+  await expect(page.locator("tbody").first()).toContainText("Context window");
+  await expect(page.locator("tbody").first()).toContainText("144,000");
+  await expect(page.locator("tbody").first()).toContainText("temperature");
+  expect(fixture.requests.some((request) => request.url().endsWith("/models/preferred"))).toBe(false);
+});
 
 async function navigateTo(page: Page, view: "Overview" | "Models"): Promise<void> {
   const menu = page.getByRole("button", { name: "Open navigation" });
@@ -117,43 +128,13 @@ function metadataCases(fixture: AdminFixture): void {
   };
 }
 
-async function expectInlineBadges(source: Locator, labels: string[]): Promise<void> {
-  const badges = source.locator(".badge");
-  await expect(badges).toHaveText(labels);
-  const geometry = await badges.evaluateAll((elements) => elements.map((element) => {
-    const rect = element.getBoundingClientRect();
-    const style = getComputedStyle(element);
-    return {
-      top: rect.top, height: rect.height, left: rect.left, right: rect.right,
-      font: style.font, padding: style.padding, borderWidth: style.borderWidth,
-      whiteSpace: style.whiteSpace, textTransform: style.textTransform,
-    };
-  }));
-  const first = geometry[0]!;
-  for (const [index, badge] of geometry.entries()) {
-    expect(Math.abs(badge.top - first.top)).toBeLessThanOrEqual(1);
-    expect(badge.height).toBe(first.height);
-    expect(badge.font).toBe(first.font);
-    expect(badge.padding).toBe(first.padding);
-    expect(badge.borderWidth).toBe(first.borderWidth);
-    expect(badge.whiteSpace).toBe("nowrap");
-    expect(badge.textTransform).toBe("none");
-    if (index > 0) expect(badge.left).toBeGreaterThanOrEqual(geometry[index - 1]!.right);
-  }
-}
-
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 740 }]) {
-  test(`models controls and source rows stay bounded at ${viewport.width}px`, async ({ page }, testInfo) => {
+  test(`models controls and read-only rows stay bounded at ${viewport.width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await openModels(page, metadataCases);
-    await expectInlineBadges(
-      page.locator("tbody[data-model-id=\"upstream-conflict\"] > tr").first().getByRole("cell").nth(2),
-      ["Protocols: Upstream", "Protocol conflict"],
-    );
-    await expectInlineBadges(
-      page.locator("tbody[data-model-id=\"discovered-builtin\"] > tr").first().getByRole("cell").nth(2),
-      ["Protocols: Built-in"],
-    );
+    await expect(page.getByRole("columnheader")).toHaveCount(3);
+    await expect(page.locator("tbody[data-model-id=\"upstream-conflict\"] > tr").first().getByRole("cell")).toHaveCount(3);
+    await expect(page.getByText("Protocols: Upstream", { exact: true })).toHaveCount(0);
     const bounds = await page.locator(".table-scroll").evaluate((element) => ({
       left: element.getBoundingClientRect().left,
       right: element.getBoundingClientRect().right,
@@ -175,16 +156,16 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
 test("models distinguish catalog membership from native protocol metadata sources", async ({ page }) => {
   await openModels(page, metadataCases);
   await expect(page.getByText("Only models discovered", { exact: false })).toContainText("upstream catalog");
-  await expect(page.getByText("Protocols identifies", { exact: false })).toContainText("not live inference validation");
+  await expect(page.getByText("Capability details show", { exact: false })).toContainText("not live inference validation");
   for (const [id, labels] of [
-    ["gpt-alpha", ["Protocols: Upstream"]],
-    ["upstream-conflict", ["Protocols: Upstream", "Protocol conflict"]],
-    ["discovered-builtin", ["Protocols: Built-in"]],
-    ["unknown-model", ["Protocols: Unknown"]],
+    ["gpt-alpha", "Upstream"],
+    ["upstream-conflict", "Upstream · Conflict"],
+    ["discovered-builtin", "Built-in"],
+    ["unknown-model", "Unknown"],
   ] as const) {
-    const source = page.locator(`tbody[data-model-id="${id}"] > tr`).first().getByRole("cell").nth(2);
-    await expectInlineBadges(source, [...labels]);
-    await expect(source).not.toContainText("live");
+    const model = page.locator(`tbody[data-model-id="${id}"]`);
+    await model.getByText("Capability details", { exact: true }).click();
+    await expect(model.locator("dl")).toContainText(labels);
   }
 });
 
@@ -209,7 +190,7 @@ test("models label per-request token ceilings and retain unknowns and budget det
   await expect(unknown.locator("input, select, fieldset")).toHaveCount(0);
 });
 
-test("models allow inspection and preference selection without metadata editing or additions", async ({ page }) => {
+test("models allow inspection without metadata editing or preference actions", async ({ page }) => {
   const fixture = await openModels(page);
   const model = page.locator('tbody[data-model-id="claude-beta"]');
   await model.getByText("Capability details", { exact: true }).click();
@@ -217,19 +198,14 @@ test("models allow inspection and preference selection without metadata editing 
   await expect(model.locator("dl")).toContainText("Built-in revision");
   await expect(page.locator("main input, main fieldset, main form")).toHaveCount(0);
   await expect(page.getByRole("textbox")).toHaveCount(0);
-  await expect(model.getByRole("button")).toHaveText(["Set preferred"]);
-  await model.getByRole("button", { name: "Set preferred" }).click();
-  await expect(page.getByRole("status")).toHaveText("claude-beta is now preferred.");
+  await expect(model.getByRole("button")).toHaveCount(0);
   const mutations = fixture.requests.filter((request) => request.method() !== "GET"
     && new URL(request.url()).pathname.startsWith("/admin/api/v1/models"));
-  expect(mutations.map((request) => new URL(request.url()).pathname)).toEqual(["/admin/api/v1/models/preferred"]);
-  expect(mutations[0]?.headers()["x-ghcg-csrf"]).toBe("csrf-memory-only");
+  expect(mutations).toEqual([]);
 });
 
-test("models refresh clears stale success, stays quiet on success, and retains errors and invalid preference", async ({ page }) => {
+test("models refresh stays quiet on success and retains errors and invalid CLI preference", async ({ page }) => {
   const fixture = await openModels(page);
-  await page.locator("tbody[data-model-id=\"claude-beta\"]").getByRole("button", { name: "Set preferred" }).click();
-  await expect(page.getByRole("status")).toHaveText("claude-beta is now preferred.");
   const refresh = page.getByRole("button", { name: "Refresh", exact: true });
   await page.route("**/admin/api/v1/models/refresh", async (route) => {
     await route.fulfill({ status: 200, json: { data: fixture.state.models } });
@@ -240,8 +216,6 @@ test("models refresh clears stale success, stays quiet on success, and retains e
   await expect(page.getByText("Catalog refreshed", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toHaveCount(0);
 
-  await page.locator("tbody[data-model-id=\"gpt-alpha\"]").getByRole("button", { name: "Set preferred" }).click();
-  await expect(page.getByRole("status")).toHaveText("gpt-alpha is now preferred.");
   await page.route("**/admin/api/v1/models/refresh", async (route) => {
     await route.fulfill({ status: 503, json: { error: { code: "upstream_unavailable", requestId: "synthetic-refresh" } } });
   }, { times: 1 });

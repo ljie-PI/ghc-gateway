@@ -1,18 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ApiError, errorMessage, type AdminClient } from "../api.js";
+  import { errorMessage, type AdminClient } from "../api.js";
   import type { AdminAccounts, AdminModels } from "../types.js";
 
   type ModelItem = AdminModels["items"][number];
 
-  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
+  let { client, pageNumber, onchanged }: { client: AdminClient; pageNumber: string; onchanged?: () => void } = $props();
   let accounts: AdminAccounts | null = $state(null);
   let data: AdminModels | null = $state(null);
   let accountId = $state("");
   let loading = $state(true);
   let busy = $state("");
   let failure = $state("");
-  let message = $state("");
   let requestGeneration = 0;
 
   onMount(async () => {
@@ -28,7 +27,7 @@
     }
   });
 
-  async function load(preserveFailure = false): Promise<void> {
+  async function load(): Promise<void> {
     if (!accountId) {
       requestGeneration += 1;
       loading = false;
@@ -39,11 +38,12 @@
     const generation = ++requestGeneration;
     loading = true;
     busy = "";
-    if (!preserveFailure) failure = "";
+    failure = "";
     try {
       const loaded = await client.models(targetAccountId);
       if (!isCurrentRequest(generation, targetAccountId)) return;
       data = loaded;
+      onchanged?.();
     } catch (error: unknown) {
       if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
@@ -58,36 +58,16 @@
     const generation = ++requestGeneration;
     busy = "refresh";
     failure = "";
-    message = "";
     try {
       const refreshed = await client.refreshModels(targetAccountId);
       if (!isCurrentRequest(generation, targetAccountId)) return;
       data = refreshed;
+      onchanged?.();
     } catch (error: unknown) {
       if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
     } finally {
       if (isCurrentRequest(generation, targetAccountId)) busy = "";
-    }
-  }
-
-  async function prefer(id: string): Promise<void> {
-    if (!data || data.accountId !== accountId) return;
-    const targetAccountId = data.accountId;
-    const generation = ++requestGeneration;
-    busy = `prefer:${id}`;
-    failure = "";
-    try {
-      await client.preferModel(targetAccountId, id, data.preferredModel?.revision ?? 0);
-      if (!isCurrentRequest(generation, targetAccountId)) return;
-      message = `${id} is now preferred.`;
-      await load();
-    } catch (error: unknown) {
-      if (!isCurrentRequest(generation, targetAccountId)) return;
-      failure = errorMessage(error);
-      if (error instanceof ApiError && error.status === 409) await load(true);
-    } finally {
-      if (accountId === targetAccountId) busy = "";
     }
   }
 
@@ -140,13 +120,12 @@
   {/if}
 </section>
 
-{#if message}<p class="notice success" role="status">{message}</p>{/if}
 {#if failure}<p class="notice error" role="alert">{failure}</p>{/if}
 
 {#if data?.preferredModel?.validity === "invalid"}
   <section class="notice warning" role="alert">
     <h2>Preferred model unavailable</h2>
-    <p>Select a discovered model below. The gateway will not silently substitute one.</p>
+    <p>Use <code>ghcg models set &lt;model-id&gt;</code> to select a preferred model. The gateway will not silently substitute one.</p>
   </section>
 {/if}
 
@@ -173,8 +152,7 @@
     <details class="catalog-help" id="model-catalog-help">
       <summary>About sources and token limits</summary>
       <p>Only models discovered in the upstream catalog are listed.</p>
-      <p>Protocols identifies the source of native interface metadata: Upstream, Built-in, or Unknown.
-        These are metadata, not live inference validation or proof of account entitlement.</p>
+      <p>Capability details show declared metadata, not live inference validation or proof of account entitlement.</p>
       <p>Token limits apply to each request, not account quota. The input limit may be lower than the model's full context window.</p>
     </details>
     <div class="table-scroll">
@@ -183,15 +161,12 @@
           <tr>
             <th>Model</th>
             <th>Native interfaces</th>
-            <th>Source</th>
             <th>Per-request token limits</th>
-            <th>Preference</th>
           </tr>
         </thead>
         {#each data.items as model, index (`${model.id}:${index}`)}
-          {@const preferred = data.preferredModel?.modelId === model.id && data.preferredModel.validity === "valid"}
           <tbody data-model-id={model.id}>
-            <tr class:current-row={preferred}>
+            <tr>
               <td>
                 <div class="model-summary">
                   <strong>{model.name}</strong>
@@ -213,33 +188,21 @@
                 </div>
               </td>
               <td>
-                <div class="model-source">
-                  <span class="badge">Protocols: {sourceLabel(model.protocolsSource)}</span>
-                  {#if model.protocolsConflict}<span class="badge warning">Protocol conflict</span>{/if}
-                </div>
-              </td>
-              <td>
                 <div class="model-limits">
                   <span>Max input: {model.maxInputTokens?.toLocaleString() ?? "Unknown"}</span>
                   <span>Max output: {model.maxOutputTokens?.toLocaleString() ?? "Unknown"}</span>
                 </div>
               </td>
-              <td>
-                <div class="row-actions">
-                  <button
-                    class:primary={!preferred}
-                    onclick={() => prefer(model.id)}
-                    disabled={busy === `prefer:${model.id}` || preferred}
-                  >{preferred ? "Preferred" : "Set preferred"}</button>
-                </div>
-              </td>
             </tr>
             <tr class="model-details-row">
-              <td colspan="5">
+              <td colspan="3">
                 <details class="model-details">
                   <summary>Capability details</summary>
                   <div class="capability-grid">
                     <dl>
+                      <div><dt>Context window</dt><dd>{model.metadata.contextWindowTokens?.value?.toLocaleString() ?? "Unknown"} · {declarationLabel(model.metadata.contextWindowTokens?.liveState ?? "missing")}</dd></div>
+                      <div><dt>Supported parameters</dt><dd>{model.metadata.supportedParameters.value === null ? "Unknown" : model.metadata.supportedParameters.value.join(", ") || "None"} · {declarationLabel(model.metadata.supportedParameters.liveState)}</dd></div>
+                      <div><dt>Reasoning efforts</dt><dd>{model.metadata.reasoningEfforts.value === null ? "Unknown" : model.metadata.reasoningEfforts.value.join(", ") || "None"} · {declarationLabel(model.metadata.reasoningEfforts.liveState)}</dd></div>
                       <div><dt>Native HTTP protocols</dt><dd>{model.protocols?.join(", ") || (model.protocols === null ? "Unknown" : "None")}</dd></div>
                       <div><dt>Protocol metadata source</dt><dd>{sourceLabel(model.protocolsSource)}{model.protocolsConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.protocolsLiveState)}</dd></div>
                       <div><dt>Max input tokens per request</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {sourceLabel(model.maxInputTokensSource)}{model.maxInputTokensConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.maxInputTokensLiveState)}</dd></div>
@@ -278,17 +241,6 @@
     margin-bottom: 6px;
   }
 
-  .model-source {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    white-space: nowrap;
-  }
-
-  .model-source .badge {
-    flex-shrink: 0;
-    text-transform: none;
-  }
 
   .model-limits {
     display: grid;

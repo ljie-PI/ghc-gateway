@@ -1,9 +1,10 @@
 <script lang="ts">
   import { errorMessage, type AdminClient } from "../api.js";
-  import type { AgentMapping, AgentStatus } from "../../../src/agents/types.js";
+  import { MAX_MAPPINGS, validateMappings, type AgentMapping, type AgentStatus } from "../../../src/agents/types.js";
+  import type { AdminAgentModels } from "../../../src/admin/api.js";
 
-  let { client, status, catalogRevision, onchanged }: {
-    client: AdminClient; status: AgentStatus; catalogRevision: string | null; onchanged: (status: AgentStatus) => void;
+  let { client, status, catalog, onchanged }: {
+    client: AdminClient; status: AgentStatus; catalog: AdminAgentModels | null; onchanged: (status: AgentStatus) => void;
   } = $props();
   const title = $derived(status.id === "claude" ? "Claude Code" : "Codex");
   let drafts: AgentMapping[] = $state([]);
@@ -13,11 +14,6 @@
   let failure = $state("");
   let notice = $state("");
   const dirty = $derived(JSON.stringify(drafts) !== baseline);
-  const valid = $derived(drafts.length > 0 && drafts.every((row) => row.displayName.trim().length > 0
-    && row.displayName.length <= 80 && !/[\p{C}]/u.test(row.displayName)
-    && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(row.modelId))
-    && (status.id !== "codex" || new Set(drafts.map((row) => row.modelId)).size === drafts.length));
-  const applyAllowed = $derived(status.state === "not_managed" || status.state === "installed");
   const stateLabel = $derived({
     not_managed: "Not managed", installed: "Configuration installed", conflict: "External changes detected",
     recovery_required: "Recovery required", unsafe_path: "Unsupported or unsafe path",
@@ -36,28 +32,45 @@
   }
   function mappingName(index: number): string {
     if (status.id === "codex") return `Model ${index + 1}`;
-    return index === 3 ? "Subagent" : ["Sonnet", "Opus", "Haiku"][index] ?? `Mapping ${index + 1}`;
+    return ["Sonnet", "Opus", "Haiku"][index] ?? `Model ${index + 1}`;
   }
   function setRow(index: number, key: keyof AgentMapping, value: string): void {
-    drafts = drafts.map((row, i) => i === index ? { ...row, [key]: value } : row);
+    const selected = key === "modelId" ? catalog?.items.find((model) => model.id === value) : undefined;
+    drafts = drafts.map((row, i) => i === index
+      ? { ...row, [key]: value, ...(selected === undefined ? {} : { displayName: selected.name }) } : row);
     notice = "";
   }
-  async function mutate(restore: boolean): Promise<void> {
-    if (restore) {
-      if (!window.confirm(`Restore ${title}? This restores the configuration saved before the first apply, undoing all subsequent Gateway configuration changes.`)) return;
-    } else if (!status.backupAvailable && !window.confirm(`Apply ${title} configuration? Gateway will privately back up the original global configuration before making changes. Restart the client after applying.`)) return;
-    busy = true;
+  async function apply(): Promise<void> {
+    if (busy) return;
     failure = "";
     notice = "";
     try {
-      const next = restore
-        ? await client.restoreAgent({ agent: status.id, expectedRevision: status.revision })
-        : await client.applyAgent({ agent: status.id, expectedRevision: status.revision, catalogRevision: catalogRevision!, mappings: drafts });
+      validateMappings(status.id, drafts);
+    } catch {
+      failure = "Enter a valid model ID and display name for each row. Extra models must not duplicate an earlier model.";
+      return;
+    }
+    const selectedCatalog = catalog;
+    if (selectedCatalog === null) {
+      failure = "Model catalog is not ready. Sign in if needed, then refresh and try again.";
+      return;
+    }
+    if (drafts.some((row) => !selectedCatalog.usableModelIds.includes(row.modelId))) {
+      failure = "Choose discovered Copilot models with usable capabilities from the model list.";
+      return;
+    }
+    if (status.state === "not_managed" && !window.confirm(`Apply ${title} configuration? The first original configuration will be retained in a private .ghcg.bak file when it exists. Later applies preserve that backup and update only Gateway-owned settings. Restart the client after applying.`)) return;
+    busy = true;
+    try {
+      const next = await client.applyAgent({
+        agent: status.id, expectedRevision: status.revision,
+        catalogRevision: selectedCatalog.catalogRevision, mappings: drafts,
+      });
       status = next;
       resetDrafts();
       loadedRevision = next.revision;
       onchanged(next);
-      notice = restore ? "Original configuration restored. Restart the client." : "Configuration installed. Restart the client; inference has not been tested.";
+      notice = "Configuration installed. Restart the client; inference has not been tested.";
     } catch (error: unknown) {
       failure = errorMessage(error);
     } finally { busy = false; }
@@ -71,52 +84,40 @@
   </header>
   {#if failure}<p class="notice error" role="alert">{failure}</p>{/if}
   {#if notice}<p class="notice success" role="status">{notice}</p>{/if}
-  {#if status.state === "conflict" || status.state === "recovery_required"}
-    <p class="notice">Outside edits are never overwritten. Refresh to inspect again. Restore is available only when recovery is unambiguous; otherwise keep recovery files and reconcile the external changes first.</p>
+  {#if status.state === "recovery_required"}
+    <p class="notice">An interrupted write may need recovery. Refresh and apply again; retain backup and recovery files if the operation reports a conflict.</p>
   {/if}
-  <form onsubmit={(event) => { event.preventDefault(); void mutate(false); }}>
+  <form novalidate onsubmit={(event) => { event.preventDefault(); void apply(); }}>
     <fieldset disabled={busy}>
       <legend>Model mapping</legend>
       <p class="muted" id={`${status.id}-mapping-help`}>{status.id === "claude" ? "Rows are ordered Sonnet, Opus, Haiku. " : ""}The first row is the startup model. Display names are labels; Copilot model IDs are sent unchanged.</p>
+      {#if status.id === "claude"}<p class="muted">Additional rows appear in the model menu. Requires Claude Code 2.1.243 or newer.</p>{/if}
+      <datalist id={`${status.id}-model-options`}>
+        {#each catalog?.items ?? [] as model, index (`${model.id}:${index}`)}
+          <option value={model.id} label={model.name}></option>
+        {/each}
+      </datalist>
       {#each drafts as row, index (index)}
-        {#if index < 3 || status.id === "codex"}
           <div class="agent-mapping-row">
+            <label><span><span class="visually-hidden">{mappingName(index)} </span>Copilot model ID</span>
+              <input type="text" value={row.modelId} maxlength="128" required spellcheck="false" autocomplete="off"
+                list={`${status.id}-model-options`} aria-describedby={`${status.id}-mapping-help`}
+                oninput={(event) => setRow(index, "modelId", event.currentTarget.value)} />
+            </label>
             <label><span><span class="visually-hidden">{mappingName(index)} </span>Display name</span>
               <input type="text" value={row.displayName} maxlength="80" required aria-describedby={`${status.id}-mapping-help`}
                 oninput={(event) => setRow(index, "displayName", event.currentTarget.value)} />
             </label>
-            <label><span><span class="visually-hidden">{mappingName(index)} </span>Copilot model ID</span>
-              <input type="text" value={row.modelId} maxlength="128" required spellcheck="false" autocomplete="off"
-                oninput={(event) => setRow(index, "modelId", event.currentTarget.value)} />
-            </label>
-            {#if status.id === "codex"}
+            {#if status.id === "codex" || index >= 3}
               <button type="button" aria-label={`Remove model ${index + 1}`} disabled={drafts.length === 1} onclick={() => drafts = drafts.filter((_, i) => i !== index)}>Remove</button>
             {/if}
           </div>
-        {/if}
       {/each}
-      {#if status.id === "codex"}
-        <button type="button" disabled={drafts.length >= 16} onclick={() => drafts = [...drafts, { displayName: "", modelId: "" }]}>Add model</button>
-      {:else}
-        <details>
-          <summary>Additional settings</summary>
-          <p class="muted">Optional model Claude Code uses for delegated subagent work. If omitted, Claude Code uses its own defaults.</p>
-          {#if drafts[3]}
-            <div class="agent-mapping-row">
-              <label><span><span class="visually-hidden">Subagent </span>Display name</span><input type="text" value={drafts[3].displayName} maxlength="80" required oninput={(event) => setRow(3, "displayName", event.currentTarget.value)} /></label>
-              <label><span><span class="visually-hidden">Subagent </span>Copilot model ID</span><input type="text" value={drafts[3].modelId} maxlength="128" required oninput={(event) => setRow(3, "modelId", event.currentTarget.value)} /></label>
-              <button type="button" onclick={() => drafts = drafts.slice(0, 3)}>Remove subagent mapping</button>
-            </div>
-          {:else}
-            <button type="button" onclick={() => drafts = [...drafts, { displayName: "Subagent", modelId: "" }]}>Add subagent mapping</button>
-          {/if}
-        </details>
-      {/if}
+      <button type="button" disabled={drafts.length >= MAX_MAPPINGS} onclick={() => drafts = [...drafts, { displayName: "", modelId: "" }]}>Add model</button>
     </fieldset>
     <div class="agent-actions">
-      <p aria-live="polite">{dirty ? "Unapplied changes" : "No unapplied changes"}</p>
-      <button class="primary" type="submit" disabled={busy || !dirty || !valid || !applyAllowed || catalogRevision === null}>Apply changes</button>
-      <button type="button" disabled={busy || !status.canRestore} onclick={() => void mutate(true)}>Restore</button>
+      <p aria-live="polite">{dirty ? "Unapplied changes" : ""}</p>
+      <button class="primary" type="submit" disabled={busy}>Apply changes</button>
     </div>
   </form>
   <details class="agent-details">

@@ -64,7 +64,7 @@ test("refresh clears copied feedback without canceling device authorization", as
   const fixture = await openAccounts(page);
   await page.getByRole("button", { name: "Start login", exact: true }).click();
   await page.getByRole("button", { name: "Copy device code", exact: true }).click();
-  await expect(page.getByText("Code copied.", { exact: true })).toBeVisible();
+  await expect(page.locator(".copy-code")).toHaveAttribute("title", "Copied");
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
   await expect(page.getByText("Code copied.", { exact: true })).toHaveCount(0);
   await expect(page.getByText("ABCD-1234", { exact: true })).toBeVisible();

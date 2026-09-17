@@ -204,12 +204,11 @@ function agentStatus(agent: "claude" | "codex", seed: number): AgentStatus {
     revision: seed.toString(16).repeat(64),
     paths: agent === "claude"
       ? ["C:/Users/octo/.claude/settings.json"]
-      : ["C:/Users/octo/.codex/ghcg-models.json", "C:/Users/octo/.codex/config.toml"],
+      : ["C:/Users/octo/.codex/ghcg_models.json", "C:/Users/octo/.codex/config.toml"],
     endpoint: agent === "claude" ? "http://127.0.0.1:31400" : "http://127.0.0.1:31400/v1",
     backupAvailable: false,
     lastAppliedAt: null,
     mappings: [],
-    canRestore: false,
   };
 }
 
@@ -222,6 +221,12 @@ function modelItem(input: {
 }): AdminModels["items"][number] {
   return {
     ...input,
+    metadata: {
+      chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
+      supportedParameters: { value: ["temperature"], source: "live", conflict: false, liveState: "value" },
+      reasoningEfforts: { value: ["none", "high"], source: "live", conflict: false, liveState: "value" },
+      contextWindowTokens: { value: 144000, source: "live", conflict: false, liveState: "value" },
+    },
     protocols: ["chat", "responses"],
     protocolsSource: "live",
     protocolsConflict: false,
@@ -316,13 +321,18 @@ async function handle(
     if (fixture.state.failAgents) return failure(route, 500, "internal_error");
     const view: AgentsView = {
       items: [structuredClone(fixture.state.agents.claude), structuredClone(fixture.state.agents.codex)],
-      catalogRevision: fixture.state.agentsCatalogRevision,
-      modelsAvailable: fixture.state.agentsCatalogRevision !== null,
     };
     if (fixture.state.agentsDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, fixture.state.agentsDelayMs));
     }
     return json(route, 200, view);
+  }
+  if (path === "/agents/models") {
+    if (fixture.state.agentsCatalogRevision === null) return failure(route, 400, "agent_models_unavailable");
+    return json(route, 200, {
+      accountId: fixture.state.models.accountId, catalogRevision: fixture.state.agentsCatalogRevision,
+      items: fixture.state.models.items, usableModelIds: fixture.state.models.items.map((model) => model.id),
+    });
   }
   if (path === "/agents/apply" && request.method() === "POST") {
     const body = request.postDataJSON() as { agent: "claude" | "codex"; expectedRevision: string; mappings: { displayName: string; modelId: string }[] };
@@ -336,23 +346,6 @@ async function handle(
       backupAvailable: true,
       lastAppliedAt: NOW,
       mappings: body.mappings,
-      canRestore: true,
-    };
-    fixture.state.agents[body.agent] = next;
-    return json(route, 200, next);
-  }
-  if (path === "/agents/restore" && request.method() === "POST") {
-    const body = request.postDataJSON() as { agent: "claude" | "codex"; expectedRevision: string };
-    const current = fixture.state.agents[body.agent];
-    if (body.expectedRevision !== current.revision) return failure(route, 409, "revision_conflict");
-    const next: AgentStatus = {
-      ...current,
-      state: "not_managed",
-      revision: nextAgentRevision(current.revision),
-      backupAvailable: false,
-      lastAppliedAt: null,
-      mappings: [],
-      canRestore: false,
     };
     fixture.state.agents[body.agent] = next;
     return json(route, 200, next);

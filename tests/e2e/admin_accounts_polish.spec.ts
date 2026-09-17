@@ -190,7 +190,9 @@ test("copy icon writes the exact synthetic code through the browser Clipboard wi
   expect(copyBox!.x).toBeGreaterThanOrEqual(codeBox!.x + codeBox!.width);
   await copy.focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("status").filter({ hasText: "Code copied." })).toBeVisible();
+  await expect(page.locator(".copy-code")).toHaveAttribute("title", "Copied");
+  await expect(page.getByText("Code copied.", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Check now", exact: true })).toHaveCount(0);
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("ABCD-1234");
   expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })))
     .toEqual({ local: 0, session: 0 });

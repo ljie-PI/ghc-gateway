@@ -3,7 +3,7 @@
   import { ApiError, errorMessage, type AdminClient } from "../api.js";
   import type { AdminAccounts, DeviceFlow } from "../types.js";
 
-  let { client, pageNumber }: { client: AdminClient; pageNumber: string } = $props();
+  let { client, pageNumber, onchanged }: { client: AdminClient; pageNumber: string; onchanged?: () => void } = $props();
   let data: AdminAccounts | null = $state(null);
   const visibleAccounts = $derived.by(() => data?.items.filter((account) => account.state !== "removed") ?? []);
   let host = $state("github.com");
@@ -13,6 +13,7 @@
   let message = $state("");
   let failure = $state("");
   let copying = $state(false);
+  let copied = $state(false);
   let copyFeedback = $state("");
   let copyFeedbackRevision = 0;
   let pollState: "idle" | "waiting" | "checking" | "retrying" = $state("idle");
@@ -44,6 +45,7 @@
         || (expectedGeneration !== undefined && expectedGeneration !== pollGeneration)
       ) return null;
       data = loaded;
+      onchanged?.();
       return loaded;
     } catch (error: unknown) {
       if (
@@ -60,6 +62,7 @@
   async function refresh(): Promise<void> {
     message = "";
     copyFeedback = "";
+    copied = false;
     copyFeedbackRevision += 1;
     await load();
   }
@@ -201,16 +204,6 @@
     }
   }
 
-  function checkNow(): void {
-    if (flow === null) return;
-    if (Date.now() < nextPollAtMs) {
-      message = `The next check is available at ${new Date(nextPollAtMs).toLocaleTimeString()}.`;
-      schedulePoll(pollGeneration);
-      return;
-    }
-    if (pollState !== "checking") void poll(pollGeneration);
-  }
-
   async function cancelFlow(): Promise<void> {
     const canceledFlowId = flow?.flowId;
     clearFlow();
@@ -241,6 +234,7 @@
   function stopPolling(): void {
     pollGeneration += 1;
     copying = false;
+    copied = false;
     copyFeedback = "";
     if (pollTimer !== null) clearTimeout(pollTimer);
     pollTimer = null;
@@ -273,11 +267,13 @@
     const generation = pollGeneration;
     const feedbackRevision = copyFeedbackRevision;
     copying = true;
+    copied = false;
     copyFeedback = "";
-    let feedback: string;
+    let feedback = "";
+    let succeeded = false;
     try {
       await navigator.clipboard.writeText(activeFlow.userCode);
-      feedback = "Code copied.";
+      succeeded = true;
     } catch {
       feedback = "Could not copy. Select and copy the code manually.";
     }
@@ -285,6 +281,7 @@
     copying = false;
     if (feedbackRevision === copyFeedbackRevision && Date.now() < Date.parse(activeFlow.expiresAt)) {
       copyFeedback = feedback;
+      copied = succeeded;
     }
   }
 
@@ -375,14 +372,18 @@
         <button
           class="centered-control copy-code"
           type="button"
-          aria-label="Copy device code"
-          title="Copy device code"
+          aria-label={copied ? "Device code copied; copy again" : "Copy device code"}
+          title={copied ? "Copied" : "Copy device code"}
           disabled={copying}
           onclick={() => void copyCode()}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-            <rect x="9" y="2" width="6" height="4" rx="1" />
-            <path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3" />
+            {#if copied}
+              <path d="m5 12 4 4L19 6" />
+            {:else}
+              <rect x="9" y="2" width="6" height="4" rx="1" />
+              <path d="M9 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-3" />
+            {/if}
           </svg>
         </button>
       </div>
@@ -402,9 +403,6 @@
       <a class="button primary" href={flow.verificationUri} target="_blank" rel="noreferrer">
         Open verification page
       </a>
-      <button onclick={checkNow} disabled={pollState === "checking"}>
-        {pollState === "checking" ? "Checking..." : "Check now"}
-      </button>
       <button class="quiet" onclick={() => void cancelFlow()}>Cancel</button>
     </div>
   </section>

@@ -246,7 +246,7 @@ td { padding: 16px 13px; border-bottom: 1px solid var(--line); font-size: 14px; 
 th:first-child, td:first-child { padding-left: 0; }
 th:last-child, td:last-child { padding-right: 0; }
 .account-table { min-width: 780px; }
-.model-table { min-width: 980px; }
+.model-table { min-width: 640px; }
 tr.current-row { background: var(--soft); }
 tr.current-row > td:first-child, .account-table tr > td:first-child { padding-left: 12px; border-left: 2px solid var(--ink); }
 tr.current-row > td:last-child, .account-table tr > td:last-child { padding-right: 12px; }

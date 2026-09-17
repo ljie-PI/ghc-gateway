@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
-import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentRestoreRequest, type AgentModel } from "./types.js";
+import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentModel } from "./types.js";
 import { AgentStore, copyMappings, newImage, type AgentState, type StepState } from "./store.js";
 import { assertNoLinks, assertOwned, assertPrivate, canonical, digest, exists, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, syncDirectory, writeExclusive, type FileImage } from "./files.js";
 import { projectAgent } from "./transform.js";
@@ -34,7 +34,7 @@ export class FileAgentsManager implements AgentsManager {
     const codex = path.resolve(env.CODEX_HOME ?? path.join(this.home, ".codex"));
     this.paths = {
       claude: [path.join(claude, "settings.json")],
-      codex: [path.join(codex, "ghcg-models.json"), path.join(codex, "config.toml")],
+      codex: [path.join(codex, "ghcg_models.json"), path.join(codex, "config.toml")],
     };
   }
 
@@ -49,31 +49,45 @@ export class FileAgentsManager implements AgentsManager {
       const store = new AgentStore(this.root, request.agent);
       // Parse and validate BEFORE making a recovery directory or lock file.
       const initial = await store.read();
-      if (initial.pending !== null) throw new AgentError("agent_recovery_required");
       const paths = this.targetPaths(request.agent, initial);
-      const before = await this.images(paths);
+      const before = await this.images(paths, initial);
       this.requireRevision(request.expectedRevision, initial, before, paths, origin);
-      this.requireExpected(initial, before);
-      const configIndex = request.agent === "claude" ? 0 : 1;
-      const config = initial.targets.length === 0 ? before[configIndex]! : initial.targets[configIndex]!.original;
-      const projection = projectAgent(request.agent, config === null ? null : Buffer.from(config.bytes, "base64"), request.mappings, origin, paths[0]!, models);
+      if (initial.pending === null) this.project(request, before, paths, origin, models);
       signal.throwIfAborted();
       assertCurrent();
       return await store.locked(async (save) => {
         const state = await store.read();
-        const current = await this.images(paths);
+        let current = await this.images(paths, state);
         this.requireRevision(request.expectedRevision, state, current, paths, origin);
-        this.requireExpected(state, current);
         assertCurrent();
         signal.throwIfAborted();
-        if (state.targets.length === 0) {
-          state.targets = paths.map((target, index) => ({ path: target, original: current[index]!, expected: current[index]! }));
+        if (state.pending !== null) {
+          // Resume only the already-durable transaction, never a new restore.
+          await this.requireRecoverable(state, current);
+          await this.execute(request.agent, state, save);
+          await this.finish(request.agent, state, save);
         }
+        const livePaths = this.targetPaths(request.agent, state);
+        current = await this.images(livePaths);
+        if (initial.pending === null) this.requireRevision(request.expectedRevision, state, current, livePaths, origin);
+        const projection = this.project(request, current, livePaths, origin, models);
+        const prepared = await this.prepareTargets(request.agent, state, current, livePaths);
+        current = prepared.current;
+        assertCurrent();
+        signal.throwIfAborted();
         const after = request.agent === "claude"
-          ? [newImage(projection.config, state.targets[0]!.original)]
-          : [newImage(projection.catalog!, state.targets[0]!.original), newImage(projection.config, state.targets[1]!.original)];
-        state.pending = { kind: "apply", steps: this.plan(request.agent, state, current, after), garbage: [] };
+          ? [prepared.backup, newImage(projection.config, current[1]!)]
+          : [prepared.backup, newImage(projection.catalog!, current[1]!), newImage(projection.config, current[2]!)];
+        const steps = this.plan(request.agent, state, current, after);
+        for (const [index, target] of state.targets.entries()) target.expected = current[index]!;
         state.mappings = copyMappings(request.mappings);
+        if (steps.length === 0) {
+          state.lastAppliedAt = (this.options.now ?? (() => new Date()))().toISOString();
+          state.revision += 1;
+          await save(state);
+          return await this.status(request.agent, origin);
+        }
+        state.pending = { kind: "apply", steps, garbage: [] };
         // From this durable intent onward cancellation must not interrupt commit.
         await save(state);
         this.hit("intent", request.agent, -1);
@@ -85,43 +99,56 @@ export class FileAgentsManager implements AgentsManager {
     });
   }
 
-  async restore(request: AgentRestoreRequest, origin: string, signal: AbortSignal): Promise<AgentStatus> {
-    return await this.exclusive(request.agent, async () => {
-      signal.throwIfAborted();
-      const store = new AgentStore(this.root, request.agent);
-      const initial = await store.read();
-      if (initial.targets.length === 0) throw new AgentError("validation_failed");
-      const paths = this.targetPaths(request.agent, initial);
-      const current = await this.images(paths, initial);
-      this.requireRevision(request.expectedRevision, initial, current, paths, origin);
-      await this.requireRecoverable(initial, current);
-      signal.throwIfAborted();
-      return await store.locked(async (save) => {
-        const state = await store.read();
-        const before = await this.images(paths, state);
-        this.requireRevision(request.expectedRevision, state, before, paths, origin);
-        await this.requireRecoverable(state, before);
-        signal.throwIfAborted();
-        if (state.pending?.kind !== "restore") {
-          const garbage = state.pending?.steps.map((step) => step.scratch) ?? [];
-          await this.releasePublishedStageLinks(state);
-          state.pending = {
-            kind: "restore", garbage,
-            steps: this.plan(request.agent, state, before, state.targets.map((target) => target.original)),
-          };
-          await save(state);
-          this.hit("intent", request.agent, -1);
-        }
-        await this.execute(request.agent, state, save);
-        await this.finish(request.agent, state, save);
-        return await this.status(request.agent, origin);
-      });
-    });
+  private project(request: AgentApplyRequest, images: readonly (FileImage | null)[], paths: readonly string[], origin: string, models: readonly AgentModel[]) {
+    const config = images.at(-1) ?? null;
+    const catalogPath = path.join(path.dirname(paths.at(-1)!), "ghcg_models.json");
+    return projectAgent(request.agent, config === null ? null : Buffer.from(config.bytes, "base64"), request.mappings, origin, catalogPath, models);
+  }
+
+  private async prepareTargets(agent: AgentId, state: AgentState, current: (FileImage | null)[], paths: readonly string[]) {
+    if (state.version === 2 && state.targets.length > 0) {
+      await this.requireBackup(state, current);
+      return { current, backup: state.targets[0]!.expected };
+    }
+    const configPath = paths.at(-1)!;
+    const original = state.targets.length === 0 ? current.at(-1)! : state.targets.at(-1)!.original;
+    const backupPath = `${configPath}.ghcg.bak`;
+    const existing = await readImage(backupPath);
+    if (existing !== null) {
+      await assertPrivate(backupPath, false);
+      if (existing.bytes !== original?.bytes) throw new AgentError("agent_conflict");
+    }
+    const clientPaths = agent === "claude" ? [configPath] : [path.join(path.dirname(configPath), "ghcg_models.json"), configPath];
+    const clientImages = await this.images(clientPaths);
+    if (!sameImage(clientImages.at(-1)!, current.at(-1)!)) throw new AgentError("agent_conflict");
+    if (state.targets.length > 0 && agent === "codex" && paths[0] !== clientPaths[0]) {
+      if (clientImages[0] !== null) throw new AgentError("agent_conflict");
+      state.legacyCatalog = state.targets[0]!;
+    }
+    const oldTargets = state.targets;
+    state.targets = [
+      { path: backupPath, original: existing, expected: existing },
+      ...clientPaths.map((target, index) => ({
+        path: target,
+        original: index === clientPaths.length - 1 ? original : oldTargets.find((item) => item.path === target)?.original ?? clientImages[index]!,
+        expected: clientImages[index]!,
+      })),
+    ];
+    state.version = 2;
+    return {
+      current: [existing, ...clientImages],
+      backup: existing ?? (original === null ? null : newImage(Buffer.from(original.bytes, "base64"), null)),
+    };
+  }
+
+  private async requireBackup(state: AgentState, images: readonly (FileImage | null)[]): Promise<void> {
+    if (state.version !== 2 || state.targets.length === 0) return;
+    if (!sameImage(state.targets[0]!.expected, images[0]!)) throw new AgentError("agent_conflict");
+    if (images[0] !== null) await assertPrivate(state.targets[0]!.path, false);
   }
 
   close(): void {
-    // Mutations are synchronous, bounded by two 1 MiB files and bounded OS calls.
-    // No background queue or automatic shutdown restore exists.
+    // Transactions contain at most three 1 MiB files and bounded OS calls.
     this.closed = true;
   }
 
@@ -139,22 +166,27 @@ export class FileAgentsManager implements AgentsManager {
     let paths = this.paths[agent];
     let revision = "0".repeat(64);
     let kind: AgentStatus["state"] = "not_managed";
-    let canRestore = false;
     try {
       state = await new AgentStore(this.root, agent).read();
       paths = this.targetPaths(agent, state);
       const images = await this.images(paths, state);
       revision = this.revision(state, images, paths, origin);
       kind = state.targets.length === 0 ? "not_managed" : state.pending !== null ? "recovery_required" : "installed";
-      try { await this.requireRecoverable(state, images); canRestore = state.targets.length > 0; }
+      try {
+        if (state.pending !== null) await this.requireRecoverable(state, images);
+        else await this.requireBackup(state, images);
+      }
       catch { kind = state.pending !== null ? "recovery_required" : "conflict"; }
     } catch (error: unknown) {
       kind = error instanceof AgentError && error.code === "agent_unsafe_path" ? "unsafe_path" : "recovery_required";
     }
     return {
-      id: agent, state: kind, revision, paths, endpoint: agent === "claude" ? origin : `${origin}/v1`,
-      backupAvailable: (state?.targets.length ?? 0) > 0, lastAppliedAt: state?.lastAppliedAt ?? null,
-      mappings: state?.mappings ?? [], canRestore,
+      id: agent, state: kind, revision, paths: state?.version === 2 && state.targets.length > 0 ? paths.slice(1) : paths,
+      endpoint: agent === "claude" ? origin : `${origin}/v1`,
+      backupAvailable: state?.version === 2 ? state.targets[0]?.expected !== null && state.targets[0]?.expected !== undefined
+        : (state?.targets.length ?? 0) > 0,
+      lastAppliedAt: state?.lastAppliedAt ?? null,
+      mappings: state?.version === 1 && agent === "claude" ? state.mappings.slice(0, 3) : state?.mappings ?? [],
     };
   }
 
@@ -204,15 +236,15 @@ export class FileAgentsManager implements AgentsManager {
   }
 
   private plan(agent: AgentId, state: AgentState, before: readonly (FileImage | null)[], after: readonly (FileImage | null)[]): StepState[] {
-    return state.targets.map((target, index) => ({
+    return state.targets.map((target, index): StepState => ({
       target: index, before: before[index]!, after: after[index]!, phase: "planned",
       scratch: path.join(path.dirname(target.path), `.ghcg-agents-${agent}-${randomUUID()}`),
-    }));
+    })).filter((step) => !sameImage(step.before, step.after));
   }
 
   private async execute(agent: AgentId, state: AgentState, save: (state: AgentState) => Promise<void>): Promise<void> {
     const pending = state.pending!;
-    // Catalog first when applying; configuration reference first when restoring.
+    // Backup, catalog, then config. Legacy restore intents retain their stored ordering.
     const steps = pending.kind === "restore" ? [...pending.steps].reverse() : pending.steps;
     for (const step of steps) {
       const target = state.targets[step.target]!.path;
@@ -289,20 +321,6 @@ export class FileAgentsManager implements AgentsManager {
     state.revision += 1;
     await save(state);
     this.hit("complete", agent, -1);
-  }
-  private async releasePublishedStageLinks(state: AgentState): Promise<void> {
-    for (const step of state.pending?.steps ?? []) {
-      const target = state.targets[step.target]?.path;
-      const stage = path.join(step.scratch, "next");
-      if (target === undefined || !exists(target) || !exists(stage)) continue;
-      const targetStat = fs.lstatSync(target);
-      const stageStat = fs.lstatSync(stage);
-      if (targetStat.dev !== stageStat.dev || targetStat.ino !== stageStat.ino) continue;
-      if (!sameImage(await readImage(target, stage), step.after)) throw new AgentError("agent_recovery_required");
-      await assertOwned(stage, false, target);
-      fs.unlinkSync(stage);
-      syncDirectory(step.scratch);
-    }
   }
 
   private async cleanup(scratch: string, liveTarget?: string): Promise<void> {
