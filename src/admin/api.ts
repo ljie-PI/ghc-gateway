@@ -443,14 +443,12 @@ export class AdminManagementApi {
     try {
       const captured = await this.agentCatalog(signal);
       if (captured.revision !== request.catalogRevision) throw new AdminApiError("revision_conflict");
-      await this.requireSameCredentialGeneration(captured.account.accountId, captured.account, signal);
       const models = this.dependencies.registry.modelsUsableForAgentMapping(captured.catalog)
         .map((model) => ({ modelId: model.modelId, maxInputTokens: model.maxInputTokens.value, metadata: model.profile }));
       return await this.requireAgents().apply(request, origin, models, () => {
         signal.throwIfAborted();
         if (!this.dependencies.registry.isCurrent(captured.catalog)
-          || JSON.stringify(this.dependencies.accounts.defaultState()) !== captured.defaultState
-          || this.requireActiveAccount(captured.account.accountId).revision !== captured.accountRevision) {
+          || JSON.stringify(this.agentSelection()) !== JSON.stringify(captured.selection)) {
           throw new AdminApiError("revision_conflict");
         }
       }, signal);
@@ -462,23 +460,34 @@ export class AdminManagementApi {
     return this.dependencies.agents;
   }
 
-  private async agentCatalog(signal: AbortSignal) {
-    signal.throwIfAborted();
+  private agentSelection() {
     const defaults = this.dependencies.accounts.defaultState();
     const active = this.dependencies.accounts.list().filter((item) => item.state === "active");
     // Same fallback as AccountDirectory.bindDefault: only an unambiguous account.
     const id = defaults.defaultAccountId ?? (active.length === 1 ? active[0]!.accountId : null);
+    const account = active.find((item) => item.accountId === id);
+    return {
+      defaultState: JSON.stringify(defaults),
+      accountId: account?.accountId ?? null,
+      accountRevision: account?.revision ?? null,
+    };
+  }
+
+  private async agentCatalog(signal: AbortSignal) {
+    signal.throwIfAborted();
+    const selection = this.agentSelection();
+    const id = selection.accountId;
     if (id === null) throw new AgentError("agent_models_unavailable");
-    const summary = this.requireActiveAccount(id);
     const account = await this.dependencies.accounts.bindAccount(id, signal);
     const catalog = await this.dependencies.registry.get(account, signal);
-    signal.throwIfAborted();
+    await this.requireSameCredentialGeneration(id, account, signal);
+    if (JSON.stringify(this.agentSelection()) !== JSON.stringify(selection)) throw new AdminApiError("revision_conflict");
     if (!this.dependencies.registry.isCurrent(catalog)) throw new AgentError("agent_models_unavailable");
     const revision = createHash("sha256").update(JSON.stringify({
-      defaults, accountId: id, accountRevision: summary.revision, credentialGeneration: account.credentialGeneration,
+      selection, credentialGeneration: account.credentialGeneration,
       catalogGeneration: catalog.catalogGeneration,
     })).digest("hex");
-    return { catalog, account, revision, accountRevision: summary.revision, defaultState: JSON.stringify(defaults) };
+    return { catalog, account, revision, selection };
   }
 
   async models(accountId: string | null, signal: AbortSignal): Promise<AdminModels> {

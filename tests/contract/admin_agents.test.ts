@@ -85,6 +85,31 @@ const claudeMappings = [
 ];
 
 describe("Admin agents API", () => {
+  it.each(["default", "revision", "ambiguous", "credentials"] as const)("rejects catalog choices after concurrent %s changes", async (change) => {
+    const dependencies = adminDependencies();
+    const initialAccounts = dependencies.accounts.list();
+    const get = dependencies.registry.get;
+    const bind = dependencies.accounts.bindAccount;
+    let generation = 4;
+    dependencies.accounts.bindAccount = async (...args) => ({ ...await bind(...args), credentialGeneration: generation });
+    if (change === "ambiguous") dependencies.accounts.defaultState = () => ({ defaultRevision: 2, defaultAccountId: null });
+    let release = (): void => undefined;
+    let started = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    dependencies.registry.get = async (...args) => { started(); await held; return await get(...args); };
+    const api = new AdminManagementApi({ ...dependencies, agents: agentStub().manager });
+    const pending = api.agentModels(new AbortController().signal);
+    await entered;
+    if (change === "default") dependencies.accounts.defaultState = () => ({ defaultRevision: 3, defaultAccountId: "github.com/43" });
+    if (change === "revision") dependencies.accounts.list = () => initialAccounts.map((account) => ({ ...account, revision: account.revision + 1 }));
+    if (change === "ambiguous") dependencies.accounts.list = () => [...initialAccounts, { ...initialAccounts[0]!, accountId: "github.com/43", userId: "43" }];
+    if (change === "credentials") generation = 5;
+    const rejected = expect(pending).rejects.toMatchObject({ code: "revision_conflict" });
+    release();
+    await rejected;
+  });
+
   it("returns local configuration while a model catalog is still pending", async () => {
     const dependencies = adminDependencies();
     let release = (): void => undefined;

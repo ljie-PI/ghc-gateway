@@ -56,9 +56,11 @@ export class AdminClient {
       signal === undefined ? undefined : { signal },
     );
   }
-  accounts(): Promise<AdminAccounts> { return this.request("/accounts"); }
-  models(accountId?: string): Promise<AdminModels> {
-    return this.request(`/models${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`);
+  accounts(signal?: AbortSignal): Promise<AdminAccounts> {
+    return this.request("/accounts", signal === undefined ? undefined : { signal });
+  }
+  models(accountId?: string, signal?: AbortSignal): Promise<AdminModels> {
+    return this.request(`/models${accountId === undefined ? "" : `?accountId=${encodeURIComponent(accountId)}`}`, signal === undefined ? undefined : { signal });
   }
   agents(signal?: AbortSignal): Promise<AgentsView> {
     return this.request("/agents", signal === undefined ? undefined : { signal });
@@ -90,8 +92,8 @@ export class AdminClient {
   removeAccount(accountId: string, expectedRevision: number): Promise<AdminAccount> {
     return this.mutate(`/accounts/${encodeURIComponent(accountId)}`, "DELETE", { expectedRevision });
   }
-  refreshModels(accountId: string): Promise<AdminModels> {
-    return this.mutate("/models/refresh", "POST", { accountId });
+  refreshModels(accountId: string, signal?: AbortSignal): Promise<AdminModels> {
+    return this.mutate("/models/refresh", "POST", { accountId }, signal);
   }
   saveConfig(value: AdminRuntimeConfig): Promise<AdminRuntimeConfig> {
     return this.mutate("/config", "PUT", { expectedRevision: value.revision, config: value.config });

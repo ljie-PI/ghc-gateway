@@ -13,19 +13,33 @@
   let busy = $state("");
   let failure = $state("");
   let requestGeneration = 0;
+  let disposed = false;
+  const requests = new AbortController();
 
-  onMount(async () => {
+  onMount(() => {
+    void initialize();
+    return () => {
+      disposed = true;
+      requestGeneration += 1;
+      requests.abort();
+    };
+  });
+
+  async function initialize(): Promise<void> {
     try {
-      accounts = await client.accounts();
+      const loaded = await client.accounts(requests.signal);
+      if (disposed) return;
+      accounts = loaded;
       accountId = accounts.defaultAccountId
         ?? accounts.items.find((account) => account.state === "active")?.accountId
         ?? "";
       await load();
     } catch (error: unknown) {
+      if (disposed) return;
       failure = errorMessage(error);
       loading = false;
     }
-  });
+  }
 
   async function load(): Promise<void> {
     if (!accountId) {
@@ -40,10 +54,9 @@
     busy = "";
     failure = "";
     try {
-      const loaded = await client.models(targetAccountId);
+      const loaded = await client.models(targetAccountId, requests.signal);
       if (!isCurrentRequest(generation, targetAccountId)) return;
       data = loaded;
-      onchanged?.();
     } catch (error: unknown) {
       if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
@@ -58,11 +71,11 @@
     const generation = ++requestGeneration;
     busy = "refresh";
     failure = "";
+    onchanged?.();
     try {
-      const refreshed = await client.refreshModels(targetAccountId);
+      const refreshed = await client.refreshModels(targetAccountId, requests.signal);
       if (!isCurrentRequest(generation, targetAccountId)) return;
       data = refreshed;
-      onchanged?.();
     } catch (error: unknown) {
       if (!isCurrentRequest(generation, targetAccountId)) return;
       failure = errorMessage(error);
@@ -72,7 +85,7 @@
   }
 
   function isCurrentRequest(generation: number, targetAccountId: string): boolean {
-    return requestGeneration === generation && accountId === targetAccountId;
+    return !disposed && requestGeneration === generation && accountId === targetAccountId;
   }
 
   function sourceLabel(source: ModelItem["defaultOutputTokens"]["source"]): string {

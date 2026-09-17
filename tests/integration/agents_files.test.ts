@@ -32,6 +32,16 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it.each(["missing", "replaced"] as const)("reports %s live configuration without disabling a fresh Apply", async (change) => {
+    const h = harness();
+    const file = seed(h.home, ".claude/settings.json", "{}\n");
+    await apply(h.manager, "claude");
+    if (change === "missing") fs.unlinkSync(file);
+    else fs.writeFileSync(file, JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://example.test" } }));
+    expect((await h.status("claude")).state).toBe("conflict");
+    expect((await apply(h.manager, "claude")).state).toBe("installed");
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).env.ANTHROPIC_BASE_URL).toBe(origin);
+  }, 180_000);
   it.each([null, "apply", "restore"] as const)("migrates a legacy Codex baseline with pending %s", async (kind) => {
     const h = harness();
     const original = Buffer.from("\ufeff# first original\r\nmodel=\"old\"\r\n");
@@ -162,7 +172,7 @@ describe("private repeatable agent configuration", () => {
     await apply(h.manager, "claude");
     const external = Buffer.from(JSON.stringify({ env: { OTHER: "external-edit" } }));
     fs.writeFileSync(original, external);
-    expect((await h.status("claude")).state).toBe("installed");
+    expect((await h.status("claude")).state).toBe("conflict");
     await apply(h.manager, "claude");
     expect(JSON.parse(fs.readFileSync(original, "utf8")).env.OTHER).toBe("external-edit");
   }, 180_000);
@@ -203,6 +213,7 @@ describe("private repeatable agent configuration", () => {
 
   it.each([
     ["intent", -1],
+    ["stage_written", 0],
     ["staged", 0],
     ["linked", 0],
     ["published", 0],

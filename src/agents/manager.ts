@@ -4,7 +4,7 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentModel } from "./types.js";
 import { AgentStore, copyMappings, newImage, type AgentState, type StepState } from "./store.js";
-import { assertNoLinks, assertOwned, assertPrivate, canonical, digest, exists, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, syncDirectory, writeExclusive, type FileImage } from "./files.js";
+import { applyAccess, assertNoLinks, assertOwned, assertPrivate, canonical, digest, exists, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, syncDirectory, writeExclusive, type FileImage } from "./files.js";
 import { projectAgent } from "./transform.js";
 
 export interface AgentManagerOptions {
@@ -12,7 +12,7 @@ export interface AgentManagerOptions {
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly now?: () => Date;
   /** Deterministic failure/race injection at durable transaction boundaries. */
-  readonly checkpoint?: (point: "intent" | "staged" | "displaced" | "linked" | "published" | "complete", agent: AgentId, index: number) => void;
+  readonly checkpoint?: (point: "intent" | "stage_written" | "staged" | "displaced" | "linked" | "published" | "complete", agent: AgentId, index: number) => void;
 }
 
 export class FileAgentsManager implements AgentsManager {
@@ -174,7 +174,10 @@ export class FileAgentsManager implements AgentsManager {
       kind = state.targets.length === 0 ? "not_managed" : state.pending !== null ? "recovery_required" : "installed";
       try {
         if (state.pending !== null) await this.requireRecoverable(state, images);
-        else await this.requireBackup(state, images);
+        else {
+          await this.requireBackup(state, images);
+          this.requireExpected(state, images);
+        }
       }
       catch { kind = state.pending !== null ? "recovery_required" : "conflict"; }
     } catch (error: unknown) {
@@ -255,10 +258,25 @@ export class FileAgentsManager implements AgentsManager {
       if (position === "after") { step.phase = "published"; await save(state); continue; }
       await this.ensureClientParent(path.dirname(target));
       await privateDirectory(step.scratch);
-      if (step.after !== null && !exists(stage)) {
-        await writeExclusive(stage, step.after);
-        step.after = (await readImage(stage))!;
-        await save(state);
+      if (step.after !== null) {
+        const intended = step.after;
+        const staged = await readImage(stage);
+        if (staged === null) {
+          await writeExclusive(stage, intended);
+          this.hit("stage_written", agent, step.target);
+        } else if (!sameImage(staged, intended)) {
+          if (step.phase !== "planned" || staged.bytes !== intended.bytes) throw new AgentError("agent_recovery_required");
+          // A crash may precede journaling the descriptor assigned to a new stage.
+          // Verify payload/ownership and reapply intended access before adopting it.
+          await applyAccess(stage, intended);
+        }
+        const observed = await readImage(stage);
+        if (observed === null || observed.bytes !== intended.bytes
+          || (process.platform !== "win32" && observed.mode !== intended.mode)) throw new AgentError("agent_recovery_required");
+        if (!sameImage(observed, intended)) {
+          step.after = observed;
+          await save(state);
+        }
       }
       this.hit("staged", agent, step.target);
       if (position === "before" && step.before !== null) {

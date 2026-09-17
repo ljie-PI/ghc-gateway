@@ -84,6 +84,38 @@ test("Models refresh invalidates cached agent choices without rereading local co
   expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
 });
 
+for (const action of ["read", "refresh"] as const) {
+  test(`an abandoned Models ${action} cannot invalidate newer Agents choices`, async ({ page }) => {
+    await openAgents(page);
+    await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+    let release = (): void => undefined;
+    let started = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const target = action === "read" ? /\/admin\/api\/v1\/models\?/u : /\/admin\/api\/v1\/models\/refresh$/u;
+    await page.route(target, async (route) => {
+      started();
+      await held;
+      await route.fallback();
+    });
+    try {
+      await page.getByRole("button", { name: "Models", exact: true }).click();
+      if (action === "refresh") {
+        await expect(page.getByRole("table")).toBeVisible();
+        await page.getByRole("button", { name: "Refresh", exact: true }).click();
+      }
+      await entered;
+      const canceled = page.waitForEvent("requestfailed", { predicate: (request) => target.test(request.url()), timeout: 5000 });
+      await page.getByRole("button", { name: "Agents", exact: true }).click();
+      await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+      release();
+      await canceled;
+      await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+      await expect(page.getByText("Model catalog unavailable.", { exact: false })).toHaveCount(0);
+    } finally { release(); }
+  });
+}
+
 async function openAgents(page: Page) {
   const fixture = await installAdminFixture(page);
   await page.goto("/admin/#bootstrap_token=one-time-secret");
