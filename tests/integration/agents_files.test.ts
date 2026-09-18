@@ -79,7 +79,7 @@ describe("private repeatable agent configuration", () => {
     await expect(apply(h.manager, agent)).rejects.toThrow();
   }, 180_000);
 
-  it.each(["claude", "codex"] as const)("reports and safely reapplies every changed %s target", async (agent) => {
+  it.each(["claude", "codex"] as const)("reports every changed %s target and reapplies only with intact ownership", async (agent) => {
     const h = harness();
     seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
       agent === "claude" ? "{\"theme\":\"original\"}\n" : "# original\nmodel = \"old\"\n");
@@ -92,13 +92,19 @@ describe("private repeatable agent configuration", () => {
     expect(installed.paths).toEqual(expectedPaths);
 
     for (const target of expectedPaths) {
+      const managed = fs.readFileSync(target);
       fs.unlinkSync(target);
       expect(await h.status(agent)).toMatchObject({
         state: "conflict",
         backupAvailable: true,
         paths: expectedPaths,
       });
-      expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+      if (agent === "codex" && target.endsWith("config.toml")) {
+        await expect(apply(h.manager, agent)).rejects.toThrow("agent conflict");
+        fs.writeFileSync(target, managed, { mode: 0o600 });
+      } else {
+        expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+      }
 
       const replacement = target.endsWith(".json")
         ? agent === "claude" ? "{\"theme\":\"external\"}\n" : "{\"external\":true}\n"
@@ -109,7 +115,12 @@ describe("private repeatable agent configuration", () => {
         backupAvailable: true,
         paths: expectedPaths,
       });
-      expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+      if (agent === "codex" && target.endsWith("config.toml")) {
+        await expect(apply(h.manager, agent)).rejects.toThrow("agent conflict");
+        fs.writeFileSync(target, managed, { mode: 0o600 });
+      } else {
+        expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+      }
     }
   }, 300_000);
 
@@ -390,7 +401,7 @@ describe("private repeatable agent configuration", () => {
       },
     });
 
-    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({ name: "AgentError" });
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(external);
   }, 180_000);
@@ -418,11 +429,12 @@ describe("private repeatable agent configuration", () => {
       },
     });
 
-    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({ name: "AgentError" });
     expect(fs.readFileSync(backup)).toEqual(external);
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(beforeConfig);
-    expect((await manager.inspect(origin)).find((item) => item.id === "codex")!.state).toBe("recovery_required");
+    expect((await manager.inspect(origin)).find((item) => item.id === "codex")!.state)
+      .toBe(process.platform === "win32" ? "unsafe_path" : "recovery_required");
   }, 180_000);
 
   it("rejects an unchanged catalog race before publishing current config changes", async () => {
