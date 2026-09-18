@@ -10,9 +10,9 @@ import { promisify } from "node:util";
 import { threadId } from "node:worker_threads";
 
 const INSTALL_SYMBOL = Symbol.for("ghcg.issue225.windowsSecurityTrace");
-const MAX_TRACE_FILES = 64;
-const MAX_RECORDS = 1024;
-const MAX_RECORD_BYTES = 1024;
+const MAX_TRACE_FILES = 32;
+const MAX_RECORDS = 8192;
+const MAX_RECORD_BYTES = 512;
 const MAX_TRACE_FILE_BYTES = MAX_RECORDS * MAX_RECORD_BYTES;
 const MAX_TOTAL_TRACE_BYTES = MAX_TRACE_FILES * MAX_TRACE_FILE_BYTES;
 const RUN_PATTERN = /^[a-z0-9_-]{1,32}$/u;
