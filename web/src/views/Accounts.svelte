@@ -3,7 +3,9 @@
   import { ApiError, errorMessage, type AdminClient } from "../api.js";
   import type { AdminAccounts, DeviceFlow } from "../types.js";
 
-  let { client, pageNumber, onchanged }: { client: AdminClient; pageNumber: string; onchanged?: () => void } = $props();
+  let { client, pageNumber, onaccounts }: {
+    client: AdminClient; pageNumber: string; onaccounts: (accounts: AdminAccounts) => void;
+  } = $props();
   let data: AdminAccounts | null = $state(null);
   const visibleAccounts = $derived.by(() => data?.items.filter((account) => account.state !== "removed") ?? []);
   let host = $state("github.com");
@@ -23,6 +25,7 @@
   let pollAbort: AbortController | null = null;
   let pollGeneration = 0;
   let loadGeneration = 0;
+  let disposed = false;
   let nextPollAtMs = 0;
   let pollIntervalSeconds = 1;
 
@@ -44,8 +47,9 @@
         requestGeneration !== loadGeneration
         || (expectedGeneration !== undefined && expectedGeneration !== pollGeneration)
       ) return null;
+      if (disposed) return null;
       data = loaded;
-      onchanged?.();
+      onaccounts(loaded);
       return loaded;
     } catch (error: unknown) {
       if (
@@ -251,6 +255,7 @@
   }
 
   function dispose(): void {
+    disposed = true;
     const disposedFlowId = flow?.flowId;
     stopPolling();
     loadGeneration += 1;
@@ -295,31 +300,44 @@
     failure = "";
     try {
       await client.useAccount(id, data.defaultRevision);
+      if (disposed) return;
       await load();
     } catch (error: unknown) {
+      if (disposed) return;
       failure = errorMessage(error);
       await load(true);
     } finally {
-      busy = "";
+      if (!disposed) busy = "";
     }
   }
 
   async function remove(id: string, revision: number): Promise<void> {
     if (!confirm("Remove this account's credentials and live caches?")) return;
+    if (data === null) return;
     busy = id;
     failure = "";
     try {
       const removed = await client.removeAccount(id, revision);
-      if (data) {
-        data = { ...data, items: data.items.map((account) => account.accountId === id ? removed : account) };
+      if (disposed) return;
+      if (data !== null) {
+        data = {
+          ...data,
+          items: data.items.map((account) => account.accountId === id
+            && account.revision === revision
+            && removed.accountId === id
+            && removed.revision > account.revision
+            ? removed
+            : account),
+        };
       }
       message = "Account removed.";
       await load();
     } catch (error: unknown) {
+      if (disposed) return;
       failure = errorMessage(error);
       await load(true);
     } finally {
-      busy = "";
+      if (!disposed) busy = "";
     }
   }
 </script>
