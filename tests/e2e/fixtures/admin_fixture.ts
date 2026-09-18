@@ -56,6 +56,7 @@ export interface AdminFixture {
     agents: Record<"claude" | "codex", AgentStatus>;
     agentsCatalogRevision: string | null;
     agentsApplyConflict: boolean;
+    agentsApplyResult: AgentStatus["state"] | null;
     agentsDelayMs: number;
     failAgents: boolean;
     cancelCompletesDeviceFlow: boolean;
@@ -145,6 +146,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       agents: { claude: agentStatus("claude", 1), codex: agentStatus("codex", 7) },
       agentsCatalogRevision: "c".repeat(64),
       agentsApplyConflict: false,
+      agentsApplyResult: null,
       agentsDelayMs: 0,
       failAgents: false,
       cancelCompletesDeviceFlow: false,
@@ -341,7 +343,7 @@ async function handle(
     if (body.expectedRevision !== current.revision) return failure(route, 409, "revision_conflict");
     const next: AgentStatus = {
       ...current,
-      state: "installed",
+      state: fixture.state.agentsApplyResult ?? "installed",
       revision: nextAgentRevision(current.revision),
       backupAvailable: true,
       lastAppliedAt: NOW,

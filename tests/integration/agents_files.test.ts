@@ -33,6 +33,102 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it.each([
+    ["claude", "missing", "conflict"],
+    ["claude", "replaced", "conflict"],
+    ["claude", "unsafe", "unsafe_path"],
+    ["codex", "missing", "conflict"],
+    ["codex", "replaced", "conflict"],
+    ["codex", "unsafe", "unsafe_path"],
+  ] as const)("reports a %s %s first-original sidecar as unavailable", async (agent, change, expectedState) => {
+    const h = harness();
+    const file = seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+      agent === "claude" ? "{\"theme\":\"original\"}\n" : "# original\nmodel = \"old\"\n");
+    await apply(h.manager, agent);
+    const backup = `${file}.ghcg.bak`;
+    if (change === "missing") fs.unlinkSync(backup);
+    else if (change === "replaced") fs.writeFileSync(backup, "unrelated backup");
+    else {
+      fs.unlinkSync(backup);
+      fs.mkdirSync(backup);
+    }
+
+    const status = await h.status(agent);
+    expect(status).toMatchObject({
+      state: expectedState,
+      backupAvailable: false,
+      paths: agent === "claude"
+        ? [process.platform === "win32" ? file.toLowerCase() : file]
+        : [
+          path.join(path.dirname(file), "ghcg_models.json"),
+          file,
+        ].map((target) => process.platform === "win32" ? target.toLowerCase() : target),
+    });
+    await expect(apply(h.manager, agent)).rejects.toThrow();
+  }, 180_000);
+
+  it.each(["claude", "codex"] as const)("reports and safely reapplies every changed %s target", async (agent) => {
+    const h = harness();
+    seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+      agent === "claude" ? "{\"theme\":\"original\"}\n" : "# original\nmodel = \"old\"\n");
+    await apply(h.manager, agent);
+    const installed = await h.status(agent);
+    const expectedPaths = (agent === "claude"
+      ? [path.join(h.home, ".claude", "settings.json")]
+      : [path.join(h.home, ".codex", "ghcg_models.json"), path.join(h.home, ".codex", "config.toml")])
+      .map((target) => process.platform === "win32" ? target.toLowerCase() : target);
+    expect(installed.paths).toEqual(expectedPaths);
+
+    for (const target of expectedPaths) {
+      fs.unlinkSync(target);
+      expect(await h.status(agent)).toMatchObject({
+        state: "conflict",
+        backupAvailable: true,
+        paths: expectedPaths,
+      });
+      expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+
+      const replacement = target.endsWith(".json")
+        ? agent === "claude" ? "{\"theme\":\"external\"}\n" : "{\"external\":true}\n"
+        : "# external\nmodel = \"external\"\n";
+      fs.writeFileSync(target, replacement);
+      expect(await h.status(agent)).toMatchObject({
+        state: "conflict",
+        backupAvailable: true,
+        paths: expectedPaths,
+      });
+      expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+    }
+  }, 300_000);
+
+  it.each(["claude", "codex"] as const)("reports every unsafe %s target without hiding its live backup", async (agent) => {
+    const h = harness();
+    seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+      agent === "claude" ? "{}\n" : "model = \"old\"\n");
+    await apply(h.manager, agent);
+    const installed = await h.status(agent);
+    const expectedPaths = (agent === "claude"
+      ? [path.join(h.home, ".claude", "settings.json")]
+      : [path.join(h.home, ".codex", "ghcg_models.json"), path.join(h.home, ".codex", "config.toml")])
+      .map((target) => process.platform === "win32" ? target.toLowerCase() : target);
+    expect(installed.paths).toEqual(expectedPaths);
+
+    for (const target of expectedPaths) {
+      const current = fs.readFileSync(target);
+      fs.unlinkSync(target);
+      fs.mkdirSync(target);
+      expect(await h.status(agent)).toMatchObject({
+        state: "unsafe_path",
+        backupAvailable: true,
+        paths: expectedPaths,
+      });
+      await expect(apply(h.manager, agent)).rejects.toThrow("agent unsafe path");
+      fs.rmdirSync(target);
+      fs.writeFileSync(target, current, { mode: 0o600 });
+      await apply(h.manager, agent);
+    }
+  }, 300_000);
+
   it.each(["missing", "replaced"] as const)("reports %s live configuration without disabling a fresh Apply", async (change) => {
     const h = harness();
     const file = seed(h.home, ".claude/settings.json", "{}\n");
@@ -234,7 +330,10 @@ describe("private repeatable agent configuration", () => {
     });
     await expect(apply(crashed, "codex")).rejects.toThrow();
     const restarted = new FileAgentsManager({ home: homes.at(-1)! });
-    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")!.state).toBe("recovery_required");
+    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")).toMatchObject({
+      state: "recovery_required",
+      backupAvailable: !(new Set<string>(["intent", "stage_written", "staged"]).has(point)),
+    });
     expect((await apply(restarted, "codex")).state).toBe("installed");
     expect(fs.readFileSync(`${file}.ghcg.bak`)).toEqual(original);
     expect(fs.readFileSync(file, "utf8")).toContain("model = \"model-a\"");

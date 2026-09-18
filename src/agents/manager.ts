@@ -166,9 +166,11 @@ export class FileAgentsManager implements AgentsManager {
     let paths = this.paths[agent];
     let revision = "0".repeat(64);
     let kind: AgentStatus["state"] = "not_managed";
+    let backupAvailable = false;
     try {
       state = await new AgentStore(this.root, agent).read();
       paths = this.targetPaths(agent, state);
+      backupAvailable = await this.liveBackupAvailable(state, paths);
       const images = await this.images(paths, state);
       revision = this.revision(state, images, paths, origin);
       kind = state.targets.length === 0 ? "not_managed" : state.pending !== null ? "recovery_required" : "installed";
@@ -179,18 +181,30 @@ export class FileAgentsManager implements AgentsManager {
           this.requireExpected(state, images);
         }
       }
-      catch { kind = state.pending !== null ? "recovery_required" : "conflict"; }
+      catch (error: unknown) {
+        kind = error instanceof AgentError && error.code === "agent_unsafe_path"
+          ? "unsafe_path"
+          : state.pending !== null ? "recovery_required" : "conflict";
+      }
     } catch (error: unknown) {
       kind = error instanceof AgentError && error.code === "agent_unsafe_path" ? "unsafe_path" : "recovery_required";
     }
     return {
       id: agent, state: kind, revision, paths: state?.version === 2 && state.targets.length > 0 ? paths.slice(1) : paths,
       endpoint: agent === "claude" ? origin : `${origin}/v1`,
-      backupAvailable: state?.version === 2 ? state.targets[0]?.expected !== null && state.targets[0]?.expected !== undefined
-        : (state?.targets.length ?? 0) > 0,
+      backupAvailable,
       lastAppliedAt: state?.lastAppliedAt ?? null,
       mappings: state?.version === 1 && agent === "claude" ? state.mappings.slice(0, 3) : state?.mappings ?? [],
     };
+  }
+
+  private async liveBackupAvailable(state: AgentState, paths: readonly string[]): Promise<boolean> {
+    if (state.version !== 2 || state.targets.length === 0) return false;
+    const step = state.pending?.steps.find((candidate) => candidate.target === 0);
+    const image = await readImage(paths[0]!, step === undefined ? undefined : path.join(step.scratch, "next"));
+    if (image === null) return false;
+    await assertPrivate(paths[0]!, false);
+    return sameImage(image, step?.after ?? state.targets[0]!.expected);
   }
 
   private targetPaths(agent: AgentId, state: AgentState): readonly string[] {
