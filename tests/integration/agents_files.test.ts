@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "../../src/agents/types.js";
@@ -12,6 +12,7 @@ import { projectAgent } from "../../src/agents/transform.js";
 
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
+let windowsAclWarmup: Promise<void> | undefined;
 const effective = <T>(value: T) => ({ value, source: "live" as const, conflict: false, liveState: "value" as const });
 const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((modelId) => ({
   modelId,
@@ -44,9 +45,25 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 }
 async function stableSeed(home: string, target: string, bytes: Buffer | string): Promise<string> {
   const file = seed(home, target, bytes);
-  await protect(file);
+  protect(file);
+  if (await readImage(file) === null) throw new Error("stable Agent test seed is unavailable");
   return file;
 }
+async function warmWindowsAgentAcl(): Promise<void> {
+  if (process.platform !== "win32") return;
+  windowsAclWarmup ??= Promise.resolve().then(() => {
+    const executable = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    try {
+      execFileSync(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1\"; Get-Acl -LiteralPath $PSHOME | Out-Null",
+      ], { windowsHide: true, timeout: 60_000, stdio: "ignore" });
+    } catch {
+      throw new Error("Windows Agent ACL test warm-up failed");
+    }
+  });
+  await windowsAclWarmup;
+}
+beforeAll(warmWindowsAgentAcl, 90_000);
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
