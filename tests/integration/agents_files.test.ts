@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import type { AgentId, AgentMapping } from "../../src/agents/types.js";
 import { AgentStore } from "../../src/agents/store.js";
@@ -49,7 +50,7 @@ describe("private repeatable agent configuration", () => {
     const configPath = seed(h.home, ".codex/config.toml", original);
     const originalImage = (await readImage(configPath))!;
     const catalogPath = path.join(h.home, ".codex", "ghcg-models.json");
-    const projection = projectAgent("codex", original, mappings, origin, catalogPath, models);
+    const projection = projectAgent("codex", original, mappings, origin, catalogPath, models, null);
     fs.writeFileSync(configPath, projection.config);
     seed(h.home, ".codex/ghcg-models.json", projection.catalog!);
     const current = [(await readImage(catalogPath))!, (await readImage(configPath))!];
@@ -165,6 +166,82 @@ describe("private repeatable agent configuration", () => {
     expect(value.models.map((row: { slug: string }) => row.slug)).toEqual([...models].reverse().map((row) => row.modelId));
     expect(fs.readdirSync(path.join(h.home, ".codex")).sort()).toEqual(["auth.json", "config.toml", "ghcg_models.json"]);
     expect(fs.readFileSync(auth, "utf8")).toBe("login-secret");
+  }, 300_000);
+
+  it("rejects an unmanaged reserved Codex provider before creating intent or files", async () => {
+    const h = harness();
+    const original = Buffer.from("model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\nwire_api = \"responses\"\n[model_providers.other]\nname = \"Other\"\n[mcp_servers.local]\ncommand = \"node\"\n");
+    const config = seed(h.home, ".codex/config.toml", original);
+    const catalog = seed(h.home, ".codex/ghcg_models.json", "external catalog\n");
+    const auth = seed(h.home, ".codex/auth.json", "login-secret\n");
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(config)).toEqual(original);
+    expect(fs.readFileSync(catalog, "utf8")).toBe("external catalog\n");
+    expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
+    expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
+    expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents"))).toBe(false);
+  }, 180_000);
+
+  it("does not treat stale durable Codex state as provider ownership", async () => {
+    const h = harness();
+    const baseline = Buffer.from("model = \"old\"\n");
+    const config = seed(h.home, ".codex/config.toml", baseline);
+    const baselineImage = (await readImage(config))!;
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const store = new AgentStore(path.join(h.home, ".ghc-gateway-agents"), "codex");
+    await store.locked(async (save) => save({
+      version: 2, revision: 1, mappings, lastAppliedAt: null, pending: null,
+      targets: [
+        { path: `${config}.ghcg.bak`, original: null, expected: null },
+        { path: catalog, original: null, expected: null },
+        { path: config, original: baselineImage, expected: baselineImage },
+      ],
+    }));
+    const external = Buffer.from("model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\n");
+    fs.writeFileSync(config, external);
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(config)).toEqual(external);
+    expect(fs.existsSync(catalog)).toBe(false);
+    expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
+  }, 180_000);
+
+  it("updates a Gateway-owned Codex provider from durable state and preserves unrelated settings", async () => {
+    const h = harness();
+    const file = seed(h.home, ".codex/config.toml", "[model_providers.other]\nname = \"Other\"\n[mcp_servers.local]\ncommand = \"node\"\n[hooks.Stop]\ncommand = \"notify\"\n");
+    const auth = seed(h.home, ".codex/auth.json", "login-secret\n");
+    await apply(h.manager, "codex");
+    const nextOrigin = "http://127.0.0.1:32568";
+    const current = (await h.manager.inspect(nextOrigin)).find((item) => item.id === "codex")!;
+    await h.manager.apply({
+      agent: "codex", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings: [...mappings].reverse(),
+    }, nextOrigin, models, () => undefined, new AbortController().signal);
+    expect(parse(fs.readFileSync(file, "utf8"))).toMatchObject({
+      model: "model-c",
+      model_providers: {
+        ghc_gateway: { base_url: `${nextOrigin}/v1` },
+        other: { name: "Other" },
+      },
+      mcp_servers: { local: { command: "node" } },
+      hooks: { Stop: { command: "notify" } },
+    });
+    expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
+  }, 300_000);
+
+  it("rejects an external provider change after Codex management begins", async () => {
+    const h = harness();
+    const config = seed(h.home, ".codex/config.toml", "[mcp_servers.local]\ncommand = \"node\"\n");
+    await apply(h.manager, "codex");
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const backup = `${config}.ghcg.bak`;
+    const catalogBefore = fs.readFileSync(catalog);
+    const backupBefore = fs.readFileSync(backup);
+    const external = Buffer.from(fs.readFileSync(config, "utf8").replace(`${origin}/v1`, "https://external.example/v1"));
+    fs.writeFileSync(config, external);
+    await expect(apply(h.manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(config)).toEqual(external);
+    expect(fs.readFileSync(catalog)).toEqual(catalogBefore);
+    expect(fs.readFileSync(backup)).toEqual(backupBefore);
+    expect(parse(fs.readFileSync(config, "utf8")).mcp_servers).toEqual({ local: { command: "node" } });
   }, 300_000);
 
   it("preserves outside unrelated edits when a refreshed Apply patches owned fields", async () => {
