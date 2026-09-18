@@ -7,7 +7,7 @@ import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
 import { AgentStore } from "../../src/agents/store.js";
-import { readImage } from "../../src/agents/files.js";
+import { applyAccess, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 
 const homes: string[] = [];
@@ -42,6 +42,12 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
   fs.writeFileSync(file, bytes, { mode: 0o600 });
   return file;
 }
+async function stableSeed(home: string, target: string, bytes: Buffer | string): Promise<string> {
+  const file = seed(home, target, bytes);
+  // Materialize the captured access metadata before inspect hashes the image.
+  await applyAccess(file, (await readImage(file))!);
+  return file;
+}
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
@@ -54,9 +60,13 @@ describe("private repeatable agent configuration", () => {
     ["codex", "unsafe", "unsafe_path"],
   ] as const)("reports a %s %s first-original sidecar as unavailable", async (agent, change, expectedState) => {
     const h = harness();
-    const file = seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+    const file = await stableSeed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
       agent === "claude" ? "{\"theme\":\"original\"}\n" : "# original\nmodel = \"old\"\n");
-    await apply(h.manager, agent);
+    const seeded = await h.status(agent);
+    expect((await h.status(agent)).revision).toBe(seeded.revision);
+    await h.manager.apply({
+      agent, expectedRevision: seeded.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
     const backup = `${file}.ghcg.bak`;
     if (change === "missing") fs.unlinkSync(backup);
     else if (change === "replaced") fs.writeFileSync(backup, "unrelated backup");
