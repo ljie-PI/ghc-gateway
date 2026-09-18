@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, unlinkSync, writeSync } from "node:fs";
-import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, readdir, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, readdir, rename, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -146,13 +146,15 @@ describe("daemon operation lease", () => {
     const directory = await initializedDirectory();
     const databasePath = path.join(directory, "daemon.operation.db");
     const tempPath = path.join(directory, initializationTempName(9999));
+    const replacementPath = path.join(directory, "replacement.db");
     await copyFile(databasePath, tempPath);
+    await copyFile(databasePath, replacementPath);
     await expect(operationLease({
       processIdentity: async () => null,
       onDatabaseInitTempPhase: async (phase) => {
         if (phase !== "before_unlink") return;
         await unlink(tempPath);
-        await copyFile(databasePath, tempPath);
+        await rename(replacementPath, tempPath);
       },
     }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
 
@@ -163,13 +165,15 @@ describe("daemon operation lease", () => {
     const directory = await initializedDirectory();
     const databasePath = path.join(directory, "daemon.operation.db");
     const tempPath = path.join(directory, initializationTempName(9999));
+    const replacementPath = path.join(directory, "replacement.db");
     await writeFile(tempPath, "in progress", { mode: 0o600 });
+    await copyFile(databasePath, replacementPath);
     await expect(operationLease({
       processIdentity: async () => START_IDENTITY,
       onDatabaseInitTempPhase: async (phase) => {
         if (phase !== "initializer_checked") return;
         await unlink(tempPath);
-        await copyFile(databasePath, tempPath);
+        await rename(replacementPath, tempPath);
       },
     }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
 
