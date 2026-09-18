@@ -7,7 +7,7 @@ import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
 import { AgentStore } from "../../src/agents/store.js";
-import { readImage } from "../../src/agents/files.js";
+import { protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 
 const homes: string[] = [];
@@ -42,9 +42,125 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
   fs.writeFileSync(file, bytes, { mode: 0o600 });
   return file;
 }
+async function stableSeed(home: string, target: string, bytes: Buffer | string): Promise<string> {
+  const file = seed(home, target, bytes);
+  await protect(file);
+  return file;
+}
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it.each([
+    ["claude", "missing", "conflict"],
+    ["claude", "replaced", "conflict"],
+    ["claude", "unsafe", "unsafe_path"],
+    ["codex", "missing", "conflict"],
+    ["codex", "replaced", "conflict"],
+    ["codex", "unsafe", "unsafe_path"],
+  ] as const)("reports a %s %s first-original sidecar as unavailable", async (agent, change, expectedState) => {
+    const h = harness();
+    const file = await stableSeed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+      agent === "claude" ? "{\"theme\":\"original\"}\n" : "# original\nmodel = \"old\"\n");
+    const seeded = await h.status(agent);
+    expect((await h.status(agent)).revision).toBe(seeded.revision);
+    await h.manager.apply({
+      agent, expectedRevision: seeded.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+    const backup = `${file}.ghcg.bak`;
+    if (change === "missing") fs.unlinkSync(backup);
+    else if (change === "replaced") fs.writeFileSync(backup, "unrelated backup");
+    else {
+      fs.unlinkSync(backup);
+      fs.mkdirSync(backup);
+    }
+
+    const status = await h.status(agent);
+    expect(status).toMatchObject({
+      state: expectedState,
+      backupAvailable: false,
+      paths: agent === "claude"
+        ? [process.platform === "win32" ? file.toLowerCase() : file]
+        : [
+          path.join(path.dirname(file), "ghcg_models.json"),
+          file,
+        ].map((target) => process.platform === "win32" ? target.toLowerCase() : target),
+    });
+    await expect(apply(h.manager, agent)).rejects.toThrow();
+  }, 180_000);
+
+  it.each(["claude", "codex"] as const)("reports every changed %s target and reapplies only with intact ownership", async (agent) => {
+    const h = harness();
+    seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+      agent === "claude" ? "{\"theme\":\"original\"}\n" : "# original\nmodel = \"old\"\n");
+    await apply(h.manager, agent);
+    const installed = await h.status(agent);
+    const expectedPaths = (agent === "claude"
+      ? [path.join(h.home, ".claude", "settings.json")]
+      : [path.join(h.home, ".codex", "ghcg_models.json"), path.join(h.home, ".codex", "config.toml")])
+      .map((target) => process.platform === "win32" ? target.toLowerCase() : target);
+    expect(installed.paths).toEqual(expectedPaths);
+
+    for (const target of expectedPaths) {
+      const managed = fs.readFileSync(target);
+      fs.unlinkSync(target);
+      expect(await h.status(agent)).toMatchObject({
+        state: "conflict",
+        backupAvailable: true,
+        paths: expectedPaths,
+      });
+      if (agent === "codex" && target.endsWith("config.toml")) {
+        await expect(apply(h.manager, agent)).rejects.toThrow("agent conflict");
+        fs.writeFileSync(target, managed, { mode: 0o600 });
+      } else {
+        expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+      }
+
+      const replacement = target.endsWith(".json")
+        ? agent === "claude" ? "{\"theme\":\"external\"}\n" : "{\"external\":true}\n"
+        : "# external\nmodel = \"external\"\n";
+      fs.writeFileSync(target, replacement);
+      expect(await h.status(agent)).toMatchObject({
+        state: "conflict",
+        backupAvailable: true,
+        paths: expectedPaths,
+      });
+      if (agent === "codex" && target.endsWith("config.toml")) {
+        await expect(apply(h.manager, agent)).rejects.toThrow("agent conflict");
+        fs.writeFileSync(target, managed, { mode: 0o600 });
+      } else {
+        expect(await apply(h.manager, agent)).toMatchObject({ state: "installed", backupAvailable: true });
+      }
+    }
+  }, 300_000);
+
+  it.each(["claude", "codex"] as const)("reports every unsafe %s target without hiding its live backup", async (agent) => {
+    const h = harness();
+    seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+      agent === "claude" ? "{}\n" : "model = \"old\"\n");
+    await apply(h.manager, agent);
+    const installed = await h.status(agent);
+    const expectedPaths = (agent === "claude"
+      ? [path.join(h.home, ".claude", "settings.json")]
+      : [path.join(h.home, ".codex", "ghcg_models.json"), path.join(h.home, ".codex", "config.toml")])
+      .map((target) => process.platform === "win32" ? target.toLowerCase() : target);
+    expect(installed.paths).toEqual(expectedPaths);
+
+    for (const target of expectedPaths) {
+      const current = fs.readFileSync(target);
+      fs.unlinkSync(target);
+      fs.mkdirSync(target);
+      expect(await h.status(agent)).toMatchObject({
+        state: "unsafe_path",
+        backupAvailable: true,
+        paths: expectedPaths,
+      });
+      await expect(apply(h.manager, agent)).rejects.toThrow("agent unsafe path");
+      fs.rmdirSync(target);
+      fs.writeFileSync(target, current, { mode: 0o600 });
+      await apply(h.manager, agent);
+    }
+  }, 300_000);
+
   it.each(["missing", "replaced"] as const)("reports %s live configuration without disabling a fresh Apply", async (change) => {
     const h = harness();
     const file = seed(h.home, ".claude/settings.json", "{}\n");
@@ -294,7 +410,10 @@ describe("private repeatable agent configuration", () => {
       },
     });
 
-    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
+      name: "AgentError",
+      code: "agent_conflict",
+    });
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(external);
   }, 180_000);
@@ -315,18 +434,22 @@ describe("private repeatable agent configuration", () => {
         execFileSync(process.execPath, [
           "--input-type=commonjs",
           "-e",
-          "require('node:fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64'))",
+          "require('node:fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64'), { mode: 0o600 })",
           backup,
           external.toString("base64"),
         ]);
       },
     });
 
-    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
+      name: "AgentError",
+      code: process.platform === "win32" ? "agent_unsafe_path" : "agent_conflict",
+    });
     expect(fs.readFileSync(backup)).toEqual(external);
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(beforeConfig);
-    expect((await manager.inspect(origin)).find((item) => item.id === "codex")!.state).toBe("recovery_required");
+    expect((await manager.inspect(origin)).find((item) => item.id === "codex")!.state)
+      .toBe(process.platform === "win32" ? "unsafe_path" : "recovery_required");
   }, 180_000);
 
   it("rejects an unchanged catalog race before publishing current config changes", async () => {
@@ -411,12 +534,65 @@ describe("private repeatable agent configuration", () => {
     });
     await expect(apply(crashed, "codex")).rejects.toThrow();
     const restarted = new FileAgentsManager({ home: homes.at(-1)! });
-    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")!.state).toBe("recovery_required");
+    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")).toMatchObject({
+      state: "recovery_required",
+      backupAvailable: !(new Set<string>(["intent", "stage_written", "staged"]).has(point)),
+    });
     expect((await apply(restarted, "codex")).state).toBe("installed");
     expect(fs.readFileSync(`${file}.ghcg.bak`)).toEqual(original);
     expect(fs.readFileSync(file, "utf8")).toContain("model = \"model-a\"");
     expect(fs.readdirSync(path.join(homes.at(-1)!, ".codex")).sort()).toEqual(["config.toml", "config.toml.ghcg.bak", "ghcg_models.json"]);
   }, 300_000);
+
+  for (const agent of ["claude", "codex"] as const) {
+    it(`retains truthful ${agent} client paths when the managed directory becomes a reparse point`, async () => {
+      const h = harness();
+      const directory = path.join(h.home, agent === "claude" ? ".claude" : ".codex");
+      seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+        agent === "claude" ? "{}\n" : "model = \"old\"\n");
+      await apply(h.manager, agent);
+      const expectedPaths = agent === "claude"
+        ? [path.join(directory, "settings.json")]
+        : [path.join(directory, "ghcg_models.json"), path.join(directory, "config.toml")];
+      const displaced = `${directory}-displaced`;
+      const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-elsewhere-"));
+      homes.push(elsewhere);
+      fs.renameSync(directory, displaced);
+      fs.symlinkSync(elsewhere, directory, process.platform === "win32" ? "junction" : "dir");
+
+      expect(await h.status(agent)).toMatchObject({
+        state: "unsafe_path",
+        backupAvailable: false,
+        paths: expectedPaths.map((target) => process.platform === "win32" ? target.toLowerCase() : target),
+      });
+      await expect(apply(h.manager, agent)).rejects.toThrow("agent unsafe path");
+    }, 180_000);
+
+    it.skipIf(process.platform === "win32")(`retains truthful ${agent} client paths when each managed target becomes a symlink`, async () => {
+      const h = harness();
+      seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+        agent === "claude" ? "{}\n" : "model = \"old\"\n");
+      await apply(h.manager, agent);
+      const expectedPaths = agent === "claude"
+        ? [path.join(h.home, ".claude", "settings.json")]
+        : [path.join(h.home, ".codex", "ghcg_models.json"), path.join(h.home, ".codex", "config.toml")];
+      const elsewhere = seed(h.home, `${agent}-replacement`, "untrusted replacement");
+      for (const target of expectedPaths) {
+        const current = fs.readFileSync(target);
+        fs.unlinkSync(target);
+        fs.symlinkSync(elsewhere, target, "file");
+
+        expect(await h.status(agent)).toMatchObject({
+          state: "unsafe_path",
+          backupAvailable: true,
+          paths: expectedPaths,
+        });
+        await expect(apply(h.manager, agent)).rejects.toThrow("agent unsafe path");
+        fs.unlinkSync(target);
+        fs.writeFileSync(target, current, { mode: 0o600 });
+      }
+    }, 180_000);
+  }
 
   it("rejects symlinked configuration directories without writing", async () => {
     const h = harness();

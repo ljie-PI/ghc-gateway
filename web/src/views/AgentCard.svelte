@@ -21,8 +21,14 @@
 
   $effect(() => {
     if (loadedRevision !== status.revision) {
+      if (loadedRevision !== "") {
+        failure = "";
+        notice = "";
+      }
       if (loadedRevision === "" || !dirty) resetDrafts();
       loadedRevision = status.revision;
+    } else if (status.state !== "installed") {
+      notice = "";
     }
   });
   function resetDrafts(): void {
@@ -70,7 +76,16 @@
       resetDrafts();
       loadedRevision = next.revision;
       onchanged(next);
-      notice = "Configuration installed. Restart the client; inference has not been tested.";
+      if (next.state === "installed") {
+        notice = "Configuration installed. Restart the client; inference has not been tested.";
+      } else {
+        failure = {
+          not_managed: "Configuration was not installed.",
+          conflict: "Configuration was not installed because external changes were detected.",
+          recovery_required: "Configuration was not installed because recovery is required.",
+          unsafe_path: "Configuration was not installed because a path is unsupported or unsafe.",
+        }[next.state];
+      }
     } catch (error: unknown) {
       failure = errorMessage(error);
     } finally { busy = false; }
