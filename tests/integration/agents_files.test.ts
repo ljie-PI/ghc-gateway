@@ -340,6 +340,56 @@ describe("private repeatable agent configuration", () => {
     expect(fs.readdirSync(path.join(homes.at(-1)!, ".codex")).sort()).toEqual(["config.toml", "config.toml.ghcg.bak", "ghcg_models.json"]);
   }, 300_000);
 
+  for (const agent of ["claude", "codex"] as const) {
+    it(`retains truthful ${agent} client paths when the managed directory becomes a reparse point`, async () => {
+      const h = harness();
+      const directory = path.join(h.home, agent === "claude" ? ".claude" : ".codex");
+      seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+        agent === "claude" ? "{}\n" : "model = \"old\"\n");
+      await apply(h.manager, agent);
+      const expectedPaths = agent === "claude"
+        ? [path.join(directory, "settings.json")]
+        : [path.join(directory, "ghcg_models.json"), path.join(directory, "config.toml")];
+      const displaced = `${directory}-displaced`;
+      const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-elsewhere-"));
+      homes.push(elsewhere);
+      fs.renameSync(directory, displaced);
+      fs.symlinkSync(elsewhere, directory, process.platform === "win32" ? "junction" : "dir");
+
+      expect(await h.status(agent)).toMatchObject({
+        state: "unsafe_path",
+        backupAvailable: false,
+        paths: expectedPaths.map((target) => process.platform === "win32" ? target.toLowerCase() : target),
+      });
+      await expect(apply(h.manager, agent)).rejects.toThrow("agent unsafe path");
+    }, 180_000);
+
+    it.skipIf(process.platform === "win32")(`retains truthful ${agent} client paths when each managed target becomes a symlink`, async () => {
+      const h = harness();
+      seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
+        agent === "claude" ? "{}\n" : "model = \"old\"\n");
+      await apply(h.manager, agent);
+      const expectedPaths = agent === "claude"
+        ? [path.join(h.home, ".claude", "settings.json")]
+        : [path.join(h.home, ".codex", "ghcg_models.json"), path.join(h.home, ".codex", "config.toml")];
+      const elsewhere = seed(h.home, `${agent}-replacement`, "untrusted replacement");
+      for (const target of expectedPaths) {
+        const current = fs.readFileSync(target);
+        fs.unlinkSync(target);
+        fs.symlinkSync(elsewhere, target, "file");
+
+        expect(await h.status(agent)).toMatchObject({
+          state: "unsafe_path",
+          backupAvailable: true,
+          paths: expectedPaths,
+        });
+        await expect(apply(h.manager, agent)).rejects.toThrow("agent unsafe path");
+        fs.unlinkSync(target);
+        fs.writeFileSync(target, current, { mode: 0o600 });
+      }
+    }, 180_000);
+  }
+
   it("rejects symlinked configuration directories without writing", async () => {
     const h = harness();
     const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-elsewhere-"));

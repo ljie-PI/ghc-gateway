@@ -167,19 +167,28 @@ export class FileAgentsManager implements AgentsManager {
     let revision = "0".repeat(64);
     let kind: AgentStatus["state"] = "not_managed";
     let backupAvailable = false;
+    const images: (FileImage | null)[] = [];
     try {
       state = await new AgentStore(this.root, agent).read();
-      paths = this.targetPaths(agent, state);
-      backupAvailable = await this.liveBackupAvailable(state, paths);
-      const images = await this.images(paths, state);
+      paths = this.fallbackTargetPaths(agent, state);
+      const validatedPaths: string[] = [];
+      try {
+        for (const [index, target] of paths.entries()) {
+          const validated = canonical(target);
+          validatedPaths.push(validated);
+          images.push(await this.image(validated, index, state));
+        }
+      } catch (error: unknown) {
+        backupAvailable = this.backupAvailable(state, images);
+        throw error;
+      }
+      paths = validatedPaths;
       revision = this.revision(state, images, paths, origin);
+      backupAvailable = this.backupAvailable(state, images);
       kind = state.targets.length === 0 ? "not_managed" : state.pending !== null ? "recovery_required" : "installed";
       try {
         if (state.pending !== null) await this.requireRecoverable(state, images);
-        else {
-          await this.requireBackup(state, images);
-          this.requireExpected(state, images);
-        }
+        else this.requireExpected(state, images);
       }
       catch (error: unknown) {
         kind = error instanceof AgentError && error.code === "agent_unsafe_path"
@@ -198,30 +207,37 @@ export class FileAgentsManager implements AgentsManager {
     };
   }
 
-  private async liveBackupAvailable(state: AgentState, paths: readonly string[]): Promise<boolean> {
+  private backupAvailable(state: AgentState, images: readonly (FileImage | null)[]): boolean {
     if (state.version !== 2 || state.targets.length === 0) return false;
     const step = state.pending?.steps.find((candidate) => candidate.target === 0);
-    const image = await readImage(paths[0]!, step === undefined ? undefined : path.join(step.scratch, "next"));
-    if (image === null) return false;
-    await assertPrivate(paths[0]!, false);
+    const image = images[0];
+    if (image === undefined || image === null) return false;
     return sameImage(image, step?.after ?? state.targets[0]!.expected);
   }
 
+  private fallbackTargetPaths(agent: AgentId, state: AgentState): readonly string[] {
+    const targets = state.targets.length === 0 ? this.paths[agent] : state.targets.map((target) => target.path);
+    return targets.map((target) => process.platform === "win32" ? path.resolve(target).toLowerCase() : path.resolve(target));
+  }
   private targetPaths(agent: AgentId, state: AgentState): readonly string[] {
     return state.targets.length === 0 ? this.paths[agent].map(canonical) : state.targets.map((target) => canonical(target.path));
   }
-  private async images(paths: readonly string[], state?: AgentState): Promise<(FileImage | null)[]> {
-    // Client files usually share a parent directory; verify each distinct one once.
-    const parents = new Set(paths.map((target) => {
-      let parent = path.dirname(target);
-      while (!exists(parent)) parent = path.dirname(parent);
-      return parent;
-    }));
-    for (const parent of parents) await assertOwned(parent, true);
-    return await Promise.all(paths.map(async (target, index) => {
-      const stage = state?.pending?.steps.find((step) => step.target === index);
-      return await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"));
-    }));
+  private async images(paths: readonly string[], state?: AgentState, images: (FileImage | null)[] = []): Promise<(FileImage | null)[]> {
+    for (const [index, target] of paths.entries()) {
+      images.push(await this.image(target, index, state));
+    }
+    return images;
+  }
+  private async image(target: string, index: number, state?: AgentState): Promise<FileImage | null> {
+    let parent = path.dirname(target);
+    while (!exists(parent)) parent = path.dirname(parent);
+    await assertOwned(parent, true);
+    const stage = state?.pending?.steps.find((step) => step.target === index);
+    const image = await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"));
+    if (state?.version === 2 && state.targets.length > 0 && index === 0 && image !== null) {
+      await assertPrivate(target, false);
+    }
+    return image;
   }
   private revision(state: AgentState, images: readonly (FileImage | null)[], paths: readonly string[], origin: string): string {
     return digest({ state, images, paths, origin });
