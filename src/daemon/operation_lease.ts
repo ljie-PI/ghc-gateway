@@ -4,12 +4,13 @@ import {
   constants,
   fsyncSync,
   linkSync,
+  lstatSync,
   openSync,
   readdirSync,
   renameSync,
   unlinkSync,
   writeSync,
-  type Stats,
+  type BigIntStats,
 } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -57,6 +58,7 @@ export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
     length: number,
     position: number | null,
   ) => number;
+  readonly unlink?: (path: string) => void;
   readonly processStartIdentity?: (context?: Readonly<ProcessIdentityContext>) => Promise<string | null>;
   readonly processIdentity?: (
     pid: number,
@@ -66,6 +68,11 @@ export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
   readonly delay?: (ms: number, signal?: AbortSignal) => Promise<void>;
   readonly onInitializationPhase?: (
     phase: "database_prepared" | "database_published",
+  ) => void | Promise<void>;
+  readonly onDatabaseInitTempsEnumerated?: (paths: readonly string[]) => void | Promise<void>;
+  readonly onDatabaseInitTempPhase?: (
+    phase: "initializer_checked" | "before_validation" | "before_unlink",
+    path: string,
   ) => void | Promise<void>;
   readonly onPhase?: (phase: "os_locked" | "held_published" | "released_published" | "database_closing") => void;
 }
@@ -89,9 +96,12 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
   ) => Promise<string | null>;
   private readonly createToken: () => string;
   private readonly write: NonNullable<DaemonOperationLeaseFileOptions["write"]>;
+  private readonly unlink: NonNullable<DaemonOperationLeaseFileOptions["unlink"]>;
   private readonly delay: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly protectedOptions: ProtectedFileOptions;
-  private readonly onInitializationPhase: NonNullable<DaemonOperationLeaseFileOptions["onInitializationPhase"]>;
+  private readonly onInitializationPhase: DaemonOperationLeaseFileOptions["onInitializationPhase"];
+  private readonly onDatabaseInitTempsEnumerated: DaemonOperationLeaseFileOptions["onDatabaseInitTempsEnumerated"];
+  private readonly onDatabaseInitTempPhase: DaemonOperationLeaseFileOptions["onDatabaseInitTempPhase"];
   private readonly onPhase: NonNullable<DaemonOperationLeaseFileOptions["onPhase"]>;
 
   constructor(options: Readonly<DaemonOperationLeaseFileOptions> = {}) {
@@ -103,8 +113,11 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     this.createToken = options.createToken ?? randomUUID;
     this.write = options.write ?? ((fd, buffer, offset, length, position) =>
       writeSync(fd, buffer, offset, length, position));
+    this.unlink = options.unlink ?? unlinkSync;
     this.delay = options.delay ?? abortableDelay;
-    this.onInitializationPhase = options.onInitializationPhase ?? (() => undefined);
+    this.onInitializationPhase = options.onInitializationPhase;
+    this.onDatabaseInitTempsEnumerated = options.onDatabaseInitTempsEnumerated;
+    this.onDatabaseInitTempPhase = options.onDatabaseInitTempPhase;
     this.onPhase = options.onPhase ?? (() => undefined);
     this.protectedOptions = {
       ...(options.platform === undefined ? {} : { platform: options.platform }),
@@ -191,14 +204,18 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       closeSync(fd);
       fd = undefined;
       this.validateDatabase(files, initPath);
-      const prepared = this.onInitializationPhase("database_prepared");
-      if (prepared !== undefined) await prepared;
+      if (this.onInitializationPhase !== undefined) {
+        const prepared = this.onInitializationPhase("database_prepared");
+        if (prepared !== undefined) await prepared;
+      }
       try {
         linkSync(initPath, databasePath);
         files.flushDirectory();
         publishedOwnDatabase = true;
-        const published = this.onInitializationPhase("database_published");
-        if (published !== undefined) await published;
+        if (this.onInitializationPhase !== undefined) {
+          const published = this.onInitializationPhase("database_published");
+          if (published !== undefined) await published;
+        }
       } catch (error: unknown) {
         if (!isAlreadyExists(error)) throw error;
       }
@@ -262,17 +279,34 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
     if (names.length > MAX_DATABASE_INIT_TEMPS) {
       throw new DaemonIdentityFileError("unsafe_path", "too many daemon operation database initialization files");
     }
-    const databaseStat = files.assertProtectedRegularFile(databasePath);
+    if (this.onDatabaseInitTempsEnumerated !== undefined) {
+      const enumerated = this.onDatabaseInitTempsEnumerated(
+        names.map((name) => path.join(files.directory, name)),
+      );
+      if (enumerated !== undefined) await enumerated;
+      signal?.throwIfAborted();
+    }
+    const databaseStat = files.assertProtectedRegularFileIdentity(databasePath);
     for (const name of names) {
       signal?.throwIfAborted();
       const initOwner = decodeDatabaseInitName(name);
       const initPath = path.join(files.directory, name);
-      const initStat = files.assertProtectedRegularFile(initPath);
+      let initStat: BigIntStats;
+      try {
+        initStat = fileIdentity(initPath);
+      } catch (error: unknown) {
+        if (isMissingLstat(error, initPath)) continue;
+        throw error;
+      }
       if (sameFile(databaseStat, initStat)) {
-        files.unlink(initPath);
+        if (this.onDatabaseInitTempPhase !== undefined) {
+          const beforeUnlink = this.onDatabaseInitTempPhase("before_unlink", initPath);
+          if (beforeUnlink !== undefined) await beforeUnlink;
+          signal?.throwIfAborted();
+        }
+        this.unlinkDatabaseInitTemp(files, initPath, initStat);
         continue;
       }
-      this.validateDatabase(files, initPath);
 
       let actual: string | null;
       try {
@@ -280,9 +314,71 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       } catch (error: unknown) {
         throw new DaemonIdentityFileError("unsafe_owner", "unable to verify database initializer", { cause: error });
       }
+      signal?.throwIfAborted();
+      if (this.onDatabaseInitTempPhase !== undefined) {
+        const checked = this.onDatabaseInitTempPhase("initializer_checked", initPath);
+        if (checked !== undefined) await checked;
+      }
+      signal?.throwIfAborted();
+      let protectedStat: BigIntStats;
+      try {
+        protectedStat = files.assertProtectedRegularFileIdentity(initPath);
+      } catch (error: unknown) {
+        if (isMissingLstat(error, initPath)) continue;
+        throw error;
+      }
+      if (!sameFile(initStat, protectedStat)) {
+        throw new DaemonIdentityFileError("unsafe_path", "database initialization file changed during owner verification");
+      }
       if (actual === initOwner.processStartIdentity) continue;
-      files.unlink(initPath);
+
+      if (this.onDatabaseInitTempPhase !== undefined) {
+        const beforeValidation = this.onDatabaseInitTempPhase("before_validation", initPath);
+        if (beforeValidation !== undefined) await beforeValidation;
+        signal?.throwIfAborted();
+      }
+      try {
+        this.validateDatabase(files, initPath);
+      } catch (error: unknown) {
+        try {
+          fileIdentity(initPath);
+        } catch (statError: unknown) {
+          if (isMissingLstat(statError, initPath)) continue;
+          throw statError;
+        }
+        throw error;
+      }
+      if (this.onDatabaseInitTempPhase !== undefined) {
+        const beforeUnlink = this.onDatabaseInitTempPhase("before_unlink", initPath);
+        if (beforeUnlink !== undefined) await beforeUnlink;
+        signal?.throwIfAborted();
+      }
+      this.unlinkDatabaseInitTemp(files, initPath, protectedStat);
     }
+  }
+
+  private unlinkDatabaseInitTemp(
+    files: ProtectedFileSystem,
+    initPath: string,
+    expected: BigIntStats,
+  ): void {
+    let current: BigIntStats;
+    try {
+      current = files.assertProtectedRegularFileIdentity(initPath);
+    } catch (error: unknown) {
+      if (isMissingLstat(error, initPath)) return;
+      throw error;
+    }
+    if (!sameFile(expected, current)) {
+      throw new DaemonIdentityFileError("unsafe_path", "database initialization file changed before cleanup");
+    }
+    try {
+      this.unlink(initPath);
+    } catch (error: unknown) {
+      if (!isMissingUnlink(error, initPath)) throw error;
+      return;
+    }
+    files.flushDirectory();
   }
 
   private assertDatabaseAssets(files: ProtectedFileSystem, databasePath: string): void {
@@ -462,8 +558,12 @@ function decodeDatabaseInitName(name: string): { readonly pid: number; readonly 
   return { pid, processStartIdentity };
 }
 
-function sameFile(left: Stats, right: Stats): boolean {
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
+}
+
+function fileIdentity(filePath: string): BigIntStats {
+  return lstatSync(filePath, { bigint: true });
 }
 
 function writeAllSync(
@@ -535,6 +635,20 @@ function isAlreadyExists(error: unknown): boolean {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function isMissingLstat(error: unknown, expectedPath: string): boolean {
+  return typeof error === "object" && error !== null
+    && "code" in error && error.code === "ENOENT"
+    && "syscall" in error && error.syscall === "lstat"
+    && "path" in error && error.path === expectedPath;
+}
+
+function isMissingUnlink(error: unknown, expectedPath: string): boolean {
+  return typeof error === "object" && error !== null
+    && "code" in error && error.code === "ENOENT"
+    && "syscall" in error && error.syscall === "unlink"
+    && "path" in error && error.path === expectedPath;
 }
 
 async function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {

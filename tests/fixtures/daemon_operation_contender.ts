@@ -9,21 +9,35 @@ const contender = process.argv[5];
 if (dataDir === undefined || gatePath === undefined || eventsPath === undefined || contender === undefined) {
   process.exitCode = 2;
 } else {
-  writeSync(1, "ready\n");
-  while (!await exists(gatePath)) await new Promise((resolve) => setTimeout(resolve, 10));
-  const lease = await new DaemonOperationLeaseFile().acquire(dataDir);
-  appendFileSync(eventsPath, `start:${contender}\n`, "utf8");
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  appendFileSync(eventsPath, `end:${contender}\n`, "utf8");
-  lease.release();
+  const lease = await new DaemonOperationLeaseFile({
+    onInitializationPhase: async (phase) => {
+      if (phase !== "database_prepared") return;
+      writeSync(1, "ready\n");
+      await waitFor(gatePath);
+    },
+  }).acquire(dataDir);
+  try {
+    appendFileSync(eventsPath, `start:${contender}\n`, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    appendFileSync(eventsPath, `end:${contender}\n`, "utf8");
+  } finally {
+    lease.release();
+  }
   writeSync(1, "done\n");
 }
 
-async function exists(filePath: string): Promise<boolean> {
-  try {
-    await access(filePath);
-    return true;
-  } catch {
-    return false;
+async function waitFor(filePath: string): Promise<void> {
+  for (;;) {
+    try {
+      await access(filePath);
+      return;
+    } catch (error: unknown) {
+      if (!isNotFound(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
+}
+
+function isNotFound(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }

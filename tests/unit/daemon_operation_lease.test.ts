@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, readdir, rmdir, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -89,6 +89,176 @@ describe("daemon operation lease", () => {
     const first = await firstAcquire;
     expect(await initializationTemps(directory)).toEqual([]);
     first.release();
+  });
+
+  it("accepts an initialization temp removed after directory enumeration", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await link(path.join(directory, "daemon.operation.db"), tempPath);
+
+    const lease = await operationLease({
+      onDatabaseInitTempsEnumerated: async (paths) => {
+        expect(paths).toEqual([tempPath]);
+        await unlink(tempPath);
+      },
+    }).acquire(directory);
+
+    lease.release();
+    expect(await initializationTemps(directory)).toEqual([]);
+  });
+
+  it("leaves an exact live initializer's incomplete temp untouched", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await writeFile(tempPath, "in progress", { mode: 0o600 });
+
+    const lease = await operationLease({
+      processIdentity: async (pid) => pid === 9999 ? START_IDENTITY : null,
+    }).acquire(directory);
+
+    lease.release();
+    expect(await readFile(tempPath, "utf8")).toBe("in progress");
+    await unlink(tempPath);
+  });
+
+  it.each(["initializer_checked", "before_validation", "before_unlink"] as const)(
+    "accepts an initialization temp removed at %s",
+    async (removeAt) => {
+      const directory = await initializedDirectory();
+      const tempPath = path.join(directory, initializationTempName(9999));
+      await copyFile(path.join(directory, "daemon.operation.db"), tempPath);
+
+      const lease = await operationLease({
+        processIdentity: async () => null,
+        onDatabaseInitTempPhase: async (phase, observedPath) => {
+          if (phase !== removeAt) return;
+          expect(observedPath).toBe(tempPath);
+          await unlink(tempPath);
+        },
+      }).acquire(directory);
+
+      lease.release();
+      expect(await initializationTemps(directory)).toEqual([]);
+    },
+  );
+
+  it("fails closed without deleting an initialization temp replaced before cleanup", async () => {
+    const directory = await initializedDirectory();
+    const databasePath = path.join(directory, "daemon.operation.db");
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await copyFile(databasePath, tempPath);
+    await expect(operationLease({
+      processIdentity: async () => null,
+      onDatabaseInitTempPhase: async (phase) => {
+        if (phase !== "before_unlink") return;
+        await unlink(tempPath);
+        await copyFile(databasePath, tempPath);
+      },
+    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
+
+    await expect(readFile(tempPath)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it("fails closed when a live initializer's temp is replaced during owner verification", async () => {
+    const directory = await initializedDirectory();
+    const databasePath = path.join(directory, "daemon.operation.db");
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await writeFile(tempPath, "in progress", { mode: 0o600 });
+    await expect(operationLease({
+      processIdentity: async () => START_IDENTITY,
+      onDatabaseInitTempPhase: async (phase) => {
+        if (phase !== "initializer_checked") return;
+        await unlink(tempPath);
+        await copyFile(databasePath, tempPath);
+      },
+    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
+
+    await expect(readFile(tempPath)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it("accepts an initialization temp removed by a concurrent unlink", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await link(path.join(directory, "daemon.operation.db"), tempPath);
+
+    const lease = await operationLease({ unlink: (target) => {
+      unlinkSync(target);
+      unlinkSync(target);
+    } }).acquire(directory);
+
+    lease.release();
+    expect(await initializationTemps(directory)).toEqual([]);
+  });
+
+  it("does not accept an unrelated missing-path error from cleanup", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await link(path.join(directory, "daemon.operation.db"), tempPath);
+    const unrelated = path.join(directory, "unrelated");
+
+    await expect(operationLease({ unlink: () => {
+      throw Object.assign(new Error("missing"), { code: "ENOENT", syscall: "unlink", path: unrelated });
+    } }).acquire(directory)).rejects.toMatchObject({ code: "io_error" });
+    await expect(readFile(tempPath)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it.skipIf(process.platform === "win32")("rejects an unsafe live initializer temp after owner verification", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await writeFile(tempPath, "in progress", { mode: 0o600 });
+
+    await expect(operationLease({
+      processIdentity: async () => START_IDENTITY,
+      onDatabaseInitTempPhase: async (phase) => {
+        if (phase === "initializer_checked") await chmod(tempPath, 0o644);
+      },
+    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_permissions" });
+    await expect(readFile(tempPath, "utf8")).resolves.toBe("in progress");
+  });
+
+  it.skipIf(process.platform === "win32")("rejects an unsafe stale temp immediately before cleanup", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await copyFile(path.join(directory, "daemon.operation.db"), tempPath);
+
+    await expect(operationLease({
+      processIdentity: async () => null,
+      onDatabaseInitTempPhase: async (phase) => {
+        if (phase === "before_unlink") await chmod(tempPath, 0o644);
+      },
+    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_permissions" });
+    await expect(readFile(tempPath)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it("validates an enumerated malformed name before accepting its removal", async () => {
+    const directory = await initializedDirectory();
+    const malformed = path.join(directory, ".daemon.operation.db.init-malformed");
+    await writeFile(malformed, "temporary", { mode: 0o600 });
+
+    await expect(operationLease({
+      onDatabaseInitTempsEnumerated: async () => { await unlink(malformed); },
+    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_path" });
+  });
+
+  it("fails closed when an initialization temp owner cannot be verified", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await copyFile(path.join(directory, "daemon.operation.db"), tempPath);
+
+    await expect(operationLease({
+      processIdentity: async () => { throw new Error("private process diagnostic"); },
+    }).acquire(directory)).rejects.toMatchObject({ code: "unsafe_owner" });
+    await expect(readFile(tempPath)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it("retains stable invalid initialization database evidence", async () => {
+    const directory = await initializedDirectory();
+    const tempPath = path.join(directory, initializationTempName(9999));
+    await writeFile(tempPath, "not sqlite", { mode: 0o600 });
+
+    await expect(operationLease({ processIdentity: async () => null }).acquire(directory))
+      .rejects.toMatchObject({ code: "unsafe_path" });
+    await expect(readFile(tempPath, "utf8")).resolves.toBe("not sqlite");
   });
 
   it("recovers protected initialization temps left before and after atomic database publication", async () => {

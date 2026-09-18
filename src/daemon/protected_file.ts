@@ -11,6 +11,7 @@ import {
   readSync,
   unlinkSync,
   writeSync,
+  type BigIntStats,
   type Stats,
 } from "node:fs";
 import path from "node:path";
@@ -125,13 +126,23 @@ export class ProtectedFileSystem {
 
   assertProtectedRegularFile(filePath: string): Stats {
     const stat = lstatSync(filePath);
-    if (!stat.isFile() || stat.isSymbolicLink() || this.isWindowsReparsePoint(filePath)) {
-      throw new DaemonIdentityFileError("unsafe_path", "daemon path must be a regular file");
-    }
+    this.assertRegularFile(filePath, stat);
     this.assertOwner(stat);
     if (this.platform === "win32") {
       this.assertWindowsAcl(filePath);
     } else if ((stat.mode & 0o777) !== 0o600) {
+      throw new DaemonIdentityFileError("unsafe_permissions", "daemon file permissions must be 0600");
+    }
+    return stat;
+  }
+
+  assertProtectedRegularFileIdentity(filePath: string): BigIntStats {
+    const stat = lstatSync(filePath, { bigint: true });
+    this.assertRegularFile(filePath, stat);
+    this.assertOwner(stat);
+    if (this.platform === "win32") {
+      this.assertWindowsAcl(filePath);
+    } else if ((stat.mode & 0o777n) !== 0o600n) {
       throw new DaemonIdentityFileError("unsafe_permissions", "daemon file permissions must be 0600");
     }
     return stat;
@@ -170,8 +181,16 @@ export class ProtectedFileSystem {
     }
   }
 
-  private assertOwner(stat: Stats): void {
-    if (this.platform !== "win32" && typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+  private assertRegularFile(filePath: string, stat: Stats | BigIntStats): void {
+    if (!stat.isFile() || stat.isSymbolicLink() || this.isWindowsReparsePoint(filePath)) {
+      throw new DaemonIdentityFileError("unsafe_path", "daemon path must be a regular file");
+    }
+  }
+
+  private assertOwner(stat: Stats | BigIntStats): void {
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    const expected = typeof stat.uid === "bigint" && uid !== undefined ? BigInt(uid) : uid;
+    if (this.platform !== "win32" && uid !== undefined && stat.uid !== expected) {
       throw new DaemonIdentityFileError("unsafe_owner", "daemon path must be owned by the current user");
     }
   }

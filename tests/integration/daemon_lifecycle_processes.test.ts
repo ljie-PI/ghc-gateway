@@ -28,9 +28,11 @@ describe("daemon lifecycle coordination across CLI processes", () => {
     const dataDir = path.join(root, "data");
     const gatePath = path.join(root, "gate");
     const eventsPath = path.join(root, "events");
+    let first: ReturnType<typeof runContender> | undefined;
+    let second: ReturnType<typeof runContender> | undefined;
     try {
-      const first = runContender(dataDir, gatePath, eventsPath, "first");
-      const second = runContender(dataDir, gatePath, eventsPath, "second");
+      first = runContender(dataDir, gatePath, eventsPath, "first");
+      second = runContender(dataDir, gatePath, eventsPath, "second");
       await Promise.all([first.ready, second.ready]);
       await writeFile(gatePath, "go", "utf8");
       const [firstResult, secondResult] = await Promise.all([first.result, second.result]);
@@ -53,6 +55,7 @@ describe("daemon lifecycle coordination across CLI processes", () => {
         "daemon.operation.owner.json",
       ]);
     } finally {
+      await Promise.allSettled([first?.stop(), second?.stop()]);
       await rm(root, { recursive: true, force: true });
     }
   });
@@ -268,7 +271,20 @@ function runContender(dataDir: string, gatePath: string, eventsPath: string, con
   let stdout = "";
   let stderr = "";
   let signalReady = (): void => undefined;
-  const ready = new Promise<void>((resolve) => { signalReady = resolve; });
+  let failReady = (_error: Error): void => undefined;
+  let readySettled = false;
+  const ready = new Promise<void>((resolve, reject) => {
+    signalReady = () => {
+      if (readySettled) return;
+      readySettled = true;
+      resolve();
+    };
+    failReady = (error) => {
+      if (readySettled) return;
+      readySettled = true;
+      reject(error);
+    };
+  });
   child.stdout!.setEncoding("utf8");
   child.stderr!.setEncoding("utf8");
   child.stdout!.on("data", (chunk: string) => {
@@ -277,13 +293,26 @@ function runContender(dataDir: string, gatePath: string, eventsPath: string, con
   });
   child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
   const result = new Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }>((resolve, reject) => {
-    child.once("error", reject);
+    child.once("error", (error) => {
+      failReady(error);
+      reject(error);
+    });
     child.once("close", (code) => {
       children.delete(child);
+      if (!readySettled) {
+        failReady(new Error(`operation contender exited before ready: code=${String(code)} stderr=${stderr}`));
+      }
       resolve({ code, stdout, stderr });
     });
   });
-  return { ready, result };
+  return {
+    ready,
+    result,
+    stop: async () => {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await result;
+    },
+  };
 }
 
 function runCrashHolder(
