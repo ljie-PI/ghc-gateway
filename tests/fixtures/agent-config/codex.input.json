@@ -1,0 +1,73 @@
+{
+  "agent": "codex",
+  "origin": "http://127.0.0.1:32567",
+  "catalogPath": "C:\\Users\\octo\\.codex\\ghcg_models.json",
+  "source": "model = \"stale-startup\"\nmodel_provider = \"external\"\nmodel_catalog_json = \"C:\\\\external\\\\models.json\"\napproval_policy = \"on-request\"\nweb_search = \"live\"\nmodel_reasoning_effort = \"high\"\nmodel_reasoning_summary = \"detailed\"\nmodel_verbosity = \"high\"\nmodel_context_window = 999999\nmodel_auto_compact_token_limit = 888888\nmodel_supports_reasoning_summaries = true\nreview_model = \"stale-review\"\nservice_tier = \"priority\"\n\n[model_providers.other]\nname = \"Other Provider\"\nbase_url = \"https://other.example/v1\"\nwire_api = \"chat\"\n\n[mcp_servers.local]\ncommand = \"node\"\nargs = [\"server.mjs\"]\n\n[hooks.Stop]\ncommand = \"notify\"\n",
+  "firstMappings": [
+    {
+      "modelId": "gpt-alpha-live",
+      "displayName": "Alpha Friendly"
+    },
+    {
+      "modelId": "claude-beta-live",
+      "displayName": "Beta Friendly"
+    },
+    {
+      "modelId": "unknown-gamma-live",
+      "displayName": "Gamma Friendly"
+    }
+  ],
+  "repeatMappings": [
+    {
+      "modelId": "unknown-gamma-live",
+      "displayName": "Editable Gamma Label"
+    },
+    {
+      "modelId": "gpt-alpha-live",
+      "displayName": "Editable Alpha Label"
+    },
+    {
+      "modelId": "claude-beta-live",
+      "displayName": "Editable Beta Label"
+    }
+  ],
+  "repeatRoot": {
+    "approval_policy": "never",
+    "user_instructions": "Preserve this editable setting.",
+    "model_reasoning_effort": "minimal",
+    "model_reasoning_summary": "none",
+    "model_verbosity": "low",
+    "model_context_window": 777777,
+    "model_auto_compact_token_limit": 666666,
+    "model_supports_reasoning_summaries": true,
+    "review_model": "stale-again",
+    "service_tier": "flex"
+  },
+  "repeatEnv": {},
+  "models": [
+    {
+      "modelId": "gpt-alpha-live",
+      "protocols": ["responses"],
+      "maxInputTokens": 128000,
+      "contextWindowTokens": 144000,
+      "supportedParameters": ["reasoning"],
+      "reasoningEfforts": ["low", "high"]
+    },
+    {
+      "modelId": "claude-beta-live",
+      "protocols": ["chat"],
+      "maxInputTokens": 200000,
+      "contextWindowTokens": 220000,
+      "supportedParameters": ["reasoning_effort"],
+      "reasoningEfforts": ["medium"]
+    },
+    {
+      "modelId": "unknown-gamma-live",
+      "protocols": null,
+      "maxInputTokens": null,
+      "contextWindowTokens": null,
+      "supportedParameters": ["reasoning"],
+      "reasoningEfforts": ["high"]
+    }
+  ]
+}

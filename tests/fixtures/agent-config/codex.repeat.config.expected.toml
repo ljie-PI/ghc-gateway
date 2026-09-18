@@ -1,0 +1,25 @@
+model = "unknown-gamma-live"
+model_provider = "ghc_gateway"
+model_catalog_json = "C:\\Users\\octo\\.codex\\ghcg_models.json"
+approval_policy = "never"
+web_search = "live"
+user_instructions = "Preserve this editable setting."
+
+[model_providers.other]
+name = "Other Provider"
+base_url = "https://other.example/v1"
+wire_api = "chat"
+
+[model_providers.ghc_gateway]
+name = "GHC Gateway"
+base_url = "http://127.0.0.1:32567/v1"
+wire_api = "responses"
+experimental_bearer_token = "ghcg-local"
+requires_openai_auth = false
+
+[mcp_servers.local]
+command = "node"
+args = [ "server.mjs" ]
+
+[hooks.Stop]
+command = "notify"

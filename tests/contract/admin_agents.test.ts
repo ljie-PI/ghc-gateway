@@ -19,7 +19,7 @@ function agentStatus(agent: "claude" | "codex", revision: string, state: AgentSt
     id: agent,
     state,
     revision,
-    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : ["C:/home/.codex/ghcg-models.json", "C:/home/.codex/config.toml"],
+    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : ["C:/home/.codex/ghcg_models.json", "C:/home/.codex/config.toml"],
     endpoint: agent === "claude" ? ORIGIN : `${ORIGIN}/v1`,
     backupAvailable: state !== "not_managed",
     lastAppliedAt: state === "installed" ? "2027-01-15T08:00:00.000Z" : null,

@@ -46,7 +46,6 @@ export interface AdminFixture {
     conflictAccount: boolean;
     conflictConfig: boolean;
     conflictHistory: boolean;
-    conflictModel: boolean;
     failAccountRemoval: boolean;
     devicePollStates: Array<"pending" | "complete" | "expired" | "denied" | "failed" | "network">;
     devicePollDelayMs: number;
@@ -136,7 +135,6 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       conflictAccount: false,
       conflictConfig: false,
       conflictHistory: false,
-      conflictModel: false,
       failAccountRemoval: false,
       devicePollStates: ["pending", "complete"],
       devicePollDelayMs: 0,
@@ -484,21 +482,6 @@ async function handle(
       items: fixture.state.models.items.slice(1),
     };
     return json(route, 200, fixture.state.models);
-  }
-  if (path === "/models/preferred") {
-    if (fixture.state.conflictModel) {
-      fixture.state.conflictModel = false;
-      return failure(route, 409, "revision_conflict");
-    }
-    const body = request.postDataJSON() as { modelId: string };
-    fixture.state.models = {
-      ...fixture.state.models,
-      preferredModel: { revision: 3, modelId: body.modelId, validity: "valid" },
-    };
-    return json(route, 200, {
-      accountId: fixture.state.models.accountId,
-      preferredModel: fixture.state.models.preferredModel,
-    });
   }
   if (path === "/config" && request.method() === "GET") return json(route, 200, fixture.state.config);
   if (path === "/config" && fixture.state.conflictConfig) {

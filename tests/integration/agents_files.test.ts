@@ -9,6 +9,7 @@ import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.j
 import { AgentStore } from "../../src/agents/store.js";
 import { protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
+import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
 
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
@@ -32,9 +33,14 @@ function harness(options: Omit<AgentManagerOptions, "home"> = {}) {
   const status = async (agent: AgentId) => (await manager.inspect(origin)).find((item) => item.id === agent)!;
   return { home, manager, status };
 }
-async function apply(manager: FileAgentsManager, agent: AgentId, rows: readonly AgentMapping[] = mappings) {
+async function apply(
+  manager: FileAgentsManager,
+  agent: AgentId,
+  rows: readonly AgentMapping[] = mappings,
+  available: readonly AgentModel[] = models,
+) {
   const status = (await manager.inspect(origin)).find((item) => item.id === agent)!;
-  return await manager.apply({ agent, expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings: rows }, origin, models, () => undefined, new AbortController().signal);
+  return await manager.apply({ agent, expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings: rows }, origin, available, () => undefined, new AbortController().signal);
 }
 function seed(home: string, target: string, bytes: Buffer | string): string {
   const file = path.join(home, target);
@@ -50,6 +56,31 @@ async function stableSeed(home: string, target: string, bytes: Buffer | string):
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it.each(["claude", "codex"] as const)("publishes exact %s first and repeat Apply fixture bytes", async (agent) => {
+    const h = harness();
+    const fixturePath = path.resolve("tests/fixtures/agent-config", `${agent}.input.json`);
+    const initial = await projectAgentConfigFixture(fixturePath);
+    const config = seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml", initial.source);
+    const auth = seed(h.home, agent === "claude" ? ".claude/.credentials.json" : ".codex/auth.json", "login-secret\n");
+    const catalogPath = agent === "codex"
+      ? (process.platform === "win32" ? path.join(h.home, ".codex", "ghcg_models.json").toLowerCase() : path.join(h.home, ".codex", "ghcg_models.json"))
+      : undefined;
+    const fixture = await projectAgentConfigFixture(fixturePath, catalogPath);
+
+    expect((await apply(h.manager, agent, fixture.input.firstMappings, fixture.models)).state).toBe("installed");
+    expect(fs.readFileSync(config)).toEqual(fixture.first.config);
+    if (agent === "codex") expect(fs.readFileSync(catalogPath!)).toEqual(fixture.first.catalog);
+    expect(fs.readFileSync(`${config}.ghcg.bak`)).toEqual(fixture.source);
+    expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
+
+    fs.writeFileSync(config, fixture.repeatSource);
+    expect((await apply(h.manager, agent, fixture.input.repeatMappings, fixture.models)).state).toBe("installed");
+    expect(fs.readFileSync(config)).toEqual(fixture.repeat.config);
+    if (agent === "codex") expect(fs.readFileSync(catalogPath!)).toEqual(fixture.repeat.catalog);
+    expect(fs.readFileSync(`${config}.ghcg.bak`)).toEqual(fixture.source);
+    expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
+  }, 300_000);
+
   it.each([
     ["claude", "missing", "conflict"],
     ["claude", "replaced", "conflict"],

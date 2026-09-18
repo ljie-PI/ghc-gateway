@@ -74,8 +74,8 @@ describe("agent configuration projection", () => {
   });
   it("generates a multi-model Responses catalog with actual request IDs and conservative metadata", () => {
     const source = "\ufeff# keep on restore\r\nmodel=\"old\"\r\nmodel_catalog_json=\"/external/catalog.json\"\r\nweb_search=\"live\"\r\n[model_providers.other]\r\nname=\"Other\"\r\n[mcp_servers.local]\r\ncommand=\"node\"\r\n";
-    const result = projectAgent("codex", Buffer.from(source), mappings, origin, "C:\\test\\ghcg-models.json", models, null);
-    expect(parse(result.config.toString())).toMatchObject({ model: "real-sonnet", model_provider: "ghc_gateway", model_catalog_json: "C:\\test\\ghcg-models.json",
+    const result = projectAgent("codex", Buffer.from(source), mappings, origin, "C:\\test\\ghcg_models.json", models, null);
+    expect(parse(result.config.toString())).toMatchObject({ model: "real-sonnet", model_provider: "ghc_gateway", model_catalog_json: "C:\\test\\ghcg_models.json",
       model_providers: { other: { name: "Other" }, ghc_gateway: { base_url: `${origin}/v1`, wire_api: "responses", requires_openai_auth: false, experimental_bearer_token: "ghcg-local" } },
       mcp_servers: { local: { command: "node" } }, web_search: "live" });
     const catalog = JSON.parse(result.catalog!.toString());

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "gpt-extra-live",
+  "theme": "light",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "notify"
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "local": {
+      "command": "node",
+      "args": [
+        "server.mjs"
+      ]
+    }
+  },
+  "env": {
+    "KEEP_ME": "edited outside Gateway",
+    "ANTHROPIC_CUSTOM_HEADERS": "X-Fixture: preserved",
+    "NEW_UNRELATED": "preserved on repeat",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:32567",
+    "ANTHROPIC_AUTH_TOKEN": "ghcg-local",
+    "ANTHROPIC_MODEL": "gpt-extra-live",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-live",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-extra-live",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Editable Startup Label",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-live",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Editable Opus Label",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-live",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Editable Haiku Label"
+  },
+  "modelPicker": {
+    "replaceBuiltInOptions": true,
+    "options": [
+      {
+        "model": "gpt-extra-live",
+        "label": "Editable Startup Label"
+      },
+      {
+        "model": "claude-opus-live",
+        "label": "Editable Opus Label"
+      },
+      {
+        "model": "claude-haiku-live",
+        "label": "Editable Haiku Label"
+      },
+      {
+        "model": "claude-sonnet-live",
+        "label": "Editable Menu Label"
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npm test)"
+    ]
+  }
+}

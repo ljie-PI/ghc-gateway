@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "model": "claude-sonnet-live",
+  "theme": "dark",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "notify"
+          }
+        ]
+      }
+    ]
+  },
+  "mcpServers": {
+    "local": {
+      "command": "node",
+      "args": [
+        "server.mjs"
+      ]
+    }
+  },
+  "env": {
+    "KEEP_ME": "yes",
+    "ANTHROPIC_CUSTOM_HEADERS": "X-Fixture: preserved",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:32567",
+    "ANTHROPIC_AUTH_TOKEN": "ghcg-local",
+    "ANTHROPIC_MODEL": "claude-sonnet-live",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-haiku-live",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-live",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Sonnet Friendly",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-live",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Opus Friendly",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-live",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Haiku Friendly"
+  },
+  "modelPicker": {
+    "replaceBuiltInOptions": true,
+    "options": [
+      {
+        "model": "claude-sonnet-live",
+        "label": "Sonnet Friendly"
+      },
+      {
+        "model": "claude-opus-live",
+        "label": "Opus Friendly"
+      },
+      {
+        "model": "claude-haiku-live",
+        "label": "Haiku Friendly"
+      },
+      {
+        "model": "gpt-extra-live",
+        "label": "Extra Friendly"
+      }
+    ]
+  }
+}

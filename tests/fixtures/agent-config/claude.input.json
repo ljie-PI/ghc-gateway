@@ -1,0 +1,145 @@
+{
+  "agent": "claude",
+  "origin": "http://127.0.0.1:32567",
+  "catalogPath": "unused",
+  "source": {
+    "$schema": "https://json.schemastore.org/claude-code-settings.json",
+    "model": "stale-model",
+    "theme": "dark",
+    "hooks": {
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "notify"
+            }
+          ]
+        }
+      ]
+    },
+    "mcpServers": {
+      "local": {
+        "command": "node",
+        "args": [
+          "server.mjs"
+        ]
+      }
+    },
+    "apiKeyHelper": "read-secret",
+    "awsAuthRefresh": "refresh-secret",
+    "awsCredentialExport": "export-secret",
+    "forceLoginMethod": "console",
+    "forceLoginOrgUUID": "stale-org",
+    "env": {
+      "KEEP_ME": "yes",
+      "ANTHROPIC_CUSTOM_HEADERS": "X-Fixture: preserved",
+      "ANTHROPIC_API_KEY": "stale-key",
+      "ANTHROPIC_AUTH_TOKEN": "stale-token",
+      "ANTHROPIC_BASE_URL": "https://stale.example",
+      "ANTHROPIC_MODEL": "stale-model",
+      "ANTHROPIC_SMALL_FAST_MODEL": "stale-small",
+      "ANTHROPIC_REASONING_MODEL": "stale-reasoning",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL": "stale-haiku",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "Stale Haiku",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL": "stale-sonnet",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "Stale Sonnet",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "Stale Opus",
+      "ANTHROPIC_DEFAULT_FABLE_MODEL": "stale-fable",
+      "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "Stale Fable",
+      "CLAUDE_CODE_SUBAGENT_MODEL": "stale-subagent",
+      "CLAUDE_CODE_API_KEY_HELPER_TTL_MS": "60000",
+      "CLAUDE_CODE_USE_BEDROCK": "1",
+      "CLAUDE_CODE_USE_VERTEX": "1",
+      "CLAUDE_CODE_USE_FOUNDRY": "1"
+    }
+  },
+  "firstMappings": [
+    {
+      "modelId": "claude-sonnet-live",
+      "displayName": "Sonnet Friendly"
+    },
+    {
+      "modelId": "claude-opus-live",
+      "displayName": "Opus Friendly"
+    },
+    {
+      "modelId": "claude-haiku-live",
+      "displayName": "Haiku Friendly"
+    },
+    {
+      "modelId": "gpt-extra-live",
+      "displayName": "Extra Friendly"
+    }
+  ],
+  "repeatMappings": [
+    {
+      "modelId": "gpt-extra-live",
+      "displayName": "Editable Startup Label"
+    },
+    {
+      "modelId": "claude-opus-live",
+      "displayName": "Editable Opus Label"
+    },
+    {
+      "modelId": "claude-haiku-live",
+      "displayName": "Editable Haiku Label"
+    },
+    {
+      "modelId": "claude-sonnet-live",
+      "displayName": "Editable Menu Label"
+    }
+  ],
+  "repeatRoot": {
+    "theme": "light",
+    "permissions": {
+      "allow": [
+        "Bash(npm test)"
+      ]
+    },
+    "apiKeyHelper": "stale-again",
+    "forceLoginMethod": "stale-again"
+  },
+  "repeatEnv": {
+    "KEEP_ME": "edited outside Gateway",
+    "NEW_UNRELATED": "preserved on repeat",
+    "ANTHROPIC_API_KEY": "stale-again",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "stale-again",
+    "CLAUDE_CODE_USE_BEDROCK": "1"
+  },
+  "models": [
+    {
+      "modelId": "claude-sonnet-live",
+      "protocols": ["messages"],
+      "maxInputTokens": 200000,
+      "contextWindowTokens": 200000,
+      "supportedParameters": null,
+      "reasoningEfforts": null
+    },
+    {
+      "modelId": "claude-opus-live",
+      "protocols": ["chat"],
+      "maxInputTokens": 128000,
+      "contextWindowTokens": 144000,
+      "supportedParameters": null,
+      "reasoningEfforts": null
+    },
+    {
+      "modelId": "claude-haiku-live",
+      "protocols": ["messages"],
+      "maxInputTokens": 64000,
+      "contextWindowTokens": 64000,
+      "supportedParameters": null,
+      "reasoningEfforts": null
+    },
+    {
+      "modelId": "gpt-extra-live",
+      "protocols": ["responses"],
+      "maxInputTokens": 128000,
+      "contextWindowTokens": 144000,
+      "supportedParameters": ["reasoning"],
+      "reasoningEfforts": ["low", "high"]
+    }
+  ]
+}
