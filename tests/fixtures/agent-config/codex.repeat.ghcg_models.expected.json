@@ -1,0 +1,97 @@
+{
+  "models": [
+    {
+      "slug": "unknown-gamma-live",
+      "display_name": "Editable Gamma Label",
+      "description": "Editable Gamma Label",
+      "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
+      "supported_reasoning_levels": [],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 0,
+      "support_verbosity": false,
+      "supports_reasoning_summaries": false,
+      "supports_reasoning_summary_parameter": false,
+      "supports_parallel_tool_calls": false,
+      "supports_image_detail_original": false,
+      "supports_search_tool": false,
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ]
+    },
+    {
+      "slug": "gpt-alpha-live",
+      "display_name": "Editable Alpha Label",
+      "description": "Editable Alpha Label",
+      "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        },
+        {
+          "effort": "high",
+          "description": "High"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1,
+      "support_verbosity": false,
+      "supports_reasoning_summaries": false,
+      "supports_reasoning_summary_parameter": false,
+      "supports_parallel_tool_calls": false,
+      "supports_image_detail_original": false,
+      "supports_search_tool": false,
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 128000,
+      "max_context_window": 144000
+    },
+    {
+      "slug": "claude-beta-live",
+      "display_name": "Editable Beta Label",
+      "description": "Editable Beta Label",
+      "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
+      "supported_reasoning_levels": [
+        {
+          "effort": "medium",
+          "description": "Medium"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 2,
+      "support_verbosity": false,
+      "supports_reasoning_summaries": false,
+      "supports_reasoning_summary_parameter": false,
+      "supports_parallel_tool_calls": false,
+      "supports_image_detail_original": false,
+      "supports_search_tool": false,
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "input_modalities": [
+        "text"
+      ],
+      "context_window": 200000,
+      "max_context_window": 220000
+    }
+  ]
+}

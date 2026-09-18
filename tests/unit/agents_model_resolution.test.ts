@@ -52,7 +52,7 @@ describe("agent configuration compatibility with Gateway model resolution", () =
     const projection = projectAgent("codex", null, [
       { displayName: "Coding", modelId: "gpt-test" },
       { displayName: "Writer", modelId: "claude-test" },
-    ], origin, "ghcg-models.json", [
+    ], origin, "ghcg_models.json", [
       ...snapshot.models,
     ], null);
     const catalog = JSON.parse(projection.catalog!.toString()) as { models: { slug: string }[] };

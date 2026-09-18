@@ -1,0 +1,44 @@
+[
+  {
+    "caseId": "agent-config.claude.first.settings",
+    "family": "agent-config",
+    "input": "claude.input.json",
+    "expected": "claude.first.settings.expected.json",
+    "encoder": "first-config"
+  },
+  {
+    "caseId": "agent-config.claude.repeat.settings",
+    "family": "agent-config",
+    "input": "claude.input.json",
+    "expected": "claude.repeat.settings.expected.json",
+    "encoder": "repeat-config"
+  },
+  {
+    "caseId": "agent-config.codex.first.config",
+    "family": "agent-config",
+    "input": "codex.input.json",
+    "expected": "codex.first.config.expected.toml",
+    "encoder": "first-config"
+  },
+  {
+    "caseId": "agent-config.codex.first.catalog",
+    "family": "agent-config",
+    "input": "codex.input.json",
+    "expected": "codex.first.ghcg_models.expected.json",
+    "encoder": "first-catalog"
+  },
+  {
+    "caseId": "agent-config.codex.repeat.config",
+    "family": "agent-config",
+    "input": "codex.input.json",
+    "expected": "codex.repeat.config.expected.toml",
+    "encoder": "repeat-config"
+  },
+  {
+    "caseId": "agent-config.codex.repeat.catalog",
+    "family": "agent-config",
+    "input": "codex.input.json",
+    "expected": "codex.repeat.ghcg_models.expected.json",
+    "encoder": "repeat-catalog"
+  }
+]

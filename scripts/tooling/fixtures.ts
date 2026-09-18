@@ -45,6 +45,9 @@ import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.
 import { convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
 import { convertProtocolStream } from "../../src/protocols/conversion/stream.js";
 import type { InferenceProtocol } from "../../src/protocols/conversion/types.js";
+import { projectAgent, type AgentProjection } from "../../src/agents/transform.js";
+import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
+import { parse, stringify, type TomlTable } from "smol-toml";
 
 export interface FixtureManifestEntry {
   readonly caseId: string;
@@ -71,6 +74,7 @@ const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, F
   ["responses-bridge-nonstream", expectedResponsesBridgeNonstreamFixture],
   ["responses-endpoint", expectedResponsesEndpointFixture],
   ["protocol-conversion", expectedProtocolConversionFixture],
+  ["agent-config", expectedAgentConfigFixture],
 ]);
 
 async function findManifests(root: string): Promise<string[]> {
@@ -652,6 +656,90 @@ async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): P
     }
   }
   return output;
+}
+
+interface AgentConfigFixtureInput {
+  readonly agent: AgentId;
+  readonly origin: string;
+  readonly catalogPath: string;
+  readonly source: string | Record<string, unknown>;
+  readonly firstMappings: readonly AgentMapping[];
+  readonly repeatMappings: readonly AgentMapping[];
+  readonly repeatRoot: Readonly<Record<string, unknown>>;
+  readonly repeatEnv: Readonly<Record<string, string>>;
+  readonly models: readonly {
+    readonly modelId: string;
+    readonly protocols: readonly ("chat" | "messages" | "responses")[] | null;
+    readonly maxInputTokens: number | null;
+    readonly contextWindowTokens: number | null;
+    readonly supportedParameters: readonly string[] | null;
+    readonly reasoningEfforts: readonly ("none" | "minimal" | "low" | "medium" | "high" | "xhigh")[] | null;
+  }[];
+}
+
+export async function projectAgentConfigFixture(
+  inputPath: string,
+  catalogPathOverride?: string,
+): Promise<{
+  readonly input: AgentConfigFixtureInput;
+  readonly models: readonly AgentModel[];
+  readonly source: Buffer;
+  readonly first: AgentProjection;
+  readonly repeatSource: Buffer;
+  readonly repeat: AgentProjection;
+}> {
+  const input = JSON.parse(await readFile(inputPath, "utf8")) as AgentConfigFixtureInput;
+  const source = Buffer.from(typeof input.source === "string" ? input.source : JSON.stringify(input.source));
+  const models: readonly AgentModel[] = input.models.map((model) => ({
+    modelId: model.modelId,
+    protocols: fixtureAgentField(model.protocols),
+    maxInputTokens: fixtureAgentField(model.maxInputTokens),
+    profile: {
+      chatOutputTokenField: fixtureAgentField(null),
+      supportedParameters: fixtureAgentField(model.supportedParameters),
+      reasoningEfforts: fixtureAgentField(model.reasoningEfforts),
+      contextWindowTokens: fixtureAgentField(model.contextWindowTokens),
+    },
+  }));
+  const catalogPath = catalogPathOverride ?? input.catalogPath;
+  const first = projectAgent(
+    input.agent, source, input.firstMappings, input.origin, catalogPath, models, null,
+  );
+  let repeatSource: Buffer;
+  if (input.agent === "claude") {
+    const value = JSON.parse(first.config.toString("utf8")) as Record<string, unknown>;
+    Object.assign(value, input.repeatRoot);
+    value.env = { ...(value.env as Record<string, string>), ...input.repeatEnv };
+    repeatSource = Buffer.from(JSON.stringify(value));
+  } else {
+    const value = parse(first.config.toString("utf8"));
+    Object.assign(value, input.repeatRoot as TomlTable);
+    repeatSource = Buffer.from(stringify(value));
+  }
+  const repeat = projectAgent(
+    input.agent, repeatSource, input.repeatMappings, input.origin, catalogPath, models, first.config,
+  );
+  return { input, models, source, first, repeatSource, repeat };
+}
+
+async function expectedAgentConfigFixture(entry: FixtureManifestEntry): Promise<Uint8Array | undefined> {
+  const projection = await projectAgentConfigFixture(path.join(fixtureFamilyRoot(entry), entry.input));
+  switch (entry.encoder) {
+  case "first-config": return projection.first.config;
+  case "first-catalog": return projection.first.catalog;
+  case "repeat-config": return projection.repeat.config;
+  case "repeat-catalog": return projection.repeat.catalog;
+  default: return undefined;
+  }
+}
+
+function fixtureAgentField<T>(value: T | null) {
+  return {
+    value,
+    source: value === null ? "unknown" as const : "live" as const,
+    conflict: false,
+    liveState: value === null ? "missing" as const : "value" as const,
+  };
 }
 
 function wireObjectFromUnknown(value: unknown): WireJsonObject {
