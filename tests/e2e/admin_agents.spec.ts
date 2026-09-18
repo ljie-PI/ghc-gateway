@@ -1,5 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { installAdminFixture } from "./fixtures/admin_fixture.js";
+import {
+  ADMIN_FIXTURE_NOW_MS,
+  installAdminFixture,
+  operationalEvent,
+  sse,
+} from "./fixtures/admin_fixture.js";
 
 test("catalog choices autofill names and unchanged mappings can be applied again", async ({ page }) => {
   const fixture = await openAgents(page);
@@ -82,6 +87,238 @@ test("Models refresh invalidates cached agent choices without rereading local co
   await expect(page.locator("#codex-model-options option")).toHaveAttribute("value", "claude-beta");
   expect(fixture.requests.filter((request) => request.url().endsWith("/agents"))).toHaveLength(1);
   expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+});
+
+test("unchanged Accounts reads retain the current agent catalog", async ({ page }) => {
+  const fixture = await openAgents(page);
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  await page.getByRole("button", { name: "Accounts", exact: true }).click();
+  await expect(page.getByText("Octo Admin", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+});
+
+for (const mutation of ["default selection", "removal"] as const) {
+  test(`an Accounts ${mutation} completed after navigation cannot discard newer agent choices`, async ({ page }) => {
+    const fixture = await installAdminFixture(page);
+    const github = fixture.state.accounts.items[0]!;
+    fixture.state.accounts = {
+      ...fixture.state.accounts,
+      items: [...fixture.state.accounts.items, {
+        ...github,
+        accountId: "ghes:2",
+        host: "github.example.test",
+        numericUserId: "2",
+        login: "enterprise",
+        displayName: "Enterprise Admin",
+      }],
+    };
+    await page.goto("/admin/#bootstrap_token=held-account-mutation");
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+    await page.getByRole("button", { name: "Accounts", exact: true }).click();
+    await expect(page.getByText("Enterprise Admin", { exact: true })).toBeVisible();
+
+    let release = (): void => undefined;
+    let markStarted = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const target = mutation === "default selection" ? /\/accounts\/default$/u : /\/accounts\/ghes%3A2$/u;
+    await page.route(target, async (route) => {
+      markStarted();
+      await held;
+      await route.fallback();
+    });
+    try {
+      if (mutation === "default selection") {
+        await page.getByRole("row").filter({ hasText: "Enterprise Admin" })
+          .getByRole("button", { name: "Use this account", exact: true }).click({ noWaitAfter: true });
+      } else {
+        page.once("dialog", (dialog) => dialog.accept());
+        await page.getByRole("row").filter({ hasText: "Enterprise Admin" })
+          .getByRole("button", { name: "Remove", exact: true }).click({ noWaitAfter: true });
+      }
+      await started;
+      await page.getByRole("button", { name: "Agents", exact: true }).click();
+      await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+      const completed = page.waitForResponse((response) => target.test(response.url()));
+      release();
+      await completed;
+      await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+      expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+}
+
+for (const mutation of ["default selection", "removal"] as const) {
+  test(`an Accounts ${mutation} invalidates agent choices exactly once`, async ({ page }) => {
+    const fixture = await installAdminFixture(page);
+    const github = fixture.state.accounts.items[0]!;
+    fixture.state.accounts = {
+      ...fixture.state.accounts,
+      items: [...fixture.state.accounts.items, {
+        ...github,
+        accountId: "ghes:2",
+        host: "github.example.test",
+        numericUserId: "2",
+        login: "enterprise",
+        displayName: "Enterprise Admin",
+      }],
+    };
+    await page.goto("/admin/#bootstrap_token=account-mutation");
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+    await page.getByRole("button", { name: "Accounts", exact: true }).click();
+    const enterprise = page.getByRole("row").filter({ hasText: "Enterprise Admin" });
+    await expect(enterprise).toBeVisible();
+    if (mutation === "default selection") {
+      await enterprise.getByRole("button", { name: "Use this account", exact: true }).click();
+      await expect(enterprise.getByRole("button", { name: "In use", exact: true })).toBeDisabled();
+    } else {
+      page.once("dialog", (dialog) => dialog.accept());
+      await enterprise.getByRole("button", { name: "Remove", exact: true }).click();
+      await expect(enterprise).toHaveCount(0);
+    }
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+  });
+}
+
+test("mounted Agents reloads once after an account revision event and preserves drafts", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  const heldStream = fixture.holdNextEventStream();
+  fixture.state.streamBodies = [sse("operational", {
+    kind: "operational",
+    event: operationalEvent(41, "account_authenticated"),
+  })];
+  try {
+    await page.goto("/admin/#bootstrap_token=held-account-event");
+    await heldStream.started;
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    const card = page.getByRole("region", { name: "Codex", exact: true });
+    const id = card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+    const name = card.getByRole("textbox", { name: "Model 1 Display name", exact: true });
+    await id.fill("gpt-alpha");
+    await name.fill("Keep my draft");
+    fixture.state.models = { ...fixture.state.models, items: fixture.state.models.items.slice(1) };
+    fixture.state.agentsCatalogRevision = "d".repeat(64);
+    heldStream.release();
+    await expect(page.locator("#codex-model-options option")).toHaveCount(1);
+    await expect(page.locator("#codex-model-options option")).toHaveAttribute("value", "claude-beta");
+    await expect(id).toHaveValue("gpt-alpha");
+    await expect(name).toHaveValue("Keep my draft");
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents"))).toHaveLength(1);
+  } finally {
+    heldStream.release();
+  }
+});
+
+test("an observed credential revision change invalidates agent choices exactly once", async ({ page }) => {
+  const fixture = await openAgents(page);
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  await page.getByRole("button", { name: "Accounts", exact: true }).click();
+  await expect(page.getByText("Octo Admin", { exact: true })).toBeVisible();
+  const account = fixture.state.accounts.items[0]!;
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: [{ ...account, revision: account.revision + 1 }],
+  };
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+});
+
+test("a held device-flow completion cannot invalidate agent choices after Accounts is left", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+  const fixture = await installAdminFixture(page);
+  fixture.state.devicePollStates = ["complete"];
+  await page.goto("/admin/#bootstrap_token=held-device-completion");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  await page.getByRole("button", { name: "Accounts", exact: true }).click();
+  await expect(page.getByText("Octo Admin", { exact: true })).toBeVisible();
+  const heldPoll = fixture.holdNextDevicePoll();
+  await page.getByRole("button", { name: "Start login", exact: true }).click();
+  fixture.state.deviceNowMs += 5_000;
+  await page.clock.fastForward(5_000);
+  await heldPoll.started;
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  heldPoll.release();
+  await heldPoll.responseFinished;
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+});
+
+test("device-flow account completion invalidates cached agent choices once", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+  const fixture = await installAdminFixture(page);
+  fixture.state.devicePollStates = ["complete"];
+  await page.goto("/admin/#bootstrap_token=device-completion");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  await page.getByRole("button", { name: "Accounts", exact: true }).click();
+  await page.getByRole("button", { name: "Start login", exact: true }).click();
+  fixture.state.deviceNowMs += 5_000;
+  await page.clock.fastForward(5_000);
+  await expect(page.getByText("Enterprise Admin", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+});
+
+test("Admin Session teardown cancels a held agent catalog request", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  let release = (): void => undefined;
+  let markStarted = (): void => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  await page.route("**/admin/api/v1/agents/models", async (route) => {
+    markStarted();
+    await held;
+    await route.fallback();
+  });
+  try {
+    await page.goto("/admin/#bootstrap_token=teardown-agent-catalog");
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await started;
+    const canceled = page.waitForEvent("requestfailed", {
+      predicate: (request) => request.url().endsWith("/agents/models"),
+      timeout: 5_000,
+    });
+    await page.getByRole("button", { name: "End session", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
+    release();
+    await canceled;
+    await page.waitForTimeout(50);
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+  } finally {
+    release();
+  }
+});
+
+test("Admin Session teardown does not reload an already loaded agent catalog", async ({ page }) => {
+  const fixture = await openAgents(page);
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  await page.getByRole("button", { name: "End session", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
+  await page.waitForTimeout(50);
+  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
 });
 
 for (const action of ["read", "refresh"] as const) {

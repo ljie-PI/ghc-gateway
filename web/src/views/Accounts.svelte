@@ -23,6 +23,8 @@
   let pollAbort: AbortController | null = null;
   let pollGeneration = 0;
   let loadGeneration = 0;
+  let accountRevisionSignature: string | null = null;
+  let disposed = false;
   let nextPollAtMs = 0;
   let pollIntervalSeconds = 1;
 
@@ -44,8 +46,7 @@
         requestGeneration !== loadGeneration
         || (expectedGeneration !== undefined && expectedGeneration !== pollGeneration)
       ) return null;
-      data = loaded;
-      onchanged?.();
+      publishAccounts(loaded, true);
       return loaded;
     } catch (error: unknown) {
       if (
@@ -57,6 +58,31 @@
     } finally {
       if (requestGeneration === loadGeneration) loading = false;
     }
+  }
+
+  function publishAccounts(loaded: AdminAccounts, notifyChange: boolean): void {
+    if (disposed) return;
+    const signature = revisionSignature(loaded);
+    const changed = accountRevisionSignature !== null && accountRevisionSignature !== signature;
+    data = loaded;
+    accountRevisionSignature = signature;
+    if (notifyChange && changed) onchanged?.();
+  }
+
+  function revisionSignature(accounts: AdminAccounts): string {
+    return JSON.stringify({
+      defaultRevision: accounts.defaultRevision,
+      defaultAccountId: accounts.defaultAccountId,
+      accounts: accounts.items
+        .map((account) => [account.accountId, account.revision, account.state])
+        .toSorted(([left], [right]) => String(left).localeCompare(String(right))),
+    });
+  }
+
+  function confirmChange(next: AdminAccounts): void {
+    if (disposed) return;
+    publishAccounts(next, false);
+    onchanged?.();
   }
 
   async function refresh(): Promise<void> {
@@ -251,6 +277,7 @@
   }
 
   function dispose(): void {
+    disposed = true;
     const disposedFlowId = flow?.flowId;
     stopPolling();
     loadGeneration += 1;
@@ -294,32 +321,44 @@
     busy = id;
     failure = "";
     try {
-      await client.useAccount(id, data.defaultRevision);
+      const selected = await client.useAccount(id, data.defaultRevision);
+      if (disposed) return;
+      confirmChange({ ...data, ...selected });
       await load();
     } catch (error: unknown) {
+      if (disposed) return;
       failure = errorMessage(error);
       await load(true);
     } finally {
-      busy = "";
+      if (!disposed) busy = "";
     }
   }
 
   async function remove(id: string, revision: number): Promise<void> {
     if (!confirm("Remove this account's credentials and live caches?")) return;
+    const current = data;
+    if (current === null) return;
     busy = id;
     failure = "";
     try {
       const removed = await client.removeAccount(id, revision);
-      if (data) {
-        data = { ...data, items: data.items.map((account) => account.accountId === id ? removed : account) };
-      }
+      if (disposed) return;
+      const account = current.items.find((item) => item.accountId === id);
+      const changed = {
+        ...current,
+        defaultRevision: current.defaultRevision + (account?.state === "active" ? 1 : 0),
+        defaultAccountId: current.defaultAccountId === id ? null : current.defaultAccountId,
+        items: current.items.map((item) => item.accountId === id ? removed : item),
+      };
+      confirmChange(changed);
       message = "Account removed.";
       await load();
     } catch (error: unknown) {
+      if (disposed) return;
       failure = errorMessage(error);
       await load(true);
     } finally {
-      busy = "";
+      if (!disposed) busy = "";
     }
   }
 </script>

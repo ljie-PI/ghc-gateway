@@ -38,6 +38,7 @@
   let navigation: HTMLElement | null = $state(null);
   let agentsSnapshot: AgentsView | null = $state(null);
   let agentModelsSnapshot: AdminAgentModels | null = $state(null);
+  let agentModelsGeneration = $state(0);
   let pageNumber = $derived(String(views.indexOf(view) + 1).padStart(2, "0"));
   const client = new AdminClient(teardown);
   const agentsResource = new SessionResource((signal) => client.agents(signal), (value) => { agentsSnapshot = value; });
@@ -127,10 +128,11 @@
 
   function clearAgentsSnapshot(): void {
     agentsResource.replace(null);
-    clearAgentModels();
+    clearAgentModels(false);
   }
 
-  function clearAgentModels(): void {
+  function clearAgentModels(reload = true): void {
+    if (reload) agentModelsGeneration += 1;
     agentModelsResource.replace(null);
   }
 
@@ -276,6 +278,7 @@
               {pageNumber}
               data={agentsSnapshot}
               catalog={agentModelsSnapshot}
+              catalogGeneration={agentModelsGeneration}
               onload={loadAgents}
               onloadmodels={(refresh) => agentModelsResource.load(refresh)}
               onchanged={updateAgent}

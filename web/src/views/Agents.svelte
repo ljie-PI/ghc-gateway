@@ -10,6 +10,7 @@
     pageNumber,
     data,
     catalog,
+    catalogGeneration,
     onload,
     onloadmodels,
     onchanged,
@@ -18,6 +19,7 @@
     pageNumber: string;
     data: AgentsView | null;
     catalog: AdminAgentModels | null;
+    catalogGeneration: number;
     onload: (refresh?: boolean) => Promise<AgentsView>;
     onloadmodels: (refresh?: boolean) => Promise<AdminAgentModels>;
     onchanged: (status: AgentStatus) => void;
@@ -27,13 +29,26 @@
   let modelsLoading = $state(false);
   let modelsFailure = $state("");
   let disposed = false;
+  let catalogTrackingInitialized = false;
+  let attemptedCatalogGeneration = -1;
+  let modelsLoadGeneration = 0;
   const orderedItems = $derived(data?.items.toSorted((left, right) =>
     (left.id === "codex" ? 0 : 1) - (right.id === "codex" ? 0 : 1)) ?? []);
 
   onMount(() => {
     if (data === null) void load(false);
-    if (catalog === null) void loadModels(false);
     return () => { disposed = true; };
+  });
+
+  $effect(() => {
+    if (!catalogTrackingInitialized) {
+      catalogTrackingInitialized = true;
+      attemptedCatalogGeneration = catalog === null ? catalogGeneration - 1 : catalogGeneration;
+    }
+    if (catalog === null && attemptedCatalogGeneration !== catalogGeneration) {
+      attemptedCatalogGeneration = catalogGeneration;
+      void loadModels(false);
+    }
   });
 
   async function load(refresh: boolean): Promise<void> {
@@ -49,14 +64,16 @@
   }
 
   async function loadModels(refresh: boolean): Promise<void> {
+    const generation = ++modelsLoadGeneration;
     modelsLoading = true;
     modelsFailure = "";
     try {
       await onloadmodels(refresh);
     } catch (error: unknown) {
-      if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) modelsFailure = errorMessage(error);
+      if (!disposed && generation === modelsLoadGeneration
+        && !(error instanceof DOMException && error.name === "AbortError")) modelsFailure = errorMessage(error);
     } finally {
-      if (!disposed) modelsLoading = false;
+      if (!disposed && generation === modelsLoadGeneration) modelsLoading = false;
     }
   }
 
