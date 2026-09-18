@@ -12,7 +12,7 @@ export interface AgentManagerOptions {
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly now?: () => Date;
   /** Deterministic failure/race injection at durable transaction boundaries. */
-  readonly checkpoint?: (point: "intent" | "stage_written" | "staged" | "displaced" | "linked" | "published" | "complete", agent: AgentId, index: number) => void;
+  readonly checkpoint?: (point: "before_intent" | "intent" | "stage_written" | "staged" | "displaced" | "linked" | "published" | "complete", agent: AgentId, index: number) => void;
 }
 
 export class FileAgentsManager implements AgentsManager {
@@ -73,8 +73,6 @@ export class FileAgentsManager implements AgentsManager {
         const projection = this.project(request, state, current, livePaths, origin, models);
         const prepared = await this.prepareTargets(request.agent, state, current, livePaths);
         current = prepared.current;
-        assertCurrent();
-        signal.throwIfAborted();
         const after = request.agent === "claude"
           ? [prepared.backup, newImage(projection.config, current[1]!)]
           : [prepared.backup, newImage(projection.catalog!, current[1]!), newImage(projection.config, current[2]!)];
@@ -84,12 +82,12 @@ export class FileAgentsManager implements AgentsManager {
         if (steps.length === 0) {
           state.lastAppliedAt = (this.options.now ?? (() => new Date()))().toISOString();
           state.revision += 1;
-          await save(state);
+          await save(state, () => this.requireCurrent(request.agent, assertCurrent, signal));
           return await this.status(request.agent, origin);
         }
         state.pending = { kind: "apply", steps, garbage: [] };
         // From this durable intent onward cancellation must not interrupt commit.
-        await save(state);
+        await save(state, () => this.requireCurrent(request.agent, assertCurrent, signal));
         this.hit("intent", request.agent, -1);
         await this.execute(request.agent, state, save);
         state.lastAppliedAt = (this.options.now ?? (() => new Date()))().toISOString();
@@ -417,5 +415,10 @@ export class FileAgentsManager implements AgentsManager {
   }
   private hit(point: Parameters<NonNullable<AgentManagerOptions["checkpoint"]>>[0], agent: AgentId, index: number): void {
     this.options.checkpoint?.(point, agent, index);
+  }
+  private requireCurrent(agent: AgentId, assertCurrent: () => void, signal: AbortSignal): void {
+    this.hit("before_intent", agent, -1);
+    signal.throwIfAborted();
+    assertCurrent();
   }
 }

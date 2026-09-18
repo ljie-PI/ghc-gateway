@@ -27,6 +27,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
     displayName: "Octocat",
     state: "active" as const,
     authenticatedAtMs: now.value - 1_000,
+    credentialGeneration: 4,
   };
   let defaultRevision = 2;
   let defaultAccountId: string | null = account.accountId;

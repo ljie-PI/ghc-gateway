@@ -21,6 +21,7 @@ export interface AccountSummary {
   readonly displayName: string | null;
   readonly state: CredentialState;
   readonly authenticatedAtMs: number | null;
+  readonly credentialGeneration: number | null;
 }
 
 export interface BoundAccount {
@@ -370,5 +371,6 @@ function toSummary(row: AccountRow): AccountSummary {
     displayName: row.display_name,
     state: row.credential_state,
     authenticatedAtMs: row.authenticated_at_ms,
+    credentialGeneration: row.credential_generation,
   };
 }

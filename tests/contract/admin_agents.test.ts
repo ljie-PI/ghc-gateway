@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createAdminModule } from "../../src/admin/routes.js";
 import type { AdminModule } from "../../src/gateway/create_gateway.js";
@@ -11,6 +14,8 @@ import {
 } from "../../src/agents/types.js";
 import { adminDependencies, login, type TestAdminDependencies } from "./admin_test_harness.js";
 import { AdminManagementApi } from "../../src/admin/api.js";
+import { FileAgentsManager } from "../../src/agents/manager.js";
+import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
 
 const ORIGIN = "http://127.0.0.1:31400";
 
@@ -85,6 +90,69 @@ const claudeMappings = [
 ];
 
 describe("Admin agents API", () => {
+  it.each(["default", "fallback", "account", "credentials", "catalog"] as const)(
+    "fences a concurrent %s revision change before durable Apply intent",
+    async (change) => {
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-admin-agents-")));
+      const dependencies = adminDependencies();
+      const first = dependencies.accounts.list()[0]!;
+      const second = { ...first, accountId: "github.com/43", userId: "43" };
+      let accounts = change === "default" ? [first, second] : [first];
+      let defaultState = change === "fallback"
+        ? { defaultRevision: 2, defaultAccountId: null as string | null }
+        : { defaultRevision: 2, defaultAccountId: first.accountId as string | null };
+      let catalogCurrent = true;
+      let stateDatabaseExistedAtBoundary = false;
+      dependencies.accounts.list = () => accounts;
+      dependencies.accounts.defaultState = () => defaultState;
+      dependencies.accounts.bindAccount = async (accountId, signal) => {
+        signal?.throwIfAborted();
+        const account = accounts.find((candidate) => candidate.accountId === accountId);
+        if (account === undefined) throw new Error("account not found");
+        return {
+          accountId,
+          environment: resolveGitHubEnvironment(account.host),
+          userId: account.userId,
+          login: account.login,
+          displayName: account.displayName,
+          credentialGeneration: account.credentialGeneration!,
+        };
+      };
+      dependencies.registry.isCurrent = () => catalogCurrent;
+      const manager = new FileAgentsManager({
+        home,
+        checkpoint: (point) => {
+          if (point !== "before_intent") return;
+          stateDatabaseExistedAtBoundary = fs.existsSync(path.join(home, ".ghc-gateway-agents", "codex", "state.db"));
+          if (change === "default") defaultState = { defaultRevision: 3, defaultAccountId: second.accountId };
+          if (change === "fallback") accounts = [first, second];
+          if (change === "account") accounts = [{ ...first, revision: first.revision + 1 }];
+          if (change === "credentials") accounts = [{ ...first, credentialGeneration: 5 }];
+          if (change === "catalog") catalogCurrent = false;
+        },
+      });
+      const api = new AdminManagementApi({ ...dependencies, agents: manager });
+      try {
+        const status = (await manager.inspect(ORIGIN)).find((item) => item.id === "codex")!;
+        const catalog = await api.agentModels(new AbortController().signal);
+        await expect(api.applyAgent({
+          agent: "codex",
+          expectedRevision: status.revision,
+          catalogRevision: catalog.catalogRevision,
+          mappings: [{ displayName: "GPT Test", modelId: "gpt-test" }],
+        }, ORIGIN, new AbortController().signal)).rejects.toMatchObject({ code: "revision_conflict" });
+
+        expect(stateDatabaseExistedAtBoundary).toBe(false);
+        expect(fs.existsSync(path.join(home, ".ghc-gateway-agents", "codex", "state.db"))).toBe(false);
+        expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
+      } finally {
+        manager.close();
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
+
   it.each(["default", "revision", "ambiguous", "credentials"] as const)("rejects catalog choices after concurrent %s changes", async (change) => {
     const dependencies = adminDependencies();
     const initialAccounts = dependencies.accounts.list();
