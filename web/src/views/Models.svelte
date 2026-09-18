@@ -7,7 +7,7 @@
 
   let { client, pageNumber, onchanged }: { client: AdminClient; pageNumber: string; onchanged?: () => void } = $props();
   let accounts: AdminAccounts | null = $state(null);
-  let data: AdminModels | null = $state(null);
+  let data = $state<AdminModels | null>(null);
   let accountId = $state("");
   let loading = $state(true);
   let busy = $state("");
@@ -15,6 +15,7 @@
   let requestGeneration = 0;
   let disposed = false;
   const requests = new AbortController();
+  const selectedData = $derived.by(() => data?.accountId === accountId ? data : null);
 
   onMount(() => {
     void initialize();
@@ -126,16 +127,16 @@
       <option value={account.accountId}>{account.login ?? account.host} · {account.host}</option>
     {/each}
   </select>
-  {#if data && data.accountId === accountId}
+  {#if selectedData}
     <span class="subtle" title="Catalog cache version, account credential version and last successful catalog fetch time.">
-      Generation {data.catalogGeneration} · credential {data.credentialGeneration} · fetched {new Date(data.fetchedAt).toLocaleString()}
+      Generation {selectedData.catalogGeneration} · credential {selectedData.credentialGeneration} · fetched {new Date(selectedData.fetchedAt).toLocaleString()}
     </span>
   {/if}
 </section>
 
 {#if failure}<p class="notice error" role="alert">{failure}</p>{/if}
 
-{#if data?.preferredModel?.validity === "invalid"}
+{#if selectedData?.preferredModel?.validity === "invalid"}
   <section class="notice warning" role="alert">
     <h2>Preferred model unavailable</h2>
     <p>Use <code>ghcg models set &lt;model-id&gt;</code> to select a preferred model. The gateway will not silently substitute one.</p>
@@ -150,17 +151,17 @@
     <h2>No active account</h2>
     <p>Connect an account before requesting a model catalog.</p>
   </section>
-{:else if data?.items.length === 0}
+{:else if selectedData?.items.length === 0}
   <section class="empty">
     <span>00</span>
     <h2>Catalog is empty</h2>
     <p>The account returned no visible models. Refresh discovery to check again.</p>
   </section>
-{:else if data}
+{:else if selectedData}
   <section class="section" aria-labelledby="model-directory-title">
     <div class="section-heading">
       <h2 id="model-directory-title"><span class="section-number">[01]</span>Model directory</h2>
-      <span class="badge">{data.items.length} models</span>
+      <span class="badge">{selectedData.items.length} models</span>
     </div>
     <details class="catalog-help" id="model-catalog-help">
       <summary>About sources and token limits</summary>
@@ -177,7 +178,7 @@
             <th>Per-request token limits</th>
           </tr>
         </thead>
-        {#each data.items as model, index (`${model.id}:${index}`)}
+        {#each selectedData.items as model, index (`${model.id}:${index}`)}
           <tbody data-model-id={model.id}>
             <tr>
               <td>

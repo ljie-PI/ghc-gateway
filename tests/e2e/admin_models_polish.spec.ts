@@ -75,12 +75,16 @@ for (const width of [1440, 390, 320]) {
   });
 }
 
-test("Models hides the previous account diagnostics while the next catalog loads", async ({ page }) => {
+test("Models renders rows, warnings and diagnostics only for the selected account", async ({ page }) => {
   const fixture = await openModels(page, (fixture) => {
     const first = fixture.state.accounts.items[0]!;
     fixture.state.accounts = { ...fixture.state.accounts, items: [first, {
       ...first, accountId: "ghes:2", host: "github.example.test", login: "enterprise", displayName: "Enterprise Admin",
     }] };
+    fixture.state.models = {
+      ...fixture.state.models,
+      preferredModel: { revision: 2, modelId: "missing-model", validity: "invalid" },
+    };
   });
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
@@ -88,15 +92,138 @@ test("Models hides the previous account diagnostics while the next catalog loads
     await pending;
     await route.fulfill({ json: { data: { ...fixture.state.models,
       accountId: "ghes:2", catalogGeneration: 9, credentialGeneration: 4,
+      preferredModel: null,
+      items: [{ ...fixture.state.models.items[0]!, id: "enterprise-model", name: "Enterprise Model" }],
     } } });
   });
   const metadata = page.locator(".toolbar").first().locator(".subtle");
+  await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toBeVisible();
+  await expect(page.locator("tbody[data-model-id=\"gpt-alpha\"]")).toBeVisible();
   try {
     await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
     await expect(page.getByText("Loading model catalog...", { exact: true })).toBeVisible();
     await expect(metadata).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toHaveCount(0);
+    await expect(page.locator("tbody[data-model-id=\"gpt-alpha\"]")).toHaveCount(0);
   } finally { release(); }
   await expect(metadata).toContainText("Generation 9 · credential 4 · fetched");
+  await expect(page.locator("tbody[data-model-id=\"enterprise-model\"]")).toBeVisible();
+  await expect(page.locator("tbody[data-model-id=\"gpt-alpha\"]")).toHaveCount(0);
+});
+
+test("Models does not render the previous account catalog when switching fails", async ({ page }) => {
+  const fixture = await openModels(page, (fixture) => {
+    const first = fixture.state.accounts.items[0]!;
+    fixture.state.accounts = { ...fixture.state.accounts, items: [first, {
+      ...first, accountId: "ghes:2", host: "github.example.test", login: "enterprise", displayName: "Enterprise Admin",
+    }] };
+  });
+  fixture.state.models = {
+    ...fixture.state.models,
+    preferredModel: { revision: 2, modelId: "missing-model", validity: "invalid" },
+    items: [],
+  };
+  await navigateTo(page, "Overview");
+  await navigateTo(page, "Models");
+  await expect(page.getByRole("heading", { name: "Catalog is empty" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toBeVisible();
+  await expect(page.locator(".toolbar").first().locator(".subtle")).toContainText("Generation 1 · credential 1 · fetched");
+
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(/\/models\?accountId=ghes%3A2$/u, async (route) => {
+    await pending;
+    await route.fulfill({
+      status: 503,
+      json: { error: { code: "upstream_unavailable", message: "upstream unavailable", requestId: "failed-switch" } },
+    });
+  });
+  try {
+    await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
+    await expect(page.getByText("Loading model catalog...", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Catalog is empty" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toHaveCount(0);
+    await expect(page.locator(".toolbar").first().locator(".subtle")).toHaveCount(0);
+  } finally { release(); }
+  await expect(page.getByRole("alert")).toHaveText("upstream unavailable");
+  await expect(page.getByText("Loading model catalog...", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Catalog is empty" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Preferred model unavailable" })).toHaveCount(0);
+  await expect(page.locator(".toolbar").first().locator(".subtle")).toHaveCount(0);
+  await expect(page.getByRole("table")).toHaveCount(0);
+});
+
+test("a superseded account response cannot overwrite the newer selection", async ({ page }) => {
+  const fixture = await openModels(page, (fixture) => {
+    const first = fixture.state.accounts.items[0]!;
+    fixture.state.accounts = { ...fixture.state.accounts, items: [first, {
+      ...first, accountId: "ghes:2", host: "github.example.test", login: "enterprise", displayName: "Enterprise Admin",
+    }] };
+  });
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  await page.route(/\/models\?accountId=ghes%3A2$/u, async (route) => {
+    started();
+    await pending;
+    await route.fulfill({ json: { data: {
+      ...fixture.state.models,
+      accountId: "ghes:2",
+      catalogGeneration: 9,
+      credentialGeneration: 4,
+      preferredModel: null,
+      items: [{ ...fixture.state.models.items[0]!, id: "enterprise-model", name: "Enterprise Model" }],
+    } } });
+  });
+  try {
+    await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
+    await entered;
+    await page.getByLabel("Account", { exact: true }).selectOption("github:1");
+    await expect(page.locator("tbody[data-model-id=\"gpt-alpha\"]")).toBeVisible();
+    const lateResponse = page.waitForResponse((response) => response.url().endsWith("/models?accountId=ghes%3A2"));
+    release();
+    await lateResponse;
+    await expect(page.getByLabel("Account", { exact: true })).toHaveValue("github:1");
+    await expect(page.locator("tbody[data-model-id=\"gpt-alpha\"]")).toBeVisible();
+    await expect(page.locator("tbody[data-model-id=\"enterprise-model\"]")).toHaveCount(0);
+    await expect(page.locator(".toolbar").first().locator(".subtle"))
+      .toContainText("Generation 1 · credential 1 · fetched");
+  } finally { release(); }
+});
+
+test("an abandoned Models account switch cannot render after navigation", async ({ page }) => {
+  await openModels(page, (fixture) => {
+    const first = fixture.state.accounts.items[0]!;
+    fixture.state.accounts = { ...fixture.state.accounts, items: [first, {
+      ...first, accountId: "ghes:2", host: "github.example.test", login: "enterprise", displayName: "Enterprise Admin",
+    }] };
+  });
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  await page.route(/\/models\?accountId=ghes%3A2$/u, async (route) => {
+    started();
+    await pending;
+    await route.fallback();
+  });
+  try {
+    await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
+    await entered;
+    const canceled = page.waitForEvent("requestfailed", {
+      predicate: (request) => request.url().endsWith("/models?accountId=ghes%3A2"),
+    });
+    await navigateTo(page, "Overview");
+    release();
+    await canceled;
+    await navigateTo(page, "Models");
+    await expect(page.getByLabel("Account", { exact: true })).toHaveValue("github:1");
+    await expect(page.locator("tbody[data-model-id=\"gpt-alpha\"]")).toBeVisible();
+    await expect(page.locator("tbody[data-model-id=\"enterprise-model\"]")).toHaveCount(0);
+    await expect(page.locator(".toolbar").first().locator(".subtle"))
+      .toContainText("Generation 1 · credential 1 · fetched");
+  } finally { release(); }
 });
 
 function metadataCases(fixture: AdminFixture): void {
@@ -192,7 +319,7 @@ test("models label per-request token ceilings and retain unknowns and budget det
 
 test("models allow inspection without metadata editing or preference actions", async ({ page }) => {
   const fixture = await openModels(page);
-  const model = page.locator('tbody[data-model-id="claude-beta"]');
+  const model = page.locator("tbody[data-model-id=\"claude-beta\"]");
   await model.getByText("Capability details", { exact: true }).click();
   await expect(model.locator("dl")).toContainText("Native HTTP protocols");
   await expect(model.locator("dl")).toContainText("Built-in revision");
