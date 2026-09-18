@@ -102,6 +102,7 @@ describe("Admin agents API", () => {
         ? { defaultRevision: 2, defaultAccountId: null as string | null }
         : { defaultRevision: 2, defaultAccountId: first.accountId as string | null };
       let catalogCurrent = true;
+      let stateDatabaseExistedAtBoundary = false;
       dependencies.accounts.list = () => accounts;
       dependencies.accounts.defaultState = () => defaultState;
       dependencies.accounts.bindAccount = async (accountId, signal) => {
@@ -122,6 +123,7 @@ describe("Admin agents API", () => {
         home,
         checkpoint: (point) => {
           if (point !== "before_intent") return;
+          stateDatabaseExistedAtBoundary = fs.existsSync(path.join(home, ".ghc-gateway-agents", "codex", "state.db"));
           if (change === "default") defaultState = { defaultRevision: 3, defaultAccountId: second.accountId };
           if (change === "fallback") accounts = [first, second];
           if (change === "account") accounts = [{ ...first, revision: first.revision + 1 }];
@@ -140,6 +142,7 @@ describe("Admin agents API", () => {
           mappings: [{ displayName: "GPT Test", modelId: "gpt-test" }],
         }, ORIGIN, new AbortController().signal)).rejects.toMatchObject({ code: "revision_conflict" });
 
+        expect(stateDatabaseExistedAtBoundary).toBe(false);
         expect(fs.existsSync(path.join(home, ".ghc-gateway-agents", "codex", "state.db"))).toBe(false);
         expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
       } finally {

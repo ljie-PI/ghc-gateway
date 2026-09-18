@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
-import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
+import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "../../src/agents/types.js";
 import { AgentStore } from "../../src/agents/store.js";
 import { protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
@@ -243,18 +243,44 @@ describe("private repeatable agent configuration", () => {
   }, 180_000);
   it("keeps cancellation abortable until the durable intent boundary", async () => {
     const controller = new AbortController();
+    let stateDatabaseExistedAtBoundary = false;
     const h = harness({
       checkpoint: (point) => {
-        if (point === "before_intent") controller.abort();
+        if (point !== "before_intent") return;
+        stateDatabaseExistedAtBoundary = fs.existsSync(path.join(h.home, ".ghc-gateway-agents", "codex", "state.db"));
+        controller.abort();
       },
     });
     const status = await h.status("codex");
     await expect(h.manager.apply({
       agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings,
     }, origin, models, () => undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(stateDatabaseExistedAtBoundary).toBe(false);
     expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents", "codex", "state.db"))).toBe(false);
     expect(fs.existsSync(path.join(h.home, ".codex"))).toBe(false);
   }, 180_000);
+
+  it("leaves existing state and client files unchanged on a no-op boundary conflict", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const status = await h.status("codex");
+    const statePath = path.join(h.home, ".ghc-gateway-agents", "codex", "state.db");
+    const catalogPath = path.join(h.home, ".codex", "ghcg_models.json");
+    const configPath = path.join(h.home, ".codex", "config.toml");
+    const before = [statePath, catalogPath, configPath].map((file) => fs.readFileSync(file));
+    let assertions = 0;
+
+    await expect(h.manager.apply({
+      agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => {
+      assertions += 1;
+      if (assertions === 3) throw new AgentError("revision_conflict");
+    }, new AbortController().signal)).rejects.toMatchObject({ name: "AgentError", code: "revision_conflict" });
+
+    expect(assertions).toBe(3);
+    expect([statePath, catalogPath, configPath].map((file) => fs.readFileSync(file))).toEqual(before);
+    expect(await h.status("codex")).toEqual(status);
+  }, 300_000);
 
   it("ignores cancellation after durable intent and completes Apply", async () => {
     const controller = new AbortController();

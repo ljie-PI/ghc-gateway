@@ -85,23 +85,17 @@ export class AgentStore {
     this.validatePaths(state);
     await this.checkDirectory();
     if (exists(this.statePath)) await assertPrivate(this.statePath, false);
-    const created = !exists(this.statePath);
-    if (created) {
+    beforeCommit?.();
+    if (!exists(this.statePath)) {
       const fd = fs.openSync(this.statePath, "wx", 0o600);
       fs.closeSync(fd);
-      await protect(this.statePath);
+      protect(this.statePath);
     }
     const db = new DatabaseSync(this.statePath, { timeout: 0 });
     try {
       db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=8192; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
-      beforeCommit?.();
       db.prepare("INSERT INTO state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document").run(JSON.stringify(state));
-    } catch (error: unknown) {
-      db.close();
-      if (created) fs.unlinkSync(this.statePath);
-      throw error;
-    }
-    db.close();
+    } finally { db.close(); }
   }
   private async checkDirectory(): Promise<void> {
     await assertPrivate(this.root, true);
