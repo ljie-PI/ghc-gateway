@@ -19,6 +19,15 @@ const initial: AdminAccounts = {
 };
 
 describe("AccountRevisionObserver", () => {
+  it("does not have a baseline until the first account snapshot is observed", () => {
+    const observer = new AccountRevisionObserver();
+    expect(observer.hasBaseline()).toBe(false);
+    observer.observe(initial);
+    expect(observer.hasBaseline()).toBe(true);
+    observer.reset();
+    expect(observer.hasBaseline()).toBe(false);
+  });
+
   it("retains session revisions across view lifetimes and reports each real revision once", () => {
     const observer = new AccountRevisionObserver();
     expect(observer.observe(initial)).toBe(false);

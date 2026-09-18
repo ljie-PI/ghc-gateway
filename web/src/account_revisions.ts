@@ -3,6 +3,10 @@ import type { AdminAccounts } from "../../src/admin/api.js";
 export class AccountRevisionObserver {
   private signature: string | null = null;
 
+  hasBaseline(): boolean {
+    return this.signature !== null;
+  }
+
   observe(accounts: AdminAccounts): boolean {
     const signature = JSON.stringify({
       defaultRevision: accounts.defaultRevision,

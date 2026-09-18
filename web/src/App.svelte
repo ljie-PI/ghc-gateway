@@ -140,8 +140,9 @@
     if (accountRevisions.observe(accounts)) clearAgentModels();
   }
 
-  async function readAccountRevisions(signal: AbortSignal): Promise<void> {
+  async function readAccountRevisions(signal: AbortSignal): Promise<boolean> {
     observeAccounts(await client.accounts(signal));
+    return accountRevisions.hasBaseline();
   }
 
   function loadAgents(refresh = false): Promise<AgentsView> {

@@ -263,7 +263,7 @@ for (const change of ["account", "default", "credential"] as const) {
   });
 }
 
-test("account removal never republishes an obsolete snapshot after a concurrent Refresh", async ({ page }) => {
+test("account removal never publishes an older revision of the same account after Refresh", async ({ page }) => {
   const fixture = await installAdminFixture(page);
   addEnterpriseAccount(fixture);
   await page.goto("/admin/#bootstrap_token=remove-refresh-race");
@@ -275,25 +275,28 @@ test("account removal never republishes an obsolete snapshot after a concurrent 
   let markRemovalStarted = (): void => undefined;
   const removalHeld = new Promise<void>((resolve) => { releaseRemoval = resolve; });
   const removalStarted = new Promise<void>((resolve) => { markRemovalStarted = resolve; });
+  const enterpriseAccount = fixture.state.accounts.items.find((account) => account.accountId === "ghes:2")!;
+  const staleRemoved = { ...enterpriseAccount, state: "removed" as const, revision: enterpriseAccount.revision + 1 };
   await page.route(/\/accounts\/ghes%3A2$/u, async (route) => {
     markRemovalStarted();
     await removalHeld;
-    await route.fallback();
+    await route.fulfill({ json: { data: staleRemoved } });
   });
   page.once("dialog", (dialog) => dialog.accept());
   await enterprise.getByRole("button", { name: "Remove", exact: true }).click({ noWaitAfter: true });
   await removalStarted;
 
-  const github = fixture.state.accounts.items[0]!;
   const refreshedAccounts = {
     ...fixture.state.accounts,
-    items: [{ ...github, displayName: "Updated Admin", revision: github.revision + 1 }, fixture.state.accounts.items[1]!],
+    items: fixture.state.accounts.items.map((account) => account.accountId === "ghes:2"
+      ? { ...account, displayName: "Reauthenticated Enterprise", revision: staleRemoved.revision + 1 }
+      : account),
   };
   await page.route("**/admin/api/v1/accounts", async (route) => {
     await route.fulfill({ json: { data: refreshedAccounts } });
   }, { times: 1 });
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByText("Updated Admin", { exact: true })).toBeVisible();
+  await expect(page.getByText("Reauthenticated Enterprise", { exact: true })).toBeVisible();
 
   await page.route("**/admin/api/v1/accounts", async (route) => {
     await route.fulfill({
@@ -304,11 +307,82 @@ test("account removal never republishes an obsolete snapshot after a concurrent 
   try {
     releaseRemoval();
     await expect(page.getByRole("alert")).toContainText("internal error");
-    await expect(enterprise).toHaveCount(0);
-    await expect(page.getByText("Updated Admin", { exact: true })).toBeVisible();
+    await expect(page.getByText("Reauthenticated Enterprise", { exact: true })).toBeVisible();
+    await expect(page.getByRole("row").filter({ hasText: "Reauthenticated Enterprise" })
+      .getByText("Connected", { exact: true })).toBeVisible();
   } finally {
     releaseRemoval();
   }
+});
+
+test("Agent catalog publication waits for an account baseline across navigation", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  let release = (): void => undefined;
+  let markStarted = (): void => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  await page.route("**/admin/api/v1/accounts", async (route) => {
+    markStarted();
+    await held;
+    await route.fallback().catch(() => undefined);
+  }, { times: 1 });
+  try {
+    await page.goto("/admin/#bootstrap_token=account-baseline");
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await started;
+    await expect(page.locator(".agent-card")).toHaveCount(2);
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(0);
+    await page.getByRole("button", { name: "Overview", exact: true }).click();
+    release();
+    addEnterpriseAccount(fixture);
+    fixture.state.models = { ...fixture.state.models, items: fixture.state.models.items.slice(1) };
+    fixture.state.agentsCatalogRevision = "d".repeat(64);
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await expect(page.locator("#codex-model-options option")).toHaveCount(1);
+    await expect(page.locator("#codex-model-options option")).toHaveAttribute("value", "claude-beta");
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+  } finally {
+    release();
+  }
+});
+
+test("mounted Agents retries a failed automatic catalog reload at the bounded observation cadence", async ({ page }) => {
+  await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+  const fixture = await openAgents(page);
+  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  const id = card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+  const name = card.getByRole("textbox", { name: "Model 1 Display name", exact: true });
+  await id.fill("gpt-alpha");
+  await name.fill("Retry draft");
+  const account = fixture.state.accounts.items[0]!;
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: [{ ...account, revision: account.revision + 1 }],
+  };
+  fixture.state.models = { ...fixture.state.models, items: fixture.state.models.items.slice(1) };
+  fixture.state.agentsCatalogRevision = "d".repeat(64);
+  let automaticCatalogRequests = 0;
+  page.on("request", (request) => {
+    if (request.url().endsWith("/agents/models")) automaticCatalogRequests += 1;
+  });
+  await page.route("**/admin/api/v1/agents/models", async (route) => {
+    await route.fulfill({
+      status: 503,
+      json: { error: { code: "upstream_unavailable", message: "synthetic", requestId: "synthetic" } },
+    });
+  }, { times: 1 });
+
+  await advance(page, fixture, 5_000);
+  await expect(page.getByRole("alert")).toContainText("upstream unavailable");
+  expect(automaticCatalogRequests).toBe(1);
+  await advance(page, fixture, 4_999);
+  expect(automaticCatalogRequests).toBe(1);
+  await advance(page, fixture, 1);
+  await expect(page.locator("#codex-model-options option")).toHaveCount(1);
+  await expect(id).toHaveValue("gpt-alpha");
+  await expect(name).toHaveValue("Retry draft");
+  expect(automaticCatalogRequests).toBe(2);
 });
 
 test("a held device-flow completion cannot invalidate agent choices after Accounts is left", async ({ page }) => {

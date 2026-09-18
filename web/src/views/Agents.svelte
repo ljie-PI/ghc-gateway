@@ -23,7 +23,7 @@
     catalogGeneration: number;
     onload: (refresh?: boolean) => Promise<AgentsView>;
     onloadmodels: (refresh?: boolean) => Promise<AdminAgentModels>;
-    onobserveaccounts: (signal: AbortSignal) => Promise<void>;
+    onobserveaccounts: (signal: AbortSignal) => Promise<boolean>;
     onchanged: (status: AgentStatus) => void;
   } = $props();
   let loading = $state(false);
@@ -52,9 +52,8 @@
   $effect(() => {
     if (!catalogTrackingInitialized) {
       catalogTrackingInitialized = true;
-      attemptedCatalogGeneration = catalog === null ? catalogGeneration - 1 : catalogGeneration;
-    }
-    if (catalog === null && attemptedCatalogGeneration !== catalogGeneration) {
+      attemptedCatalogGeneration = catalogGeneration;
+    } else if (catalog === null && attemptedCatalogGeneration !== catalogGeneration) {
       attemptedCatalogGeneration = catalogGeneration;
       void loadModels(false);
     }
@@ -87,11 +86,16 @@
   }
 
   async function observeAccounts(): Promise<void> {
+    let observed = false;
     try {
-      await onobserveaccounts(accountObservation.signal);
+      observed = await onobserveaccounts(accountObservation.signal);
     } catch {
       // Catalog loading reports actionable account failures; bounded observation retries quietly.
     } finally {
+      if (!disposed && !accountObservation.signal.aborted && observed
+        && catalog === null && attemptedCatalogGeneration === catalogGeneration && !modelsLoading) {
+        void loadModels(false);
+      }
       if (!disposed && !accountObservation.signal.aborted) {
         accountObservationTimer = setTimeout(() => void observeAccounts(), 5_000);
       }

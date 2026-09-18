@@ -320,7 +320,15 @@
       const removed = await client.removeAccount(id, revision);
       if (disposed) return;
       if (data !== null) {
-        data = { ...data, items: data.items.map((account) => account.accountId === id ? removed : account) };
+        data = {
+          ...data,
+          items: data.items.map((account) => account.accountId === id
+            && account.revision === revision
+            && removed.accountId === id
+            && removed.revision > account.revision
+            ? removed
+            : account),
+        };
       }
       message = "Account removed.";
       await load();
