@@ -23,7 +23,7 @@ import {
   type ProcessIdentityDependencies,
 } from "../../src/daemon/process_identity.js";
 
-const WINDOWS_TEST_COMMAND_TIMEOUT_MS = 8_000;
+const WINDOWS_TEST_COMMAND_TIMEOUT_MS = 15_000;
 
 const identity: DaemonIdentity = {
   version: 1,
@@ -79,7 +79,7 @@ describe("daemon identity file", () => {
     let observed = false;
     let rejection: unknown;
     const files = new ProtectedFileSystem(directory, {
-      runCommand: (command, args, environment?: Readonly<Record<string, string>>) => {
+      runCommand: (command, args, environment, timeoutMs) => {
         // Pause the creator at its first post-creation inspection. A second
         // caller must already accept the visible directory before we continue.
         if (!observed && args.join(" ").includes("Get-Item")) {
@@ -87,7 +87,7 @@ describe("daemon identity file", () => {
           try { new ProtectedFileSystem(directory).ensureProtectedDirectory(); }
           catch (error: unknown) { rejection = error; }
         }
-        return nativeWindowsCommand(command, args, environment);
+        return nativeWindowsCommand(command, args, environment, timeoutMs);
       },
     });
     try {
@@ -103,11 +103,11 @@ describe("daemon identity file", () => {
     const script = `import {execFileSync} from 'node:child_process';
       import path from 'node:path';
       import {ProtectedFileSystem} from ${JSON.stringify(source)};
-      new ProtectedFileSystem(process.argv[1], {runCommand(file,args,environment) {
+      new ProtectedFileSystem(process.argv[1], {runCommand(file,args,environment,timeoutMs) {
         if(args.join(' ').includes('Get-Item')) process.exit(23);
         const executable=file==='whoami'||file==='icacls'
           ? path.join(process.env.SystemRoot,'System32',file+'.exe') : file;
-        return execFileSync(executable,args,{encoding:'utf8',windowsHide:true,timeout:${WINDOWS_TEST_COMMAND_TIMEOUT_MS},
+        return execFileSync(executable,args,{encoding:'utf8',windowsHide:true,timeout:timeoutMs??${WINDOWS_TEST_COMMAND_TIMEOUT_MS},
           maxBuffer:1048576,env:{...process.env,...environment},stdio:['ignore','pipe','pipe']});
       }}).ensureProtectedDirectory();`;
     try {
@@ -141,14 +141,14 @@ describe("daemon identity file", () => {
       let raced = false;
       const protectedPath = kind === "junction" ? outside : directory;
       const files = new ProtectedFileSystem(directory, {
-        runCommand: (command, args, environment) => {
+        runCommand: (command, args, environment, timeoutMs) => {
           if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
             raced = true;
             if (kind === "junction") symlinkSync(outside, directory, "junction");
             else mkdirSync(directory);
             before = windowsSddl(protectedPath);
           }
-          return nativeWindowsCommand(command, args, environment);
+          return nativeWindowsCommand(command, args, environment, timeoutMs);
         },
       });
       try {
@@ -184,18 +184,62 @@ describe("daemon identity file", () => {
   it("propagates a creation-command timeout without creating or deleting a directory", async () => {
     const directory = await temporaryDirectory();
     const failure = Object.assign(new Error("private diagnostic"), { code: "ETIMEDOUT" });
+    let creationTimeoutMs: number | undefined;
     const files = new ProtectedFileSystem(directory, {
       platform: "win32",
-      runCommand: (command) => {
+      runCommand: (command, _args, environment, timeoutMs) => {
         if (command === "whoami") return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
+        expect(environment?.GHCG_DIRECTORY_PATH).toBeDefined();
+        creationTimeoutMs = timeoutMs;
         throw failure;
       },
     });
     let caught: unknown;
     try { files.ensureProtectedDirectory(); } catch (error: unknown) { caught = error; }
     expect(caught).toBe(failure);
+    expect(creationTimeoutMs).toBe(15_000);
     expect(daemonRuntimeCliError(caught)).toBe("internal_error");
     expect(existsSync(directory)).toBe(false);
+  });
+
+  it("leaves a committed directory for a later caller when creation acknowledgement times out", async () => {
+    const directory = await temporaryDirectory();
+    const failure = Object.assign(new Error("private diagnostic"), { code: "ETIMEDOUT" });
+    let creationAttempts = 0;
+    let creationTimeoutMs: number | undefined;
+    const runCommand = (
+      command: string,
+      args: readonly string[],
+      environment?: Readonly<Record<string, string>>,
+      timeoutMs?: number,
+    ): string => {
+      if (command === "whoami") return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
+      if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
+        creationAttempts += 1;
+        creationTimeoutMs = timeoutMs;
+        mkdirSync(environment.GHCG_DIRECTORY_PATH);
+        throw failure;
+      }
+      return windowsSecurityCommand(command, args, directory, "CONTOSO\\current");
+    };
+    try {
+      let caught: unknown;
+      try {
+        new ProtectedFileSystem(directory, { platform: "win32", runCommand }).ensureProtectedDirectory();
+      } catch (error: unknown) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      expect(creationTimeoutMs).toBe(15_000);
+      expect(creationAttempts).toBe(1);
+      expect(existsSync(directory)).toBe(true);
+
+      expect(() => new ProtectedFileSystem(directory, { platform: "win32", runCommand }).ensureProtectedDirectory())
+        .not.toThrow();
+      expect(creationAttempts).toBe(1);
+    } finally {
+      await rm(path.dirname(directory), { recursive: true, force: true });
+    }
   });
 
   it.each(["preserved", "substituted"] as const)("handles %s Unicode paths in icacls output without repairing permissions", async (outputPath) => {
@@ -345,10 +389,16 @@ function windowsSddl(target: string): string {
   ], { GHCG_TEST_PATH: target }).trim();
 }
 
-function nativeWindowsCommand(command: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
+function nativeWindowsCommand(
+  command: string,
+  args: readonly string[],
+  environment?: Readonly<Record<string, string>>,
+  timeoutMs = WINDOWS_TEST_COMMAND_TIMEOUT_MS,
+): string {
   const executable = command === "whoami" || command === "icacls" ? windowsCommandPath(command) : command;
   return execFileSync(executable, [...args], {
-    encoding: "utf8", windowsHide: true, timeout: WINDOWS_TEST_COMMAND_TIMEOUT_MS, maxBuffer: 1024 * 1024,
+    encoding: "utf8", windowsHide: true, timeout: timeoutMs,
+    maxBuffer: 1024 * 1024,
     env: { ...process.env, ...environment }, stdio: ["ignore", "pipe", "pipe"],
   });
 }
