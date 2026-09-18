@@ -111,6 +111,53 @@ test("Models renders rows, warnings and diagnostics only for the selected accoun
   await expect(page.locator("tbody[data-model-id=\"gpt-alpha\"]")).toHaveCount(0);
 });
 
+test("Models prevents Refresh from superseding an account switch", async ({ page }) => {
+  const fixture = await openModels(page, (fixture) => {
+    const first = fixture.state.accounts.items[0]!;
+    fixture.state.accounts = { ...fixture.state.accounts, items: [first, {
+      ...first, accountId: "ghes:2", host: "github.example.test", login: "enterprise", displayName: "Enterprise Admin",
+    }] };
+  });
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(/\/models\?accountId=ghes%3A2$/u, async (route) => {
+    await pending;
+    await route.fulfill({ json: { data: {
+      ...fixture.state.models,
+      accountId: "ghes:2",
+      catalogGeneration: 9,
+      credentialGeneration: 4,
+      preferredModel: null,
+      items: [{ ...fixture.state.models.items[0]!, id: "enterprise-model", name: "Enterprise Model" }],
+    } } });
+  });
+  await page.route("**/admin/api/v1/models/refresh", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ accountId: "ghes:2" });
+    await route.fulfill({ json: { data: {
+      ...fixture.state.models,
+      accountId: "ghes:2",
+      catalogGeneration: 10,
+      credentialGeneration: 4,
+      preferredModel: null,
+      items: [{ ...fixture.state.models.items[0]!, id: "enterprise-refreshed", name: "Enterprise Refreshed" }],
+    } } });
+  });
+  const refresh = page.getByRole("button", { name: "Refresh", exact: true });
+  try {
+    await page.getByLabel("Account", { exact: true }).selectOption("ghes:2");
+    await expect(page.getByText("Loading model catalog...", { exact: true })).toBeVisible();
+    await expect(refresh).toBeDisabled();
+  } finally { release(); }
+  await expect(page.locator("tbody[data-model-id=\"enterprise-model\"]")).toBeVisible();
+  await expect(refresh).toBeEnabled();
+
+  await refresh.click();
+  await expect(page.locator("tbody[data-model-id=\"enterprise-refreshed\"]")).toBeVisible();
+  await expect(page.getByText("Loading model catalog...", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".toolbar").first().locator(".subtle"))
+    .toContainText("Generation 10 · credential 4 · fetched");
+});
+
 test("Models does not render the previous account catalog when switching fails", async ({ page }) => {
   const fixture = await openModels(page, (fixture) => {
     const first = fixture.state.accounts.items[0]!;

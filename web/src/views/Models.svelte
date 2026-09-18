@@ -115,7 +115,7 @@
     <h1 tabindex="-1">Models</h1>
     <p>Inspect the account catalog and native interface metadata.</p>
   </div>
-  <button class="primary" onclick={refresh} disabled={!accountId || busy === "refresh"}>
+  <button class="primary" onclick={refresh} disabled={!accountId || loading || busy === "refresh"}>
     {busy === "refresh" ? "Refreshing..." : "Refresh"}
   </button>
 </header>
