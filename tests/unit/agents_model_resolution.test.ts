@@ -54,7 +54,7 @@ describe("agent configuration compatibility with Gateway model resolution", () =
       { displayName: "Writer", modelId: "claude-test" },
     ], origin, "ghcg-models.json", [
       ...snapshot.models,
-    ]);
+    ], null);
     const catalog = JSON.parse(projection.catalog!.toString()) as { models: { slug: string }[] };
     for (const entry of catalog.models) {
       const resolved = resolveModel(snapshot, entry.slug, null);
@@ -101,7 +101,7 @@ describe("agent configuration compatibility with Gateway model resolution", () =
       { displayName: "Haiku", modelId: "haiku-real" },
     ], origin, "unused", [
       ...snapshot.models,
-    ]);
+    ], null);
     const env = JSON.parse(projection.config.toString()).env as Record<string, string>;
     for (const key of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
       const resolved = resolveModel(snapshot, env[key]!, null);
