@@ -401,7 +401,10 @@ describe("private repeatable agent configuration", () => {
       },
     });
 
-    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({ name: "AgentError" });
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
+      name: "AgentError",
+      code: "agent_conflict",
+    });
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(external);
   }, 180_000);
@@ -422,14 +425,17 @@ describe("private repeatable agent configuration", () => {
         execFileSync(process.execPath, [
           "--input-type=commonjs",
           "-e",
-          "require('node:fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64'))",
+          "require('node:fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64'), { mode: 0o600 })",
           backup,
           external.toString("base64"),
         ]);
       },
     });
 
-    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({ name: "AgentError" });
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
+      name: "AgentError",
+      code: process.platform === "win32" ? "agent_unsafe_path" : "agent_conflict",
+    });
     expect(fs.readFileSync(backup)).toEqual(external);
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(beforeConfig);
