@@ -1,4 +1,4 @@
-import type { ModelCapabilityProfile } from "../copilot/model_capabilities.js";
+import type { EffectiveModelCapabilitySnapshot } from "../copilot/capability_registry.js";
 
 export type AgentId = "claude" | "codex";
 export interface AgentMapping {
@@ -32,11 +32,7 @@ export interface AgentApplyRequest {
   readonly catalogRevision: string;
   readonly mappings: readonly AgentMapping[];
 }
-export interface AgentModel {
-  readonly modelId: string;
-  readonly maxInputTokens: number | null;
-  readonly metadata?: ModelCapabilityProfile;
-}
+export type AgentModel = Pick<EffectiveModelCapabilitySnapshot, "modelId" | "protocols" | "maxInputTokens" | "profile">;
 export interface AgentsManager {
   inspect(origin: string): Promise<readonly AgentStatus[]>;
   apply(request: AgentApplyRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus>;

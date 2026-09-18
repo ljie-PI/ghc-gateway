@@ -1,4 +1,5 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
+import { supportsReasoningParameter } from "./routing.js";
 import { chooseOutputTokenBudget } from "../../copilot/model_capabilities.js";
 import {
   duplicateMemberNames,
@@ -1366,7 +1367,7 @@ function encodeChatRequest(
     unsupported("REQ-R-EXT-STREAM");
   }
   validateConditionalTargetParameters(request, context.capability, "chat");
-  const reasoning = supportsTargetReasoning(context.capability, ["reasoning_effort"], request.reasoning)
+  const reasoning = supportsTargetReasoning(context.capability, "chat", request.reasoning)
     ? request.reasoning
     : undefined;
   const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
@@ -1421,7 +1422,7 @@ function encodeResponsesRequest(
   validateConditionalTargetParameters(request, context.capability, "responses");
   const reasoning = supportsTargetReasoning(
     context.capability,
-    ["reasoning", "reasoning.effort"],
+    "responses",
     request.reasoning,
   )
     ? request.reasoning
@@ -1480,7 +1481,7 @@ function encodeMessagesRequest(
   }
   const reasoningSupported = supportsTargetReasoning(
     context.capability,
-    ["output_config.effort", "output_config"],
+    "messages",
     request.reasoning,
   );
   const targetReasoning = !reasoningSupported || request.reasoning?.effort === "none"
@@ -1513,20 +1514,12 @@ function encodeMessagesRequest(
   return encodedRequest(request, body, targetDegradations);
 }
 
-function supportsTargetParameter(
-  capability: Readonly<EffectiveModelCapabilitySnapshot>,
-  keys: readonly string[],
-): boolean {
-  const supported = capability.profile.supportedParameters.value;
-  return keys.some((key) => supported?.includes(key) === true);
-}
-
 function supportsTargetReasoning(
   capability: Readonly<EffectiveModelCapabilitySnapshot>,
-  parameterKeys: readonly string[],
+  target: InferenceProtocol,
   reasoning: SemanticReasoning | undefined,
 ): boolean {
-  if (!supportsTargetParameter(capability, parameterKeys)) {
+  if (!supportsReasoningParameter(target, capability.profile.supportedParameters.value)) {
     return false;
   }
   return reasoning?.effort === undefined

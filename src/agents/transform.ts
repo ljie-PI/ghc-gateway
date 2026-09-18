@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { parse, stringify, type TomlTable } from "smol-toml";
+import { protocolTargets, supportsReasoningParameter } from "../protocols/conversion/routing.js";
 import { AgentError, validateMappings, type AgentId, type AgentMapping, type AgentModel } from "./types.js";
 
 export interface AgentProjection {
@@ -117,13 +118,17 @@ function projectCodex(
     "model_auto_compact_token_limit", "model_supports_reasoning_summaries", "review_model", "service_tier"]) delete config[key];
   const catalog = { models: mappings.map((mapping, index) => {
     const model = models.find((item) => item.modelId === mapping.modelId)!;
-    const fullContext = model.metadata?.contextWindowTokens?.value ?? null;
-    const limit = model.maxInputTokens === null ? fullContext
-      : fullContext === null ? model.maxInputTokens : Math.min(model.maxInputTokens, fullContext);
+    const fullContext = model.profile.contextWindowTokens?.value ?? null;
+    const inputLimit = model.maxInputTokens.value;
+    const limit = inputLimit === null ? null
+      : fullContext === null ? inputLimit : Math.min(inputLimit, fullContext);
+    const target = model.protocols.value === null ? null : protocolTargets("responses", model.protocols.value)[0] ?? null;
+    const supportsReasoning = target !== null
+      && supportsReasoningParameter(target, model.profile.supportedParameters.value);
     return {
       slug: mapping.modelId, display_name: mapping.displayName, description: mapping.displayName,
       base_instructions: "You are Codex, a coding agent. Help the user with their coding tasks.",
-      supported_reasoning_levels: (model.metadata?.reasoningEfforts.value ?? []).map((effort) => ({
+      supported_reasoning_levels: (supportsReasoning ? model.profile.reasoningEfforts.value ?? [] : []).map((effort) => ({
         effort, description: effort.charAt(0).toUpperCase() + effort.slice(1),
       })),
       shell_type: "shell_command", visibility: "list", supported_in_api: true,

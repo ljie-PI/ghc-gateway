@@ -443,8 +443,7 @@ export class AdminManagementApi {
     try {
       const captured = await this.agentCatalog(signal);
       if (captured.revision !== request.catalogRevision) throw new AdminApiError("revision_conflict");
-      const models = this.dependencies.registry.modelsUsableForAgentMapping(captured.catalog)
-        .map((model) => ({ modelId: model.modelId, maxInputTokens: model.maxInputTokens.value, metadata: model.profile }));
+      const models = this.dependencies.registry.modelsUsableForAgentMapping(captured.catalog);
       return await this.requireAgents().apply(request, origin, models, () => {
         signal.throwIfAborted();
         if (!this.dependencies.registry.isCurrent(captured.catalog)

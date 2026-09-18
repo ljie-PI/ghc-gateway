@@ -258,12 +258,13 @@ export class FileAgentsManager implements AgentsManager {
     const pending = state.pending!;
     // Backup, catalog, then config. Legacy restore intents retain their stored ordering.
     const steps = pending.kind === "restore" ? [...pending.steps].reverse() : pending.steps;
+    const positions = new Map<StepState, "before" | "after" | "gap">();
     for (const step of steps) {
       const target = state.targets[step.target]!.path;
       assertNoLinks(target);
       const stage = path.join(step.scratch, "next");
-      const displaced = path.join(step.scratch, "previous");
-      let position = await this.classify(step, await readImage(target, stage));
+      const position = await this.classify(step, await readImage(target, stage));
+      positions.set(step, position);
       if (position === "after") { step.phase = "published"; await save(state); continue; }
       await this.ensureClientParent(path.dirname(target));
       await privateDirectory(step.scratch);
@@ -288,6 +289,16 @@ export class FileAgentsManager implements AgentsManager {
         }
       }
       this.hit("staged", agent, step.target);
+    }
+    const boundary = await this.images(state.targets.map((target) => target.path), state);
+    if ([...positions.values()].every((position) => position === "before")) this.requireExpected(state, boundary);
+    else await this.requireRecoverable(state, boundary);
+    for (const step of steps) {
+      let position = positions.get(step)!;
+      if (position === "after") continue;
+      const target = state.targets[step.target]!.path;
+      const stage = path.join(step.scratch, "next");
+      const displaced = path.join(step.scratch, "previous");
       if (position === "before" && step.before !== null) {
         if (exists(displaced)) throw new AgentError("agent_recovery_required");
         // Staging and journal writes may take time. Revalidate the full live

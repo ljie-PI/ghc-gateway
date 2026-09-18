@@ -452,6 +452,8 @@ async function handle(
       const removing: AdminAccount = { ...found, state: "removing", revision: found.revision + 1 };
       fixture.state.accounts = {
         ...fixture.state.accounts,
+        defaultAccountId: fixture.state.accounts.defaultAccountId === id ? null : fixture.state.accounts.defaultAccountId,
+        defaultRevision: fixture.state.accounts.defaultRevision + 1,
         items: fixture.state.accounts.items.map((item) => item.accountId === id ? removing : item),
       };
       return failure(route, 500, "internal_error");
@@ -459,6 +461,8 @@ async function handle(
     const removed: AdminAccount = { ...found, state: "removed", revision: found.revision + 1 };
     fixture.state.accounts = {
       ...fixture.state.accounts,
+      defaultAccountId: fixture.state.accounts.defaultAccountId === id ? null : fixture.state.accounts.defaultAccountId,
+      defaultRevision: fixture.state.accounts.defaultRevision + (found.state === "active" ? 1 : 0),
       items: fixture.state.accounts.items.map((item) => item.accountId === id ? removed : item),
     };
     return json(route, 200, removed);
