@@ -114,7 +114,7 @@ export async function assertPrivate(target: string, directory: boolean): Promise
     throw new AgentError("agent_unsafe_path");
   }
 }
-export async function protect(target: string): Promise<void> {
+export function protect(target: string): void {
   if (process.platform === "win32") {
     agentWindowsAcl(() => WINDOWS_ACL.restrict(target, false));
   } else fs.chmodSync(target, 0o600);

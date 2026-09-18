@@ -192,6 +192,7 @@ export interface AdminAccountSummary {
   readonly displayName: string | null;
   readonly state: "active" | "removing" | "removed";
   readonly authenticatedAtMs: number | null;
+  readonly credentialGeneration: number | null;
 }
 
 export interface AdminDeviceFlows {
@@ -448,7 +449,7 @@ export class AdminManagementApi {
         signal.throwIfAborted();
         if (!this.dependencies.registry.isCurrent(captured.catalog)
           || JSON.stringify(this.agentSelection()) !== JSON.stringify(captured.selection)) {
-          throw new AdminApiError("revision_conflict");
+          throw new AgentError("revision_conflict");
         }
       }, signal);
     } finally { this.agentMutations.delete(request.agent); }
@@ -469,6 +470,7 @@ export class AdminManagementApi {
       defaultState: JSON.stringify(defaults),
       accountId: account?.accountId ?? null,
       accountRevision: account?.revision ?? null,
+      credentialGeneration: account?.credentialGeneration ?? null,
     };
   }
 
@@ -486,7 +488,7 @@ export class AdminManagementApi {
       selection, credentialGeneration: account.credentialGeneration,
       catalogGeneration: catalog.catalogGeneration,
     })).digest("hex");
-    return { catalog, account, revision, selection };
+    return { catalog, revision, selection };
   }
 
   async models(accountId: string | null, signal: AbortSignal): Promise<AdminModels> {

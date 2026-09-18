@@ -62,7 +62,7 @@ export class AgentStore {
     } finally { db.close(); }
   }
 
-  async locked<T>(work: (save: (state: AgentState) => Promise<void>) => Promise<T>): Promise<T> {
+  async locked<T>(work: (save: (state: AgentState, beforeCommit?: () => void) => Promise<void>) => Promise<T>): Promise<T> {
     await privateDirectory(this.root);
     await privateDirectory(this.directory);
     await this.checkDirectory();
@@ -76,19 +76,20 @@ export class AgentStore {
     const lock = new DatabaseSync(lockPath, { timeout: 0 });
     try {
       try { lock.exec("BEGIN EXCLUSIVE"); } catch { throw new AgentError("agent_busy"); }
-      return await work((state) => this.save(state));
+      return await work((state, beforeCommit) => this.save(state, beforeCommit));
     } finally { lock.close(); }
   }
 
-  private async save(state: AgentState): Promise<void> {
+  private async save(state: AgentState, beforeCommit?: () => void): Promise<void> {
     if (!Value.Check(StateSchema, state)) throw new AgentError("agent_recovery_required");
     this.validatePaths(state);
     await this.checkDirectory();
     if (exists(this.statePath)) await assertPrivate(this.statePath, false);
+    beforeCommit?.();
     if (!exists(this.statePath)) {
       const fd = fs.openSync(this.statePath, "wx", 0o600);
       fs.closeSync(fd);
-      await protect(this.statePath);
+      protect(this.statePath);
     }
     const db = new DatabaseSync(this.statePath, { timeout: 0 });
     try {
