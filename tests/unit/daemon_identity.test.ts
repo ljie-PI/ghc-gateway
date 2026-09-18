@@ -188,7 +188,10 @@ describe("daemon identity file", () => {
     const files = new ProtectedFileSystem(directory, {
       platform: "win32",
       runCommand: (command, _args, environment, timeoutMs) => {
-        if (command === "whoami") return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
+        if (command === "whoami") {
+          expect(timeoutMs).toBeUndefined();
+          return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
+        }
         expect(environment?.GHCG_DIRECTORY_PATH).toBeDefined();
         creationTimeoutMs = timeoutMs;
         throw failure;
@@ -213,13 +216,17 @@ describe("daemon identity file", () => {
       environment?: Readonly<Record<string, string>>,
       timeoutMs?: number,
     ): string => {
-      if (command === "whoami") return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
+      if (command === "whoami") {
+        expect(timeoutMs).toBeUndefined();
+        return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
+      }
       if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
         creationAttempts += 1;
         creationTimeoutMs = timeoutMs;
         mkdirSync(environment.GHCG_DIRECTORY_PATH);
         throw failure;
       }
+      expect(timeoutMs).toBeUndefined();
       return windowsSecurityCommand(command, args, directory, "CONTOSO\\current");
     };
     try {

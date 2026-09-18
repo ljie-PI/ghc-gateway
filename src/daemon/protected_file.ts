@@ -16,10 +16,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { InvalidWindowsIdentityError, WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
-import {
-  createWindowsPrivateDirectory,
-  type WindowsDirectoryCommand,
-} from "../security/windows_directory.js";
+import { createWindowsPrivateDirectory, type WindowsDirectoryCommand } from "../security/windows_directory.js";
 
 export type DaemonIdentityFileErrorCode =
   | "invalid_identity"
