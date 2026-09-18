@@ -10,16 +10,20 @@
     pageNumber,
     data,
     catalog,
+    catalogGeneration,
     onload,
     onloadmodels,
+    onobserveaccounts,
     onchanged,
   }: {
     client: AdminClient;
     pageNumber: string;
     data: AgentsView | null;
     catalog: AdminAgentModels | null;
+    catalogGeneration: number;
     onload: (refresh?: boolean) => Promise<AgentsView>;
     onloadmodels: (refresh?: boolean) => Promise<AdminAgentModels>;
+    onobserveaccounts: (signal: AbortSignal) => Promise<boolean>;
     onchanged: (status: AgentStatus) => void;
   } = $props();
   let loading = $state(false);
@@ -27,13 +31,24 @@
   let modelsLoading = $state(false);
   let modelsFailure = $state("");
   let disposed = false;
+  let attemptedCatalogGeneration = -1;
+  let modelsLoadGeneration = 0;
+  let accountObservationActive = false;
+  let accountObservationTimer: ReturnType<typeof setTimeout> | null = null;
+  let catalogRefreshRequested = false;
+  let forceCatalogRefresh = false;
+  const accountObservation = new AbortController();
   const orderedItems = $derived(data?.items.toSorted((left, right) =>
     (left.id === "codex" ? 0 : 1) - (right.id === "codex" ? 0 : 1)) ?? []);
 
   onMount(() => {
     if (data === null) void load(false);
-    if (catalog === null) void loadModels(false);
-    return () => { disposed = true; };
+    requestAccountObservation();
+    return () => {
+      disposed = true;
+      if (accountObservationTimer !== null) clearTimeout(accountObservationTimer);
+      accountObservation.abort();
+    };
   });
 
   async function load(refresh: boolean): Promise<void> {
@@ -48,21 +63,61 @@
     }
   }
 
-  async function loadModels(refresh: boolean): Promise<void> {
+  async function loadModels(refresh: boolean): Promise<boolean> {
+    const generation = ++modelsLoadGeneration;
     modelsLoading = true;
     modelsFailure = "";
     try {
       await onloadmodels(refresh);
+      return true;
     } catch (error: unknown) {
-      if (!disposed && !(error instanceof DOMException && error.name === "AbortError")) modelsFailure = errorMessage(error);
+      if (!disposed && generation === modelsLoadGeneration
+        && !(error instanceof DOMException && error.name === "AbortError")) modelsFailure = errorMessage(error);
+      return false;
     } finally {
-      if (!disposed) modelsLoading = false;
+      if (!disposed && generation === modelsLoadGeneration) modelsLoading = false;
+    }
+  }
+
+  function requestAccountObservation(): void {
+    if (disposed || accountObservation.signal.aborted || accountObservationActive) return;
+    if (accountObservationTimer !== null) clearTimeout(accountObservationTimer);
+    accountObservationTimer = null;
+    void observeAccounts();
+  }
+
+  async function observeAccounts(): Promise<void> {
+    accountObservationActive = true;
+    let observed = false;
+    try {
+      observed = await onobserveaccounts(accountObservation.signal);
+    } catch {
+      // Catalog loading reports actionable account failures; bounded observation retries quietly.
+    } finally {
+      if (!disposed && !accountObservation.signal.aborted && observed) {
+        const refresh = forceCatalogRefresh;
+        const shouldLoad = refresh || catalogRefreshRequested || catalog === null
+          || attemptedCatalogGeneration !== catalogGeneration;
+        catalogRefreshRequested = false;
+        forceCatalogRefresh = false;
+        attemptedCatalogGeneration = catalogGeneration;
+        if (shouldLoad && !await loadModels(refresh)) {
+          catalogRefreshRequested = true;
+          forceCatalogRefresh = refresh;
+        }
+      }
+      accountObservationActive = false;
+      if (!disposed && !accountObservation.signal.aborted) {
+        accountObservationTimer = setTimeout(requestAccountObservation, 5_000);
+      }
     }
   }
 
   function refresh(): void {
     void load(true);
-    void loadModels(true);
+    catalogRefreshRequested = true;
+    forceCatalogRefresh = true;
+    requestAccountObservation();
   }
 </script>
 
