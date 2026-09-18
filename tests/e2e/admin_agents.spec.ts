@@ -691,6 +691,54 @@ test("Apply validates drafts without disabling and posts exact custom display na
   });
 });
 
+for (const [state, label, message] of [
+  ["conflict", "External changes detected", "Configuration was not installed because external changes were detected."],
+  ["recovery_required", "Recovery required", "Configuration was not installed because recovery is required."],
+  ["unsafe_path", "Unsupported or unsafe path", "Configuration was not installed because a path is unsupported or unsafe."],
+] as const) {
+  test(`Apply reports a returned ${state} status without claiming installation`, async ({ page }) => {
+    const fixture = await openAgents(page);
+    fixture.state.agentsApplyResult = state;
+    const codex = page.getByRole("region", { name: "Codex", exact: true });
+    await codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
+    await codex.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Fast");
+    page.once("dialog", (dialog) => dialog.accept());
+    await codex.getByRole("button", { name: "Apply changes", exact: true }).click();
+
+    await expect(codex.locator(".badge")).toHaveText(label);
+    await expect(codex.getByRole("alert")).toHaveText(message);
+    await expect(codex.getByText(/Configuration installed\. Restart/)).toHaveCount(0);
+  });
+}
+
+for (const [change, state, revision, label] of [
+  ["revision", "installed", "e".repeat(64), "Configuration installed"],
+  ["state", "conflict", null, "External changes detected"],
+] as const) {
+  test(`a Refresh with a newer ${change} clears stale Apply success`, async ({ page }) => {
+    const fixture = await openAgents(page);
+    const codex = page.getByRole("region", { name: "Codex", exact: true });
+    await codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
+    await codex.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Fast");
+    page.once("dialog", (dialog) => dialog.accept());
+    await codex.getByRole("button", { name: "Apply changes", exact: true }).click();
+    await expect(codex.getByText(/Configuration installed\. Restart/)).toBeVisible();
+
+    fixture.state.agents.codex = {
+      ...fixture.state.agents.codex,
+      state,
+      revision: revision ?? fixture.state.agents.codex.revision,
+      backupAvailable: false,
+    };
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+
+    await expect(codex.locator(".badge")).toHaveText(label);
+    await expect(codex.getByText(/Configuration installed\. Restart/)).toHaveCount(0);
+    await codex.getByText("Configuration details", { exact: true }).click();
+    await expect(codex.getByText("Not created", { exact: true })).toBeVisible();
+  });
+}
+
 test("an in-flight Refresh cannot overwrite a newer Apply result", async ({ page }) => {
   const fixture = await openAgents(page);
   const codex = page.locator(".agent-card", { has: page.getByRole("heading", { name: "Codex" }) });
