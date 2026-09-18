@@ -22,16 +22,6 @@ interface DevicePollHold {
   release(): void;
 }
 
-interface EventStreamHold {
-  readonly started: Promise<void>;
-  release(): void;
-}
-
-interface HeldEventStream {
-  markStarted(): void;
-  readonly released: Promise<void>;
-}
-
 interface HeldDevicePoll {
   markStarted(): void;
   markResponseFinished(): void;
@@ -43,7 +33,6 @@ export interface AdminFixture {
   readonly streamRequests: Request[];
   readonly streamRequestHeaders: Array<Record<string, string | string[] | undefined>>;
   holdNextDevicePoll(): DevicePollHold;
-  holdNextEventStream(): EventStreamHold;
   readonly state: {
     authenticated: boolean;
     accounts: AdminAccounts;
@@ -79,7 +68,6 @@ export interface AdminFixture {
 export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   const github = account("github:1", "github.com", "octo");
   let heldDevicePoll: HeldDevicePoll | null = null;
-  let heldEventStream: HeldEventStream | null = null;
   const fixture: AdminFixture = {
     requests: [],
     streamRequests: [],
@@ -100,19 +88,6 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       });
       heldDevicePoll = { markStarted, markResponseFinished, released };
       return { started, responseFinished, release };
-    },
-    holdNextEventStream() {
-      if (heldEventStream !== null) throw new Error("An event stream is already held");
-      let markStarted!: () => void;
-      let release!: () => void;
-      const started = new Promise<void>((resolve) => {
-        markStarted = resolve;
-      });
-      const released = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      heldEventStream = { markStarted, released };
-      return { started, release };
     },
     state: {
       authenticated: false,
@@ -181,12 +156,6 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   const streamServer = createServer(async (request, response) => {
     const index = fixture.streamRequestHeaders.length;
     fixture.streamRequestHeaders.push(request.headers);
-    const heldStream = heldEventStream;
-    heldEventStream = null;
-    if (heldStream !== null) {
-      heldStream.markStarted();
-      await heldStream.released;
-    }
     const delay = fixture.state.streamDelaysMs[index] ?? 0;
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     const body = fixture.state.streamBodies[Math.min(index, fixture.state.streamBodies.length - 1)] ?? "";

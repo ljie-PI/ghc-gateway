@@ -2,7 +2,8 @@
   import { onMount, tick } from "svelte";
   import { AdminClient, errorMessage, takeBootstrapToken } from "./api.js";
   import type { AgentStatus, AgentsView } from "../../src/agents/types.js";
-  import type { AdminAgentModels } from "../../src/admin/api.js";
+  import type { AdminAccounts, AdminAgentModels } from "../../src/admin/api.js";
+  import { AccountRevisionObserver } from "./account_revisions.js";
   import { SessionResource } from "./session_resource.js";
   import type {
     AdminOperationalEvent,
@@ -43,6 +44,7 @@
   const client = new AdminClient(teardown);
   const agentsResource = new SessionResource((signal) => client.agents(signal), (value) => { agentsSnapshot = value; });
   const agentModelsResource = new SessionResource((signal) => client.agentModels(signal), (value) => { agentModelsSnapshot = value; });
+  const accountRevisions = new AccountRevisionObserver();
 
   onMount(() => {
     updateNavigationMode();
@@ -94,9 +96,6 @@
     });
     stream.addEventListener("operational", (event) => {
       const value = JSON.parse((event as MessageEvent<string>).data) as { event: AdminOperationalEvent };
-      if (["account_authenticated", "account_removed", "default_account_changed"].includes(value.event.kind)) {
-        clearAgentModels();
-      }
       liveEvents = [
         ...liveEvents.filter((item) => item.eventId !== value.event.eventId),
         value.event,
@@ -117,6 +116,7 @@
     closeStream();
     client.clear();
     clearAgentsSnapshot();
+    accountRevisions.reset();
     session = null;
     liveStatus = null;
     liveEvents = [];
@@ -134,6 +134,14 @@
   function clearAgentModels(reload = true): void {
     if (reload) agentModelsGeneration += 1;
     agentModelsResource.replace(null);
+  }
+
+  function observeAccounts(accounts: AdminAccounts): void {
+    if (accountRevisions.observe(accounts)) clearAgentModels();
+  }
+
+  async function readAccountRevisions(signal: AbortSignal): Promise<void> {
+    observeAccounts(await client.accounts(signal));
   }
 
   function loadAgents(refresh = false): Promise<AgentsView> {
@@ -269,7 +277,7 @@
           {#if view === "Overview"}
             <Overview {client} {liveStatus} {pageNumber} />
           {:else if view === "Accounts"}
-            <Accounts {client} {pageNumber} onchanged={clearAgentModels} />
+            <Accounts {client} {pageNumber} onaccounts={observeAccounts} />
           {:else if view === "Models"}
             <Models {client} {pageNumber} onchanged={clearAgentModels} />
           {:else if view === "Agents"}
@@ -281,6 +289,7 @@
               catalogGeneration={agentModelsGeneration}
               onload={loadAgents}
               onloadmodels={(refresh) => agentModelsResource.load(refresh)}
+              onobserveaccounts={readAccountRevisions}
               onchanged={updateAgent}
             />
           {:else if view === "Configuration"}

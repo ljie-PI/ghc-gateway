@@ -2,8 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   ADMIN_FIXTURE_NOW_MS,
   installAdminFixture,
-  operationalEvent,
-  sse,
+  type AdminFixture,
 } from "./fixtures/admin_fixture.js";
 
 test("catalog choices autofill names and unchanged mappings can be applied again", async ({ page }) => {
@@ -121,6 +120,7 @@ for (const mutation of ["default selection", "removal"] as const) {
     await expect(page.locator("#codex-model-options option")).toHaveCount(2);
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
     await expect(page.getByText("Enterprise Admin", { exact: true })).toBeVisible();
+    const accountReadsBeforeMutation = accountReads(fixture);
 
     let release = (): void => undefined;
     let markStarted = (): void => undefined;
@@ -146,9 +146,11 @@ for (const mutation of ["default selection", "removal"] as const) {
       await expect(page.locator("#codex-model-options option")).toHaveCount(2);
       const completed = page.waitForResponse((response) => target.test(response.url()));
       release();
-      await completed;
+      await (await completed).body();
+      await settleBrowser(page);
       await expect(page.locator("#codex-model-options option")).toHaveCount(2);
       expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+      expect(accountReads(fixture)).toBe(accountReadsBeforeMutation + 1);
     } finally {
       release();
     }
@@ -156,26 +158,15 @@ for (const mutation of ["default selection", "removal"] as const) {
 }
 
 for (const mutation of ["default selection", "removal"] as const) {
-  test(`an Accounts ${mutation} invalidates agent choices exactly once`, async ({ page }) => {
+  test(`an Accounts ${mutation} invalidates and reloads agent choices once`, async ({ page }) => {
+    await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
     const fixture = await installAdminFixture(page);
-    const github = fixture.state.accounts.items[0]!;
-    fixture.state.accounts = {
-      ...fixture.state.accounts,
-      items: [...fixture.state.accounts.items, {
-        ...github,
-        accountId: "ghes:2",
-        host: "github.example.test",
-        numericUserId: "2",
-        login: "enterprise",
-        displayName: "Enterprise Admin",
-      }],
-    };
-    await page.goto("/admin/#bootstrap_token=account-mutation");
+    addEnterpriseAccount(fixture);
+    await page.goto(`/admin/#bootstrap_token=${mutation.replace(" ", "-")}`);
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await expect(page.locator("#codex-model-options option")).toHaveCount(2);
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
     const enterprise = page.getByRole("row").filter({ hasText: "Enterprise Admin" });
-    await expect(enterprise).toBeVisible();
     if (mutation === "default selection") {
       await enterprise.getByRole("button", { name: "Use this account", exact: true }).click();
       await expect(enterprise.getByRole("button", { name: "In use", exact: true })).toBeDisabled();
@@ -184,61 +175,140 @@ for (const mutation of ["default selection", "removal"] as const) {
       await enterprise.getByRole("button", { name: "Remove", exact: true }).click();
       await expect(enterprise).toHaveCount(0);
     }
-    await page.getByRole("button", { name: "Refresh", exact: true }).click();
-    await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
-    await page.getByRole("button", { name: "Agents", exact: true }).click();
-    await expect(page.locator("#codex-model-options option")).toHaveCount(2);
-    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+
+    let release = (): void => undefined;
+    let markStarted = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    await page.route("**/admin/api/v1/agents/models", async (route) => {
+      markStarted();
+      await held;
+      await route.fallback();
+    }, { times: 1 });
+    try {
+      await page.getByRole("button", { name: "Agents", exact: true }).click();
+      await started;
+      await expect(page.getByText("Loading model choices...", { exact: true })).toBeVisible();
+      await expect(page.locator("#codex-model-options option")).toHaveCount(0);
+      release();
+      await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+      await advance(page, fixture, 5_000);
+      expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+    } finally {
+      release();
+    }
   });
 }
 
-test("mounted Agents reloads once after an account revision event and preserves drafts", async ({ page }) => {
-  const fixture = await installAdminFixture(page);
-  const heldStream = fixture.holdNextEventStream();
-  fixture.state.streamBodies = [sse("operational", {
-    kind: "operational",
-    event: operationalEvent(41, "account_authenticated"),
-  })];
-  try {
-    await page.goto("/admin/#bootstrap_token=held-account-event");
-    await heldStream.started;
+for (const change of ["account", "default", "credential"] as const) {
+  test(`mounted Agents observes a real ${change} revision once and preserves drafts`, async ({ page }) => {
+    await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
+    const fixture = await installAdminFixture(page);
+    if (change === "default") addEnterpriseAccount(fixture);
+    await page.goto(`/admin/#bootstrap_token=observe-${change}`);
     await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+    await expect.poll(() => accountReads(fixture)).toBeGreaterThanOrEqual(1);
     const card = page.getByRole("region", { name: "Codex", exact: true });
     const id = card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
     const name = card.getByRole("textbox", { name: "Model 1 Display name", exact: true });
     await id.fill("gpt-alpha");
     await name.fill("Keep my draft");
+
+    if (change === "account") addEnterpriseAccount(fixture);
+    if (change === "default") {
+      fixture.state.accounts = {
+        ...fixture.state.accounts,
+        defaultAccountId: "ghes:2",
+        defaultRevision: fixture.state.accounts.defaultRevision + 1,
+      };
+    }
+    if (change === "credential") {
+      const account = fixture.state.accounts.items[0]!;
+      fixture.state.accounts = {
+        ...fixture.state.accounts,
+        items: [{ ...account, revision: account.revision + 1 }],
+      };
+    }
     fixture.state.models = { ...fixture.state.models, items: fixture.state.models.items.slice(1) };
     fixture.state.agentsCatalogRevision = "d".repeat(64);
-    heldStream.release();
-    await expect(page.locator("#codex-model-options option")).toHaveCount(1);
-    await expect(page.locator("#codex-model-options option")).toHaveAttribute("value", "claude-beta");
-    await expect(id).toHaveValue("gpt-alpha");
-    await expect(name).toHaveValue("Keep my draft");
-    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
-    expect(fixture.requests.filter((request) => request.url().endsWith("/agents"))).toHaveLength(1);
-  } finally {
-    heldStream.release();
-  }
-});
 
-test("an observed credential revision change invalidates agent choices exactly once", async ({ page }) => {
-  const fixture = await openAgents(page);
-  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+    let release = (): void => undefined;
+    let markStarted = (): void => undefined;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    await page.route("**/admin/api/v1/agents/models", async (route) => {
+      markStarted();
+      await held;
+      await route.fallback();
+    }, { times: 1 });
+    try {
+      await advance(page, fixture, 5_000);
+      await started;
+      await expect(page.getByText("Loading model choices...", { exact: true })).toBeVisible();
+      await expect(page.locator("#codex-model-options option")).toHaveCount(0);
+      await expect(id).toHaveValue("gpt-alpha");
+      await expect(name).toHaveValue("Keep my draft");
+      await advance(page, fixture, 10_000);
+      release();
+      await expect(page.locator("#codex-model-options option")).toHaveCount(1);
+      await expect(page.locator("#codex-model-options option")).toHaveAttribute("value", "claude-beta");
+      await expect(id).toHaveValue("gpt-alpha");
+      await expect(name).toHaveValue("Keep my draft");
+      await advance(page, fixture, 5_000);
+      expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+    } finally {
+      release();
+    }
+  });
+}
+
+test("account removal never republishes an obsolete snapshot after a concurrent Refresh", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  addEnterpriseAccount(fixture);
+  await page.goto("/admin/#bootstrap_token=remove-refresh-race");
   await page.getByRole("button", { name: "Accounts", exact: true }).click();
-  await expect(page.getByText("Octo Admin", { exact: true })).toBeVisible();
-  const account = fixture.state.accounts.items[0]!;
-  fixture.state.accounts = {
+  const enterprise = page.getByRole("row").filter({ hasText: "Enterprise Admin" });
+  await expect(enterprise).toBeVisible();
+
+  let releaseRemoval = (): void => undefined;
+  let markRemovalStarted = (): void => undefined;
+  const removalHeld = new Promise<void>((resolve) => { releaseRemoval = resolve; });
+  const removalStarted = new Promise<void>((resolve) => { markRemovalStarted = resolve; });
+  await page.route(/\/accounts\/ghes%3A2$/u, async (route) => {
+    markRemovalStarted();
+    await removalHeld;
+    await route.fallback();
+  });
+  page.once("dialog", (dialog) => dialog.accept());
+  await enterprise.getByRole("button", { name: "Remove", exact: true }).click({ noWaitAfter: true });
+  await removalStarted;
+
+  const github = fixture.state.accounts.items[0]!;
+  const refreshedAccounts = {
     ...fixture.state.accounts,
-    items: [{ ...account, revision: account.revision + 1 }],
+    items: [{ ...github, displayName: "Updated Admin", revision: github.revision + 1 }, fixture.state.accounts.items[1]!],
   };
+  await page.route("**/admin/api/v1/accounts", async (route) => {
+    await route.fulfill({ json: { data: refreshedAccounts } });
+  }, { times: 1 });
   await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
-  await expect(page.getByText("Loading accounts...", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
-  await expect(page.locator("#codex-model-options option")).toHaveCount(2);
-  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
+  await expect(page.getByText("Updated Admin", { exact: true })).toBeVisible();
+
+  await page.route("**/admin/api/v1/accounts", async (route) => {
+    await route.fulfill({
+      status: 500,
+      json: { error: { code: "internal_error", message: "synthetic", requestId: "synthetic" } },
+    });
+  }, { times: 1 });
+  try {
+    releaseRemoval();
+    await expect(page.getByRole("alert")).toContainText("internal error");
+    await expect(enterprise).toHaveCount(0);
+    await expect(page.getByText("Updated Admin", { exact: true })).toBeVisible();
+  } finally {
+    releaseRemoval();
+  }
 });
 
 test("a held device-flow completion cannot invalidate agent choices after Accounts is left", async ({ page }) => {
@@ -257,10 +327,13 @@ test("a held device-flow completion cannot invalidate agent choices after Accoun
   await heldPoll.started;
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   await expect(page.locator("#codex-model-options option")).toHaveCount(2);
+  const accountReadsAfterNavigation = accountReads(fixture);
   heldPoll.release();
   await heldPoll.responseFinished;
+  await settleBrowser(page);
   await expect(page.locator("#codex-model-options option")).toHaveCount(2);
   expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+  expect(accountReads(fixture)).toBe(accountReadsAfterNavigation);
 });
 
 test("device-flow account completion invalidates cached agent choices once", async ({ page }) => {
@@ -360,6 +433,38 @@ async function openAgents(page: Page) {
   await page.getByRole("button", { name: "Agents" }).click();
   await expect(page.getByRole("heading", { name: "Agents" })).toBeFocused();
   return fixture;
+}
+
+function addEnterpriseAccount(fixture: AdminFixture): void {
+  if (fixture.state.accounts.items.some((account) => account.accountId === "ghes:2")) return;
+  const github = fixture.state.accounts.items[0]!;
+  fixture.state.accounts = {
+    ...fixture.state.accounts,
+    items: [...fixture.state.accounts.items, {
+      ...github,
+      accountId: "ghes:2",
+      host: "github.example.test",
+      numericUserId: "2",
+      login: "enterprise",
+      displayName: "Enterprise Admin",
+    }],
+  };
+}
+
+function accountReads(fixture: AdminFixture): number {
+  return fixture.requests.filter((request) => request.method() === "GET" && request.url().endsWith("/accounts")).length;
+}
+
+async function advance(page: Page, fixture: AdminFixture, milliseconds: number): Promise<void> {
+  fixture.state.deviceNowMs += milliseconds;
+  await page.clock.fastForward(milliseconds);
+}
+
+async function settleBrowser(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
 }
 
 async function expectOnlyVisuallyHidden(locator: Locator): Promise<void> {
