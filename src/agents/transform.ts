@@ -1,4 +1,6 @@
+import { isDeepStrictEqual } from "node:util";
 import { parse, stringify, type TomlTable } from "smol-toml";
+import { protocolTargets, supportsReasoningParameter } from "../protocols/conversion/routing.js";
 import { AgentError, validateMappings, type AgentId, type AgentMapping, type AgentModel } from "./types.js";
 
 export interface AgentProjection {
@@ -14,6 +16,7 @@ export function projectAgent(
   origin: string,
   catalogPath: string,
   models: readonly AgentModel[],
+  managedConfig: Buffer | null,
 ): AgentProjection {
   validateMappings(agent, mappings);
   if (!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/u.test(origin) || Number(new URL(origin).port) > 65535) {
@@ -26,7 +29,7 @@ export function projectAgent(
     const source = original?.toString("utf8").replace(/^\uFEFF/u, "") ?? "";
     return agent === "claude"
       ? { config: projectClaude(source, mappings, origin) }
-      : projectCodex(source, mappings, origin, catalogPath, models);
+      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig);
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
     // Parser diagnostics can contain configuration secrets.
@@ -83,6 +86,7 @@ function projectClaude(source: string, mappings: readonly AgentMapping[], origin
 
 function projectCodex(
   source: string, mappings: readonly AgentMapping[], origin: string, catalogPath: string, models: readonly AgentModel[],
+  managedConfig: Buffer | null,
 ): AgentProjection {
   const config = source === "" ? {} as TomlTable : parse(source);
   // Profiles and named subagents can override the provider/catalog. Refuse rather than
@@ -92,6 +96,14 @@ function projectCodex(
   }
   const providers = config.model_providers === undefined ? {} : object(config.model_providers);
   const reserved = "ghc_gateway";
+  if (managedConfig === null) {
+    if (providers[reserved] !== undefined) throw new AgentError("agent_conflict");
+  } else {
+    const managed = parse(managedConfig.toString("utf8").replace(/^\uFEFF/u, ""));
+    const managedProviders = managed.model_providers === undefined ? {} : object(managed.model_providers);
+    if (managedProviders[reserved] === undefined
+      || !isDeepStrictEqual(providers[reserved], managedProviders[reserved])) throw new AgentError("agent_conflict");
+  }
   providers[reserved] = {
     name: "GHC Gateway", base_url: `${origin}/v1`, wire_api: "responses",
     experimental_bearer_token: "ghcg-local", requires_openai_auth: false,
@@ -106,13 +118,17 @@ function projectCodex(
     "model_auto_compact_token_limit", "model_supports_reasoning_summaries", "review_model", "service_tier"]) delete config[key];
   const catalog = { models: mappings.map((mapping, index) => {
     const model = models.find((item) => item.modelId === mapping.modelId)!;
-    const fullContext = model.metadata?.contextWindowTokens?.value ?? null;
-    const limit = model.maxInputTokens === null ? fullContext
-      : fullContext === null ? model.maxInputTokens : Math.min(model.maxInputTokens, fullContext);
+    const fullContext = model.profile.contextWindowTokens?.value ?? null;
+    const inputLimit = model.maxInputTokens.value;
+    const limit = inputLimit === null ? null
+      : fullContext === null ? inputLimit : Math.min(inputLimit, fullContext);
+    const target = model.protocols.value === null ? null : protocolTargets("responses", model.protocols.value)[0] ?? null;
+    const supportsReasoning = target !== null
+      && supportsReasoningParameter(target, model.profile.supportedParameters.value);
     return {
       slug: mapping.modelId, display_name: mapping.displayName, description: mapping.displayName,
       base_instructions: "You are Codex, a coding agent. Help the user with their coding tasks.",
-      supported_reasoning_levels: (model.metadata?.reasoningEfforts.value ?? []).map((effort) => ({
+      supported_reasoning_levels: (supportsReasoning ? model.profile.reasoningEfforts.value ?? [] : []).map((effort) => ({
         effort, description: effort.charAt(0).toUpperCase() + effort.slice(1),
       })),
       shell_type: "shell_command", visibility: "list", supported_in_api: true,

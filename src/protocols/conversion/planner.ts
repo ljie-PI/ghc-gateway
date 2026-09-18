@@ -2,6 +2,7 @@ import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilitie
 import { GatewayFailureError } from "../../gateway/failures.js";
 import type { WireJsonObject } from "../../serialization/wire_json.js";
 import { PROTOCOL_REQUEST_CODECS } from "./request_codecs.js";
+import { protocolTargets } from "./routing.js";
 import {
   ConversionContractError,
   type ConversionPlanningInput,
@@ -10,12 +11,6 @@ import {
   type ProtocolExecutionPlan,
   type SemanticRequest,
 } from "./types.js";
-
-const PRIORITIES: Readonly<Record<InferenceProtocol, readonly InferenceProtocol[]>> = {
-  chat: ["responses", "messages"],
-  messages: ["chat", "responses"],
-  responses: ["chat", "messages"],
-};
 
 export function planProtocolExecution(input: Readonly<ConversionPlanningInput>): ProtocolExecutionPlan {
   const protocols = input.capability.protocols.value;
@@ -44,7 +39,7 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
   }
 
   const candidates = input.forcedTarget === undefined
-    ? PRIORITIES[input.source].filter((target) => protocols.includes(target))
+    ? protocolTargets(input.source, protocols)
     : protocols.includes(input.forcedTarget)
       ? [input.forcedTarget]
       : [];

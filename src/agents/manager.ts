@@ -52,7 +52,7 @@ export class FileAgentsManager implements AgentsManager {
       const paths = this.targetPaths(request.agent, initial);
       const before = await this.images(paths, initial);
       this.requireRevision(request.expectedRevision, initial, before, paths, origin);
-      if (initial.pending === null) this.project(request, before, paths, origin, models);
+      if (initial.pending === null) this.project(request, initial, before, paths, origin, models);
       signal.throwIfAborted();
       assertCurrent();
       return await store.locked(async (save) => {
@@ -70,7 +70,7 @@ export class FileAgentsManager implements AgentsManager {
         const livePaths = this.targetPaths(request.agent, state);
         current = await this.images(livePaths);
         if (initial.pending === null) this.requireRevision(request.expectedRevision, state, current, livePaths, origin);
-        const projection = this.project(request, current, livePaths, origin, models);
+        const projection = this.project(request, state, current, livePaths, origin, models);
         const prepared = await this.prepareTargets(request.agent, state, current, livePaths);
         current = prepared.current;
         assertCurrent();
@@ -99,10 +99,19 @@ export class FileAgentsManager implements AgentsManager {
     });
   }
 
-  private project(request: AgentApplyRequest, images: readonly (FileImage | null)[], paths: readonly string[], origin: string, models: readonly AgentModel[]) {
+  private project(request: AgentApplyRequest, state: AgentState, images: readonly (FileImage | null)[], paths: readonly string[], origin: string, models: readonly AgentModel[]) {
     const config = images.at(-1) ?? null;
+    const managedConfig = state.targets.at(-1)?.expected ?? null;
     const catalogPath = path.join(path.dirname(paths.at(-1)!), "ghcg_models.json");
-    return projectAgent(request.agent, config === null ? null : Buffer.from(config.bytes, "base64"), request.mappings, origin, catalogPath, models);
+    return projectAgent(
+      request.agent,
+      config === null ? null : Buffer.from(config.bytes, "base64"),
+      request.mappings,
+      origin,
+      catalogPath,
+      models,
+      managedConfig === null ? null : Buffer.from(managedConfig.bytes, "base64"),
+    );
   }
 
   private async prepareTargets(agent: AgentId, state: AgentState, current: (FileImage | null)[], paths: readonly string[]) {
@@ -279,12 +288,13 @@ export class FileAgentsManager implements AgentsManager {
     const pending = state.pending!;
     // Backup, catalog, then config. Legacy restore intents retain their stored ordering.
     const steps = pending.kind === "restore" ? [...pending.steps].reverse() : pending.steps;
+    const positions = new Map<StepState, "before" | "after" | "gap">();
     for (const step of steps) {
       const target = state.targets[step.target]!.path;
       assertNoLinks(target);
       const stage = path.join(step.scratch, "next");
-      const displaced = path.join(step.scratch, "previous");
-      let position = await this.classify(step, await readImage(target, stage));
+      const position = await this.classify(step, await readImage(target, stage));
+      positions.set(step, position);
       if (position === "after") { step.phase = "published"; await save(state); continue; }
       await this.ensureClientParent(path.dirname(target));
       await privateDirectory(step.scratch);
@@ -309,6 +319,16 @@ export class FileAgentsManager implements AgentsManager {
         }
       }
       this.hit("staged", agent, step.target);
+    }
+    const boundary = await this.images(state.targets.map((target) => target.path), state);
+    if ([...positions.values()].every((position) => position === "before")) this.requireExpected(state, boundary);
+    else await this.requireRecoverable(state, boundary);
+    for (const step of steps) {
+      let position = positions.get(step)!;
+      if (position === "after") continue;
+      const target = state.targets[step.target]!.path;
+      const stage = path.join(step.scratch, "next");
+      const displaced = path.join(step.scratch, "previous");
       if (position === "before" && step.before !== null) {
         if (exists(displaced)) throw new AgentError("agent_recovery_required");
         // Staging and journal writes may take time. Revalidate the full live

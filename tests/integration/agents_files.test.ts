@@ -1,16 +1,28 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
-import type { AgentId, AgentMapping } from "../../src/agents/types.js";
+import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
 import { AgentStore } from "../../src/agents/store.js";
 import { readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
-const models = ["model-a", "model-b", "model-c"].map((modelId) => ({ modelId, maxInputTokens: 32000 }));
+const effective = <T>(value: T) => ({ value, source: "live" as const, conflict: false, liveState: "value" as const });
+const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((modelId) => ({
+  modelId,
+  protocols: effective(["responses"] as const),
+  maxInputTokens: effective(32000),
+  profile: {
+    chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+    supportedParameters: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+    reasoningEfforts: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+  },
+}));
 const mappings = models.map((model) => ({ displayName: `Label ${model.modelId}`, modelId: model.modelId }));
 function harness(options: Omit<AgentManagerOptions, "home"> = {}) {
   // Legacy images use the same canonical home anchor as the production manager.
@@ -145,7 +157,7 @@ describe("private repeatable agent configuration", () => {
     const configPath = seed(h.home, ".codex/config.toml", original);
     const originalImage = (await readImage(configPath))!;
     const catalogPath = path.join(h.home, ".codex", "ghcg-models.json");
-    const projection = projectAgent("codex", original, mappings, origin, catalogPath, models);
+    const projection = projectAgent("codex", original, mappings, origin, catalogPath, models, null);
     fs.writeFileSync(configPath, projection.config);
     seed(h.home, ".codex/ghcg-models.json", projection.catalog!);
     const current = [(await readImage(catalogPath))!, (await readImage(configPath))!];
@@ -263,6 +275,82 @@ describe("private repeatable agent configuration", () => {
     expect(fs.readFileSync(auth, "utf8")).toBe("login-secret");
   }, 300_000);
 
+  it("rejects an unmanaged reserved Codex provider before creating intent or files", async () => {
+    const h = harness();
+    const original = Buffer.from("model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\nwire_api = \"responses\"\n[model_providers.other]\nname = \"Other\"\n[mcp_servers.local]\ncommand = \"node\"\n");
+    const config = seed(h.home, ".codex/config.toml", original);
+    const catalog = seed(h.home, ".codex/ghcg_models.json", "external catalog\n");
+    const auth = seed(h.home, ".codex/auth.json", "login-secret\n");
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(config)).toEqual(original);
+    expect(fs.readFileSync(catalog, "utf8")).toBe("external catalog\n");
+    expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
+    expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
+    expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents"))).toBe(false);
+  }, 180_000);
+
+  it("does not treat stale durable Codex state as provider ownership", async () => {
+    const h = harness();
+    const baseline = Buffer.from("model = \"old\"\n");
+    const config = seed(h.home, ".codex/config.toml", baseline);
+    const baselineImage = (await readImage(config))!;
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const store = new AgentStore(path.join(h.home, ".ghc-gateway-agents"), "codex");
+    await store.locked(async (save) => save({
+      version: 2, revision: 1, mappings, lastAppliedAt: null, pending: null,
+      targets: [
+        { path: `${config}.ghcg.bak`, original: null, expected: null },
+        { path: catalog, original: null, expected: null },
+        { path: config, original: baselineImage, expected: baselineImage },
+      ],
+    }));
+    const external = Buffer.from("model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\n");
+    fs.writeFileSync(config, external);
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(config)).toEqual(external);
+    expect(fs.existsSync(catalog)).toBe(false);
+    expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
+  }, 180_000);
+
+  it("updates a Gateway-owned Codex provider from durable state and preserves unrelated settings", async () => {
+    const h = harness();
+    const file = seed(h.home, ".codex/config.toml", "[model_providers.other]\nname = \"Other\"\n[mcp_servers.local]\ncommand = \"node\"\n[hooks.Stop]\ncommand = \"notify\"\n");
+    const auth = seed(h.home, ".codex/auth.json", "login-secret\n");
+    await apply(h.manager, "codex");
+    const nextOrigin = "http://127.0.0.1:32568";
+    const current = (await h.manager.inspect(nextOrigin)).find((item) => item.id === "codex")!;
+    await h.manager.apply({
+      agent: "codex", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings: [...mappings].reverse(),
+    }, nextOrigin, models, () => undefined, new AbortController().signal);
+    expect(parse(fs.readFileSync(file, "utf8"))).toMatchObject({
+      model: "model-c",
+      model_providers: {
+        ghc_gateway: { base_url: `${nextOrigin}/v1` },
+        other: { name: "Other" },
+      },
+      mcp_servers: { local: { command: "node" } },
+      hooks: { Stop: { command: "notify" } },
+    });
+    expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
+  }, 300_000);
+
+  it("rejects an external provider change after Codex management begins", async () => {
+    const h = harness();
+    const config = seed(h.home, ".codex/config.toml", "[mcp_servers.local]\ncommand = \"node\"\n");
+    await apply(h.manager, "codex");
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const backup = `${config}.ghcg.bak`;
+    const catalogBefore = fs.readFileSync(catalog);
+    const backupBefore = fs.readFileSync(backup);
+    const external = Buffer.from(fs.readFileSync(config, "utf8").replace(`${origin}/v1`, "https://external.example/v1"));
+    fs.writeFileSync(config, external);
+    await expect(apply(h.manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(config)).toEqual(external);
+    expect(fs.readFileSync(catalog)).toEqual(catalogBefore);
+    expect(fs.readFileSync(backup)).toEqual(backupBefore);
+    expect(parse(fs.readFileSync(config, "utf8")).mcp_servers).toEqual({ local: { command: "node" } });
+  }, 300_000);
+
   it("preserves outside unrelated edits when a refreshed Apply patches owned fields", async () => {
     const h = harness();
     const original = seed(h.home, ".claude/settings.json", JSON.stringify({ env: { OTHER: "keep" } }));
@@ -286,6 +374,95 @@ describe("private repeatable agent configuration", () => {
     });
     await expect(apply(manager, "claude")).rejects.toThrow("agent conflict");
     expect(fs.readFileSync(original)).toEqual(external);
+  }, 180_000);
+
+  it("rejects a changed-target race before publishing another changed target", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const config = path.join(h.home, ".codex/config.toml");
+    const beforeCatalog = fs.readFileSync(catalog);
+    const external = Buffer.from("model = \"external\"\n");
+    const manager = new FileAgentsManager({
+      home: h.home,
+      checkpoint: (point, agent, index) => {
+        if (point === "staged" && agent === "codex" && index === 2) fs.writeFileSync(config, external);
+      },
+    });
+
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
+    expect(fs.readFileSync(config)).toEqual(external);
+  }, 180_000);
+
+  it("rejects a separate-process backup race before publishing repeat Apply", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const backup = path.join(h.home, ".codex/config.toml.ghcg.bak");
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const config = path.join(h.home, ".codex/config.toml");
+    const beforeCatalog = fs.readFileSync(catalog);
+    const beforeConfig = fs.readFileSync(config);
+    const external = Buffer.from("external backup");
+    const manager = new FileAgentsManager({
+      home: h.home,
+      checkpoint: (point, agent, index) => {
+        if (point !== "staged" || agent !== "codex" || index !== 2) return;
+        execFileSync(process.execPath, [
+          "--input-type=commonjs",
+          "-e",
+          "require('node:fs').writeFileSync(process.argv[1], Buffer.from(process.argv[2], 'base64'))",
+          backup,
+          external.toString("base64"),
+        ]);
+      },
+    });
+
+    await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(backup)).toEqual(external);
+    expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
+    expect(fs.readFileSync(config)).toEqual(beforeConfig);
+    expect((await manager.inspect(origin)).find((item) => item.id === "codex")!.state).toBe("recovery_required");
+  }, 180_000);
+
+  it("rejects an unchanged catalog race before publishing current config changes", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const config = path.join(h.home, ".codex/config.toml");
+    const externalConfig = Buffer.from(`${fs.readFileSync(config, "utf8")}# external setting\n`);
+    const externalCatalog = Buffer.from("external catalog");
+    fs.writeFileSync(config, externalConfig);
+    const manager = new FileAgentsManager({
+      home: h.home,
+      checkpoint: (point, agent, index) => {
+        if (point === "staged" && agent === "codex" && index === 2) fs.writeFileSync(catalog, externalCatalog);
+      },
+    });
+
+    await expect(apply(manager, "codex")).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(catalog)).toEqual(externalCatalog);
+    expect(fs.readFileSync(config)).toEqual(externalConfig);
+  }, 180_000);
+
+  it("rejects an unchanged config race before publishing catalog changes", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const catalog = path.join(h.home, ".codex/ghcg_models.json");
+    const config = path.join(h.home, ".codex/config.toml");
+    const beforeCatalog = fs.readFileSync(catalog);
+    const externalConfig = Buffer.from("model = \"external\"\n");
+    const manager = new FileAgentsManager({
+      home: h.home,
+      checkpoint: (point, agent, index) => {
+        if (point === "staged" && agent === "codex" && index === 1) fs.writeFileSync(config, externalConfig);
+      },
+    });
+    const reordered = [mappings[0]!, mappings[2]!, mappings[1]!];
+
+    await expect(apply(manager, "codex", reordered)).rejects.toThrow("agent conflict");
+    expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
+    expect(fs.readFileSync(config)).toEqual(externalConfig);
   }, 180_000);
 
   it("serializes concurrent applies from two Gateway instances sharing a home", async () => {
