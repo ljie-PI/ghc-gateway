@@ -7,7 +7,7 @@ import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
 import { AgentStore } from "../../src/agents/store.js";
-import { applyAccess, readImage } from "../../src/agents/files.js";
+import { protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 
 const homes: string[] = [];
@@ -44,8 +44,7 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
 }
 async function stableSeed(home: string, target: string, bytes: Buffer | string): Promise<string> {
   const file = seed(home, target, bytes);
-  // Materialize the captured access metadata before inspect hashes the image.
-  await applyAccess(file, (await readImage(file))!);
+  await protect(file);
   return file;
 }
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
