@@ -3,14 +3,24 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
-import type { AgentId, AgentMapping } from "../../src/agents/types.js";
+import type { AgentId, AgentMapping, AgentModel } from "../../src/agents/types.js";
 import { AgentStore } from "../../src/agents/store.js";
 import { readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
-const models = ["model-a", "model-b", "model-c"].map((modelId) => ({ modelId, maxInputTokens: 32000 }));
+const effective = <T>(value: T) => ({ value, source: "live" as const, conflict: false, liveState: "value" as const });
+const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((modelId) => ({
+  modelId,
+  protocols: effective(["responses"] as const),
+  maxInputTokens: effective(32000),
+  profile: {
+    chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+    supportedParameters: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+    reasoningEfforts: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+  },
+}));
 const mappings = models.map((model) => ({ displayName: `Label ${model.modelId}`, modelId: model.modelId }));
 function harness(options: Omit<AgentManagerOptions, "home"> = {}) {
   // Legacy images use the same canonical home anchor as the production manager.
