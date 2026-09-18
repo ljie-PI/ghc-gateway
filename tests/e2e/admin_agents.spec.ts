@@ -346,6 +346,40 @@ test("Agent catalog publication waits for an account baseline across navigation"
   }
 });
 
+test("manual Agent Refresh waits for a successful account baseline before loading the catalog", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  let release = (): void => undefined;
+  let markStarted = (): void => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  await page.route("**/admin/api/v1/accounts", async (route) => {
+    markStarted();
+    await held;
+    await route.fallback();
+  }, { times: 1 });
+  try {
+    await page.goto("/admin/#bootstrap_token=manual-refresh-baseline");
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await started;
+    await expect(page.locator(".agent-card")).toHaveCount(2);
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(() => fixture.requests.filter((request) => request.url().endsWith("/agents")).length)
+      .toBe(2);
+    await settleBrowser(page);
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(0);
+
+    addEnterpriseAccount(fixture);
+    fixture.state.models = { ...fixture.state.models, items: fixture.state.models.items.slice(1) };
+    fixture.state.agentsCatalogRevision = "d".repeat(64);
+    release();
+    await expect(page.locator("#codex-model-options option")).toHaveCount(1);
+    await expect(page.locator("#codex-model-options option")).toHaveAttribute("value", "claude-beta");
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
+  } finally {
+    release();
+  }
+});
+
 test("mounted Agents retries a failed automatic catalog reload at the bounded observation cadence", async ({ page }) => {
   await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
   const fixture = await openAgents(page);
