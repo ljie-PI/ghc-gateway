@@ -241,6 +241,36 @@ describe("private repeatable agent configuration", () => {
     }, origin, models, () => undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(fs.readdirSync(h.home)).toEqual([]);
   }, 180_000);
+  it("keeps cancellation abortable until the durable intent boundary", async () => {
+    const controller = new AbortController();
+    const h = harness({
+      checkpoint: (point) => {
+        if (point === "before_intent") controller.abort();
+      },
+    });
+    const status = await h.status("codex");
+    await expect(h.manager.apply({
+      agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents", "codex", "state.db"))).toBe(false);
+    expect(fs.existsSync(path.join(h.home, ".codex"))).toBe(false);
+  }, 180_000);
+
+  it("ignores cancellation after durable intent and completes Apply", async () => {
+    const controller = new AbortController();
+    const h = harness({
+      checkpoint: (point) => {
+        if (point === "intent") controller.abort();
+      },
+    });
+    const status = await h.status("codex");
+    await expect(h.manager.apply({
+      agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, controller.signal)).resolves.toMatchObject({ state: "installed" });
+    expect(fs.existsSync(path.join(h.home, ".codex", "ghcg_models.json"))).toBe(true);
+    expect(fs.existsSync(path.join(h.home, ".codex", "config.toml"))).toBe(true);
+  }, 180_000);
+
   it("retains a first-original sidecar and reapplies onto current unrelated settings", async () => {
     const h = harness();
     const original = Buffer.from("\ufeff{\r\n \"hooks\": {\"Stop\": []}, \"theme\": \"old\"\r\n}\r\n");
