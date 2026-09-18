@@ -53,8 +53,7 @@ describe("agent configuration compatibility with Gateway model resolution", () =
       { displayName: "Coding", modelId: "gpt-test" },
       { displayName: "Writer", modelId: "claude-test" },
     ], origin, "ghcg-models.json", [
-      { modelId: "gpt-test", maxInputTokens: 128_000 },
-      { modelId: "claude-test", maxInputTokens: 128_000 },
+      ...snapshot.models,
     ]);
     const catalog = JSON.parse(projection.catalog!.toString()) as { models: { slug: string }[] };
     for (const entry of catalog.models) {
@@ -101,9 +100,7 @@ describe("agent configuration compatibility with Gateway model resolution", () =
       { displayName: "Opus", modelId: "opus-real" },
       { displayName: "Haiku", modelId: "haiku-real" },
     ], origin, "unused", [
-      { modelId: "sonnet-real", maxInputTokens: null },
-      { modelId: "opus-real", maxInputTokens: null },
-      { modelId: "haiku-real", maxInputTokens: null },
+      ...snapshot.models,
     ]);
     const env = JSON.parse(projection.config.toString()).env as Record<string, string>;
     for (const key of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
