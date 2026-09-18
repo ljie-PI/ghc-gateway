@@ -1,0 +1,152 @@
+name: Issue 225 Windows directory diagnostics
+
+on:
+  push:
+    branches: ["diagnostic/225-windows-directory-timeout"]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Fresh runner probe (${{ matrix.concurrency }})
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        concurrency: ["1", "2", "4", "8", "default"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 24.20.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.20.0"
+      - name: Check diagnostic scripts
+        shell: bash
+        run: |
+          node --check .github/diagnostics/issue-225-windows-security-preload.mjs
+          node --check .github/diagnostics/issue-225-windows-directory-probe.mjs
+      - name: Run fresh directory-creation wave
+        shell: bash
+        run: |
+          mkdir -p artifacts/issue-225/probe
+          output="artifacts/issue-225/probe/probe-${{ matrix.concurrency }}.jsonl"
+          if [[ "${{ matrix.concurrency }}" == "default" ]]; then
+            node .github/diagnostics/issue-225-windows-directory-probe.mjs --output "$output"
+          else
+            node .github/diagnostics/issue-225-windows-directory-probe.mjs \
+              --output "$output" \
+              --concurrency "${{ matrix.concurrency }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-225-directory-probe-${{ matrix.concurrency }}
+          path: artifacts/issue-225/probe/**
+          if-no-files-found: error
+          retention-days: 7
+
+  focused:
+    name: Focused native repetition
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 24.20.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.20.0"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate diagnostics
+        shell: bash
+        run: |
+          node --check .github/diagnostics/issue-225-windows-security-preload.mjs
+          node --check .github/diagnostics/issue-225-windows-directory-probe.mjs
+          npx eslint --config eslint.config.js .github/diagnostics/*.mjs
+      - name: Repeat existing native publication test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/issue-225/focused
+          trace_dir="$(node -e 'const path=require("node:path");process.stdout.write(path.resolve(process.argv[1]))' artifacts/issue-225/focused)"
+          bootstrap_url="$(node -e 'const path=require("node:path");const {pathToFileURL}=require("node:url");process.stdout.write(pathToFileURL(path.resolve(process.argv[1])).href)' scripts/tooling/bootstrap.mjs)"
+          observer_url="$(node -e 'const path=require("node:path");const {pathToFileURL}=require("node:url");process.stdout.write(pathToFileURL(path.resolve(process.argv[1])).href)' .github/diagnostics/issue-225-windows-security-preload.mjs)"
+          export GHC_GATEWAY_CI_NETWORK_GUARD=1
+          export GHCG_ISSUE_225_TRACE_DIR="$trace_dir"
+          export NODE_OPTIONS="--import=$observer_url --import=$bootstrap_url"
+          failures=0
+          for attempt in {1..20}; do
+            export GHCG_ISSUE_225_RUN="$(printf 'focused-%02d' "$attempt")"
+            if ! npm exec -- vitest run \
+              --config vitest.config.ts \
+              tests/unit/daemon_identity.test.ts \
+              --testNamePattern="publishes a new directory with owner and ACL already valid for another caller" \
+              --maxWorkers=1 \
+              --no-file-parallelism; then
+              failures=$((failures + 1))
+            fi
+          done
+          unset NODE_OPTIONS
+          node .github/diagnostics/issue-225-windows-security-preload.mjs \
+            --verify "$trace_dir" \
+            --minimum-directory-creates 20 \
+            --require-complete
+          if (( failures != 0 )); then
+            printf '%s\n' "focused failures=$failures"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-225-focused-native
+          path: artifacts/issue-225/focused/**
+          if-no-files-found: error
+          retention-days: 7
+
+  observed-full-suite:
+    name: Observed full Windows test load
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 24.20.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.20.0"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run observed full test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/issue-225/full-suite
+          trace_dir="$(node -e 'const path=require("node:path");process.stdout.write(path.resolve(process.argv[1]))' artifacts/issue-225/full-suite)"
+          bootstrap_url="$(node -e 'const path=require("node:path");const {pathToFileURL}=require("node:url");process.stdout.write(pathToFileURL(path.resolve(process.argv[1])).href)' scripts/tooling/bootstrap.mjs)"
+          observer_url="$(node -e 'const path=require("node:path");const {pathToFileURL}=require("node:url");process.stdout.write(pathToFileURL(path.resolve(process.argv[1])).href)' .github/diagnostics/issue-225-windows-security-preload.mjs)"
+          export GHC_GATEWAY_CI_NETWORK_GUARD=1
+          export GHCG_ISSUE_225_TRACE_DIR="$trace_dir"
+          export GHCG_ISSUE_225_RUN=full-suite
+          export NODE_OPTIONS="--import=$observer_url --import=$bootstrap_url"
+          test_status=0
+          npm test || test_status=$?
+          unset NODE_OPTIONS
+          verify_status=0
+          node .github/diagnostics/issue-225-windows-security-preload.mjs \
+            --verify "$trace_dir" \
+            --minimum-directory-creates 1 \
+            --require-complete || verify_status=$?
+          if (( test_status != 0 )); then exit "$test_status"; fi
+          exit "$verify_status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-225-observed-full-suite
+          path: artifacts/issue-225/full-suite/**
+          if-no-files-found: error
+          retention-days: 7
