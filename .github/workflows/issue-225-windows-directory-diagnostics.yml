@@ -67,6 +67,87 @@ jobs:
           node --check .github/diagnostics/issue-225-windows-security-preload.mjs
           node --check .github/diagnostics/issue-225-windows-directory-probe.mjs
           npx eslint --config eslint.config.js .github/diagnostics/*.mjs
+      - name: Verify observer failure semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          trace_dir="$(node -e 'const path=require("node:path");process.stdout.write(path.resolve(process.argv[1]))' "$RUNNER_TEMP/ghcg-issue-225-observer-contract")"
+          mkdir -p "$trace_dir"
+          observer_url="$(node -e 'const path=require("node:path");const {pathToFileURL}=require("node:url");process.stdout.write(pathToFileURL(path.resolve(process.argv[1])).href)' .github/diagnostics/issue-225-windows-security-preload.mjs)"
+          export GHCG_ISSUE_225_TRACE_DIR="$trace_dir"
+          export GHCG_ISSUE_225_RUN=observer-timeout
+          export NODE_OPTIONS="--import=$observer_url"
+          node --input-type=module -e "
+            import { execFile, execFileSync } from 'node:child_process';
+            import { promisify } from 'node:util';
+            const executable = process.env.SystemRoot + '\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe';
+            const script = 'Write-Output private-canary-issue225; Start-Sleep -Seconds 2';
+            let syncTimeout;
+            try {
+              execFileSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+                { encoding: 'utf8', windowsHide: true, timeout: 100, stdio: ['ignore', 'pipe', 'pipe'] });
+            } catch (error) { syncTimeout = error; }
+            if (syncTimeout?.code !== 'ETIMEDOUT' || syncTimeout?.signal !== 'SIGTERM') {
+              throw new Error('synchronous timeout semantics changed');
+            }
+            let asyncTimeout;
+            try {
+              await promisify(execFile)(executable,
+                ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+                { encoding: 'utf8', windowsHide: true, timeout: 100 });
+            } catch (error) { asyncTimeout = error; }
+            if (asyncTimeout?.killed !== true || asyncTimeout?.signal !== 'SIGTERM') {
+              throw new Error('asynchronous timeout semantics changed');
+            }
+          "
+          unset NODE_OPTIONS
+          node .github/diagnostics/issue-225-windows-security-preload.mjs \
+            --verify "$trace_dir" \
+            --minimum-directory-creates 0 \
+            --minimum-timeouts 2 \
+            --require-paired-commands
+          if grep -R -F 'private-canary-issue225' "$trace_dir"; then
+            printf '%s\n' 'observer persisted command or output content'
+            exit 1
+          fi
+          unexpected_dir="$RUNNER_TEMP/ghcg-issue-225-unexpected"
+          mkdir -p "$unexpected_dir"
+          touch "$unexpected_dir/private-canary"
+          if node .github/diagnostics/issue-225-windows-security-preload.mjs \
+            --verify "$unexpected_dir" \
+            --minimum-directory-creates 0; then
+            printf '%s\n' 'verifier accepted an unexpected artifact'
+            exit 1
+          fi
+          truncated_dir="$RUNNER_TEMP/ghcg-issue-225-truncated"
+          mkdir -p "$truncated_dir"
+          node --input-type=module -e "
+            import { writeFileSync } from 'node:fs';
+            const common = {
+              version: 1, run: 'truncated', pid: 1, ppid: 1, threadId: 0,
+              workerId: null, role: 'node', availableParallelism: 1,
+            };
+            writeFileSync(process.argv[1], [
+              JSON.stringify({ ...common, sequence: 0, atUnixMs: 0, event: 'process_start' }),
+              JSON.stringify({ ...common, sequence: 1, atUnixMs: 1, event: 'truncated' }),
+              '',
+            ].join('\\n'));
+          " "$truncated_dir/trace-000.jsonl"
+          if node .github/diagnostics/issue-225-windows-security-preload.mjs \
+            --verify "$truncated_dir" \
+            --minimum-directory-creates 0; then
+            printf '%s\n' 'verifier accepted truncated evidence'
+            exit 1
+          fi
+          writer_failure_dir="$RUNNER_TEMP/ghcg-issue-225-writer-failure"
+          mkdir -p "$writer_failure_dir"
+          touch "$writer_failure_dir/trace-failure"
+          if node .github/diagnostics/issue-225-windows-security-preload.mjs \
+            --verify "$writer_failure_dir" \
+            --minimum-directory-creates 0; then
+            printf '%s\n' 'verifier accepted a writer failure marker'
+            exit 1
+          fi
       - name: Repeat existing native publication test
         shell: bash
         run: |
@@ -94,7 +175,7 @@ jobs:
           node .github/diagnostics/issue-225-windows-security-preload.mjs \
             --verify "$trace_dir" \
             --minimum-directory-creates 20 \
-            --require-complete
+            --require-paired-commands
           if (( failures != 0 )); then
             printf '%s\n' "focused failures=$failures"
             exit 1
@@ -140,7 +221,7 @@ jobs:
           node .github/diagnostics/issue-225-windows-security-preload.mjs \
             --verify "$trace_dir" \
             --minimum-directory-creates 1 \
-            --require-complete || verify_status=$?
+            --require-paired-commands || verify_status=$?
           if (( test_status != 0 )); then exit "$test_status"; fi
           exit "$verify_status"
       - uses: actions/upload-artifact@v4

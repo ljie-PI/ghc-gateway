@@ -1,4 +1,4 @@
-import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeSync } from "node:fs";
 import { Buffer } from "node:buffer";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { availableParallelism } from "node:os";
@@ -10,8 +10,11 @@ import { promisify } from "node:util";
 import { threadId } from "node:worker_threads";
 
 const INSTALL_SYMBOL = Symbol.for("ghcg.issue225.windowsSecurityTrace");
-const MAX_RECORDS = 4096;
-const MAX_RECORD_BYTES = 2048;
+const MAX_TRACE_FILES = 128;
+const MAX_RECORDS = 512;
+const MAX_RECORD_BYTES = 1024;
+const MAX_TRACE_FILE_BYTES = MAX_RECORDS * MAX_RECORD_BYTES;
+const MAX_TOTAL_TRACE_BYTES = MAX_TRACE_FILES * MAX_TRACE_FILE_BYTES;
 const RUN_PATTERN = /^[a-z0-9_-]{1,32}$/u;
 const COMMANDS = new Set(["powershell", "whoami", "icacls"]);
 const PURPOSES = new Set([
@@ -84,9 +87,22 @@ function installTrace() {
     if (descriptor !== undefined) return true;
     try {
       mkdirSync(directory, { recursive: true });
-      descriptor = openSync(path.join(directory, `trace-${process.pid}-${threadId}-${Date.now()}.jsonl`), "ax", 0o600);
-      return true;
+      for (let slot = 0; slot < MAX_TRACE_FILES; slot += 1) {
+        try {
+          descriptor = openSync(path.join(directory, `trace-${slot.toString().padStart(3, "0")}.jsonl`), "ax", 0o600);
+          return true;
+        } catch (error) {
+          if (isRecord(error) && error.code === "EEXIST") continue;
+          markTraceFailure(directory);
+          disabled = true;
+          return false;
+        }
+      }
+      markTraceFailure(directory);
+      disabled = true;
+      return false;
     } catch {
+      markTraceFailure(directory);
       disabled = true;
       return false;
     }
@@ -114,12 +130,14 @@ function installTrace() {
       ...boundedEvent,
     });
     if (Buffer.byteLength(record, "utf8") > MAX_RECORD_BYTES) {
+      markTraceFailure(directory);
       disabled = true;
       return;
     }
     try {
       writeSync(descriptor, `${record}\n`, undefined, "utf8");
     } catch {
+      markTraceFailure(directory);
       disabled = true;
     }
     if (truncated) disabled = true;
@@ -318,17 +336,17 @@ function successEvidence() {
 
 function verifyFromCommandLine(args) {
   if (args[0] !== "--verify" || args[1] === undefined) {
-    process.stderr.write("usage: node issue-225-windows-security-preload.mjs --verify <directory> [--minimum-directory-creates <count>] [--minimum-timeouts <count>] [--require-complete]\n");
+    process.stderr.write("usage: node issue-225-windows-security-preload.mjs --verify <directory> [--minimum-directory-creates <count>] [--minimum-timeouts <count>] [--require-paired-commands]\n");
     process.exitCode = 2;
     return;
   }
   const directory = path.resolve(args[1]);
   let minimumDirectoryCreates = 1;
   let minimumTimeouts = 0;
-  let requireComplete = false;
+  let requirePairedCommands = false;
   for (let index = 2; index < args.length; index += 1) {
-    if (args[index] === "--require-complete") {
-      requireComplete = true;
+    if (args[index] === "--require-paired-commands") {
+      requirePairedCommands = true;
       continue;
     }
     if (args[index] === "--minimum-directory-creates" && args[index + 1] !== undefined) {
@@ -349,25 +367,35 @@ function verifyFromCommandLine(args) {
   if (!Number.isInteger(minimumTimeouts) || minimumTimeouts < 0 || minimumTimeouts > 10_000) {
     throw new Error("invalid minimum timeout count");
   }
-  const summary = verifyTraceDirectory(directory, requireComplete);
+  const summary = verifyTraceDirectory(directory, requirePairedCommands);
   if (summary.directoryCreates < minimumDirectoryCreates) throw new Error("insufficient directory-create evidence");
   if (summary.timeouts < minimumTimeouts) throw new Error("insufficient timeout evidence");
   process.stdout.write(`${JSON.stringify(summary)}\n`);
 }
 
-function verifyTraceDirectory(directory, requireComplete) {
-  const files = readdirSync(directory).filter((name) => /^trace-\d+-\d+-\d+\.jsonl$/u.test(name)).sort();
+function verifyTraceDirectory(directory, requirePairedCommands) {
+  const entries = readdirSync(directory).sort();
+  if (entries.includes("trace-failure")) throw new Error("trace writer reported a failure");
+  const files = entries.filter((name) => /^trace-\d{3}\.jsonl$/u.test(name));
+  if (files.length !== entries.length) throw new Error("unexpected trace directory entry");
   if (files.length === 0) throw new Error("no trace files found");
+  if (files.length > MAX_TRACE_FILES) throw new Error("too many trace files");
   let records = 0;
   let directoryCreates = 0;
   let timeouts = 0;
   let failures = 0;
   let incomplete = 0;
+  let totalBytes = 0;
 
   for (const file of files) {
     const pending = new Map();
     const seenInvocations = new Set();
-    const contents = readFileSync(path.join(directory, file), "utf8");
+    const filePath = path.join(directory, file);
+    const size = statSync(filePath).size;
+    if (size > MAX_TRACE_FILE_BYTES) throw new Error("oversize trace file");
+    totalBytes += size;
+    if (totalBytes > MAX_TOTAL_TRACE_BYTES) throw new Error("trace directory exceeded its size bound");
+    const contents = readFileSync(filePath, { encoding: "utf8", flag: "r" });
     let fileRecords = 0;
     let expectedSequence = 0;
     let expectedInvocation = 1;
@@ -421,7 +449,7 @@ function verifyTraceDirectory(directory, requireComplete) {
     if (fileRecords === 0) throw new Error("empty trace file");
     incomplete += pending.size;
   }
-  if (requireComplete && incomplete !== 0) throw new Error("incomplete command evidence");
+  if (requirePairedCommands && incomplete !== 0) throw new Error("incomplete command evidence");
   return { files: files.length, records, directoryCreates, timeouts, failures, incomplete };
 }
 
@@ -483,6 +511,19 @@ function traceProcessMetadata(record) {
 function sameTraceProcess(expected, record) {
   if (expected === undefined) return false;
   return Object.entries(expected).every(([key, value]) => record[key] === value);
+}
+
+function markTraceFailure(directory) {
+  try {
+    mkdirSync(directory, { recursive: true });
+    const descriptor = openSync(path.join(directory, "trace-failure"), "ax", 0o600);
+    closeSync(descriptor);
+  } catch (error) {
+    if (!isRecord(error) || error.code !== "EEXIST") {
+      // The process exit code remains the final fail-closed signal.
+    }
+  }
+  if (process.exitCode === undefined || process.exitCode === 0) process.exitCode = 1;
 }
 
 function validAbsolutePath(value) {
