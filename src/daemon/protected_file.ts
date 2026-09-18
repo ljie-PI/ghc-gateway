@@ -249,7 +249,12 @@ function isNotFound(error: unknown): boolean {
 const WINDOWS_SECURITY_COMMAND_TIMEOUT_MS = 5_000;
 const WINDOWS_SECURITY_COMMAND_MAX_BUFFER_BYTES = 1024 * 1024;
 
-function defaultRunCommand(file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
+function defaultRunCommand(
+  file: string,
+  args: readonly string[],
+  environment?: Readonly<Record<string, string>>,
+  timeoutMs = WINDOWS_SECURITY_COMMAND_TIMEOUT_MS,
+): string {
   const resolved = process.platform === "win32" && (file === "whoami" || file === "icacls")
     ? windowsCommandPath(file)
     : file;
@@ -258,7 +263,7 @@ function defaultRunCommand(file: string, args: readonly string[], environment?: 
     ...(environment === undefined ? {} : { env: { ...process.env, ...environment } }),
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
-    timeout: WINDOWS_SECURITY_COMMAND_TIMEOUT_MS,
+    timeout: timeoutMs,
     maxBuffer: WINDOWS_SECURITY_COMMAND_MAX_BUFFER_BYTES,
   });
 }
