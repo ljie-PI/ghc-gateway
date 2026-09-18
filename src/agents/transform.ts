@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { protocolTargets, supportsReasoningParameter } from "../protocols/conversion/routing.js";
 import { AgentError, validateMappings, type AgentId, type AgentMapping, type AgentModel } from "./types.js";
@@ -15,6 +16,7 @@ export function projectAgent(
   origin: string,
   catalogPath: string,
   models: readonly AgentModel[],
+  managedConfig: Buffer | null,
 ): AgentProjection {
   validateMappings(agent, mappings);
   if (!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/u.test(origin) || Number(new URL(origin).port) > 65535) {
@@ -27,7 +29,7 @@ export function projectAgent(
     const source = original?.toString("utf8").replace(/^\uFEFF/u, "") ?? "";
     return agent === "claude"
       ? { config: projectClaude(source, mappings, origin) }
-      : projectCodex(source, mappings, origin, catalogPath, models);
+      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig);
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
     // Parser diagnostics can contain configuration secrets.
@@ -84,6 +86,7 @@ function projectClaude(source: string, mappings: readonly AgentMapping[], origin
 
 function projectCodex(
   source: string, mappings: readonly AgentMapping[], origin: string, catalogPath: string, models: readonly AgentModel[],
+  managedConfig: Buffer | null,
 ): AgentProjection {
   const config = source === "" ? {} as TomlTable : parse(source);
   // Profiles and named subagents can override the provider/catalog. Refuse rather than
@@ -93,6 +96,14 @@ function projectCodex(
   }
   const providers = config.model_providers === undefined ? {} : object(config.model_providers);
   const reserved = "ghc_gateway";
+  if (managedConfig === null) {
+    if (providers[reserved] !== undefined) throw new AgentError("agent_conflict");
+  } else {
+    const managed = parse(managedConfig.toString("utf8").replace(/^\uFEFF/u, ""));
+    const managedProviders = managed.model_providers === undefined ? {} : object(managed.model_providers);
+    if (managedProviders[reserved] === undefined
+      || !isDeepStrictEqual(providers[reserved], managedProviders[reserved])) throw new AgentError("agent_conflict");
+  }
   providers[reserved] = {
     name: "GHC Gateway", base_url: `${origin}/v1`, wire_api: "responses",
     experimental_bearer_token: "ghcg-local", requires_openai_auth: false,
