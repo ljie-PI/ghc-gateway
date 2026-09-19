@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { WindowsAcl, windowsCommandPath, type WindowsCommandRunner } from "../../src/security/windows_acl.js";
+import { WindowsAcl, windowsCommandPath, windowsPowerShellPath, type WindowsCommandRunner } from "../../src/security/windows_acl.js";
 
 describe("Windows ACL helper", () => {
   it("resolves the current identity and parses explicit ACL principals through an injected runner", () => {
@@ -92,5 +92,9 @@ describe("Windows ACL helper", () => {
       path.join("D:\\Windows", "System32", "icacls.exe"),
     );
     expect(windowsCommandPath("icacls", "linux", {})).toBe("icacls");
+    expect(windowsPowerShellPath("win32", { SystemRoot: "D:\\Windows" })).toBe(
+      path.win32.join("D:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    );
+    expect(windowsPowerShellPath("linux", {})).toBe("powershell");
   });
 });

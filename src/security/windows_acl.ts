@@ -112,5 +112,5 @@ export function windowsPowerShellPath(
 ): string {
   if (platform !== "win32") return "powershell";
   const systemRoot = environment.SystemRoot ?? environment.WINDIR ?? "C:\\Windows";
-  return path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
