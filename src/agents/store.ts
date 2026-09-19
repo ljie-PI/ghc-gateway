@@ -100,13 +100,13 @@ export class AgentStore {
       await assertPrivate(legacyStatePath, false);
       const marker = readMigrationMarker(legacyStatePath);
       if (marker !== null) {
-        if (!samePath(marker, this.statePath)) throw new AgentError("agent_recovery_required");
+        if (!samePath(marker.target, this.statePath)) throw new AgentError("agent_recovery_required");
         if (exists(retiredStatePath)) await readStateDatabase(retiredStatePath, this.agent);
-        if (exists(this.statePath)) {
+        if (marker.phase === "complete" && exists(this.statePath)) {
           await readStateDatabase(this.statePath, this.agent);
           return true;
         }
-        if (!exists(retiredStatePath)) return true;
+        if (marker.phase === "complete" && !exists(retiredStatePath)) return true;
       }
     }
 
@@ -127,28 +127,35 @@ export class AgentStore {
         await assertPrivate(legacyStatePath, false);
         const marker = readMigrationMarker(legacyStatePath);
         if (marker !== null) {
-          if (!samePath(marker, this.statePath)) throw new AgentError("agent_recovery_required");
-          if (exists(this.statePath)) {
+          if (!samePath(marker.target, this.statePath)) throw new AgentError("agent_recovery_required");
+          if (marker.phase === "complete" && exists(this.statePath)) {
             await readStateDatabase(this.statePath, this.agent);
             return true;
           }
-          if (!exists(retiredStatePath)) return true;
+          if (marker.phase === "complete" && !exists(retiredStatePath)) return true;
         }
       }
 
       if (!exists(legacyStatePath) && exists(retiredStatePath)) {
         const retired = await readStateDatabase(retiredStatePath, this.agent);
-        await writeMigrationMarker(legacyStatePath, this.statePath);
+        await writeMigrationMarker(legacyStatePath, this.statePath, "pending");
         if (exists(this.statePath)) {
           const current = await readStateDatabase(this.statePath, this.agent);
           if (!statesEqual(retired, current)) throw new AgentError("agent_recovery_required");
         } else await publishStateDatabase(this.statePath, retired, this.agent);
+        await completeMigrationMarker(legacyStatePath, this.statePath);
         return true;
       }
 
-      if (exists(legacyStatePath) && readMigrationMarker(legacyStatePath) !== null) {
+      const marker = exists(legacyStatePath) ? readMigrationMarker(legacyStatePath) : null;
+      if (marker?.phase === "pending") {
+        if (!exists(retiredStatePath)) throw new AgentError("agent_recovery_required");
         const retired = await readStateDatabase(retiredStatePath, this.agent);
-        await publishStateDatabase(this.statePath, retired, this.agent);
+        if (exists(this.statePath)) {
+          const current = await readStateDatabase(this.statePath, this.agent);
+          if (!statesEqual(retired, current)) throw new AgentError("agent_recovery_required");
+        } else await publishStateDatabase(this.statePath, retired, this.agent);
+        await completeMigrationMarker(legacyStatePath, this.statePath);
         return true;
       }
 
@@ -161,12 +168,13 @@ export class AgentStore {
         if (exists(retiredStatePath)) throw new AgentError("agent_recovery_required");
         fs.renameSync(legacyStatePath, retiredStatePath);
         syncDirectory(legacyDirectory);
-        await writeMigrationMarker(legacyStatePath, this.statePath);
+        await writeMigrationMarker(legacyStatePath, this.statePath, "pending");
         if (!exists(this.statePath)) await publishStateDatabase(this.statePath, legacy, this.agent);
+        await completeMigrationMarker(legacyStatePath, this.statePath);
         return true;
       }
 
-      await writeMigrationMarker(legacyStatePath, this.statePath);
+      await writeMigrationMarker(legacyStatePath, this.statePath, "complete");
       return true;
     } finally {
       currentLock?.close();
@@ -207,12 +215,18 @@ export class AgentStore {
 async function migrationLock(directory: string): Promise<DatabaseSync> {
   await privateDirectory(directory);
   const lockPath = path.join(directory, "lock.db");
-  if (exists(lockPath)) await assertPrivate(lockPath, false);
-  else {
-    const fd = fs.openSync(lockPath, "wx", 0o600);
-    fs.closeSync(fd);
-    protect(lockPath);
+  if (!exists(lockPath)) {
+    let created = false;
+    try {
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      fs.closeSync(fd);
+      created = true;
+    } catch (error: unknown) {
+      if (!isAlreadyExists(error)) throw error;
+    }
+    if (created) protect(lockPath);
   }
+  await assertPrivate(lockPath, false);
   const lock = new DatabaseSync(lockPath, { timeout: 10_000 });
   try {
     lock.exec("BEGIN EXCLUSIVE");
@@ -252,7 +266,10 @@ function samePath(left: string, right: string): boolean {
     : resolvedLeft === resolvedRight;
 }
 
-async function writeMigrationMarker(statePath: string, targetStatePath: string): Promise<void> {
+type MigrationPhase = "pending" | "complete";
+interface MigrationMarker { readonly target: string; readonly phase: MigrationPhase }
+
+async function writeMigrationMarker(statePath: string, targetStatePath: string, phase: MigrationPhase): Promise<void> {
   const temporary = `${statePath}.marker`;
   if (exists(temporary)) {
     await assertPrivate(temporary, false);
@@ -263,15 +280,34 @@ async function writeMigrationMarker(statePath: string, targetStatePath: string):
   protect(temporary);
   const db = new DatabaseSync(temporary, { timeout: 0 });
   try {
-    db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE migration(target TEXT NOT NULL); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
-    db.prepare("INSERT INTO migration VALUES(?)").run(targetStatePath);
+    db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete'))); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
+    db.prepare("INSERT INTO migration VALUES(?,?)").run(targetStatePath, phase);
     // Old binaries see an invalid durable state and fail closed instead of
     // recreating a writable authority at the retired location.
-    db.prepare("INSERT INTO state VALUES(1,?)").run(JSON.stringify({ migratedTo: targetStatePath }));
+    db.prepare("INSERT INTO state VALUES(1,?)").run(markerSentinel(targetStatePath));
   } finally {
     db.close();
   }
   fs.renameSync(temporary, statePath);
+  syncDirectory(path.dirname(statePath));
+}
+
+async function completeMigrationMarker(statePath: string, targetStatePath: string): Promise<void> {
+  await assertPrivate(statePath, false);
+  const marker = readMigrationMarker(statePath);
+  if (marker?.phase !== "pending" || !samePath(marker.target, targetStatePath)) {
+    throw new AgentError("agent_recovery_required");
+  }
+  const db = new DatabaseSync(statePath, { timeout: 0 });
+  try {
+    db.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
+    db.prepare("UPDATE migration SET phase='complete'").run();
+    db.exec("COMMIT");
+  } catch (error: unknown) {
+    try { db.exec("ROLLBACK"); } catch { /* The transaction may not have started. */ }
+    if (error instanceof AgentError) throw error;
+    throw new AgentError("agent_recovery_required");
+  } finally { db.close(); }
   syncDirectory(path.dirname(statePath));
 }
 
@@ -296,20 +332,34 @@ async function publishStateDatabase(statePath: string, state: AgentState, agent:
   syncDirectory(path.dirname(statePath));
 }
 
-function readMigrationMarker(statePath: string): string | null {
+function readMigrationMarker(statePath: string): MigrationMarker | null {
   const db = new DatabaseSync(statePath, { readOnly: true, timeout: 0 });
   try {
     const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='migration'").get();
     if (table === undefined) return null;
-    const row = db.prepare("SELECT target FROM migration").get();
-    if (row === undefined || typeof row.target !== "string" || row.target.length > 4096) {
+    const rows = db.prepare("SELECT target, phase FROM migration LIMIT 2").all();
+    const stateRows = db.prepare("SELECT id, document FROM state LIMIT 2").all();
+    const row = rows[0];
+    const state = stateRows[0];
+    if (rows.length !== 1 || stateRows.length !== 1 || row === undefined || state === undefined
+      || typeof row.target !== "string" || row.target.length > 4096
+      || (row.phase !== "pending" && row.phase !== "complete")
+      || state.id !== 1 || state.document !== markerSentinel(row.target)) {
       throw new AgentError("agent_recovery_required");
     }
-    return row.target;
+    return { target: row.target, phase: row.phase };
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
     throw new AgentError("agent_recovery_required");
   } finally { db.close(); }
+}
+
+function markerSentinel(targetStatePath: string): string {
+  return JSON.stringify({ migratedTo: targetStatePath });
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }
 
 function validateStatePaths(state: AgentState, agent: AgentId): void {

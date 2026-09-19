@@ -58,8 +58,8 @@ async function writeMigrationMarker(file: string, target: string): Promise<void>
   protect(file);
   const db = new DatabaseSync(file);
   try {
-    db.exec("CREATE TABLE migration(target TEXT NOT NULL); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
-    db.prepare("INSERT INTO migration VALUES(?)").run(target);
+    db.exec("CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete'))); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
+    db.prepare("INSERT INTO migration VALUES(?,'pending')").run(target);
     db.prepare("INSERT INTO state VALUES(1,?)").run(JSON.stringify({ migratedTo: target }));
   } finally { db.close(); }
 }
@@ -113,48 +113,54 @@ describe("private repeatable agent configuration", () => {
     await apply(custom.manager, "codex");
     expect(fs.existsSync(path.join(defaults.home, "custom-data", "agents", "codex", "state.db"))).toBe(true);
     expect(fs.existsSync(path.join(defaults.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
-    await expect(new AgentStore(legacyStateRoot(defaults.home), "codex").read())
+    await expect(new AgentStore(legacyStateRoot(custom.home), "codex").read())
       .rejects.toMatchObject({ code: "agent_recovery_required" });
   }, 180_000);
 
   it("migrates complete legacy state and retires its writable authority", async () => {
     const h = harness();
-    const config = path.join(h.home, ".claude", "settings.json");
+    const config = path.join(h.home, ".codex", "config.toml");
+    const catalog = path.join(h.home, ".codex", "ghcg_models.json");
+    const legacyCatalog = path.join(h.home, ".codex", "ghcg-models.json");
+    const original = { bytes: Buffer.from("original").toString("base64"), mode: 0o600, acl: null };
+    const expected = { bytes: Buffer.from("expected").toString("base64"), mode: 0o600, acl: null };
     const state = {
       version: 2 as const,
       revision: 7,
       mappings: [mappings[0]!],
       lastAppliedAt: "2026-01-02T03:04:05.000Z",
       targets: [
-        { path: `${config}.ghcg.bak`, original: null, expected: null },
-        { path: config, original: null, expected: null },
+        { path: `${config}.ghcg.bak`, original: null, expected: original },
+        { path: catalog, original: null, expected },
+        { path: config, original, expected },
       ],
+      legacyCatalog: { path: legacyCatalog, original: null, expected },
       pending: {
         kind: "apply" as const,
-        garbage: [path.join(h.home, ".claude", ".ghcg-agents-claude-00000000-0000-4000-8000-000000000002")],
+        garbage: [path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000002")],
         steps: [{
-          target: 1,
-          before: null,
-          after: null,
+          target: 2,
+          before: original,
+          after: expected,
           phase: "planned" as const,
-          scratch: path.join(h.home, ".claude", ".ghcg-agents-claude-00000000-0000-4000-8000-000000000001"),
+          scratch: path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000001"),
         }],
       },
     };
-    await saveState(legacyStateRoot(h.home), "claude", state);
+    await saveState(legacyStateRoot(h.home), "codex", state);
 
     await h.manager.inspect(origin);
-    expect(await new AgentStore(stateRoot(h.home), "claude").read()).toEqual(state);
-    expect(fs.existsSync(path.join(legacyStateRoot(h.home), "claude", "state.db.migrated"))).toBe(true);
-    const marker = new DatabaseSync(path.join(legacyStateRoot(h.home), "claude", "state.db"), { readOnly: true });
+    expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+    expect(fs.existsSync(path.join(legacyStateRoot(h.home), "codex", "state.db.migrated"))).toBe(true);
+    const marker = new DatabaseSync(path.join(legacyStateRoot(h.home), "codex", "state.db"), { readOnly: true });
     try {
       expect(marker.prepare("SELECT target FROM migration").get()).toEqual({
-        target: path.join(stateRoot(h.home), "claude", "state.db"),
+        target: path.join(stateRoot(h.home), "codex", "state.db"),
       });
       expect(() => JSON.parse((marker.prepare("SELECT document FROM state WHERE id=1").get() as { document: string }).document))
         .not.toThrow();
     } finally { marker.close(); }
-    await expect(new AgentStore(legacyStateRoot(h.home), "claude").read())
+    await expect(new AgentStore(legacyStateRoot(h.home), "codex").read())
       .rejects.toMatchObject({ code: "agent_recovery_required" });
   }, 180_000);
 
@@ -233,6 +239,28 @@ describe("private repeatable agent configuration", () => {
     expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
   });
 
+  it.skipIf(process.platform === "win32")("rejects a linked legacy state root", async () => {
+    const h = harness();
+    const real = path.join(h.home, "real-legacy");
+    await saveState(real, "codex", { version: 2, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null });
+    fs.symlinkSync(real, legacyStateRoot(h.home), "dir");
+    expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
+  });
+
+  it("rejects a migration marker with a valid old state sentinel", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const markerPath = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const marker = new DatabaseSync(markerPath);
+    try {
+      marker.prepare("UPDATE state SET document=? WHERE id=1").run(JSON.stringify({
+        version: 2, revision: 0, mappings: [], targets: [], lastAppliedAt: null, pending: null,
+      }));
+    } finally { marker.close(); }
+    expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"))
+      .toMatchObject({ state: "recovery_required", mappings: [] });
+  }, 180_000);
+
   it.runIf(process.platform === "win32")("accepts case-insensitive Windows marker targets", async () => {
     const h = harness();
     await apply(h.manager, "codex");
@@ -240,7 +268,11 @@ describe("private repeatable agent configuration", () => {
     const marker = new DatabaseSync(markerPath);
     try {
       const target = (marker.prepare("SELECT target FROM migration").get() as { target: string }).target;
-      marker.prepare("UPDATE migration SET target=?").run(target.toUpperCase());
+      const upper = target.toUpperCase();
+      marker.exec("BEGIN IMMEDIATE");
+      marker.prepare("UPDATE migration SET target=?").run(upper);
+      marker.prepare("UPDATE state SET document=? WHERE id=1").run(JSON.stringify({ migratedTo: upper }));
+      marker.exec("COMMIT");
     } finally { marker.close(); }
     expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex")?.state)
       .toBe("installed");
