@@ -847,11 +847,15 @@ test("model combobox filters usable choices and supports standard keyboard navig
   await expect(card.getByRole("option")).toContainText("claude-beta");
   await expect(displayName).toHaveValue("");
 
-  await input.press("Home");
+  await input.press("ArrowUp");
   const optionId = await input.getAttribute("aria-activedescendant");
   expect(optionId).toBeTruthy();
+  await expect(page.locator(`#${optionId}`)).toContainText("claude-beta");
   await expect(page.locator(`#${optionId}`)).toHaveAttribute("aria-selected", "true");
+  await input.press("Home");
+  await expect(input).toHaveJSProperty("selectionStart", 0);
   await input.press("End");
+  await expect(input).toHaveJSProperty("selectionStart", 4);
   await input.press("Enter");
   await expect(input).toHaveValue("claude-beta");
   await expect(displayName).toHaveValue("Beta");
@@ -898,8 +902,65 @@ test("combobox popups stay isolated and touch scrolling does not select", async 
   await firstOption.dispatchEvent("pointerdown", { pointerType: "touch", clientX: box!.x + 8, clientY: box!.y + 8 });
   await firstOption.dispatchEvent("pointermove", { pointerType: "touch", clientX: box!.x + 8, clientY: box!.y - 16 });
   await firstOption.dispatchEvent("pointerup", { pointerType: "touch", clientX: box!.x + 8, clientY: box!.y - 16 });
+  await firstOption.dispatchEvent("click");
   await expect(claudeInput).toHaveValue("");
   await expect(codexInput).toHaveValue("");
+
+  await firstOption.click();
+  await expect(claudeInput).toHaveValue("gpt-alpha");
+});
+
+test("combobox closes on outside focus and row removal", async ({ page }) => {
+  await openAgents(page);
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  const first = card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+  await first.click();
+  await page.getByRole("heading", { name: "Agents", exact: true }).click();
+  await expect(card.locator(".agent-model-listbox")).toBeHidden();
+
+  await card.getByRole("button", { name: "Add model", exact: true }).click();
+  await card.getByRole("combobox", { name: "Model 2 Copilot model ID", exact: true }).click();
+  await expect(card.getByRole("listbox")).toBeVisible();
+  await card.getByRole("button", { name: "Remove model 2", exact: true }).click();
+  await expect(card.getByRole("combobox", { name: "Model 2 Copilot model ID", exact: true })).toHaveCount(0);
+  await expect(card.locator(".agent-model-listbox:not([hidden])")).toHaveCount(0);
+});
+
+test("combobox reports no usable models and excludes unusable catalog items", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  await page.route("**/admin/api/v1/agents/models", async (route) => {
+    await route.fulfill({ json: { data: {
+      accountId: fixture.state.models.accountId,
+      catalogRevision: "c".repeat(64),
+      items: fixture.state.models.items,
+      usableModelIds: [],
+    } } });
+  });
+  await page.goto("/admin/#bootstrap_token=no-usable-models");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  await card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).click();
+  await expect(card.locator(".agent-model-empty")).toHaveText("No usable models");
+  await expect(card.getByRole("option")).toHaveCount(0);
+});
+
+test("active option clears when catalog loading replaces choices", async ({ page }) => {
+  const fixture = await openAgents(page);
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  const input = card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+  await input.press("ArrowDown");
+  await expect(input).toHaveAttribute("aria-activedescendant", /option/u);
+  let release = (): void => undefined;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route("**/admin/api/v1/agents/models", async (route) => { await held; await route.fallback(); }, { times: 1 });
+  try {
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(card.locator(".agent-model-empty")).toHaveText("Loading model choices");
+    await expect(input).not.toHaveAttribute("aria-activedescendant", /.+/u);
+  } finally {
+    release();
+  }
+  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models")).length).toBeGreaterThanOrEqual(1);
 });
 
 test("combobox popup matches input width and stays inside each viewport", async ({ page }) => {
@@ -920,6 +981,44 @@ test("combobox popup matches input width and stays inside each viewport", async 
     expect(listBox!.y + listBox!.height).toBeLessThanOrEqual(501);
     await input.press("Escape");
   }
+});
+
+test("combobox opens above with bounded scrolling and follows the visual viewport", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  const base = fixture.state.models.items[0]!;
+  fixture.state.models = {
+    ...fixture.state.models,
+    items: Array.from({ length: 20 }, (_, index) => ({
+      ...base,
+      id: `model-${index.toString().padStart(2, "0")}`,
+      name: `Model ${index}`,
+    })),
+  };
+  await page.goto("/admin/#bootstrap_token=popup-above");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 400 });
+  const card = page.getByRole("region", { name: "Claude Code", exact: true });
+  const input = card.getByRole("combobox", { name: "Haiku Copilot model ID", exact: true });
+  await input.evaluate((element) => element.scrollIntoView({ block: "end" }));
+  await input.click();
+  const popup = card.getByRole("listbox").last();
+  await expect(popup.locator("[role=option]")).toHaveCount(20);
+  expect(await popup.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  const [inputBox, popupBox] = await Promise.all([input.boundingBox(), popup.boundingBox()]);
+  expect(popupBox!.y + popupBox!.height).toBeLessThanOrEqual(inputBox!.y + 1);
+
+  const visualTop = Math.max(0, inputBox!.y - 100);
+  await page.evaluate(({ top }) => {
+    const viewport = window.visualViewport;
+    if (viewport === null) return;
+    Object.defineProperty(viewport, "offsetTop", { configurable: true, value: top });
+    Object.defineProperty(viewport, "height", { configurable: true, value: 200 });
+    viewport.dispatchEvent(new Event("resize"));
+  }, { top: visualTop });
+  await expect.poll(() => popup.evaluate((element, top) => {
+    const box = element.getBoundingClientRect();
+    return box.top >= top && box.bottom <= top + 200;
+  }, visualTop)).toBe(true);
 });
 
 test("Apply failures are concise, red, preserve drafts, and clear only after success", async ({ page }) => {
@@ -946,4 +1045,16 @@ test("Apply failures are concise, red, preserve drafts, and clear only after suc
   await card.getByRole("button", { name: "Apply changes", exact: true }).click();
   await expect(alert).toHaveCount(0);
   await expect(card.locator(".badge")).toHaveText("Configuration installed");
+});
+
+test("canceling first Apply preserves the draft without reporting failure", async ({ page }) => {
+  const fixture = await openAgents(page);
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  await card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
+  await card.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Keep me");
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await card.getByRole("button", { name: "Apply changes", exact: true }).click();
+  await expect(card.getByRole("alert")).toHaveCount(0);
+  await expect(card.getByRole("textbox", { name: "Model 1 Display name", exact: true })).toHaveValue("Keep me");
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/apply"))).toBe(false);
 });
