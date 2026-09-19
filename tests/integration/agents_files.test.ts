@@ -467,6 +467,8 @@ describe("private repeatable agent configuration", () => {
       { id: `snapshot-${snapshot}-path-1`, path: path.join(normalizedHome, ".claude", "settings.json") },
       { id: `snapshot-${snapshot}-path-2`, path: path.join(normalizedHome, ".codex", "models.json") },
       { id: `snapshot-${snapshot}-path-3`, path: path.join(normalizedHome, ".codex", "config.toml") },
+      { id: `snapshot-${snapshot}-path-4`, path: path.join(normalizedHome, ".codex", "config.toml.ghcg.bak") },
+      { id: `snapshot-${snapshot}-path-5`, path: path.join(normalizedHome, ".codex", "models.json.ghcg.bak") },
     ]));
   });
 
@@ -1473,7 +1475,7 @@ describe("private repeatable agent configuration", () => {
 
     await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
       name: "AgentError",
-      code: "agent_conflict",
+      code: process.platform === "win32" ? "agent_unsafe_path" : "agent_conflict",
     });
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(external);
@@ -1522,13 +1524,13 @@ describe("private repeatable agent configuration", () => {
 
     await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
       name: "AgentError",
-      code: "agent_conflict",
+      code: process.platform === "win32" ? "agent_unsafe_path" : "agent_conflict",
     });
     expect(fs.readFileSync(backup)).toEqual(external);
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(beforeConfig);
     expect((await manager.inspect(origin)).find((item) => item.id === "codex")!.state)
-      .toBe("recovery_required");
+      .toBe(process.platform === "win32" ? "unsafe_path" : "recovery_required");
   }, 180_000);
 
   it("rejects an unchanged catalog race before publishing current config changes", async () => {
