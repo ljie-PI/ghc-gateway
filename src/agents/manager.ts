@@ -685,7 +685,7 @@ export class FileAgentsManager implements AgentsManager {
       if (expected.has(name)) {
         const snapshots = await this.windowsSecuritySnapshots(liveTarget === undefined || name !== "next"
           ? [scratch, target]
-          : [scratch, target, liveTarget]);
+          : [scratch, target, liveTarget], [scratch]);
         if (!sameSecurityPathIdentity(privateObservation, this.requireWindowsSnapshot(snapshots, scratch).observation)) {
           throw new AgentError("agent_unsafe_path");
         }
@@ -729,7 +729,8 @@ export class FileAgentsManager implements AgentsManager {
     const parent = this.existingParent(target);
     const candidates = [parent, target];
     if (link !== undefined) candidates.push(step.scratch, stage);
-    const snapshots = await this.windowsSecuritySnapshots(candidates);
+    const pathOnly = link === undefined ? [parent] : [parent, step.scratch];
+    const snapshots = await this.windowsSecuritySnapshots(candidates, pathOnly);
     return this.readWindowsTargetImage(target, parent, snapshots, link);
   }
   private async privateObservation(target: string, directory: boolean): Promise<SecurityPathObservation> {
@@ -743,7 +744,7 @@ export class FileAgentsManager implements AgentsManager {
     const privateObservation = await this.privateObservation(parent, true);
     const snapshots = await this.windowsSecuritySnapshots(allowedLink === undefined
       ? [parent, target]
-      : [parent, target, allowedLink]);
+      : [parent, target, allowedLink], [parent]);
     if (!sameSecurityPathIdentity(privateObservation, this.requireWindowsSnapshot(snapshots, parent).observation)) {
       throw new AgentError("agent_unsafe_path");
     }
