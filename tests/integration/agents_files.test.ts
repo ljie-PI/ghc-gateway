@@ -1,13 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "../../src/agents/types.js";
-import { AgentStore } from "../../src/agents/store.js";
-import { protect, readImage } from "../../src/agents/files.js";
+import { AgentStore, type AgentState } from "../../src/agents/store.js";
+import { privateDirectory, protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 import type { WindowsSecuritySnapshotFact, WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
 import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
@@ -15,6 +17,7 @@ import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
 let windowsAclWarmup: Promise<void> | undefined;
+const execFileAsync = promisify(execFile);
 const effective = <T>(value: T) => ({ value, source: "live" as const, conflict: false, liveState: "value" as const });
 const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((modelId) => ({
   modelId,
@@ -40,6 +43,25 @@ function harness(options: Omit<AgentManagerOptions, "home"> = {}) {
   const manager = new FileAgentsManager({ home, now: () => new Date("2026-01-02T03:04:05Z"), ...options });
   const status = async (agent: AgentId) => (await manager.inspect(origin)).find((item) => item.id === agent)!;
   return { home, manager, status };
+}
+function stateRoot(home: string, dataDir = path.join(home, ".ghc-gateway")): string {
+  return path.join(dataDir, "agents");
+}
+function legacyStateRoot(home: string): string {
+  return path.join(home, ".ghc-gateway-agents");
+}
+async function saveState(root: string, agent: AgentId, state: AgentState): Promise<void> {
+  await new AgentStore(root, agent).locked(async (save) => save(state));
+}
+async function writeMigrationMarker(file: string, target: string, phase: "pending" | "complete" = "pending"): Promise<void> {
+  fs.writeFileSync(file, "", { mode: 0o600 });
+  protect(file);
+  const db = new DatabaseSync(file);
+  try {
+    db.exec("CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete'))); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
+    db.prepare("INSERT INTO migration VALUES(?,?)").run(target, phase);
+    db.prepare("INSERT INTO state VALUES(1,?)").run(JSON.stringify({ migratedTo: target }));
+  } finally { db.close(); }
 }
 async function apply(
   manager: FileAgentsManager,
@@ -80,6 +102,333 @@ beforeAll(warmWindowsAgentAcl, 90_000);
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it("stores default and custom Agent state under the selected data directory", async () => {
+    const defaults = harness();
+    await apply(defaults.manager, "claude");
+    expect(fs.existsSync(path.join(stateRoot(defaults.home), "claude", "state.db"))).toBe(true);
+    await expect(new AgentStore(legacyStateRoot(defaults.home), "claude").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
+
+    const customHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-custom-")));
+    homes.push(customHome);
+    const customDataDir = path.join(customHome, "custom-data");
+    const custom = harness({ dataDir: customDataDir });
+    await apply(custom.manager, "codex");
+    expect(fs.existsSync(path.join(customDataDir, "agents", "codex", "state.db"))).toBe(true);
+    expect(fs.existsSync(path.join(custom.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
+    await expect(new AgentStore(legacyStateRoot(custom.home), "codex").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
+
+    const separatedHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-separated-")));
+    homes.push(separatedHome);
+    const codexHome = path.join(separatedHome, "separate-codex-home");
+    const separated = new FileAgentsManager({
+      home: separatedHome,
+      dataDir: path.join(separatedHome, "selected-data"),
+      env: { CODEX_HOME: codexHome },
+    });
+    const separatedStatus = (await separated.inspect(origin)).find((item) => item.id === "codex")!;
+    expect(separatedStatus.paths).toEqual([path.join(codexHome, "ghcg_models.json"), path.join(codexHome, "config.toml")]
+      .map((target) => process.platform === "win32" ? target.toLowerCase() : target));
+  }, 180_000);
+
+  it("migrates complete legacy state and retires its writable authority", async () => {
+    const h = harness();
+    const config = path.join(h.home, ".codex", "config.toml");
+    const catalog = path.join(h.home, ".codex", "ghcg_models.json");
+    const legacyCatalog = path.join(h.home, ".codex", "ghcg-models.json");
+    const original = { bytes: Buffer.from("original").toString("base64"), mode: 0o600, acl: null };
+    const expected = { bytes: Buffer.from("expected").toString("base64"), mode: 0o600, acl: null };
+    const state = {
+      version: 2 as const,
+      revision: 7,
+      mappings: [mappings[0]!],
+      lastAppliedAt: "2026-01-02T03:04:05.000Z",
+      targets: [
+        { path: `${config}.ghcg.bak`, original: null, expected: original },
+        { path: catalog, original: null, expected },
+        { path: config, original, expected },
+      ],
+      legacyCatalog: { path: legacyCatalog, original: null, expected },
+      pending: {
+        kind: "apply" as const,
+        garbage: [path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000002")],
+        steps: [{
+          target: 2,
+          before: original,
+          after: expected,
+          phase: "planned" as const,
+          scratch: path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000001"),
+        }],
+      },
+    };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+
+    await h.manager.inspect(origin);
+    expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+    expect(fs.existsSync(path.join(legacyStateRoot(h.home), "codex", "state.db.migrated"))).toBe(true);
+    const marker = new DatabaseSync(path.join(legacyStateRoot(h.home), "codex", "state.db"), { readOnly: true });
+    try {
+      expect(marker.prepare("SELECT target FROM migration").get()).toEqual({
+        target: path.join(stateRoot(h.home), "codex", "state.db"),
+      });
+      expect(() => JSON.parse((marker.prepare("SELECT document FROM state WHERE id=1").get() as { document: string }).document))
+        .not.toThrow();
+    } finally { marker.close(); }
+    await expect(new AgentStore(legacyStateRoot(h.home), "codex").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
+  }, 180_000);
+
+  it("accepts equivalent dual state and fails closed for conflicting dual state", async () => {
+    const equivalent = harness();
+    const state = { version: 2 as const, revision: 4, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(equivalent.home), "codex", state);
+    await saveState(stateRoot(equivalent.home), "codex", structuredClone(state));
+    expect((await equivalent.status("codex")).mappings).toEqual(state.mappings);
+    expect(fs.existsSync(path.join(legacyStateRoot(equivalent.home), "codex", "state.db.migrated"))).toBe(true);
+
+    const conflict = harness();
+    await saveState(legacyStateRoot(conflict.home), "codex", state);
+    await saveState(stateRoot(conflict.home), "codex", { ...state, revision: 5 });
+    expect(await conflict.status("codex")).toMatchObject({ state: "recovery_required", mappings: [] });
+    expect(fs.existsSync(path.join(legacyStateRoot(conflict.home), "codex", "state.db.migrated"))).toBe(false);
+  }, 180_000);
+
+  it("converges concurrent migration and remains restart-safe", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 9, mappings: [mappings[1]!], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    const one = new FileAgentsManager({ home: h.home });
+    const two = new FileAgentsManager({ home: h.home });
+    const results = await Promise.allSettled([one.inspect(origin), two.inspect(origin)]);
+    expect(results.some((result) => result.status === "fulfilled")).toBe(true);
+    const restarted = new FileAgentsManager({ home: h.home });
+    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")).toMatchObject({
+      state: "not_managed",
+      mappings: state.mappings,
+    });
+    expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+  }, 180_000);
+
+  it("recovers migration interruptions before marker and before new-state publication", async () => {
+    for (const phase of ["copied", "retired", "marked", "published"] as const) {
+      const h = harness();
+      const state = { version: 2 as const, revision: phase === "copied" ? 10 : phase === "retired" ? 11 : phase === "marked" ? 12 : 13, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+      const legacyDirectory = path.join(legacyStateRoot(h.home), "codex");
+      const legacyState = path.join(legacyDirectory, "state.db");
+      const retired = `${legacyState}.migrated`;
+      const current = path.join(stateRoot(h.home), "codex", "state.db");
+      await saveState(legacyStateRoot(h.home), "codex", state);
+      if (phase === "copied") {
+        fs.copyFileSync(legacyState, retired);
+        protect(retired);
+      } else fs.renameSync(legacyState, retired);
+      if (phase !== "retired") await writeMigrationMarker(legacyState, current);
+      if (phase === "published") await saveState(stateRoot(h.home), "codex", structuredClone(state));
+
+      const manager = new FileAgentsManager({ home: h.home });
+      expect((await manager.inspect(origin)).find((item) => item.id === "codex")?.mappings).toEqual(state.mappings);
+      expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+      expect(fs.existsSync(legacyState)).toBe(true);
+      expect(fs.existsSync(retired)).toBe(true);
+    }
+  }, 180_000);
+
+  it("recovers a complete fence before the first current-state save", async () => {
+    const h = harness();
+    const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const current = path.join(stateRoot(h.home), "codex", "state.db");
+    await saveState(legacyStateRoot(h.home), "codex", {
+      version: 2, revision: 0, mappings: [], targets: [], lastAppliedAt: null, pending: null,
+    });
+    fs.unlinkSync(legacyState);
+    await writeMigrationMarker(legacyState, current, "complete");
+    const manager = new FileAgentsManager({ home: h.home });
+    expect((await manager.inspect(origin)).find((item) => item.id === "codex")).toMatchObject({ state: "not_managed" });
+    await apply(manager, "codex");
+    expect(fs.existsSync(current)).toBe(true);
+    await expect(new AgentStore(legacyStateRoot(h.home), "codex").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
+  }, 180_000);
+
+  it("cleans private migration temporaries while recovering", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 14, mappings: [mappings[1]!], targets: [], lastAppliedAt: null, pending: null };
+    const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const retired = `${legacyState}.migrated`;
+    const current = path.join(stateRoot(h.home), "codex", "state.db");
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    fs.renameSync(legacyState, retired);
+    fs.writeFileSync(`${legacyState}.marker`, "stale", { mode: 0o600 });
+    await privateDirectory(path.dirname(stateRoot(h.home)));
+    await privateDirectory(stateRoot(h.home));
+    await privateDirectory(path.dirname(current));
+    fs.writeFileSync(`${current}.migrating`, "stale", { mode: 0o600 });
+    protect(`${legacyState}.marker`);
+    protect(`${current}.migrating`);
+
+    expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex")?.mappings)
+      .toEqual(state.mappings);
+    expect(fs.existsSync(`${legacyState}.marker`)).toBe(false);
+    expect(fs.existsSync(`${current}.migrating`)).toBe(false);
+  }, 180_000);
+
+  it("serializes legacy migration across separate processes", async () => {
+    const h = harness();
+    const dataDir = path.join(h.home, ".ghc-gateway");
+    const state = { version: 2 as const, revision: 13, mappings: [mappings[2]!], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    const run = () => execFileAsync(process.execPath, [
+      "scripts/tooling/bootstrap.mjs",
+      "tests/fixtures/agent_state_migration_contender.ts",
+      h.home,
+      dataDir,
+    ], { cwd: path.resolve(import.meta.dirname, "../.."), windowsHide: true, timeout: 60_000 });
+    const [one, two] = await Promise.all([run(), run()]);
+    expect([one.stdout.trim(), two.stdout.trim()]).toEqual(["13", "13"]);
+    expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+  }, 180_000);
+
+  it.skipIf(process.platform === "win32")("rejects an unsafe legacy state root", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    fs.chmodSync(legacyStateRoot(h.home), 0o755);
+    expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a linked legacy state root", async () => {
+    const h = harness();
+    const real = path.join(h.home, "real-legacy");
+    await saveState(real, "codex", { version: 2, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null });
+    fs.symlinkSync(real, legacyStateRoot(h.home), "dir");
+    expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
+  });
+
+  it("rejects a hard-linked legacy state database", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const alias = path.join(h.home, "state-alias.db");
+    fs.linkSync(legacyState, alias);
+    expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
+    expect(fs.lstatSync(alias).nlink).toBe(2);
+  });
+
+  it("rejects hard-linked current state and migration marker databases", async () => {
+    for (const target of ["current", "marker"] as const) {
+      const h = harness();
+      await apply(h.manager, "codex");
+      const file = target === "current"
+        ? path.join(stateRoot(h.home), "codex", "state.db")
+        : path.join(legacyStateRoot(h.home), "codex", "state.db");
+      fs.linkSync(file, path.join(h.home, `${target}-alias.db`));
+      expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"), target)
+        .toMatchObject({ state: "unsafe_path", mappings: [] });
+    }
+  }, 180_000);
+
+  it("rejects hard-linked lock, retired, temporary, and sidecar databases", async () => {
+    for (const scenario of ["lock", "retired", "marker-temp", "state-temp", "sidecar"] as const) {
+      const h = harness();
+      const state = { version: 2 as const, revision: 3, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+      const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+      const currentDirectory = path.join(stateRoot(h.home), "codex");
+      const currentState = path.join(currentDirectory, "state.db");
+      if (scenario === "lock") {
+        await saveState(stateRoot(h.home), "codex", state);
+        const lock = path.join(currentDirectory, "lock.db");
+        fs.linkSync(lock, path.join(h.home, "lock-alias"));
+        await expect(new AgentStore(stateRoot(h.home), "codex").locked(async () => undefined))
+          .rejects.toMatchObject({ code: "agent_unsafe_path" });
+        continue;
+      }
+
+      await saveState(legacyStateRoot(h.home), "codex", state);
+      if (scenario === "retired") {
+        const retired = `${legacyState}.migrated`;
+        fs.copyFileSync(legacyState, retired);
+        protect(retired);
+        fs.linkSync(retired, path.join(h.home, "retired-alias"));
+      } else if (scenario === "marker-temp") {
+        fs.renameSync(legacyState, `${legacyState}.migrated`);
+        const temporary = `${legacyState}.marker`;
+        fs.writeFileSync(temporary, "unsafe", { mode: 0o600 });
+        protect(temporary);
+        fs.linkSync(temporary, path.join(h.home, "marker-temp-alias"));
+      } else if (scenario === "state-temp") {
+        fs.renameSync(legacyState, `${legacyState}.migrated`);
+        await writeMigrationMarker(legacyState, currentState);
+        await privateDirectory(path.dirname(stateRoot(h.home)));
+        await privateDirectory(stateRoot(h.home));
+        await privateDirectory(currentDirectory);
+        const temporary = `${currentState}.migrating`;
+        fs.writeFileSync(temporary, "unsafe", { mode: 0o600 });
+        protect(temporary);
+        fs.linkSync(temporary, path.join(h.home, "state-temp-alias"));
+      } else {
+        await saveState(stateRoot(h.home), "codex", state);
+        const sidecar = `${currentState}-journal`;
+        fs.writeFileSync(sidecar, "unsafe", { mode: 0o600 });
+        protect(sidecar);
+        fs.linkSync(sidecar, path.join(h.home, "sidecar-alias"));
+        await expect(new AgentStore(stateRoot(h.home), "codex").read())
+          .rejects.toMatchObject({ code: "agent_unsafe_path" });
+        continue;
+      }
+      expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"), scenario)
+        .toMatchObject({ state: "unsafe_path", mappings: [] });
+    }
+  }, 180_000);
+
+  it("rejects a migration marker with a valid old state sentinel", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const markerPath = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const marker = new DatabaseSync(markerPath);
+    try {
+      marker.prepare("UPDATE state SET document=? WHERE id=1").run(JSON.stringify({
+        version: 2, revision: 0, mappings: [], targets: [], lastAppliedAt: null, pending: null,
+      }));
+    } finally { marker.close(); }
+    expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"))
+      .toMatchObject({ state: "recovery_required", mappings: [] });
+  }, 180_000);
+
+  it("reports a busy migration marker read as retryable", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const markerPath = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const marker = new DatabaseSync(markerPath, { timeout: 0 });
+    marker.exec("BEGIN EXCLUSIVE");
+    try {
+      const started = performance.now();
+      await expect(new AgentStore(stateRoot(h.home), "codex", legacyStateRoot(h.home)).read())
+        .rejects.toMatchObject({ code: "agent_busy" });
+      expect(performance.now() - started).toBeLessThan(1_000);
+    } finally {
+      marker.exec("ROLLBACK");
+      marker.close();
+    }
+  }, 180_000);
+
+  it.runIf(process.platform === "win32")("accepts case-insensitive Windows marker targets", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const markerPath = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const marker = new DatabaseSync(markerPath);
+    try {
+      const target = (marker.prepare("SELECT target FROM migration").get() as { target: string }).target;
+      const upper = target.toUpperCase();
+      marker.exec("BEGIN IMMEDIATE");
+      marker.prepare("UPDATE migration SET target=?").run(upper);
+      marker.prepare("UPDATE state SET document=? WHERE id=1").run(JSON.stringify({ migratedTo: upper }));
+      marker.exec("COMMIT");
+    } finally { marker.close(); }
+    expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex")?.state)
+      .toBe("installed");
+  }, 180_000);
   it.runIf(process.platform === "win32")("uses one ordered security batch per Inspect without cross-call reuse", async () => {
     const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
     const h = harness({
@@ -469,7 +818,7 @@ describe("private repeatable agent configuration", () => {
     const h = harness({
       checkpoint: (point) => {
         if (point !== "before_intent") return;
-        stateDatabaseExistedAtBoundary = fs.existsSync(path.join(h.home, ".ghc-gateway-agents", "codex", "state.db"));
+        stateDatabaseExistedAtBoundary = fs.existsSync(path.join(h.home, ".ghc-gateway", "agents", "codex", "state.db"));
         controller.abort();
       },
     });
@@ -478,7 +827,7 @@ describe("private repeatable agent configuration", () => {
       agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings,
     }, origin, models, () => undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(stateDatabaseExistedAtBoundary).toBe(false);
-    expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents", "codex", "state.db"))).toBe(false);
+    expect(fs.existsSync(path.join(h.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
     expect(fs.existsSync(path.join(h.home, ".codex"))).toBe(false);
   }, 180_000);
 
@@ -486,7 +835,7 @@ describe("private repeatable agent configuration", () => {
     const h = harness();
     await apply(h.manager, "codex");
     const status = await h.status("codex");
-    const statePath = path.join(h.home, ".ghc-gateway-agents", "codex", "state.db");
+    const statePath = path.join(h.home, ".ghc-gateway", "agents", "codex", "state.db");
     const catalogPath = path.join(h.home, ".codex", "ghcg_models.json");
     const configPath = path.join(h.home, ".codex", "config.toml");
     const before = [statePath, catalogPath, configPath].map((file) => fs.readFileSync(file));
@@ -584,7 +933,7 @@ describe("private repeatable agent configuration", () => {
     expect(fs.readFileSync(catalog, "utf8")).toBe("external catalog\n");
     expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
     expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
-    expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents"))).toBe(false);
+    expect(fs.existsSync(path.join(h.home, ".ghc-gateway", "agents"))).toBe(false);
   }, 180_000);
 
   it("does not treat stale durable Codex state as provider ownership", async () => {
@@ -899,7 +1248,7 @@ describe("private repeatable agent configuration", () => {
   it.skipIf(process.platform === "win32")("rejects world-readable recovery state", async () => {
     const h = harness();
     await apply(h.manager, "claude");
-    fs.chmodSync(path.join(h.home, ".ghc-gateway-agents/claude/state.db"), 0o644);
+    fs.chmodSync(path.join(h.home, ".ghc-gateway/agents/claude/state.db"), 0o644);
     expect((await h.status("claude")).state).toBe("unsafe_path");
   }, 180_000);
 });
