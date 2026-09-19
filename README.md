@@ -149,7 +149,8 @@ captured native or converted route without exposing credentials or request/respo
 
 Routing uses the bound account's immutable model-capability snapshot. A matching native HTTP
 protocol is selected first and preserves protocol extensions. Otherwise the gateway evaluates
-conversion compatibility without making an inference call, then uses these fixed priorities:
+conversion compatibility without making an inference call. For requests with reasoning, a target
+that declares the requested level is preferred; remaining compatible targets use these priorities:
 
 - Chat: Responses, then Messages
 - Messages: Chat, then Responses
