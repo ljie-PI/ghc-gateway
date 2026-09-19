@@ -448,14 +448,37 @@ tr.current-row > td:last-child, .account-table tr > td:last-child { padding-righ
 }
 
 .agent-cards { display: grid; gap: 24px; margin-top: 24px; }
-.agent-card { min-width: 0; border: 1px solid var(--border); padding: 24px; border-radius: 8px; }
+.agent-card { min-width: 0; padding: 24px; border: 1px solid var(--line); border-radius: 8px; }
 .agent-card-head, .agent-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .agent-card-head { justify-content: space-between; }
 .agent-card fieldset { min-width: 0; margin: 20px 0; }
 .agent-mapping-row { display: flex; gap: 12px; align-items: end; margin: 16px 0; flex-wrap: wrap; }
 .agent-mapping-row label { display: grid; gap: 6px; flex: 1 1 200px; min-width: 0; }
 .agent-mapping-row input { width: 100%; }
-.agent-actions p { flex: 1 1 180px; }
+.agent-model-combobox { position: relative; width: 100%; min-width: 0; }
+.agent-model-listbox {
+  position: absolute;
+  z-index: 25;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 100%;
+  max-height: min(240px, calc(100dvh - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid #8d8585;
+  border-radius: 4px;
+  background: var(--canvas);
+  box-shadow: 0 8px 24px rgb(32 29 29 / 14%);
+}
+.agent-model-combobox.opens-above .agent-model-listbox { top: auto; bottom: calc(100% + 4px); }
+.agent-model-listbox [role="option"] { display: grid; gap: 1px; padding: 8px 11px; cursor: pointer; overflow-wrap: anywhere; }
+.agent-model-listbox [role="option"] + [role="option"] { border-top: 1px solid var(--line); }
+.agent-model-listbox [role="option"].active { background: var(--panel); }
+.agent-model-listbox [role="option"] span { color: var(--muted); font-size: 13px; }
+.agent-model-empty { margin: 0; padding: 10px 11px; color: var(--muted); font-size: 14px; }
+.agent-actions { justify-content: space-between; }
+.agent-actions > :first-child { flex: 1 1 180px; }
+.agent-apply-failure { margin: 0; color: var(--red); font-size: 14px; }
 .agent-details { margin-top: 20px; }
 .agent-card summary { padding: 8px 0; }
 .agent-details dd { margin: 6px 0 16px; }

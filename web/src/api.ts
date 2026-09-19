@@ -165,3 +165,21 @@ export function errorMessage(error: unknown): string {
   }
   return "The operation could not be completed.";
 }
+
+export function agentApplyErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return "Apply failed: request failed.";
+  const messages: Readonly<Record<string, string>> = {
+    agent_invalid_config: "Apply failed: unsupported client configuration.",
+    agent_models_unavailable: "Apply failed: model catalog unavailable.",
+    agent_unsafe_path: "Apply failed: unsafe configuration path.",
+    agent_recovery_required: "Apply failed: recovery required.",
+    agent_conflict: "Apply failed: external changes detected.",
+    agent_busy: "Apply failed: another operation is running.",
+  };
+  const message = messages[error.code];
+  if (message !== undefined) return message;
+  if (error.status === 409) return "Apply failed: stale configuration revision.";
+  if (error.status === 403) return "Apply failed: security check rejected configuration.";
+  if (error.status === 0) return "Apply failed: Gateway is unreachable.";
+  return "Apply failed: request failed.";
+}
