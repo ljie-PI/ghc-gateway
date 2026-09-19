@@ -1,7 +1,9 @@
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import {
   queryWindowsSecuritySnapshot,
+  runWindowsSecuritySnapshotCommand,
   WindowsSecuritySnapshotError,
   type WindowsSecuritySnapshotDependencies,
   type WindowsSecuritySnapshotRequest,
@@ -16,8 +18,7 @@ const invalidRequests: readonly (readonly WindowsSecuritySnapshotRequest[])[] = 
   [{ id: "bad id", path: "C:\\one" }],
   [{ id: "control", path: "C:\\one\nfile" }],
   [{ id: "long", path: `C:\\${"x".repeat(4095)}` }],
-  Array.from({ length: 17 }, (_, index) => ({ id: `path-${index}`, path: `C:\\path-${index}` })),
-  Array.from({ length: 4 }, (_, index) => ({ id: `path-${index}`, path: `C:\\${String(index).repeat(4000)}` })),
+  Array.from({ length: 33 }, (_, index) => ({ id: `path-${index}`, path: `C:\\path-${index}` })),
 ];
 
 describe("Windows security snapshot query", () => {
@@ -47,7 +48,7 @@ describe("Windows security snapshot query", () => {
     ]);
 
     expect(calls).toHaveLength(1);
-    const [file, args, options] = calls[0]!;
+    const [file, args, options, input] = calls[0]!;
     expect(file).toBe(path.win32.join("D:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
     expect(args.slice(0, 4)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]);
     expect(args[4]).not.toContain("settings [1].json");
@@ -57,10 +58,40 @@ describe("Windows security snapshot query", () => {
     expect(options).toMatchObject({ encoding: "utf8", windowsHide: true, shell: false, timeout: 10_000 });
     expect(options.maxBuffer).toBeGreaterThan(0);
     expect(options.env.SAFE_PARENT_VALUE).toBe("retained");
-    expect(JSON.parse(Buffer.from(options.env.GHCG_WINDOWS_SECURITY_REQUEST!, "base64").toString("utf8"))).toEqual([
+    expect(options.env.GHCG_WINDOWS_SECURITY_REQUEST).toBeUndefined();
+    expect(JSON.parse(input.toString("utf8"))).toEqual([
       { id: "parent", path: "C:\\Users\\Example" },
       { id: "target", path: "C:\\Users\\Example\\settings [1].json" },
     ]);
+  });
+
+  it("keeps special and Unicode paths as stdin data and accepts the full bounded aggregate", async () => {
+    const requests = Array.from({ length: 32 }, (_, index) => ({
+      id: `path-${index}`,
+      path: index === 0
+        ? "C:\\Users\\例 [x] '$&;()\\settings.json"
+        : `C:\\${String.fromCharCode(0x4e00 + index).repeat(4093)}`,
+    }));
+    let command: Parameters<WindowsSecuritySnapshotDependencies["runCommand"]> | undefined;
+    const dependencies: WindowsSecuritySnapshotDependencies = {
+      platform: "win32",
+      environment: { SystemRoot: "C:\\Windows", RETAINED: "yes" },
+      runCommand: async (...args) => {
+        command = args;
+        return {
+          stdout: JSON.stringify(requests.map((request) => ({ id: request.id, status: "missing" }))),
+          stderr: "",
+        };
+      },
+    };
+
+    await expect(queryWindowsSecuritySnapshot(requests, dependencies)).resolves.toHaveLength(32);
+
+    const [file, args, options, input] = command!;
+    expect([file, ...args]).not.toContain(expect.stringContaining("settings.json"));
+    expect(Object.values(options.env)).not.toContain(expect.stringContaining("settings.json"));
+    expect(options.env.RETAINED).toBe("yes");
+    expect(JSON.parse(input.toString("utf8"))).toEqual(requests);
   });
 
   it("preserves valid missing and per-item error facts", async () => {
@@ -75,6 +106,52 @@ describe("Windows security snapshot query", () => {
       { id: "missing", status: "missing" },
       { id: "denied", status: "error" },
     ]);
+  });
+
+  it("accepts path-only reparse facts without an unused descriptor", async () => {
+    const dependencies = fakeDependencies(JSON.stringify([
+      { id: "parent", status: "present", reparse: false },
+      { id: "target", status: "present", reparse: false, owner: "owner", sddl: "sddl" },
+    ]));
+    await expect(queryWindowsSecuritySnapshot([
+      { id: "parent", path: "C:\\parent", security: false },
+      { id: "target", path: "C:\\parent\\target" },
+    ], dependencies)).resolves.toEqual([
+      { id: "parent", status: "present", reparse: false },
+      { id: "target", status: "present", reparse: false, owner: "owner", sddl: "sddl" },
+    ]);
+    await expect(queryWindowsSecuritySnapshot(
+      [{ id: "parent", path: "C:\\parent", security: false }],
+      fakeDependencies(JSON.stringify([{ id: "parent", status: "present", reparse: false, owner: "owner", sddl: "sddl" }])),
+    )).rejects.toEqual(new WindowsSecuritySnapshotError());
+  });
+
+  it("accepts the maximum bounded aggregate facts", async () => {
+    const requests = Array.from({ length: 32 }, (_, index) => ({ id: `path-${index}`, path: `C:\\path-${index}` }));
+    const owner = "O".repeat(16 * 1024);
+    const sddl = "S".repeat(16 * 1024);
+    const output = JSON.stringify(requests.map((request) => ({
+      id: request.id, status: "present", reparse: false, owner, sddl,
+    })));
+
+    await expect(queryWindowsSecuritySnapshot(requests, fakeDependencies(output))).resolves.toHaveLength(32);
+  });
+
+  it("rejects a default-runner stdin EPIPE without waiting for command completion", async () => {
+    const input = new EventEmitter() as EventEmitter & { end(data: Buffer): void };
+    const failure = Object.assign(new Error("closed stdin"), { code: "EPIPE" });
+    input.end = () => { input.emit("error", failure); };
+
+    await expect(runWindowsSecuritySnapshotCommand(
+      "powershell.exe",
+      [],
+      {
+        encoding: "utf8", windowsHide: true, shell: false, timeout: 10_000,
+        maxBuffer: 1024, env: {},
+      },
+      Buffer.from("[]"),
+      () => ({ stdin: input }),
+    )).rejects.toBe(failure);
   });
 
   it("preserves a one-item response array", async () => {

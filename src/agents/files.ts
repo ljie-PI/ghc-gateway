@@ -20,10 +20,15 @@ export interface SecurityPathObservation {
   readonly ctimeMs?: number;
   readonly mtimeMs?: number;
   readonly size?: number;
+  readonly nlink?: number;
 }
 export interface SecurityPathSnapshot {
   readonly observation: SecurityPathObservation;
   readonly fact: WindowsSecuritySnapshotFact;
+}
+export interface SecurityPathAllowedLink {
+  readonly target: string;
+  readonly snapshot: SecurityPathSnapshot;
 }
 export function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -68,9 +73,10 @@ export function observeSecurityPath(target: string): SecurityPathObservation {
     ctimeMs: stat.ctimeMs,
     mtimeMs: stat.mtimeMs,
     size: stat.size,
+    nlink: stat.nlink,
   };
 }
-function assertSecurityPathUnchanged(
+export function assertSecurityPathUnchanged(
   target: string,
   observation: SecurityPathObservation,
   directory: boolean,
@@ -87,20 +93,41 @@ function assertSecurityPathUnchanged(
     return;
   }
   if (!observation.present || stat.dev !== observation.dev || stat.ino !== observation.ino || (!directory
-    && (stat.ctimeMs !== observation.ctimeMs || stat.mtimeMs !== observation.mtimeMs || stat.size !== observation.size))) {
+    && (stat.ctimeMs !== observation.ctimeMs || stat.mtimeMs !== observation.mtimeMs
+      || stat.size !== observation.size || stat.nlink !== observation.nlink))) {
     throw new AgentError("agent_unsafe_path");
   }
+}
+export function sameSecurityPathObservation(
+  left: SecurityPathObservation,
+  right: SecurityPathObservation,
+): boolean {
+  return left.present === right.present && (!left.present || left.dev === right.dev && left.ino === right.ino
+    && left.ctimeMs === right.ctimeMs && left.mtimeMs === right.mtimeMs && left.size === right.size
+    && left.nlink === right.nlink);
+}
+export function sameSecurityPathIdentity(
+  left: SecurityPathObservation,
+  right: SecurityPathObservation,
+): boolean {
+  return left.present === right.present && (!left.present || left.dev === right.dev && left.ino === right.ino);
 }
 export function assertOwnedFromSecuritySnapshot(
   target: string,
   directory: boolean,
   snapshot: SecurityPathSnapshot,
-  allowedLink?: string,
-): string {
+  allowedLink?: SecurityPathAllowedLink,
+): string | null {
   assertSecurityPathUnchanged(target, snapshot.observation, directory);
   if (snapshot.fact.status !== "present" || snapshot.fact.reparse) throw new AgentError("agent_unsafe_path");
-  assertOwnedStat(target, directory, allowedLink);
-  return snapshot.fact.sddl;
+  if (allowedLink !== undefined) {
+    assertSecurityPathUnchanged(allowedLink.target, allowedLink.snapshot.observation, false);
+    if (allowedLink.snapshot.fact.status !== "present" || allowedLink.snapshot.fact.reparse) {
+      throw new AgentError("agent_unsafe_path");
+    }
+  }
+  assertOwnedStat(target, directory, allowedLink?.snapshot.observation);
+  return snapshot.fact.sddl ?? null;
 }
 export async function assertOwned(
   target: string,
@@ -127,7 +154,7 @@ export async function readImage(
 export function readImageFromSecuritySnapshot(
   target: string,
   snapshot: SecurityPathSnapshot,
-  allowedLink?: string,
+  allowedLink?: SecurityPathAllowedLink,
 ): FileImage | null {
   assertSecurityPathUnchanged(target, snapshot.observation, false);
   const present = exists(target);
@@ -137,11 +164,14 @@ export function readImageFromSecuritySnapshot(
   const recordedAcl = assertOwnedFromSecuritySnapshot(target, false, snapshot, allowedLink);
   return readVerifiedImage(target, recordedAcl);
 }
-function assertOwnedStat(target: string, directory: boolean, allowedLink?: string): fs.Stats {
+function assertOwnedStat(target: string, directory: boolean, allowedLink?: string | SecurityPathObservation): fs.Stats {
   const stat = fs.lstatSync(target);
-  const linked = allowedLink !== undefined && exists(allowedLink) ? fs.lstatSync(allowedLink) : null;
+  const linked = typeof allowedLink === "string"
+    ? exists(allowedLink) ? observeSecurityPath(allowedLink) : undefined
+    : allowedLink;
   if ((directory ? !stat.isDirectory() : !stat.isFile()) || (!directory && stat.nlink !== 1
-    && !(stat.nlink === 2 && linked?.ino === stat.ino && linked.dev === stat.dev))) {
+    && !(stat.nlink === 2 && linked?.present === true
+      && linked.ino === stat.ino && linked.dev === stat.dev))) {
     throw new AgentError("agent_unsafe_path");
   }
   return stat;
