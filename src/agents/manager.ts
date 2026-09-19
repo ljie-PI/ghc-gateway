@@ -386,7 +386,10 @@ export class FileAgentsManager implements AgentsManager {
       parents.push(parent);
     }
     const pendingLinks = await this.pendingLinkObservations(state?.pending?.steps ?? []);
-    for (const { step } of pendingLinks.values()) candidates.push(step.scratch, path.join(step.scratch, "next"));
+    for (const { step } of pendingLinks.values()) {
+      candidates.push(step.scratch, path.join(step.scratch, "next"));
+      parents.push(step.scratch);
+    }
     const snapshots = await this.windowsSecuritySnapshots(candidates, parents);
     if (privateObservation !== undefined && !sameSecurityPathObservation(privateObservation,
       this.requireWindowsSnapshot(snapshots, paths[0]!).observation)) throw new AgentError("agent_unsafe_path");
@@ -576,7 +579,10 @@ export class FileAgentsManager implements AgentsManager {
           const entries = fs.readdirSync(step.scratch);
           const expectedEntries = step.after === null ? [] : ["next"];
           const parent = this.existingParent(target);
-          const snapshots = await this.windowsSecuritySnapshots([step.scratch, stage, parent, displaced, target], [parent]);
+          const snapshots = await this.windowsSecuritySnapshots(
+            [step.scratch, stage, parent, displaced, target],
+            [step.scratch, parent],
+          );
           const afterEntries = fs.readdirSync(step.scratch);
           if (!sameSecurityPathIdentity(privateObservation, this.requireWindowsSnapshot(snapshots, step.scratch).observation)
             || this.requireWindowsSnapshot(snapshots, displaced).fact.status !== "missing"
