@@ -11,7 +11,7 @@ import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "..
 import { AgentStore, type AgentState } from "../../src/agents/store.js";
 import { privateDirectory, protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
-import type { WindowsSecuritySnapshotFact, WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
+import { queryWindowsSecuritySnapshot, type WindowsSecuritySnapshotFact, type WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
 import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
 
 const homes: string[] = [];
@@ -447,11 +447,11 @@ describe("private repeatable agent configuration", () => {
     await h.manager.inspect(origin);
 
     const normalizedHome = h.home.toLowerCase();
-    expect(batches).toEqual([0, 1].map(() => [
-      { id: "path-0", path: normalizedHome },
-      { id: "path-1", path: path.join(normalizedHome, ".claude", "settings.json") },
-      { id: "path-2", path: path.join(normalizedHome, ".codex", "ghcg_models.json") },
-      { id: "path-3", path: path.join(normalizedHome, ".codex", "config.toml") },
+    expect(batches).toEqual([1, 2].map((snapshot) => [
+      { id: `snapshot-${snapshot}-path-0`, path: normalizedHome },
+      { id: `snapshot-${snapshot}-path-1`, path: path.join(normalizedHome, ".claude", "settings.json") },
+      { id: `snapshot-${snapshot}-path-2`, path: path.join(normalizedHome, ".codex", "ghcg_models.json") },
+      { id: `snapshot-${snapshot}-path-3`, path: path.join(normalizedHome, ".codex", "config.toml") },
     ]));
   });
 
@@ -576,25 +576,231 @@ describe("private repeatable agent configuration", () => {
     expect(await h.status("claude")).toMatchObject({ state: "unsafe_path", backupAvailable: false });
   });
 
-  it.runIf(process.platform === "win32")("keeps Apply on the existing per-path security path", async () => {
-    let batches = 0;
+  it.runIf(process.platform === "win32")("does not authorize a linked live target from a replaced staged pathname", async () => {
+    const original = seed(homeWithCrash(), ".claude/settings.json", "{}\n");
+    const crashed = new FileAgentsManager({
+      home: homes.at(-1)!,
+      checkpoint: (point, agent, index) => {
+        if (point === "linked" && agent === "claude" && index === 1) throw new Error("simulated crash");
+      },
+    });
+    await expect(apply(crashed, "claude")).rejects.toThrow();
+    const store = new AgentStore(path.join(homes.at(-1)!, ".ghc-gateway-agents"), "claude");
+    const state = await store.read();
+    const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
+    const stage = path.join(step.scratch, "next");
+    let raced = false;
+    const manager = new FileAgentsManager({
+      home: homes.at(-1)!,
+      queryWindowsSecuritySnapshot: async (requests) => {
+        const facts = await queryWindowsSecuritySnapshot(requests);
+        if (!raced && requests.some((request) => request.path === stage.toLowerCase())
+          && requests.some((request) => request.path === original.toLowerCase())) {
+          raced = true;
+          fs.unlinkSync(stage);
+          fs.writeFileSync(stage, "unrelated stage", { mode: 0o600 });
+        }
+        return facts;
+      },
+    });
+
+    expect((await manager.inspect(origin)).find((item) => item.id === "claude")).toMatchObject({
+      state: "unsafe_path",
+      backupAvailable: true,
+    });
+    expect(raced).toBe(true);
+  }, 180_000);
+
+  it.runIf(process.platform === "win32")("uses distinct deduplicated security snapshots throughout Apply", async () => {
+    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
     const h = harness({
       queryWindowsSecuritySnapshot: async (requests) => {
-        batches += 1;
+        batches.push(requests);
         return requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
           ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
           : { id: request.id, status: "missing" });
       },
     });
     const current = await h.status("claude");
-    batches = 0;
+    batches.length = 0;
 
     await h.manager.apply({
       agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
     }, origin, models, () => undefined, new AbortController().signal);
 
-    expect(batches).toBe(0);
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.every((batch) => new Set(batch.map((request) => request.path.toLowerCase())).size === batch.length)).toBe(true);
+    const prefixes = batches.map((batch) => {
+      const match = /^snapshot-(\d+)-path-0$/u.exec(batch[0]!.id);
+      expect(match).not.toBeNull();
+      expect(batch.map((request) => request.id)).toEqual(batch.map((_, index) => `snapshot-${match![1]}-path-${index}`));
+      return match![1];
+    });
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+    expect(batches.some((batch) => batch.some((request) => request.path.endsWith("\\.claude\\settings.json")))).toBe(true);
   }, 180_000);
+
+  it.runIf(process.platform === "win32")("separates real Apply security boundaries and batches full target sets", async () => {
+    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const checkpoints = new Map<string, number>();
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        batches.push(requests);
+        return await queryWindowsSecuritySnapshot(requests);
+      },
+      checkpoint: (point, _agent, index) => { checkpoints.set(`${point}/${index}`, batches.length); },
+    });
+    seed(h.home, ".claude/settings.json", "{}\n");
+    const current = await h.status("claude");
+    batches.length = 0;
+
+    await h.manager.apply({
+      agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+
+    const config = path.join(h.home, ".claude", "settings.json").toLowerCase();
+    const backup = `${config}.ghcg.bak`;
+    const prefixes = batches.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""));
+    expect(new Set(prefixes).size).toBe(prefixes.length);
+    expect(batches.every((batch) => new Set(batch.map((request) => request.path)).size === batch.length)).toBe(true);
+    expect(batches[0]!.map((request) => request.path)).toContain(config);
+    expect(batches[1]!.map((request) => request.path)).toContain(config);
+    expect(prefixes[0]).not.toBe(prefixes[1]);
+
+    const staged = checkpoints.get("staged/1")!;
+    const displaced = checkpoints.get("displaced/1")!;
+    const linked = checkpoints.get("linked/1")!;
+    const complete = checkpoints.get("complete/-1")!;
+    expect(batches.slice(staged).some((batch) => {
+      const paths = batch.map((request) => request.path);
+      return paths.includes(backup) && paths.includes(config);
+    })).toBe(true);
+    expect(batches.slice(staged, displaced).some((batch) => batch.length === 5
+      && batch.some((request) => request.path === config)
+      && batch.some((request) => request.path.endsWith("\\next"))
+      && batch.some((request) => request.path.endsWith("\\previous")))).toBe(true);
+    expect(batches.slice(displaced, linked).some((batch) => batch.length === 3
+      && batch.some((request) => request.path.endsWith("\\next")))).toBe(true);
+    expect(batches.slice(linked, complete).some((batch) => batch.some((request) => request.path.endsWith("\\previous")))).toBe(true);
+    expect(batches.slice(complete).some((batch) => {
+      const paths = batch.map((request) => request.path);
+      return paths.includes(backup) && paths.includes(config);
+    })).toBe(true);
+  }, 180_000);
+
+  it.runIf(process.platform === "win32")("keeps no-op Apply to pre-lock, post-lock, and final-status snapshots", async () => {
+    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        batches.push(requests);
+        return await queryWindowsSecuritySnapshot(requests);
+      },
+    });
+    seed(h.home, ".claude/settings.json", "{}\n");
+    await apply(h.manager, "claude");
+    const current = await h.status("claude");
+    batches.length = 0;
+
+    await h.manager.apply({
+      agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+
+    expect(batches).toHaveLength(3);
+    expect(batches.map((batch) => batch[0]!.id.match(/^snapshot-(\d+)-/u)?.[1])).toHaveLength(3);
+    expect(new Set(batches.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""))).size).toBe(3);
+  }, 180_000);
+
+  it.runIf(process.platform === "win32")("keeps exact Codex first, no-op, and reordered snapshot contracts", async () => {
+    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        batches.push(requests);
+        return await queryWindowsSecuritySnapshot(requests);
+      },
+    });
+    seed(h.home, ".codex/config.toml", "model = \"old\"\n");
+    const current = await h.status("codex");
+    batches.length = 0;
+    await h.manager.apply({
+      agent: "codex", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+    const root = ["$HOME\\.codex"];
+    const targets = [...root, "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"];
+    const stage = (index: number, target: string) => [
+      `$HOME\\.codex\\$SCRATCH${index}`,
+      `$HOME\\.codex\\$SCRATCH${index}\\next`,
+      target,
+    ];
+    expectSnapshotContract(batches, h.home, [
+      [...root, "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+      [...root, "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+      targets,
+      [...root, "$HOME\\.codex\\config.toml.ghcg.bak"],
+      root,
+      stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
+      stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
+      [...root, "$HOME\\.codex\\ghcg_models.json"],
+      root,
+      stage(1, "$HOME\\.codex\\ghcg_models.json"),
+      stage(1, "$HOME\\.codex\\ghcg_models.json"),
+      [...root, "$HOME\\.codex\\config.toml"],
+      root,
+      stage(2, "$HOME\\.codex\\config.toml"),
+      stage(2, "$HOME\\.codex\\config.toml"),
+      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
+        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next",
+        "$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next"],
+      stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
+      stage(1, "$HOME\\.codex\\ghcg_models.json"),
+      ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next", ...root,
+        "$HOME\\.codex\\$SCRATCH2\\previous", "$HOME\\.codex\\config.toml"],
+      ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\previous"],
+      stage(2, "$HOME\\.codex\\config.toml"),
+      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
+        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next",
+        "$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next"],
+      ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\previous"],
+      targets,
+    ]);
+    const installed = await h.status("codex");
+    batches.length = 0;
+    await h.manager.apply({
+      agent: "codex", expectedRevision: installed.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+    expectSnapshotContract(batches, h.home, [targets, targets, targets]);
+    const repeated = await h.status("codex");
+    batches.length = 0;
+    await h.manager.apply({
+      agent: "codex", expectedRevision: repeated.revision, catalogRevision: "a".repeat(64), mappings: [...mappings].reverse(),
+    }, origin, models, () => undefined, new AbortController().signal);
+    expectSnapshotContract(batches, h.home, [
+      targets,
+      targets,
+      [...root, "$HOME\\.codex\\ghcg_models.json"],
+      root,
+      stage(0, "$HOME\\.codex\\ghcg_models.json"),
+      stage(0, "$HOME\\.codex\\ghcg_models.json"),
+      [...root, "$HOME\\.codex\\config.toml"],
+      root,
+      stage(1, "$HOME\\.codex\\config.toml"),
+      stage(1, "$HOME\\.codex\\config.toml"),
+      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
+        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
+      ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", ...root,
+        "$HOME\\.codex\\$SCRATCH0\\previous", "$HOME\\.codex\\ghcg_models.json"],
+      ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\previous"],
+      stage(0, "$HOME\\.codex\\ghcg_models.json"),
+      ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", ...root,
+        "$HOME\\.codex\\$SCRATCH1\\previous", "$HOME\\.codex\\config.toml"],
+      ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\previous"],
+      stage(1, "$HOME\\.codex\\config.toml"),
+      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
+        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
+      ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\previous"],
+      ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\previous"],
+      targets,
+    ]);
+  }, 300_000);
 
   it.each(["claude", "codex"] as const)("publishes exact %s first and repeat Apply fixture bytes", async (agent) => {
     const h = harness();
@@ -1023,6 +1229,56 @@ describe("private repeatable agent configuration", () => {
     expect(fs.readFileSync(original)).toEqual(external);
   }, 180_000);
 
+  it.runIf(process.platform === "win32")("requires the staged image in the immediate pre-rename snapshot", async () => {
+    const original = seed(homeWithCrash(), ".claude/settings.json", JSON.stringify({ env: { OTHER: "keep" } }));
+    let removed = false;
+    const manager = new FileAgentsManager({
+      home: homes.at(-1)!,
+      queryWindowsSecuritySnapshot: async (requests) => {
+        const facts = await queryWindowsSecuritySnapshot(requests);
+        if (!removed && requests.some((request) => request.path.endsWith("\\next"))
+          && requests.some((request) => request.path.endsWith("\\previous"))
+          && requests.some((request) => request.path === original.toLowerCase())) {
+          removed = true;
+          const stage = requests.find((request) => request.path.endsWith("\\next"))!.path;
+          fs.unlinkSync(stage);
+        }
+        return facts;
+      },
+    });
+
+    await expect(apply(manager, "claude")).rejects.toMatchObject({
+      name: "AgentError",
+      code: "agent_recovery_required",
+    });
+    expect(removed).toBe(true);
+    expect(fs.readFileSync(original, "utf8")).toBe(JSON.stringify({ env: { OTHER: "keep" } }));
+  }, 180_000);
+
+  it.runIf(process.platform === "win32")("rejects an unexpected scratch child before renaming the live target", async () => {
+    const original = seed(homeWithCrash(), ".claude/settings.json", "{}\n");
+    let inserted = false;
+    const manager = new FileAgentsManager({
+      home: homes.at(-1)!,
+      queryWindowsSecuritySnapshot: async (requests) => {
+        const facts = await queryWindowsSecuritySnapshot(requests);
+        const scratch = requests.find((request) => request.path.endsWith("\\previous"));
+        if (!inserted && scratch !== undefined && requests.some((request) => request.path === original.toLowerCase())) {
+          inserted = true;
+          fs.writeFileSync(path.join(path.dirname(scratch.path), "unexpected"), "unrelated");
+        }
+        return facts;
+      },
+    });
+
+    await expect(apply(manager, "claude")).rejects.toMatchObject({
+      name: "AgentError",
+      code: "agent_recovery_required",
+    });
+    expect(inserted).toBe(true);
+    expect(fs.readFileSync(original, "utf8")).toBe("{}\n");
+  }, 180_000);
+
   it("rejects a changed-target race before publishing another changed target", async () => {
     const h = harness();
     await apply(h.manager, "codex");
@@ -1030,8 +1286,13 @@ describe("private repeatable agent configuration", () => {
     const config = path.join(h.home, ".codex/config.toml");
     const beforeCatalog = fs.readFileSync(catalog);
     const external = Buffer.from("model = \"external\"\n");
+    const raceBatches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
     const manager = new FileAgentsManager({
       home: h.home,
+      queryWindowsSecuritySnapshot: async (requests) => {
+        raceBatches.push(requests);
+        return await queryWindowsSecuritySnapshot(requests);
+      },
       checkpoint: (point, agent, index) => {
         if (point === "staged" && agent === "codex" && index === 2) fs.writeFileSync(config, external);
       },
@@ -1043,6 +1304,24 @@ describe("private repeatable agent configuration", () => {
     });
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(external);
+    if (process.platform === "win32") {
+      expectSnapshotContract(raceBatches, h.home, [
+        ["$HOME", "$HOME\\.claude\\settings.json", "$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak",
+          "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex", "$HOME\\.codex\\ghcg_models.json"],
+        ["$HOME\\.codex"],
+        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\ghcg_models.json"],
+        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\ghcg_models.json"],
+        ["$HOME\\.codex", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex"],
+        ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml",
+          "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
+      ]);
+    }
   }, 180_000);
 
   it("rejects a separate-process backup race before publishing repeat Apply", async () => {
@@ -1120,10 +1399,20 @@ describe("private repeatable agent configuration", () => {
   }, 180_000);
 
   it("serializes concurrent applies from two Gateway instances sharing a home", async () => {
-    const h = harness();
-    const second = new FileAgentsManager({ home: h.home });
+    const firstBatches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const secondBatches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const h = harness({ queryWindowsSecuritySnapshot: async (requests) => {
+      firstBatches.push(requests);
+      return await queryWindowsSecuritySnapshot(requests);
+    } });
+    const second = new FileAgentsManager({ home: h.home, queryWindowsSecuritySnapshot: async (requests) => {
+      secondBatches.push(requests);
+      return await queryWindowsSecuritySnapshot(requests);
+    } });
     const reversed = [...mappings].reverse();
     const firstStatus = await h.status("claude");
+    firstBatches.length = 0;
+    secondBatches.length = 0;
     const [one, two] = await Promise.allSettled([
       h.manager.apply({ agent: "claude", expectedRevision: firstStatus.revision, catalogRevision: "a".repeat(64), mappings }, origin, models, () => undefined, new AbortController().signal),
       second.apply({ agent: "claude", expectedRevision: firstStatus.revision, catalogRevision: "a".repeat(64), mappings: reversed }, origin, models, () => undefined, new AbortController().signal),
@@ -1136,8 +1425,131 @@ describe("private repeatable agent configuration", () => {
     const live = JSON.parse(fs.readFileSync(path.join(h.home, ".claude/settings.json"), "utf8"));
     const winner = one.status === "fulfilled" ? mappings : reversed;
     expect(live.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(winner[0]!.modelId);
+    if (process.platform === "win32") {
+      const target = "$HOME\\.claude\\settings.json";
+      const backup = `${target}.ghcg.bak`;
+      const scratch = "$HOME\\.claude\\$SCRATCH0";
+      const winning = [
+        ["$HOME", target],
+        ["$HOME", target],
+        ["$HOME", backup, target],
+        ["$HOME", target],
+        ["$HOME"],
+        ["$HOME\\.claude"],
+        [scratch, `${scratch}\\next`, target],
+        [scratch, `${scratch}\\next`, target],
+        ["$HOME\\.claude", backup, target, scratch, `${scratch}\\next`],
+        [scratch, `${scratch}\\next`, target],
+        ["$HOME\\.claude", backup, target, scratch, `${scratch}\\next`],
+        ["$HOME\\.claude", backup, target],
+      ];
+      const contracts = [firstBatches, secondBatches]
+        .map((batches) => snapshotContract(batches, h.home).map((snapshot) => snapshot.paths));
+      expect(contracts).toContainEqual(winning);
+      const losing = contracts.find((contract) => contract.length !== winning.length)!;
+      // Lock scheduling determines whether the loser reaches its post-lock snapshot.
+      expect([[ ["$HOME", target] ], [["$HOME", target], ["$HOME", target]]]).toContainEqual(losing);
+      expectDistinctSnapshotIds(firstBatches, h.home);
+      expectDistinctSnapshotIds(secondBatches, h.home);
+    }
     expect((await h.status("claude")).state).toBe("installed");
   }, 300_000);
+
+  it.runIf(process.platform === "win32")("refreshes pending status images after displaced validation rejects", async () => {
+    const original = seed(homeWithCrash(), ".claude/settings.json", "{}\n");
+    const crashed = new FileAgentsManager({
+      home: homes.at(-1)!,
+      checkpoint: (point, agent, index) => {
+        if (point === "displaced" && agent === "claude" && index === 1) throw new Error("simulated crash");
+      },
+    });
+    await expect(apply(crashed, "claude")).rejects.toThrow();
+    const store = new AgentStore(path.join(homes.at(-1)!, ".ghc-gateway-agents"), "claude");
+    const state = await store.read();
+    const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
+    fs.writeFileSync(path.join(step.scratch, "previous"), "invalid displaced bytes");
+    let mutated = false;
+    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const manager = new FileAgentsManager({
+      home: homes.at(-1)!,
+      queryWindowsSecuritySnapshot: async (requests) => {
+        batches.push(requests);
+        const facts = await queryWindowsSecuritySnapshot(requests);
+        if (!mutated && requests.some((request) => request.path.endsWith("\\previous"))) {
+          mutated = true;
+          fs.unlinkSync(`${original}.ghcg.bak`);
+        }
+        return facts;
+      },
+    });
+
+    const status = (await manager.inspect(origin)).find((item) => item.id === "claude")!;
+
+    expect(status).toMatchObject({ state: "recovery_required", backupAvailable: false });
+    const displacedBatch = batches.findIndex((batch) => batch.some((request) => request.path.endsWith("\\previous")));
+    const refresh = batches.slice(displacedBatch + 1).find((batch) => {
+      const paths = batch.map((request) => request.path);
+      return paths.includes(`${original}.ghcg.bak`.toLowerCase()) && paths.includes(original.toLowerCase());
+    });
+    expect(refresh).toBeDefined();
+    expectSnapshotContract(batches, homes.at(-1)!, [
+      ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
+        "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
+        "$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\next",
+        "$HOME", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+      ["$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\previous"],
+      ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
+        "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
+        "$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\next"],
+    ]);
+  }, 180_000);
+
+  it.runIf(process.platform === "win32")("keeps the exact linked-crash recovery snapshot contract", async () => {
+    const home = homeWithCrash();
+    seed(home, ".claude/settings.json", "{}\n");
+    const crashed = new FileAgentsManager({
+      home,
+      checkpoint: (point, agent, index) => {
+        if (point === "linked" && agent === "claude" && index === 1) throw new Error("simulated crash");
+      },
+    });
+    await expect(apply(crashed, "claude")).rejects.toThrow();
+    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const restarted = new FileAgentsManager({ home, queryWindowsSecuritySnapshot: async (requests) => {
+      batches.push(requests);
+      return await queryWindowsSecuritySnapshot(requests);
+    } });
+    const pending = (await restarted.inspect(origin)).find((item) => item.id === "claude")!;
+    batches.length = 0;
+
+    await restarted.apply({
+      agent: "claude", expectedRevision: pending.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+
+    const target = "$HOME\\.claude\\settings.json";
+    const backup = `${target}.ghcg.bak`;
+    const scratch0 = "$HOME\\.claude\\$SCRATCH0";
+    const scratch1 = "$HOME\\.claude\\$SCRATCH1";
+    const full = ["$HOME\\.claude", backup, target,
+      scratch0, `${scratch0}\\next`, scratch1, `${scratch1}\\next`];
+    expectSnapshotContract(batches, home, [
+      full,
+      full,
+      [scratch1, `${scratch1}\\previous`],
+      full,
+      ["$HOME\\.claude", backup, scratch0, `${scratch0}\\next`],
+      [scratch1, `${scratch1}\\previous`],
+      ["$HOME\\.claude", target, scratch1, `${scratch1}\\next`],
+      full,
+      [scratch1, `${scratch1}\\previous`],
+      full,
+      full,
+      [scratch1, `${scratch1}\\previous`],
+      [scratch1, `${scratch1}\\next`, target],
+      ["$HOME\\.claude", backup, target],
+      ["$HOME\\.claude", backup, target],
+    ]);
+  }, 180_000);
 
   it.each([
     ["intent", -1],
@@ -1252,6 +1664,48 @@ describe("private repeatable agent configuration", () => {
     expect((await h.status("claude")).state).toBe("unsafe_path");
   }, 180_000);
 });
+
+function snapshotContract(batches: readonly (readonly WindowsSecuritySnapshotRequest[])[], home: string) {
+  const normalizedHome = home.toLowerCase();
+  const scratches = new Map<string, string>();
+  return batches.map((batch) => ({
+    id: batch[0]!.id.replace(/-path-0$/u, ""),
+    paths: batch.map((request) => request.path.replace(normalizedHome, "$HOME").replace(
+      /\.ghcg-agents-(?:claude|codex)-[0-9a-f-]+/gu,
+      (scratch) => {
+        let token = scratches.get(scratch);
+        if (token === undefined) {
+          token = `$SCRATCH${scratches.size}`;
+          scratches.set(scratch, token);
+        }
+        return token;
+      },
+    )),
+  }));
+}
+
+function expectSnapshotContract(
+  batches: readonly (readonly WindowsSecuritySnapshotRequest[])[],
+  home: string,
+  expectedPaths: readonly (readonly string[])[],
+): void {
+  const contract = snapshotContract(batches, home);
+  expect(contract.map((snapshot) => snapshot.paths)).toEqual(expectedPaths);
+  expectDistinctSnapshotIds(batches, home);
+}
+
+function expectDistinctSnapshotIds(
+  batches: readonly (readonly WindowsSecuritySnapshotRequest[])[],
+  home: string,
+): void {
+  const contract = snapshotContract(batches, home);
+  expect(new Set(contract.map((snapshot) => snapshot.id)).size).toBe(contract.length);
+  for (const [batchIndex, batch] of batches.entries()) {
+    expect(batch.map((request) => request.id)).toEqual(
+      batch.map((_, pathIndex) => `${contract[batchIndex]!.id}-path-${pathIndex}`),
+    );
+  }
+}
 
 function homeWithCrash(): string {
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-")));
