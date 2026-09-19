@@ -74,6 +74,7 @@ export class AgentStore {
       await protect(lockPath);
     }
     await assertPrivateDatabase(lockPath);
+    await assertPrivateDatabaseSidecars(lockPath);
     const lock = new DatabaseSync(lockPath, { timeout: 0 });
     try {
       try { lock.exec("BEGIN EXCLUSIVE"); } catch { throw new AgentError("agent_busy"); }
@@ -284,6 +285,7 @@ async function writeMigrationMarker(statePath: string, targetStatePath: string, 
   fs.closeSync(fd);
   protect(temporary);
   await assertPrivateDatabase(temporary);
+  await assertPrivateDatabaseSidecars(temporary);
   const db = new DatabaseSync(temporary, { timeout: 0 });
   try {
     db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete'))); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
@@ -329,6 +331,7 @@ async function publishStateDatabase(statePath: string, state: AgentState, agent:
   fs.closeSync(fd);
   protect(temporary);
   await assertPrivateDatabase(temporary);
+  await assertPrivateDatabaseSidecars(temporary);
   const db = new DatabaseSync(temporary, { timeout: 0 });
   try {
     db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=8192; CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");

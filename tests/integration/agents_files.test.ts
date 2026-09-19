@@ -324,7 +324,60 @@ describe("private repeatable agent configuration", () => {
         ? path.join(stateRoot(h.home), "codex", "state.db")
         : path.join(legacyStateRoot(h.home), "codex", "state.db");
       fs.linkSync(file, path.join(h.home, `${target}-alias.db`));
-      expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"))
+      expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"), target)
+        .toMatchObject({ state: "unsafe_path", mappings: [] });
+    }
+  }, 180_000);
+
+  it("rejects hard-linked lock, retired, temporary, and sidecar databases", async () => {
+    for (const scenario of ["lock", "retired", "marker-temp", "state-temp", "sidecar"] as const) {
+      const h = harness();
+      const state = { version: 2 as const, revision: 3, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+      const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+      const currentDirectory = path.join(stateRoot(h.home), "codex");
+      const currentState = path.join(currentDirectory, "state.db");
+      if (scenario === "lock") {
+        await saveState(stateRoot(h.home), "codex", state);
+        const lock = path.join(currentDirectory, "lock.db");
+        fs.linkSync(lock, path.join(h.home, "lock-alias"));
+        await expect(new AgentStore(stateRoot(h.home), "codex").locked(async () => undefined))
+          .rejects.toMatchObject({ code: "agent_unsafe_path" });
+        continue;
+      }
+
+      await saveState(legacyStateRoot(h.home), "codex", state);
+      if (scenario === "retired") {
+        const retired = `${legacyState}.migrated`;
+        fs.copyFileSync(legacyState, retired);
+        protect(retired);
+        fs.linkSync(retired, path.join(h.home, "retired-alias"));
+      } else if (scenario === "marker-temp") {
+        fs.renameSync(legacyState, `${legacyState}.migrated`);
+        const temporary = `${legacyState}.marker`;
+        fs.writeFileSync(temporary, "unsafe", { mode: 0o600 });
+        protect(temporary);
+        fs.linkSync(temporary, path.join(h.home, "marker-temp-alias"));
+      } else if (scenario === "state-temp") {
+        fs.renameSync(legacyState, `${legacyState}.migrated`);
+        await writeMigrationMarker(legacyState, currentState);
+        await privateDirectory(path.dirname(stateRoot(h.home)));
+        await privateDirectory(stateRoot(h.home));
+        await privateDirectory(currentDirectory);
+        const temporary = `${currentState}.migrating`;
+        fs.writeFileSync(temporary, "unsafe", { mode: 0o600 });
+        protect(temporary);
+        fs.linkSync(temporary, path.join(h.home, "state-temp-alias"));
+      } else {
+        await saveState(stateRoot(h.home), "codex", state);
+        const sidecar = `${currentState}-journal`;
+        fs.writeFileSync(sidecar, "unsafe", { mode: 0o600 });
+        protect(sidecar);
+        fs.linkSync(sidecar, path.join(h.home, "sidecar-alias"));
+        await expect(new AgentStore(stateRoot(h.home), "codex").read())
+          .rejects.toMatchObject({ code: "agent_unsafe_path" });
+        continue;
+      }
+      expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"), scenario)
         .toMatchObject({ state: "unsafe_path", mappings: [] });
     }
   }, 180_000);
@@ -350,8 +403,10 @@ describe("private repeatable agent configuration", () => {
     const marker = new DatabaseSync(markerPath, { timeout: 0 });
     marker.exec("BEGIN EXCLUSIVE");
     try {
+      const started = performance.now();
       await expect(new AgentStore(stateRoot(h.home), "codex", legacyStateRoot(h.home)).read())
         .rejects.toMatchObject({ code: "agent_busy" });
+      expect(performance.now() - started).toBeLessThan(1_000);
     } finally {
       marker.exec("ROLLBACK");
       marker.close();
