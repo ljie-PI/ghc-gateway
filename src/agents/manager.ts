@@ -284,11 +284,22 @@ export class FileAgentsManager implements AgentsManager {
         if (inspection?.error !== undefined) throw inspection.error;
         const validatedPaths: string[] = [];
         try {
-          for (const target of paths) {
-            const validated = canonical(target);
-            validatedPaths.push(validated);
+          if (process.platform === "win32") {
+            let validationError: unknown;
+            try {
+              for (const target of paths) validatedPaths.push(canonical(target));
+            } catch (error: unknown) {
+              validationError = error;
+            }
+            if (validatedPaths.length > 0) await this.images(validatedPaths, state, images);
+            if (validationError !== undefined) throw validationError;
+          } else {
+            for (const [index, target] of paths.entries()) {
+              const validated = canonical(target);
+              validatedPaths.push(validated);
+              images.push(await this.image(validated, index, state));
+            }
           }
-          await this.images(validatedPaths, state, images);
         } catch (error: unknown) {
           backupAvailable = this.backupAvailable(state, images);
           throw error;
