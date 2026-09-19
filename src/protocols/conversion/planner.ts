@@ -1,4 +1,7 @@
-import { ModelCapabilityUnavailableError } from "../../copilot/model_capabilities.js";
+import {
+  ModelCapabilityUnavailableError,
+  supportsModelReasoning,
+} from "../../copilot/model_capabilities.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import type { WireJsonObject } from "../../serialization/wire_json.js";
 import { PROTOCOL_REQUEST_CODECS } from "./request_codecs.js";
@@ -55,8 +58,13 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
     throw contractFailure(error);
   }
 
+  const orderedCandidates = decoded.reasoning === undefined
+    ? candidates
+    : [...candidates].sort((left, right) => Number(
+      supportsModelReasoning(input.capability.capabilities, right, decoded.reasoning?.effort),
+    ) - Number(supportsModelReasoning(input.capability.capabilities, left, decoded.reasoning?.effort)));
   let lastUnsupported: ConversionContractError | undefined;
-  for (const target of candidates) {
+  for (const target of orderedCandidates) {
     if (target === input.source) {
       return Object.freeze({
         kind: "native",

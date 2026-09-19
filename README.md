@@ -85,7 +85,7 @@ Preferred models are account-specific. If a catalog refresh removes a preferred 
 
 The Models Admin view shows read-only account-scoped native HTTP interfaces, token and context limits, reasoning levels, input modalities, tool calling, reasoning summaries, verbosity, and search support. These capabilities are catalog declarations used by the Gateway, not live inference validation. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
 
-Unknown or malformed capability declarations remain unknown. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
+Unknown or malformed boolean capability declarations fail closed as not supported; unknown protocols and numeric limits remain unavailable. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
 
 For conversions that require an output-token value, an explicit valid request value wins. Otherwise the model's upstream or built-in default is used, followed by `min(8192, known output ceiling)` or `4096` when the ceiling is unknown. Invalid explicit request values are not replaced by a default.
 

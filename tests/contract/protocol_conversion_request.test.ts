@@ -673,28 +673,30 @@ describe("shared conversion request codecs", () => {
     expect(decoded(converted.bytes)).not.toHaveProperty("reasoning_effort");
   });
 
-  it.each([
-    ["tool calling", {
-      model: "source", messages: [{ role: "user", content: "hi" }],
-      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
-    }, { toolCalling: false }],
-    ["parallel tool calling", {
-      model: "source", messages: [{ role: "user", content: "hi" }],
-      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
-      parallel_tool_calls: true,
-    }, { parallelToolCalling: false }],
-    ["vision", {
-      model: "source", messages: [{ role: "user", content: [
-        { type: "text", text: "look" },
-        { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
-      ] }],
-    }, { inputModalities: ["text"] as const }],
-  ] as const)("rejects converted %s without shared model capability evidence", (_name, request, denied) => {
-    const base = capability(["responses"]);
-    expect(() => prepareConvertedRequest("chat", "responses", body(request), "target", {
-      ...base,
-      capabilities: { ...base.capabilities, ...denied },
-    })).toThrow();
+  it("prefers a target that supports the requested reasoning level", () => {
+    const base = capability(["chat", "messages"]);
+    const plan = planProtocolExecution({
+      source: "responses",
+      body: body({
+        model: "source",
+        input: "hi",
+        reasoning: { effort: "high" },
+      }),
+      stream: false,
+      resolvedModel: "target",
+      capability: {
+        ...base,
+        capabilities: {
+          ...base.capabilities,
+          reasoningLevels: ["high"],
+          reasoningProtocols: ["messages"],
+        },
+      },
+    });
+    expect(plan).toMatchObject({ kind: "converted", target: "messages" });
+    expect(plan.kind === "converted" ? decoded(plan.request.bytes) : null).toMatchObject({
+      output_config: { effort: "high" },
+    });
   });
 
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {

@@ -145,7 +145,7 @@ describe("agent configuration projection", () => {
       { slug: "native-responses", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
       { slug: "chat-bridge", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
       { slug: "messages-bridge", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
-      { slug: "chat-priority", supported_reasoning_levels: [] },
+      { slug: "chat-priority", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
     ]);
   });
   it("projects effective model capabilities without adapter-specific reinterpretation", async () => {

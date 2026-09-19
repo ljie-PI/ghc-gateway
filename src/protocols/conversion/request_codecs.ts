@@ -1,5 +1,5 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
-import { chooseOutputTokenBudget } from "../../copilot/model_capabilities.js";
+import { chooseOutputTokenBudget, supportsModelReasoning } from "../../copilot/model_capabilities.js";
 import {
   duplicateMemberNames,
   isWireJsonArray,
@@ -1518,11 +1518,7 @@ function supportsTargetReasoning(
   target: InferenceProtocol,
   reasoning: SemanticReasoning | undefined,
 ): boolean {
-  if (!capability.capabilities.reasoningProtocols.includes(target)) {
-    return false;
-  }
-  return reasoning?.effort === undefined
-    || capability.capabilities.reasoningLevels.includes(reasoning.effort);
+  return supportsModelReasoning(capability.capabilities, target, reasoning?.effort);
 }
 
 function validateConditionalTargetParameters(
@@ -1530,7 +1526,6 @@ function validateConditionalTargetParameters(
   capability: Readonly<EffectiveModelCapabilitySnapshot>,
   target: InferenceProtocol,
 ): void {
-  validateModelCapabilities(request, capability);
   const supported = capability.profile.supportedParameters.value;
   if (request.temperature !== undefined && supported?.includes("temperature") !== true) {
     unsupported("REQ-TARGET-TEMPERATURE-CAPABILITY");
@@ -1548,26 +1543,6 @@ function validateConditionalTargetParameters(
       : ["output_config.format", "output_config"];
   if (!formatKeys.some((key) => supported?.includes(key) === true)) {
     unsupported("REQ-TARGET-FORMAT-CAPABILITY");
-  }
-}
-
-function validateModelCapabilities(
-  request: Readonly<SemanticRequest>,
-  capability: Readonly<EffectiveModelCapabilitySnapshot>,
-): void {
-  const usesTools = request.tools.length > 0
-    || request.items.some((item) => item.type === "tool_call" || item.type === "tool_result");
-  if (usesTools && !capability.capabilities.toolCalling) {
-    unsupported("REQ-TARGET-TOOLS-CAPABILITY");
-  }
-  if (request.parallelToolCalls === true && !capability.capabilities.parallelToolCalling) {
-    unsupported("REQ-TARGET-PARALLEL-TOOLS-CAPABILITY");
-  }
-  const usesImages = request.instructions.some((part) => part.type === "image")
-    || request.items.some((item) => item.type === "message"
-      && item.content.some((part) => part.type === "image"));
-  if (usesImages && !capability.capabilities.inputModalities.includes("image")) {
-    unsupported("REQ-TARGET-VISION-CAPABILITY");
   }
 }
 

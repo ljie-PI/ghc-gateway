@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { parse, stringify, type TomlTable } from "smol-toml";
+import { supportsModelReasoning } from "../copilot/model_capabilities.js";
 import { protocolTargets } from "../protocols/conversion/routing.js";
 import { AgentError, validateMappings, type AgentId, type AgentMapping, type AgentModel } from "./types.js";
 
@@ -118,8 +119,9 @@ function projectCodex(
     "model_auto_compact_token_limit", "model_supports_reasoning_summaries", "review_model", "service_tier"]) delete config[key];
   const catalog = { models: mappings.map((mapping, index) => {
     const model = models.find((item) => item.modelId === mapping.modelId)!;
-    const target = model.protocols.value === null ? null : protocolTargets("responses", model.protocols.value)[0] ?? null;
-    const reasoningLevels = target !== null && model.capabilities.reasoningProtocols.includes(target)
+    const targets = model.protocols.value === null ? [] : protocolTargets("responses", model.protocols.value);
+    const target = targets.find((candidate) => supportsModelReasoning(model.capabilities, candidate)) ?? targets[0] ?? null;
+    const reasoningLevels = target !== null && supportsModelReasoning(model.capabilities, target)
       ? model.capabilities.reasoningLevels
       : [];
     return {

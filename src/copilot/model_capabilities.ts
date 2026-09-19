@@ -81,6 +81,15 @@ export interface ModelCapabilities {
   readonly search: boolean;
 }
 
+export function supportsModelReasoning(
+  capabilities: Pick<ModelCapabilities, "reasoningLevels" | "reasoningProtocols">,
+  protocol: NativeModelProtocol,
+  effort?: SupportedReasoningEffort,
+): boolean {
+  return capabilities.reasoningProtocols.includes(protocol)
+    && (effort === undefined || capabilities.reasoningLevels.includes(effort));
+}
+
 export interface BuiltinModelCapabilities {
   readonly revision: string;
   readonly capabilities: DeclaredModelCapabilities;
