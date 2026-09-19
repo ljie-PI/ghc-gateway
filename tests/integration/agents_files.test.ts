@@ -745,8 +745,8 @@ describe("private repeatable agent configuration", () => {
       target,
     ];
     expectSnapshotContract(batches, h.home, [
-      ["$HOME", "$HOME\\.claude\\settings.json", ...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
-      targets,
+      ["$HOME", "$HOME\\.claude\\settings.json", ...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml",
+        "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak"],
       [...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
       targets,
       [...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
@@ -1048,6 +1048,28 @@ describe("private repeatable agent configuration", () => {
     expect(fs.existsSync(path.join(h.home, ".codex/models.json"))).toBe(true);
   }, 180_000);
 
+  it("offers takeover when legacy state meets an existing native models.json", async () => {
+    const h = harness();
+    const config = path.join(h.home, ".codex/config.toml");
+    const historical = path.join(h.home, ".codex/ghcg-models.json");
+    const projection = projectAgent("codex", null, mappings, origin, historical, models, null);
+    seed(h.home, ".codex/config.toml", projection.config);
+    seed(h.home, ".codex/ghcg-models.json", projection.catalog!);
+    seed(h.home, ".codex/models.json", "native catalog\n");
+    const store = new AgentStore(stateRoot(h.home), "codex");
+    await store.locked(async (save) => save({
+      version: 1, revision: 1, mappings, lastAppliedAt: null, pending: null,
+      targets: [
+        { path: historical, original: null, expected: (await readImage(historical))! },
+        { path: config, original: null, expected: (await readImage(config))! },
+      ],
+    }));
+    const status = await h.status("codex");
+    expect(status.takeover).toMatchObject({ catalogPath: path.join(h.home, ".codex/models.json") });
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
+    expect((await takeover(h.manager)).state).toBe("installed");
+  }, 180_000);
+
   it("drops only the legacy Subagent row while migrating the first Claude original", async () => {
     const h = harness();
     const original = Buffer.from("{\"theme\":\"old\"}\n");
@@ -1245,6 +1267,36 @@ describe("private repeatable agent configuration", () => {
       takeoverRevision: status.takeover!.revision, mappings,
     }, origin, models, () => undefined, new AbortController().signal)).rejects.toMatchObject({ code: "revision_conflict" });
     expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
+  }, 180_000);
+
+  it("revalidates managed Codex takeover evidence before target preparation", async () => {
+    const h = harness();
+    seed(h.home, ".codex/config.toml", "model = \"external\"\n");
+    seed(h.home, ".codex/models.json", "native catalog\n");
+    await takeover(h.manager);
+    const config = path.join(h.home, ".codex/config.toml");
+    fs.writeFileSync(config, fs.readFileSync(config, "utf8").replace(`${origin}/v1`, "https://external.example/v1"));
+    const status = await h.status("codex");
+    expect(status.takeover).not.toBeNull();
+    const catalog = path.join(h.home, ".codex/models.json");
+    const before = [config, catalog].map((target) => fs.readFileSync(target));
+    let changed = false;
+    const manager = new FileAgentsManager({
+      home: h.home,
+      checkpoint: (point, agent, index) => {
+        if (!changed && point === "staged" && agent === "codex" && index === 3) {
+          changed = true;
+          fs.writeFileSync(catalog, "changed again\n");
+        }
+      },
+    });
+    await expect(manager.takeover({
+      agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64),
+      takeoverRevision: status.takeover!.revision, mappings,
+    }, origin, models, () => undefined, new AbortController().signal)).rejects.toMatchObject({ code: "agent_conflict" });
+    expect(fs.readFileSync(config)).toEqual(before[0]);
+    expect(fs.readFileSync(catalog, "utf8")).toBe("changed again\n");
+    expect(fs.existsSync(`${catalog}.ghcg.bak`)).toBe(true);
   }, 180_000);
 
   it.each([

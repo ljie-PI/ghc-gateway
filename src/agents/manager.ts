@@ -248,10 +248,12 @@ export class FileAgentsManager implements AgentsManager {
       this.requireBackup(state, current);
       if (agent === "codex" && takeoverEvidence !== undefined) {
         const targetPaths = state.targets.map((target) => target.path);
+        const fresh = await this.images(targetPaths, state);
         if (!sameFilePaths(takeoverEvidence.paths, targetPaths)
-          || current.some((image, index) => !sameImage(image, takeoverEvidence.images[index]!))) {
+          || fresh.some((image, index) => !sameImage(image, takeoverEvidence.images[index]!))) {
           throw new AgentError("revision_conflict");
         }
+        current = fresh;
       }
       return agent === "claude"
         ? { current, backup: state.targets[0]!.expected, configBackup: null, catalogBackup: null }
@@ -382,7 +384,7 @@ export class FileAgentsManager implements AgentsManager {
       if (images[0] !== null || images[1] !== null) throw new AgentError("agent_conflict");
       if (images[2] === null && images[3] === null) throw new AgentError("agent_conflict");
     } else {
-      const expectedConfigBackup = state.targets[0]?.expected ?? null;
+      const expectedConfigBackup = state.version === 1 ? null : state.targets[0]?.expected ?? null;
       if (!sameImage(images[0]!, expectedConfigBackup)) throw new AgentError("agent_conflict");
       const expectedCatalogBackup = state.version === 3 && state.targets.length === 4
         ? state.targets[1]!.expected : null;
