@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
@@ -16,6 +17,7 @@ import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
 let windowsAclWarmup: Promise<void> | undefined;
+const execFileAsync = promisify(execFile);
 const effective = <T>(value: T) => ({ value, source: "live" as const, conflict: false, liveState: "value" as const });
 const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((modelId) => ({
   modelId,
@@ -50,6 +52,16 @@ function legacyStateRoot(home: string): string {
 }
 async function saveState(root: string, agent: AgentId, state: AgentState): Promise<void> {
   await new AgentStore(root, agent).locked(async (save) => save(state));
+}
+async function writeMigrationMarker(file: string, target: string): Promise<void> {
+  fs.writeFileSync(file, "", { mode: 0o600 });
+  protect(file);
+  const db = new DatabaseSync(file);
+  try {
+    db.exec("CREATE TABLE migration(target TEXT NOT NULL); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
+    db.prepare("INSERT INTO migration VALUES(?)").run(target);
+    db.prepare("INSERT INTO state VALUES(1,?)").run(JSON.stringify({ migratedTo: target }));
+  } finally { db.close(); }
 }
 async function apply(
   manager: FileAgentsManager,
@@ -94,12 +106,15 @@ describe("private repeatable agent configuration", () => {
     const defaults = harness();
     await apply(defaults.manager, "claude");
     expect(fs.existsSync(path.join(stateRoot(defaults.home), "claude", "state.db"))).toBe(true);
-    expect(fs.existsSync(legacyStateRoot(defaults.home))).toBe(false);
+    await expect(new AgentStore(legacyStateRoot(defaults.home), "claude").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
 
     const custom = harness({ dataDir: path.join(defaults.home, "custom-data") });
     await apply(custom.manager, "codex");
     expect(fs.existsSync(path.join(defaults.home, "custom-data", "agents", "codex", "state.db"))).toBe(true);
     expect(fs.existsSync(path.join(defaults.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
+    await expect(new AgentStore(legacyStateRoot(defaults.home), "codex").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
   }, 180_000);
 
   it("migrates complete legacy state and retires its writable authority", async () => {
@@ -172,6 +187,63 @@ describe("private repeatable agent configuration", () => {
       mappings: state.mappings,
     });
     expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+  }, 180_000);
+
+  it("recovers migration interruptions before marker and before new-state publication", async () => {
+    for (const phase of ["retired", "marked"] as const) {
+      const h = harness();
+      const state = { version: 2 as const, revision: phase === "retired" ? 11 : 12, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+      const legacyDirectory = path.join(legacyStateRoot(h.home), "codex");
+      const legacyState = path.join(legacyDirectory, "state.db");
+      const retired = `${legacyState}.migrated`;
+      const current = path.join(stateRoot(h.home), "codex", "state.db");
+      await saveState(legacyStateRoot(h.home), "codex", state);
+      fs.renameSync(legacyState, retired);
+      if (phase === "marked") await writeMigrationMarker(legacyState, current);
+
+      const manager = new FileAgentsManager({ home: h.home });
+      expect((await manager.inspect(origin)).find((item) => item.id === "codex")?.mappings).toEqual(state.mappings);
+      expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+      expect(fs.existsSync(legacyState)).toBe(true);
+      expect(fs.existsSync(retired)).toBe(true);
+    }
+  }, 180_000);
+
+  it("serializes legacy migration across separate processes", async () => {
+    const h = harness();
+    const dataDir = path.join(h.home, ".ghc-gateway");
+    const state = { version: 2 as const, revision: 13, mappings: [mappings[2]!], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    const run = () => execFileAsync(process.execPath, [
+      "scripts/tooling/bootstrap.mjs",
+      "tests/fixtures/agent_state_migration_contender.ts",
+      h.home,
+      dataDir,
+    ], { cwd: path.resolve(import.meta.dirname, "../.."), windowsHide: true, timeout: 60_000 });
+    const [one, two] = await Promise.all([run(), run()]);
+    expect([one.stdout.trim(), two.stdout.trim()]).toEqual(["13", "13"]);
+    expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+  }, 180_000);
+
+  it.skipIf(process.platform === "win32")("rejects an unsafe legacy state root", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    fs.chmodSync(legacyStateRoot(h.home), 0o755);
+    expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
+  });
+
+  it.runIf(process.platform === "win32")("accepts case-insensitive Windows marker targets", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const markerPath = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const marker = new DatabaseSync(markerPath);
+    try {
+      const target = (marker.prepare("SELECT target FROM migration").get() as { target: string }).target;
+      marker.prepare("UPDATE migration SET target=?").run(target.toUpperCase());
+    } finally { marker.close(); }
+    expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex")?.state)
+      .toBe("installed");
   }, 180_000);
   it.runIf(process.platform === "win32")("uses one ordered security batch per Inspect without cross-call reuse", async () => {
     const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];

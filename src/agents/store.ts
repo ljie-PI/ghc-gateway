@@ -49,7 +49,7 @@ export class AgentStore {
   private get statePath(): string { return path.join(this.directory, "state.db"); }
 
   async read(): Promise<AgentState> {
-    await this.migrateLegacyState();
+    await this.migrateLegacyState(false);
     return await this.readCurrent();
   }
 
@@ -61,7 +61,7 @@ export class AgentStore {
   }
 
   async locked<T>(work: (save: (state: AgentState, beforeCommit?: () => void) => Promise<void>) => Promise<T>): Promise<T> {
-    await this.migrateLegacyState();
+    await this.migrateLegacyState(true);
     if (!exists(path.dirname(this.root))) await privateDirectory(path.dirname(this.root));
     await privateDirectory(this.root);
     await privateDirectory(this.directory);
@@ -80,35 +80,41 @@ export class AgentStore {
     } finally { lock.close(); }
   }
 
-  private async migrateLegacyState(): Promise<void> {
+  private async migrateLegacyState(requireFence: boolean): Promise<void> {
     if (this.migrationChecked) return;
-    await this.performLegacyMigration();
-    this.migrationChecked = true;
+    this.migrationChecked = await this.performLegacyMigration(requireFence);
   }
 
-  private async performLegacyMigration(): Promise<void> {
-    if (this.legacyRoot === undefined || path.resolve(this.legacyRoot) === path.resolve(this.root)) return;
+  private async performLegacyMigration(requireFence: boolean): Promise<boolean> {
+    if (this.legacyRoot === undefined || samePath(this.legacyRoot, this.root)) return true;
     const legacyDirectory = path.join(this.legacyRoot, this.agent);
     const legacyStatePath = path.join(legacyDirectory, "state.db");
     const retiredStatePath = `${legacyStatePath}.migrated`;
-    if (!exists(legacyStatePath) && !exists(retiredStatePath)) return;
+    if (!exists(legacyStatePath) && !exists(retiredStatePath) && !exists(this.statePath) && !requireFence) return false;
 
     if (exists(legacyStatePath)) {
+      assertNoLinks(this.legacyRoot);
+      assertNoLinks(legacyDirectory);
+      await assertPrivate(this.legacyRoot, true);
+      await assertPrivate(legacyDirectory, true);
       await assertPrivate(legacyStatePath, false);
       const marker = readMigrationMarker(legacyStatePath);
       if (marker !== null) {
-        if (path.resolve(marker) !== path.resolve(this.statePath)
-          || !exists(retiredStatePath) || !exists(this.statePath)) throw new AgentError("agent_recovery_required");
-        await readStateDatabase(retiredStatePath, this.agent);
-        await readStateDatabase(this.statePath, this.agent);
-        return;
+        if (!samePath(marker, this.statePath)) throw new AgentError("agent_recovery_required");
+        if (exists(retiredStatePath)) await readStateDatabase(retiredStatePath, this.agent);
+        if (exists(this.statePath)) {
+          await readStateDatabase(this.statePath, this.agent);
+          return true;
+        }
+        if (!exists(retiredStatePath)) return true;
       }
     }
 
+    if (!exists(this.legacyRoot)) await privateDirectory(this.legacyRoot);
+    else await assertPrivate(this.legacyRoot, true);
+    if (!exists(legacyDirectory)) await privateDirectory(legacyDirectory);
+    else await assertPrivate(legacyDirectory, true);
     assertNoLinks(this.root);
-    assertNoLinks(this.legacyRoot);
-    await assertPrivate(this.legacyRoot, true);
-    await assertPrivate(legacyDirectory, true);
     if (!exists(path.dirname(this.root))) await privateDirectory(path.dirname(this.root));
     await privateDirectory(this.root);
     await privateDirectory(this.directory);
@@ -121,29 +127,47 @@ export class AgentStore {
         await assertPrivate(legacyStatePath, false);
         const marker = readMigrationMarker(legacyStatePath);
         if (marker !== null) {
-          throw new AgentError("agent_busy");
+          if (!samePath(marker, this.statePath)) throw new AgentError("agent_recovery_required");
+          if (exists(this.statePath)) {
+            await readStateDatabase(this.statePath, this.agent);
+            return true;
+          }
+          if (!exists(retiredStatePath)) return true;
         }
-      } else {
-        if (!exists(retiredStatePath) || !exists(this.statePath)) throw new AgentError("agent_recovery_required");
-        const retired = await readStateDatabase(retiredStatePath, this.agent);
-        const current = await readStateDatabase(this.statePath, this.agent);
-        if (!statesEqual(retired, current)) throw new AgentError("agent_recovery_required");
-        await writeMigrationMarker(legacyStatePath, this.statePath);
-        return;
-      }
-      const legacy = await readStateDatabase(legacyStatePath, this.agent);
-      if (exists(this.statePath)) {
-        await assertPrivate(this.statePath, false);
-        const current = await readStateDatabase(this.statePath, this.agent);
-        if (!statesEqual(legacy, current)) throw new AgentError("agent_recovery_required");
-      } else {
-        await publishStateDatabase(this.statePath, legacy, this.agent);
       }
 
-      if (exists(retiredStatePath)) throw new AgentError("agent_recovery_required");
-      fs.renameSync(legacyStatePath, retiredStatePath);
-      syncDirectory(legacyDirectory);
+      if (!exists(legacyStatePath) && exists(retiredStatePath)) {
+        const retired = await readStateDatabase(retiredStatePath, this.agent);
+        await writeMigrationMarker(legacyStatePath, this.statePath);
+        if (exists(this.statePath)) {
+          const current = await readStateDatabase(this.statePath, this.agent);
+          if (!statesEqual(retired, current)) throw new AgentError("agent_recovery_required");
+        } else await publishStateDatabase(this.statePath, retired, this.agent);
+        return true;
+      }
+
+      if (exists(legacyStatePath) && readMigrationMarker(legacyStatePath) !== null) {
+        const retired = await readStateDatabase(retiredStatePath, this.agent);
+        await publishStateDatabase(this.statePath, retired, this.agent);
+        return true;
+      }
+
+      if (exists(legacyStatePath)) {
+        const legacy = await readStateDatabase(legacyStatePath, this.agent);
+        if (exists(this.statePath)) {
+          const current = await readStateDatabase(this.statePath, this.agent);
+          if (!statesEqual(legacy, current)) throw new AgentError("agent_recovery_required");
+        }
+        if (exists(retiredStatePath)) throw new AgentError("agent_recovery_required");
+        fs.renameSync(legacyStatePath, retiredStatePath);
+        syncDirectory(legacyDirectory);
+        await writeMigrationMarker(legacyStatePath, this.statePath);
+        if (!exists(this.statePath)) await publishStateDatabase(this.statePath, legacy, this.agent);
+        return true;
+      }
+
       await writeMigrationMarker(legacyStatePath, this.statePath);
+      return true;
     } finally {
       currentLock?.close();
       legacyLock.close();
@@ -218,6 +242,14 @@ async function readStateDatabase(statePath: string, agent: AgentId): Promise<Age
 
 function statesEqual(left: AgentState, right: AgentState): boolean {
   return isDeepStrictEqual(left, right);
+}
+
+function samePath(left: string, right: string): boolean {
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight;
 }
 
 async function writeMigrationMarker(statePath: string, targetStatePath: string): Promise<void> {
