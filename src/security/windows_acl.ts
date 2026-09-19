@@ -105,3 +105,12 @@ export function windowsCommandPath(
   const systemRoot = environment.SystemRoot ?? environment.WINDIR ?? "C:\\Windows";
   return path.join(systemRoot, "System32", `${command}.exe`);
 }
+
+export function windowsPowerShellPath(
+  platform: NodeJS.Platform = process.platform,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  if (platform !== "win32") return "powershell";
+  const systemRoot = environment.SystemRoot ?? environment.WINDIR ?? "C:\\Windows";
+  return path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}

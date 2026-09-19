@@ -1,5 +1,6 @@
 import path from "node:path";
 import { execFile } from "node:child_process";
+import { windowsPowerShellPath } from "./windows_acl.js";
 
 export interface WindowsSecuritySnapshotRequest {
   readonly id: string;
@@ -81,8 +82,7 @@ export async function queryWindowsSecuritySnapshot(
 ): Promise<readonly WindowsSecuritySnapshotFact[]> {
   try {
     const input = validateRequests(requests, dependencies.platform);
-    const executable = path.win32.join(dependencies.environment.SystemRoot ?? dependencies.environment.WINDIR ?? "C:\\Windows",
-      "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const executable = windowsPowerShellPath(dependencies.platform, dependencies.environment);
     const { stdout, stderr } = await dependencies.runCommand(
       executable,
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SCRIPT],

@@ -116,6 +116,27 @@ describe("private repeatable agent configuration", () => {
     ]);
   });
 
+  it.runIf(process.platform === "win32")("keeps a valid backup visible when a later target query fails", async () => {
+    const h = harness();
+    const config = seed(h.home, ".claude/settings.json", "{}\n");
+    await apply(h.manager, "claude");
+    const backup = (await readImage(`${config}.ghcg.bak`))!;
+    const manager = new FileAgentsManager({
+      home: h.home,
+      queryWindowsSecuritySnapshot: async (requests) => requests.map((request): WindowsSecuritySnapshotFact => {
+        if (request.path.endsWith("\\.claude\\settings.json")) return { id: request.id, status: "error" };
+        return fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: backup.acl! }
+          : { id: request.id, status: "missing" };
+      }),
+    });
+
+    expect((await manager.inspect(origin)).find((status) => status.id === "claude")).toMatchObject({
+      state: "unsafe_path",
+      backupAvailable: true,
+    });
+  }, 180_000);
+
   it.runIf(process.platform === "win32")("fails both prepared agents closed on a global query failure", async () => {
     const h = harness({ queryWindowsSecuritySnapshot: async () => { throw new Error("sensitive diagnostic"); } });
     expect(await h.manager.inspect(origin)).toMatchObject([
