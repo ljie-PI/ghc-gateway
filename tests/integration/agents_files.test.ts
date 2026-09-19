@@ -448,7 +448,7 @@ describe("private repeatable agent configuration", () => {
 
     const normalizedHome = h.home.toLowerCase();
     expect(batches).toEqual([1, 2].map((snapshot) => [
-      { id: `snapshot-${snapshot}-path-0`, path: normalizedHome },
+      { id: `snapshot-${snapshot}-path-0`, path: normalizedHome, security: false },
       { id: `snapshot-${snapshot}-path-1`, path: path.join(normalizedHome, ".claude", "settings.json") },
       { id: `snapshot-${snapshot}-path-2`, path: path.join(normalizedHome, ".codex", "ghcg_models.json") },
       { id: `snapshot-${snapshot}-path-3`, path: path.join(normalizedHome, ".codex", "config.toml") },
@@ -688,7 +688,7 @@ describe("private repeatable agent configuration", () => {
     })).toBe(true);
   }, 180_000);
 
-  it.runIf(process.platform === "win32")("keeps no-op Apply to three transaction snapshots with private proofs", async () => {
+  it.runIf(process.platform === "win32")("keeps no-op Apply to three transaction snapshots", async () => {
     const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
     const h = harness({
       queryWindowsSecuritySnapshot: async (requests) => {
@@ -705,14 +705,8 @@ describe("private repeatable agent configuration", () => {
       agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
     }, origin, models, () => undefined, new AbortController().signal);
 
-    const transaction = batches.filter((batch) => batch[0]!.id.startsWith("snapshot-"));
-    const privateProofs = batches.filter((batch) => batch[0]!.id.startsWith("private-"));
-    expect(batches).toHaveLength(9);
-    expect(transaction).toHaveLength(3);
-    expect(privateProofs).toHaveLength(6);
-    expect(new Set(transaction.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""))).size).toBe(3);
-    expect(privateProofs.every((batch) => batch.length === 1
-      && batch[0]!.path.endsWith("\\settings.json.ghcg.bak"))).toBe(true);
+    expect(batches).toHaveLength(3);
+    expect(new Set(batches.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""))).size).toBe(3);
   }, 180_000);
 
   it.runIf(process.platform === "win32")("keeps exact Codex first, no-op, and reordered snapshot contracts", async () => {

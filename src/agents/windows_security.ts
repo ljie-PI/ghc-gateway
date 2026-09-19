@@ -1,7 +1,7 @@
 import path from "node:path";
 import { queryWindowsSecuritySnapshot, type WindowsSecuritySnapshotFact, type WindowsSecuritySnapshotRequest } from "../security/windows_security_snapshot.js";
 import { AgentError } from "./types.js";
-import { observeSecurityPath, sameSecurityPathIdentity, sameSecurityPathObservation, type SecurityPathSnapshot } from "./files.js";
+import { observeSecurityPath, type SecurityPathSnapshot } from "./files.js";
 
 export type WindowsSecurityQuery = (
   requests: readonly WindowsSecuritySnapshotRequest[],
@@ -12,11 +12,7 @@ export class AgentWindowsSecurity {
 
   constructor(private readonly query: WindowsSecurityQuery = queryWindowsSecuritySnapshot) {}
 
-  async snapshot(
-    paths: readonly string[],
-    pathOnly: readonly string[] = [],
-    kind: "snapshot" | "private" = "snapshot",
-  ): Promise<ReadonlyMap<string, SecurityPathSnapshot>> {
+  async snapshot(paths: readonly string[], pathOnly: readonly string[] = []): Promise<ReadonlyMap<string, SecurityPathSnapshot>> {
     const snapshot = ++this.sequence;
     const requests: WindowsSecuritySnapshotRequest[] = [];
     const observations = new Map<string, ReturnType<typeof observeSecurityPath>>();
@@ -26,8 +22,8 @@ export class AgentWindowsSecurity {
       if (observations.has(normalized)) continue;
       observations.set(normalized, observeSecurityPath(normalized));
       requests.push(pathOnlyKeys.has(normalized)
-        ? { id: `${kind}-${snapshot}-path-${requests.length}`, path: normalized, security: false }
-        : { id: `${kind}-${snapshot}-path-${requests.length}`, path: normalized });
+        ? { id: `snapshot-${snapshot}-path-${requests.length}`, path: normalized, security: false }
+        : { id: `snapshot-${snapshot}-path-${requests.length}`, path: normalized });
     }
     let facts: readonly WindowsSecuritySnapshotFact[];
     try {
@@ -50,23 +46,4 @@ export class AgentWindowsSecurity {
     return snapshot;
   }
 
-  async privateSnapshot(target: string, directory: boolean, validate: () => Promise<void>): Promise<SecurityPathSnapshot> {
-    const before = this.require(await this.snapshot([target], [], "private"), target);
-    await validate();
-    const after = this.require(await this.snapshot([target], [], "private"), target);
-    if (!samePrivateSnapshot(before, after, directory)) throw new AgentError("agent_unsafe_path");
-    return after;
-  }
-
-  samePrivate(left: SecurityPathSnapshot, right: SecurityPathSnapshot, directory: boolean): boolean {
-    return samePrivateSnapshot(left, right, directory);
-  }
-}
-
-function samePrivateSnapshot(left: SecurityPathSnapshot, right: SecurityPathSnapshot, directory: boolean): boolean {
-  return (directory ? sameSecurityPathIdentity(left.observation, right.observation)
-    : sameSecurityPathObservation(left.observation, right.observation))
-    && left.fact.status === "present" && right.fact.status === "present"
-    && !left.fact.reparse && !right.fact.reparse
-    && left.fact.owner === right.fact.owner && left.fact.sddl === right.fact.sddl;
 }
