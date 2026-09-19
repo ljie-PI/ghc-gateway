@@ -136,6 +136,13 @@
   }
 
   function handleKeydown(event: KeyboardEvent): void {
+    if ((event.key === "Home" || event.key === "End")
+      && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      event.preventDefault();
+      const position = event.key === "Home" ? 0 : input.value.length;
+      input.setSelectionRange(position, position);
+      return;
+    }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       if (!open) {
