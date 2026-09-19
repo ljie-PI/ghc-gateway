@@ -136,7 +136,7 @@
   {:else if catalog === null}<p class="notice" role="status">Model catalog unavailable. Sign in if needed, then refresh. Local configuration inspection does not require a Copilot account.</p>{/if}
   <div class="agent-cards">
     {#each orderedItems as status (status.id)}
-      <AgentCard {client} {status} {catalog} {onchanged} />
+      <AgentCard {client} {status} {catalog} {onchanged} {modelsLoading} modelsUnavailable={modelsFailure !== "" || (!modelsLoading && catalog === null)} />
     {/each}
   </div>
 {:else if loading}<p class="loading-line" aria-busy="true">Reading agent configuration...</p>{/if}
