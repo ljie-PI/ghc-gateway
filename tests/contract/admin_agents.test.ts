@@ -217,7 +217,7 @@ describe("Admin agents API", () => {
       expect(await catalogResponse.json()).toMatchObject({ data: {
         catalogRevision: expect.stringMatching(/^[a-f0-9]{64}$/u),
         usableModelIds: ["gpt-test"],
-        items: [{ id: "gpt-test", name: "GPT Test", metadata: { reasoningEfforts: { value: null } } }],
+        items: [{ id: "gpt-test", name: "GPT Test", capabilities: { reasoningLevels: [] } }],
       } });
     } finally {
       await harness.close();

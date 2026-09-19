@@ -19,11 +19,17 @@ const effective = <T>(value: T) => ({ value, source: "live" as const, conflict: 
 const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((modelId) => ({
   modelId,
   protocols: effective(["responses"] as const),
-  maxInputTokens: effective(32000),
-  profile: {
-    chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },
-    supportedParameters: { value: null, source: "unknown", conflict: false, liveState: "missing" },
-    reasoningEfforts: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+  capabilities: {
+    contextWindowTokens: 32000,
+    maxContextWindowTokens: 32000,
+    reasoningLevels: [],
+    reasoningProtocols: [],
+    inputModalities: ["text"],
+    toolCalling: false,
+    parallelToolCalling: false,
+    reasoningSummaries: false,
+    verbosity: false,
+    search: false,
   },
 }));
 const mappings = models.map((model) => ({ displayName: `Label ${model.modelId}`, modelId: model.modelId }));

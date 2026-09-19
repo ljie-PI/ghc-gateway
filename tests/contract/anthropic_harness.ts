@@ -61,10 +61,10 @@ export async function anthropicGateway(options: {
       async fetch() {
         return options.catalogFetch?.() ?? {
           data: [
-            { id: "gpt", name: "GPT", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
-            { id: "o1", name: "O1", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_completion_tokens" } },
-            { id: "gpt-5", name: "GPT 5", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], supported_parameters: ["reasoning_effort"], supported_reasoning_efforts: ["xhigh"], chat_output_token_field: "max_tokens" } },
-            { id: "deepseek-reasoner", name: "DeepSeek", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+            chatModel("gpt", "max_tokens"),
+            chatModel("o1", "max_completion_tokens"),
+            chatModel("gpt-5", "max_tokens", ["xhigh"]),
+            chatModel("deepseek-reasoner", "max_tokens"),
           ],
         };
       },
@@ -122,6 +122,27 @@ export async function anthropicGateway(options: {
       },
     };
   });
+}
+
+function chatModel(
+  id: string,
+  chatOutputTokenField: "max_tokens" | "max_completion_tokens",
+  reasoningEffort?: readonly string[],
+) {
+  return {
+    id, name: id, vendor: "github", model_picker_enabled: true,
+    model_info: {
+      supported_endpoints: ["/chat/completions"],
+      chat_output_token_field: chatOutputTokenField,
+      ...(reasoningEffort === undefined ? {} : {
+        supported_parameters: ["reasoning_effort"], supported_reasoning_efforts: reasoningEffort,
+      }),
+    },
+    capabilities: { supports: {
+      tool_calls: true, parallel_tool_calls: true, vision: true,
+      ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
+    } },
+  };
 }
 
 export function anthropicRequest(body: unknown, headers: HeadersInit = {}): Request {

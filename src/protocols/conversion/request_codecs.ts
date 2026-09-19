@@ -1,6 +1,5 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
-import { supportsReasoningParameter } from "./routing.js";
-import { chooseOutputTokenBudget } from "../../copilot/model_capabilities.js";
+import { chooseOutputTokenBudget, supportsModelReasoning } from "../../copilot/model_capabilities.js";
 import {
   duplicateMemberNames,
   isWireJsonArray,
@@ -1519,11 +1518,7 @@ function supportsTargetReasoning(
   target: InferenceProtocol,
   reasoning: SemanticReasoning | undefined,
 ): boolean {
-  if (!supportsReasoningParameter(target, capability.profile.supportedParameters.value)) {
-    return false;
-  }
-  return reasoning?.effort === undefined
-    || capability.profile.reasoningEfforts.value?.includes(reasoning.effort) === true;
+  return supportsModelReasoning(capability.capabilities, target, reasoning?.effort);
 }
 
 function validateConditionalTargetParameters(

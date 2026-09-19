@@ -32,7 +32,7 @@ export interface AgentApplyRequest {
   readonly catalogRevision: string;
   readonly mappings: readonly AgentMapping[];
 }
-export type AgentModel = Pick<EffectiveModelCapabilitySnapshot, "modelId" | "protocols" | "maxInputTokens" | "profile">;
+export type AgentModel = Pick<EffectiveModelCapabilitySnapshot, "modelId" | "protocols" | "capabilities">;
 export interface AgentsManager {
   inspect(origin: string): Promise<readonly AgentStatus[]>;
   apply(request: AgentApplyRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus>;

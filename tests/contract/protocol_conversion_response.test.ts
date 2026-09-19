@@ -4811,6 +4811,18 @@ function responseCapability(): EffectiveModelCapabilitySnapshot {
       source: "live",
       valid: true,
     },
+    capabilities: {
+      contextWindowTokens: 128_000,
+      maxContextWindowTokens: 128_000,
+      reasoningLevels: [],
+      reasoningProtocols: [],
+      inputModalities: ["text", "image"],
+      toolCalling: true,
+      parallelToolCalling: true,
+      reasoningSummaries: false,
+      verbosity: false,
+      search: false,
+    },
     profile: {
       chatOutputTokenField: { value: "max_tokens", source: "live", conflict: false, liveState: "value" },
       supportedParameters: { value: [], source: "live", conflict: false, liveState: "value" },

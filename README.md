@@ -83,9 +83,9 @@ ghcg models set <model-id>
 
 Preferred models are account-specific. If a catalog refresh removes a preferred model, it is marked invalid and must be explicitly reselected. The gateway never silently selects the first model.
 
-The Models Admin view shows read-only account-scoped native HTTP capabilities for Chat, Messages, and Responses, including metadata sources, conflicts, token limits, context windows, supported parameters, and reasoning efforts. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
+The Models Admin view shows read-only account-scoped native HTTP interfaces, token and context limits, reasoning levels, input modalities, tool calling, reasoning summaries, verbosity, and search support. These capabilities are catalog declarations used by the Gateway, not live inference validation. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
 
-Unknown or malformed capability declarations remain unknown. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
+Unknown or malformed boolean capability declarations fail closed as not supported; unknown protocols and numeric limits remain unavailable. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
 
 For conversions that require an output-token value, an explicit valid request value wins. Otherwise the model's upstream or built-in default is used, followed by `min(8192, known output ceiling)` or `4096` when the ceiling is unknown. Invalid explicit request values are not replaced by a default.
 
@@ -149,7 +149,8 @@ captured native or converted route without exposing credentials or request/respo
 
 Routing uses the bound account's immutable model-capability snapshot. A matching native HTTP
 protocol is selected first and preserves protocol extensions. Otherwise the gateway evaluates
-conversion compatibility without making an inference call, then uses these fixed priorities:
+conversion compatibility without making an inference call. For requests with reasoning, a target
+that declares the requested level is preferred; remaining compatible targets use these priorities:
 
 - Chat: Responses, then Messages
 - Messages: Chat, then Responses

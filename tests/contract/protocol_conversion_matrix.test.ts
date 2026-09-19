@@ -1124,6 +1124,15 @@ function model(id: string, supportedEndpoints: string[]) {
       ],
       supported_reasoning_efforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
     },
+    capabilities: {
+      supports: {
+        reasoning_effort: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        tool_calls: true,
+        parallel_tool_calls: true,
+        vision: true,
+        tool_search: true,
+      },
+    },
   };
 }
 

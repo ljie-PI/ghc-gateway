@@ -827,9 +827,9 @@ describe("Responses endpoint", () => {
           }
           return {
             data: [
-              { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] } },
-              { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
-              { id: "dual", name: "Dual", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses", "/chat/completions"], chat_output_token_field: "max_tokens" } },
+              endpointModel("native", ["/responses"]),
+              endpointModel("chat", ["/chat/completions"], "max_tokens"),
+              endpointModel("dual", ["/responses", "/chat/completions"], "max_tokens"),
             ],
           };
         },
@@ -871,6 +871,23 @@ describe("Responses endpoint", () => {
         },
       };
     });
+  }
+
+  function endpointModel(
+    id: string,
+    supportedEndpoints: readonly string[],
+    chatOutputTokenField?: "max_tokens" | "max_completion_tokens",
+  ) {
+    return {
+      id, name: id, vendor: "github", model_picker_enabled: true,
+      model_info: {
+        supported_endpoints: supportedEndpoints,
+        ...(chatOutputTokenField === undefined ? {} : { chat_output_token_field: chatOutputTokenField }),
+      },
+      capabilities: { supports: {
+        tool_calls: true, parallel_tool_calls: true, vision: true, tool_search: true,
+      } },
+    };
   }
 
   function deeplyNestedToolOutput(depth: number): unknown {

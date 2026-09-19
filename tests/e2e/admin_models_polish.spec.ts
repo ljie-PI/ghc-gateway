@@ -7,10 +7,10 @@ test("Models is a read-only directory with shared capability fields", async ({ p
   const fixture = await openModels(page);
   await expect(page.getByRole("columnheader")).toHaveText(["Model", "Native interfaces", "Per-request token limits"]);
   await expect(page.getByRole("button", { name: /preferred/i })).toHaveCount(0);
-  await page.locator("tbody").first().getByText("Capability details", { exact: true }).click();
+  await page.locator("tbody").first().getByText("Model capabilities", { exact: true }).click();
   await expect(page.locator("tbody").first()).toContainText("Context window");
   await expect(page.locator("tbody").first()).toContainText("144,000");
-  await expect(page.locator("tbody").first()).toContainText("temperature");
+  await expect(page.locator("tbody").first()).toContainText("Parallel tool calling");
   expect(fixture.requests.some((request) => request.url().endsWith("/models/preferred"))).toBe(false);
 });
 
@@ -282,20 +282,24 @@ function metadataCases(fixture: AdminFixture): void {
       base,
       {
         ...base, id: "upstream-conflict", name: "Upstream conflict",
-        protocols: ["messages"], protocolsSource: "live", protocolsConflict: true,
+        protocols: ["messages"],
       },
       {
         ...base, id: "discovered-builtin", name: "Discovered built-in",
-        protocolsSource: "builtin", protocolsLiveState: "missing",
       },
       {
         ...base, id: "unknown-model", name: "Unknown model", protocols: null,
-        protocolsSource: "unknown", protocolsLiveState: "malformed",
-        maxInputTokens: null, maxInputTokensSource: "unknown", maxInputTokensLiveState: "missing",
-        maxOutputTokens: null, maxOutputTokensSource: "unknown", maxOutputTokensLiveState: "malformed",
-        defaultOutputTokens: {
-          configured: null, configuredSource: "unknown", conflict: false, liveState: "missing",
-          effective: 4096, source: "unknown_fallback", valid: true,
+        maxInputTokens: null, maxOutputTokens: null,
+        capabilities: {
+          ...base.capabilities,
+          contextWindowTokens: null,
+          maxContextWindowTokens: null,
+          reasoningLevels: [],
+          reasoningProtocols: [],
+          inputModalities: ["text"],
+          toolCalling: false,
+          parallelToolCalling: false,
+          reasoningSummaries: false,
         },
       },
     ],
@@ -327,26 +331,21 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
   });
 }
 
-test("models distinguish catalog membership from native protocol metadata sources", async ({ page }) => {
+test("models explain catalog evidence without exposing internal diagnostics", async ({ page }) => {
   await openModels(page, metadataCases);
-  await expect(page.getByText("Only models discovered", { exact: false })).toContainText("upstream catalog");
-  await expect(page.getByText("Capability details show", { exact: false })).toContainText("not live inference validation");
-  for (const [id, labels] of [
-    ["gpt-alpha", "Upstream"],
-    ["upstream-conflict", "Upstream · Conflict"],
-    ["discovered-builtin", "Built-in"],
-    ["unknown-model", "Unknown"],
-  ] as const) {
+  await expect(page.getByText("Only models discovered", { exact: false })).toContainText("account catalog");
+  await expect(page.getByText("Capabilities are catalog declarations", { exact: false })).toContainText("not live inference validation");
+  for (const id of ["gpt-alpha", "upstream-conflict", "discovered-builtin", "unknown-model"] as const) {
     const model = page.locator(`tbody[data-model-id="${id}"]`);
-    await model.getByText("Capability details", { exact: true }).click();
-    await expect(model.locator("dl")).toContainText(labels);
+    await model.getByText("Model capabilities", { exact: true }).click();
+    await expect(model.locator("dl")).not.toContainText(/Upstream|Present|Missing|Malformed|Built-in|Conflict/u);
   }
 });
 
 test("models label per-request token ceilings and retain unknowns and budget details", async ({ page }) => {
   await openModels(page, metadataCases);
   await expect(page.getByRole("columnheader", { name: "Per-request token limits" })).toBeVisible();
-  await page.getByText("About sources and token limits", { exact: true }).click();
+  await page.getByText("About model capabilities and token limits", { exact: true }).click();
   await expect(page.getByText("Token limits apply to each request, not account quota.")).toBeVisible();
   const known = page.locator("tbody[data-model-id=\"gpt-alpha\"]");
   await expect(known.getByRole("row").first()).toContainText(`Max input: ${(128000).toLocaleString("en-US")}`);
@@ -354,22 +353,18 @@ test("models label per-request token ceilings and retain unknowns and budget det
   const unknown = page.locator("tbody[data-model-id=\"unknown-model\"]");
   await expect(unknown.getByRole("row").first()).toContainText("Max input: Unknown");
   await expect(unknown.getByRole("row").first()).toContainText("Max output: Unknown");
-  await unknown.getByText("Capability details").click();
-  await expect(unknown.locator("dl")).toContainText("Default output");
-  await expect(unknown.locator("dl")).toContainText((4096).toLocaleString("en-US"));
-  await expect(unknown.locator("dl")).toContainText("Unknown ceiling fallback");
-  await expect(unknown.locator("dl")).toContainText("Chat budget field");
-  await expect(unknown.locator("dl")).toContainText("max_tokens");
-  await expect(unknown.locator("dl")).toContainText("Malformed");
+  await unknown.getByText("Model capabilities").click();
+  await expect(unknown.locator("dl")).toContainText("Context windowUnavailable");
+  await expect(unknown.locator("dl")).toContainText("Tool callingNot supported");
   await expect(unknown.locator("input, select, fieldset")).toHaveCount(0);
 });
 
 test("models allow inspection without metadata editing or preference actions", async ({ page }) => {
   const fixture = await openModels(page);
   const model = page.locator("tbody[data-model-id=\"claude-beta\"]");
-  await model.getByText("Capability details", { exact: true }).click();
+  await model.getByText("Model capabilities", { exact: true }).click();
   await expect(model.locator("dl")).toContainText("Native HTTP protocols");
-  await expect(model.locator("dl")).toContainText("Built-in revision");
+  await expect(model.locator("dl")).not.toContainText("Built-in revision");
   await expect(page.locator("main input, main fieldset, main form")).toHaveCount(0);
   await expect(page.getByRole("textbox")).toHaveCount(0);
   await expect(model.getByRole("button")).toHaveCount(0);

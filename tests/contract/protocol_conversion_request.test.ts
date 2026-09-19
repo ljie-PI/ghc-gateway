@@ -649,15 +649,7 @@ describe("shared conversion request codecs", () => {
     const base = capability([target]);
     const unsupportedReasoning = {
       ...base,
-      profile: {
-        ...base.profile,
-        supportedParameters: {
-          value: [],
-          source: "live" as const,
-          conflict: false,
-          liveState: "value" as const,
-        },
-      },
+      capabilities: { ...base.capabilities, reasoningProtocols: [] },
     };
     const converted = prepareConvertedRequest(source, target, body(request), "target", unsupportedReasoning);
     expect(converted.degradations).toContain("reasoning.presentation_omitted");
@@ -669,15 +661,7 @@ describe("shared conversion request codecs", () => {
     const base = capability(["chat"]);
     const lowOnly = {
       ...base,
-      profile: {
-        ...base.profile,
-        reasoningEfforts: {
-          value: ["low"] as const,
-          source: "live" as const,
-          conflict: false,
-          liveState: "value" as const,
-        },
-      },
+      capabilities: { ...base.capabilities, reasoningLevels: ["low"] as const },
     };
     const converted = prepareConvertedRequest("messages", "chat", body({
       model: "source",
@@ -687,6 +671,32 @@ describe("shared conversion request codecs", () => {
     }), "target", lowOnly);
     expect(converted.degradations).toContain("reasoning.presentation_omitted");
     expect(decoded(converted.bytes)).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("prefers a target that supports the requested reasoning level", () => {
+    const base = capability(["chat", "messages"]);
+    const plan = planProtocolExecution({
+      source: "responses",
+      body: body({
+        model: "source",
+        input: "hi",
+        reasoning: { effort: "high" },
+      }),
+      stream: false,
+      resolvedModel: "target",
+      capability: {
+        ...base,
+        capabilities: {
+          ...base.capabilities,
+          reasoningLevels: ["high"],
+          reasoningProtocols: ["messages"],
+        },
+      },
+    });
+    expect(plan).toMatchObject({ kind: "converted", target: "messages" });
+    expect(plan.kind === "converted" ? decoded(plan.request.bytes) : null).toMatchObject({
+      output_config: { effort: "high" },
+    });
   });
 
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {
@@ -1570,6 +1580,18 @@ function capability(
       effective: defaultTokens ?? (maxTokens === null ? 4096 : Math.min(8192, maxTokens)),
       source: defaultTokens === null ? (maxTokens === null ? "unknown_fallback" : "known_ceiling") : "live",
       valid: true,
+    },
+    capabilities: {
+      contextWindowTokens: 128_000,
+      maxContextWindowTokens: 128_000,
+      reasoningLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      reasoningProtocols: protocols,
+      inputModalities: ["text", "image"],
+      toolCalling: true,
+      parallelToolCalling: true,
+      reasoningSummaries: false,
+      verbosity: false,
+      search: false,
     },
     profile: {
       chatOutputTokenField: { value: tokenField, source: "live", conflict: false, liveState: "value" },

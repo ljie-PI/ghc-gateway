@@ -559,6 +559,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
           vendor: "scripted",
           model_picker_enabled: true,
           model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" },
+          capabilities: { supports: { tool_calls: true, parallel_tool_calls: true, vision: true } },
         }],
       };
     },

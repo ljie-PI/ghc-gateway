@@ -235,6 +235,18 @@ function capabilityModel(modelId: string) {
       source: "known_ceiling" as const,
       valid: true,
     },
+    capabilities: {
+      contextWindowTokens: 200_000,
+      maxContextWindowTokens: 200_000,
+      reasoningLevels: [],
+      reasoningProtocols: [],
+      inputModalities: ["text"] as const,
+      toolCalling: false,
+      parallelToolCalling: false,
+      reasoningSummaries: false,
+      verbosity: false,
+      search: false,
+    },
     profile: {
       chatOutputTokenField: {
         value: "max_tokens" as const,

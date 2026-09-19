@@ -98,19 +98,19 @@ for (const width of [1440, 1100, 900, 851, 850, 601, 600, 390, 320]) {
         expect(verification!.height).toBeGreaterThanOrEqual(44);
       }
       if (view === "Models") {
-        await page.getByText("About sources and token limits", { exact: true }).click();
-        await page.getByText("Capability details", { exact: true }).first().click();
+        await page.getByText("About model capabilities and token limits", { exact: true }).click();
+        await page.getByText("Model capabilities", { exact: true }).first().click();
         await expect(page.locator("td").first()).toHaveCSS("font-size", "14px");
         const details = page.locator(".model-details[open]").first();
         await expect(details.locator("input, select, textarea")).toHaveCount(0);
-        const budget = details.locator("dl > div")
-          .filter({ has: page.getByText("Chat budget field", { exact: true }) }).locator("dd");
-        await expect(budget).toBeVisible();
-        await expect(budget).toContainText("max_tokens");
-        const budgetTextFits = await budget.evaluate((element) => (
+        const modalities = details.locator("dl > div")
+          .filter({ has: page.getByText("Input modalities", { exact: true }) }).locator("dd");
+        await expect(modalities).toBeVisible();
+        await expect(modalities).toContainText("text, image");
+        const modalitiesTextFits = await modalities.evaluate((element) => (
           element.scrollWidth <= element.clientWidth + 1 && element.scrollHeight <= element.clientHeight + 1
         ));
-        expect(budgetTextFits, "read-only Chat budget metadata remains readable without clipping").toBe(true);
+        expect(modalitiesTextFits, "read-only model capability values remain readable without clipping").toBe(true);
       }
       if (view === "Events") await page.getByRole("list", { name: "Operational events" }).locator("summary").first().click();
       if (await page.locator("h2").count()) await expect(page.locator("h2").first()).toHaveCSS("font-size", "20px");

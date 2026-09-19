@@ -6,10 +6,7 @@ import type { BoundAccount } from "../accounts/account_directory.js";
 import type { ModelCapabilityRegistry } from "../copilot/capability_registry.js";
 import type {
   NativeModelProtocol,
-  CapabilitySource,
-  CapabilityFieldState,
-  ChatOutputTokenField,
-  ModelCapabilityProfile,
+  ModelCapabilities,
 } from "../copilot/model_capabilities.js";
 import { RUNTIME_CONFIG_RANGES } from "../config/schema.js";
 import type { GatewayActivity } from "../gateway/create_gateway.js";
@@ -114,33 +111,10 @@ export interface AdminModels {
     readonly id: string;
     readonly name: string;
     readonly vendor: string;
-    readonly metadata: ModelCapabilityProfile;
+    readonly capabilities: ModelCapabilities;
     readonly protocols: readonly NativeModelProtocol[] | null;
-    readonly protocolsSource: CapabilitySource;
-    readonly protocolsConflict: boolean;
-    readonly protocolsLiveState: CapabilityFieldState;
     readonly maxInputTokens: number | null;
-    readonly maxInputTokensSource: CapabilitySource;
-    readonly maxInputTokensConflict: boolean;
-    readonly maxInputTokensLiveState: CapabilityFieldState;
     readonly maxOutputTokens: number | null;
-    readonly maxOutputTokensSource: CapabilitySource;
-    readonly maxOutputTokensConflict: boolean;
-    readonly maxOutputTokensLiveState: CapabilityFieldState;
-    readonly defaultOutputTokens: {
-      readonly configured: number | null;
-      readonly configuredSource: CapabilitySource;
-      readonly conflict: boolean;
-      readonly liveState: CapabilityFieldState;
-      readonly effective: number;
-      readonly source: CapabilitySource | "known_ceiling" | "unknown_fallback";
-      readonly valid: boolean;
-    };
-    readonly chatOutputTokenField: ChatOutputTokenField | null;
-    readonly chatOutputTokenFieldSource: CapabilitySource;
-    readonly chatOutputTokenFieldConflict: boolean;
-    readonly chatOutputTokenFieldLiveState: CapabilityFieldState;
-    readonly builtinRevision: string | null;
   }[];
 }
 
@@ -623,33 +597,10 @@ export class AdminManagementApi {
         id: model.modelId,
         name: model.name,
         vendor: model.vendor,
-        metadata: model.profile,
+        capabilities: model.capabilities,
         protocols: model.protocols.value,
-        protocolsSource: model.protocols.source,
-        protocolsConflict: model.protocols.conflict,
-        protocolsLiveState: model.protocols.liveState,
         maxInputTokens: model.maxInputTokens.value,
-        maxInputTokensSource: model.maxInputTokens.source,
-        maxInputTokensConflict: model.maxInputTokens.conflict,
-        maxInputTokensLiveState: model.maxInputTokens.liveState,
         maxOutputTokens: model.maxOutputTokens.value,
-        maxOutputTokensSource: model.maxOutputTokens.source,
-        maxOutputTokensConflict: model.maxOutputTokens.conflict,
-        maxOutputTokensLiveState: model.maxOutputTokens.liveState,
-        defaultOutputTokens: {
-          configured: model.defaultOutputTokens.configuration.value,
-          configuredSource: model.defaultOutputTokens.configuration.source,
-          conflict: model.defaultOutputTokens.configuration.conflict,
-          liveState: model.defaultOutputTokens.configuration.liveState,
-          effective: model.defaultOutputTokens.effective,
-          source: model.defaultOutputTokens.source,
-          valid: model.defaultOutputTokens.valid,
-        },
-        chatOutputTokenField: model.profile.chatOutputTokenField.value,
-        chatOutputTokenFieldSource: model.profile.chatOutputTokenField.source,
-        chatOutputTokenFieldConflict: model.profile.chatOutputTokenField.conflict,
-        chatOutputTokenFieldLiveState: model.profile.chatOutputTokenField.liveState,
-        builtinRevision: model.revision.builtinRevision,
       })),
     };
   }

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { parse, stringify, type TomlTable } from "smol-toml";
-import { protocolTargets, supportsReasoningParameter } from "../protocols/conversion/routing.js";
+import { supportsModelReasoning } from "../copilot/model_capabilities.js";
+import { protocolTargets } from "../protocols/conversion/routing.js";
 import { AgentError, validateMappings, type AgentId, type AgentMapping, type AgentModel } from "./types.js";
 
 export interface AgentProjection {
@@ -118,26 +119,30 @@ function projectCodex(
     "model_auto_compact_token_limit", "model_supports_reasoning_summaries", "review_model", "service_tier"]) delete config[key];
   const catalog = { models: mappings.map((mapping, index) => {
     const model = models.find((item) => item.modelId === mapping.modelId)!;
-    const fullContext = model.profile.contextWindowTokens?.value ?? null;
-    const inputLimit = model.maxInputTokens.value;
-    const limit = inputLimit === null ? null
-      : fullContext === null ? inputLimit : Math.min(inputLimit, fullContext);
-    const target = model.protocols.value === null ? null : protocolTargets("responses", model.protocols.value)[0] ?? null;
-    const supportsReasoning = target !== null
-      && supportsReasoningParameter(target, model.profile.supportedParameters.value);
+    const targets = model.protocols.value === null ? [] : protocolTargets("responses", model.protocols.value);
+    const target = targets.find((candidate) => supportsModelReasoning(model.capabilities, candidate)) ?? targets[0] ?? null;
+    const reasoningLevels = target !== null && supportsModelReasoning(model.capabilities, target)
+      ? model.capabilities.reasoningLevels
+      : [];
     return {
       slug: mapping.modelId, display_name: mapping.displayName, description: mapping.displayName,
       base_instructions: "You are Codex, a coding agent. Help the user with their coding tasks.",
-      supported_reasoning_levels: (supportsReasoning ? model.profile.reasoningEfforts.value ?? [] : []).map((effort) => ({
+      supported_reasoning_levels: reasoningLevels.map((effort) => ({
         effort, description: effort.charAt(0).toUpperCase() + effort.slice(1),
       })),
       shell_type: "shell_command", visibility: "list", supported_in_api: true,
-      priority: index, support_verbosity: false, supports_reasoning_summaries: false,
-      supports_reasoning_summary_parameter: false, supports_parallel_tool_calls: false,
-      supports_image_detail_original: false, supports_search_tool: false,
+      priority: index, support_verbosity: model.capabilities.verbosity,
+      supports_reasoning_summaries: model.capabilities.reasoningSummaries,
+      supports_reasoning_summary_parameter: model.capabilities.reasoningSummaries,
+      supports_parallel_tool_calls: model.capabilities.parallelToolCalling,
+      supports_image_detail_original: model.capabilities.inputModalities.includes("image"),
+      supports_search_tool: model.capabilities.search,
       truncation_policy: { mode: "bytes", limit: 10000 },
-      experimental_supported_tools: [], input_modalities: ["text"],
-      ...(limit === null ? {} : { context_window: limit, max_context_window: fullContext ?? limit }),
+      experimental_supported_tools: [], input_modalities: model.capabilities.inputModalities,
+      ...(model.capabilities.contextWindowTokens === null ? {} : {
+        context_window: model.capabilities.contextWindowTokens,
+        max_context_window: model.capabilities.maxContextWindowTokens ?? model.capabilities.contextWindowTokens,
+      }),
     };
   }) };
   const result = stringify(config);

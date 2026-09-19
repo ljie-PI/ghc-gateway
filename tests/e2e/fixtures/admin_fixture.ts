@@ -221,36 +221,19 @@ function modelItem(input: {
 }): AdminModels["items"][number] {
   return {
     ...input,
-    metadata: {
-      chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
-      supportedParameters: { value: ["temperature"], source: "live", conflict: false, liveState: "value" },
-      reasoningEfforts: { value: ["none", "high"], source: "live", conflict: false, liveState: "value" },
-      contextWindowTokens: { value: 144000, source: "live", conflict: false, liveState: "value" },
+    capabilities: {
+      contextWindowTokens: input.maxInputTokens,
+      maxContextWindowTokens: 144000,
+      reasoningLevels: ["none", "high"],
+      reasoningProtocols: ["chat", "responses"],
+      inputModalities: ["text", "image"],
+      toolCalling: true,
+      parallelToolCalling: true,
+      reasoningSummaries: true,
+      verbosity: false,
+      search: false,
     },
     protocols: ["chat", "responses"],
-    protocolsSource: "live",
-    protocolsConflict: false,
-    protocolsLiveState: "value",
-    maxInputTokensSource: "builtin",
-    maxInputTokensConflict: false,
-    maxInputTokensLiveState: "missing",
-    maxOutputTokensSource: "builtin",
-    maxOutputTokensConflict: false,
-    maxOutputTokensLiveState: "missing",
-    defaultOutputTokens: {
-      configured: null,
-      configuredSource: "unknown",
-      conflict: false,
-      liveState: "missing",
-      effective: Math.min(8192, input.maxOutputTokens),
-      source: "known_ceiling",
-      valid: true,
-    },
-    chatOutputTokenField: "max_tokens",
-    chatOutputTokenFieldSource: "builtin",
-    chatOutputTokenFieldConflict: false,
-    chatOutputTokenFieldLiveState: "missing",
-    builtinRevision: "test",
   };
 }
 

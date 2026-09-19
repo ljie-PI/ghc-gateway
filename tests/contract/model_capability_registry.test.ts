@@ -84,7 +84,7 @@ describe("model capability registry", () => {
           source: "live",
         },
         reasoningEfforts: {
-          value: ["high", "low"],
+          value: ["low", "high"],
           source: "live",
         },
       },
@@ -95,6 +95,83 @@ describe("model capability registry", () => {
       liveState: "malformed",
     });
     expect(capability(snapshot, "equivalent-order").protocols.value).toEqual(["chat", "responses"]);
+  });
+
+  it("builds one conservative provider-neutral capability value from current declarations", async () => {
+    const harness = await createHarness({
+      "github.com/1": [
+        {
+          id: "complete", name: "Complete", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses", "/chat/completions"],
+          supported_reasoning_efforts: ["xhigh", "none", "medium", "low", "low"],
+          capabilities: {
+            limits: { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000 },
+            supports: {
+              reasoning_effort: ["xhigh", "none", "medium", "low", "low"],
+              tool_calls: true,
+              parallel_tool_calls: true,
+              vision: true,
+              reasoning_summaries: true,
+              verbosity: true,
+              search: true,
+            },
+          },
+        },
+        {
+          id: "false", name: "False", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          supported_reasoning_efforts: ["high"],
+          capabilities: { supports: {
+            reasoning_effort: [], tool_calls: false, parallel_tool_calls: false, vision: false,
+          } },
+        },
+        {
+          id: "malformed", name: "Malformed", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          supported_reasoning_efforts: ["high"],
+          capabilities: { supports: {
+            reasoning_effort: "high", tool_calls: 1, parallel_tool_calls: null, vision: [],
+          } },
+        },
+        {
+          id: "conflict", name: "Conflict", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          supported_reasoning_efforts: ["low"],
+          capabilities: { supports: {
+            reasoning_effort: ["high"],
+            reasoning_summaries: true, reasoning_summary: false,
+            search: true, web_search: false,
+          } },
+        },
+        {
+          id: "bad-container", name: "Bad container", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: { supports: null },
+        },
+      ],
+    });
+    const snapshot = await harness.registry.get(harness.account1, signal);
+    expect(capability(snapshot, "complete").capabilities).toEqual({
+      contextWindowTokens: 128_000,
+      maxContextWindowTokens: 144_000,
+      reasoningLevels: ["none", "low", "medium", "xhigh"],
+      reasoningProtocols: ["chat", "responses"],
+      inputModalities: ["text", "image"],
+      toolCalling: true,
+      parallelToolCalling: true,
+      reasoningSummaries: true,
+      verbosity: true,
+      search: true,
+    });
+    for (const id of ["false", "malformed", "bad-container"]) {
+      expect(capability(snapshot, id).capabilities).toMatchObject({
+        reasoningLevels: [], reasoningProtocols: [], inputModalities: ["text"],
+        toolCalling: false, parallelToolCalling: false,
+      });
+    }
+    expect(capability(snapshot, "conflict").capabilities).toMatchObject({
+      reasoningLevels: [], reasoningProtocols: [], reasoningSummaries: false, search: false,
+    });
   });
 
   it("applies field precedence without unioning conflicts or replacing explicit empty values", async () => {

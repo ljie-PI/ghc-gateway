@@ -101,22 +101,22 @@ describe("Admin API", () => {
       expect(response.items.map((item) => ({
         id: item.id,
         value: item.maxInputTokens,
-        source: item.maxInputTokensSource,
-        conflict: item.maxInputTokensConflict,
-        liveState: item.maxInputTokensLiveState,
       }))).toEqual([
-        { id: "explicit", value: 128_000, source: "live", conflict: false, liveState: "value" },
-        { id: "context-only", value: 144_000, source: "live", conflict: false, liveState: "value" },
-        { id: "malformed", value: null, source: "unknown", conflict: false, liveState: "malformed" },
+        { id: "explicit", value: 128_000 },
+        { id: "context-only", value: 144_000 },
+        { id: "malformed", value: null },
       ]);
       for (const item of response.items) {
         expect(item).toMatchObject({
-          protocols: ["responses"], protocolsSource: "live", protocolsLiveState: "value",
-          maxOutputTokens: 16_000, maxOutputTokensSource: "live", maxOutputTokensConflict: false, maxOutputTokensLiveState: "value",
-          defaultOutputTokens: { configured: 8000, effective: 8000, source: "live", valid: true },
-          chatOutputTokenField: "max_completion_tokens", chatOutputTokenFieldSource: "live",
+          protocols: ["responses"], maxOutputTokens: 16_000,
         });
+        expect(item).not.toHaveProperty("protocolsSource");
+        expect(item).not.toHaveProperty("defaultOutputTokens");
+        expect(item).not.toHaveProperty("chatOutputTokenField");
+        expect(item).not.toHaveProperty("builtinRevision");
       }
+      expect(response.items.map((item) => (item.capabilities as Record<string, unknown>).contextWindowTokens))
+        .toEqual([128_000, 144_000, null]);
     } finally {
       await harness.close();
       await catalog.close();

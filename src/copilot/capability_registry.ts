@@ -6,8 +6,10 @@ import {
   sameProtocols,
   UNKNOWN_DECLARATIONS,
   type BuiltinModelCapabilityLookup,
+  type DeclaredModelCapabilities,
   type EffectiveCapabilityField,
   type EffectiveOutputDefault,
+  type ModelCapabilities,
   type ModelCapabilityProfile,
   type NativeModelProtocol,
 } from "./model_capabilities.js";
@@ -21,6 +23,7 @@ export interface EffectiveModelCapabilitySnapshot {
   readonly maxInputTokens: EffectiveCapabilityField<number>;
   readonly maxOutputTokens: EffectiveCapabilityField<number>;
   readonly defaultOutputTokens: EffectiveOutputDefault;
+  readonly capabilities: ModelCapabilities;
   readonly profile: ModelCapabilityProfile;
   readonly revision: {
     readonly credentialGeneration: number;
@@ -131,6 +134,24 @@ export class ModelCapabilityRegistry {
       live.defaultOutputTokens,
       fallback.defaultOutputTokens,
     );
+    const contextWindowTokens = effectiveField(live.contextWindowTokens, fallback.contextWindowTokens);
+    const effectiveProtocols = protocols.value ?? [];
+    const reasoningProtocols = reasoningEfforts.value === null
+      ? []
+      : effectiveReasoningProtocols(
+        effectiveProtocols,
+        supportedParameters,
+        effectiveField(live.reasoningEffort, fallback.reasoningEffort),
+      );
+    const reasoningLevels = reasoningProtocols.length === 0 ? [] : reasoningEfforts.value ?? [];
+    const toolCalling = supportedBoolean(live.toolCalls, fallback.toolCalls);
+    const parallelToolCalling = toolCalling
+      && supportedBoolean(live.parallelToolCalls, fallback.parallelToolCalls);
+    const contextLimit = maxInputTokens.value === null
+      ? null
+      : contextWindowTokens.value === null
+        ? maxInputTokens.value
+        : Math.min(maxInputTokens.value, contextWindowTokens.value);
     return deepFreeze({
       accountId: account.accountId,
       modelId: model.id,
@@ -143,9 +164,23 @@ export class ModelCapabilityRegistry {
         defaultOutputTokens,
         maxOutputTokens.value,
       ),
+      capabilities: {
+        contextWindowTokens: contextLimit,
+        maxContextWindowTokens: contextWindowTokens.value ?? contextLimit,
+        reasoningLevels,
+        reasoningProtocols,
+        inputModalities: supportedBoolean(live.vision, fallback.vision)
+          ? ["text", "image"]
+          : ["text"],
+        toolCalling,
+        parallelToolCalling,
+        reasoningSummaries: supportedBoolean(live.reasoningSummaries, fallback.reasoningSummaries),
+        verbosity: supportedBoolean(live.verbosity, fallback.verbosity),
+        search: supportedBoolean(live.search, fallback.search),
+      },
       profile: {
         chatOutputTokenField, supportedParameters, reasoningEfforts,
-        contextWindowTokens: effectiveField(live.contextWindowTokens, fallback.contextWindowTokens),
+        contextWindowTokens,
       },
       revision: {
         credentialGeneration: account.credentialGeneration,
@@ -171,4 +206,32 @@ function deepFreeze<T>(value: T): T {
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+const REASONING_PARAMETERS: Readonly<Record<NativeModelProtocol, readonly string[]>> = {
+  chat: ["reasoning_effort"],
+  messages: ["output_config.effort", "output_config"],
+  responses: ["reasoning", "reasoning.effort"],
+};
+
+function effectiveReasoningProtocols(
+  protocols: readonly NativeModelProtocol[],
+  supportedParameters: EffectiveCapabilityField<readonly string[]>,
+  declaredSupport: EffectiveCapabilityField<boolean>,
+): readonly NativeModelProtocol[] {
+  if (declaredSupport.liveState === "malformed" || declaredSupport.value === false) {
+    return [];
+  }
+  if (declaredSupport.value === true) {
+    return protocols;
+  }
+  return protocols.filter((protocol) => REASONING_PARAMETERS[protocol]
+    .some((parameter) => supportedParameters.value?.includes(parameter) === true));
+}
+
+function supportedBoolean(
+  live: DeclaredModelCapabilities["toolCalls"],
+  builtin: DeclaredModelCapabilities["toolCalls"],
+): boolean {
+  return effectiveField(live, builtin).value === true;
 }
