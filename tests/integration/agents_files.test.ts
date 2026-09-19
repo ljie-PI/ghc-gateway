@@ -305,15 +305,29 @@ describe("private repeatable agent configuration", () => {
     expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
   });
 
-  it.skipIf(process.platform === "win32")("rejects a hard-linked legacy state database", async () => {
+  it("rejects a hard-linked legacy state database", async () => {
     const h = harness();
     const state = { version: 2 as const, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null };
     await saveState(legacyStateRoot(h.home), "codex", state);
     const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
-    fs.linkSync(legacyState, path.join(h.home, "state-alias.db"));
+    const alias = path.join(h.home, "state-alias.db");
+    fs.linkSync(legacyState, alias);
     expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
-    expect(() => new DatabaseSync(path.join(h.home, "state-alias.db"), { readOnly: true })).not.toThrow();
+    expect(fs.lstatSync(alias).nlink).toBe(2);
   });
+
+  it("rejects hard-linked current state and migration marker databases", async () => {
+    for (const target of ["current", "marker"] as const) {
+      const h = harness();
+      await apply(h.manager, "codex");
+      const file = target === "current"
+        ? path.join(stateRoot(h.home), "codex", "state.db")
+        : path.join(legacyStateRoot(h.home), "codex", "state.db");
+      fs.linkSync(file, path.join(h.home, `${target}-alias.db`));
+      expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex"))
+        .toMatchObject({ state: "unsafe_path", mappings: [] });
+    }
+  }, 180_000);
 
   it("rejects a migration marker with a valid old state sentinel", async () => {
     const h = harness();

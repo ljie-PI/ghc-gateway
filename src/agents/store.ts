@@ -73,6 +73,7 @@ export class AgentStore {
       fs.closeSync(fd);
       await protect(lockPath);
     }
+    await assertPrivateDatabase(lockPath);
     const lock = new DatabaseSync(lockPath, { timeout: 0 });
     try {
       try { lock.exec("BEGIN EXCLUSIVE"); } catch { throw new AgentError("agent_busy"); }
@@ -187,7 +188,7 @@ export class AgentStore {
     if (!Value.Check(StateSchema, state)) throw new AgentError("agent_recovery_required");
     validateStatePaths(state, this.agent);
     await this.checkDirectory();
-    if (exists(this.statePath)) await assertPrivate(this.statePath, false);
+    if (exists(this.statePath)) await assertPrivateDatabase(this.statePath);
     beforeCommit?.();
     if (!exists(this.statePath)) {
       const fd = fs.openSync(this.statePath, "wx", 0o600);
@@ -227,7 +228,7 @@ async function migrationLock(directory: string): Promise<DatabaseSync> {
     }
     if (created) protect(lockPath);
   }
-  await assertPrivate(lockPath, false);
+  await assertPrivateDatabase(lockPath);
   const lock = new DatabaseSync(lockPath, { timeout: 10_000 });
   try {
     lock.exec("BEGIN EXCLUSIVE");
@@ -239,8 +240,7 @@ async function migrationLock(directory: string): Promise<DatabaseSync> {
 }
 
 async function readStateDatabase(statePath: string, agent: AgentId): Promise<AgentState> {
-  await assertPrivate(statePath, false);
-  if (fs.lstatSync(statePath).nlink !== 1) throw new AgentError("agent_unsafe_path");
+  await assertPrivateDatabase(statePath);
   const db = new DatabaseSync(statePath, { readOnly: true, timeout: 0 });
   try {
     const row = db.prepare("SELECT document FROM state WHERE id=1").get();
@@ -274,7 +274,7 @@ interface MigrationMarker { readonly target: string; readonly phase: MigrationPh
 async function writeMigrationMarker(statePath: string, targetStatePath: string, phase: MigrationPhase): Promise<void> {
   const temporary = `${statePath}.marker`;
   if (exists(temporary)) {
-    await assertPrivate(temporary, false);
+    await assertPrivateDatabase(temporary);
     fs.unlinkSync(temporary);
   }
   const fd = fs.openSync(temporary, "wx", 0o600);
@@ -295,7 +295,7 @@ async function writeMigrationMarker(statePath: string, targetStatePath: string, 
 }
 
 async function completeMigrationMarker(statePath: string, targetStatePath: string): Promise<void> {
-  await assertPrivate(statePath, false);
+  await assertPrivateDatabase(statePath);
   const marker = readMigrationMarker(statePath);
   if (marker?.phase !== "pending" || !samePath(marker.target, targetStatePath)) {
     throw new AgentError("agent_recovery_required");
@@ -317,7 +317,7 @@ async function publishStateDatabase(statePath: string, state: AgentState, agent:
   validateStatePaths(state, agent);
   const temporary = `${statePath}.migrating`;
   if (exists(temporary)) {
-    await assertPrivate(temporary, false);
+    await assertPrivateDatabase(temporary);
     fs.unlinkSync(temporary);
   }
   const fd = fs.openSync(temporary, "wx", 0o600);
@@ -338,7 +338,7 @@ async function copyStateDatabase(source: string, target: string, agent: AgentId)
   await readStateDatabase(source, agent);
   const temporary = `${target}.migrating`;
   if (exists(temporary)) {
-    await assertPrivate(temporary, false);
+    await assertPrivateDatabase(temporary);
     fs.unlinkSync(temporary);
   }
   fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
@@ -355,7 +355,7 @@ async function replaceStateWithMigrationMarker(
   targetStatePath: string,
   phase: MigrationPhase,
 ): Promise<void> {
-  await assertPrivate(statePath, false);
+  await assertPrivateDatabase(statePath);
   const db = new DatabaseSync(statePath, { timeout: 0 });
   try {
     db.exec("PRAGMA synchronous=FULL; BEGIN EXCLUSIVE; CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete')))");
@@ -371,6 +371,7 @@ async function replaceStateWithMigrationMarker(
 }
 
 function readMigrationMarker(statePath: string): MigrationMarker | null {
+  assertPrivateDatabaseSync(statePath);
   const db = new DatabaseSync(statePath, { readOnly: true, timeout: 0 });
   try {
     const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='migration'").get();
@@ -388,6 +389,7 @@ function readMigrationMarker(statePath: string): MigrationMarker | null {
     return { target: row.target, phase: row.phase };
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
+    if (isSqliteBusy(error)) throw new AgentError("agent_busy");
     throw new AgentError("agent_recovery_required");
   } finally { db.close(); }
 }
@@ -398,6 +400,23 @@ function markerSentinel(targetStatePath: string): string {
 
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
+}
+
+async function assertPrivateDatabase(target: string): Promise<void> {
+  await assertPrivate(target, false);
+  if (fs.lstatSync(target).nlink !== 1) throw new AgentError("agent_unsafe_path");
+}
+
+function assertPrivateDatabaseSync(target: string): void {
+  assertNoLinks(target);
+  const stat = fs.lstatSync(target);
+  if (!stat.isFile() || stat.nlink !== 1) throw new AgentError("agent_unsafe_path");
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error
+    && (error.code === "ERR_SQLITE_ERROR" || error.code === "SQLITE_BUSY")
+    && "message" in error && typeof error.message === "string" && error.message.includes("database is locked");
 }
 
 function validateStatePaths(state: AgentState, agent: AgentId): void {
