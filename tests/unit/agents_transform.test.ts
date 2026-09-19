@@ -86,7 +86,7 @@ describe("agent configuration projection", () => {
       mcp_servers: { local: { command: "node" } }, web_search: "live" });
     const catalog = JSON.parse(result.catalog!.toString());
     expect(catalog.models.map((model: { slug: string }) => model.slug)).toEqual(mappings.map((row) => row.modelId));
-    expect(catalog.models[0]).toMatchObject({ display_name: "Friendly 0", context_window: 32000, shell_type: "none", effective_context_window_percent: 100, supported_reasoning_levels: [], supports_reasoning_summary_parameter: false, experimental_supported_tools: [], input_modalities: ["text"] });
+    expect(catalog.models[0]).toMatchObject({ display_name: "Friendly 0", context_window: 32000, shell_type: "disabled", effective_context_window_percent: 100, supported_reasoning_levels: [], supports_reasoning_summary_parameter: false, experimental_supported_tools: [], input_modalities: ["text"] });
     expect(catalog.models[1].context_window).toBeUndefined();
     expect(catalog.models[1].default_reasoning_level).toBeUndefined();
   });

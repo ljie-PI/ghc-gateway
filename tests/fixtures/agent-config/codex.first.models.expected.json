@@ -15,7 +15,7 @@
           "description": "High"
         }
       ],
-      "shell_type": "none",
+      "shell_type": "disabled",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 0,
@@ -48,7 +48,7 @@
           "description": "Medium"
         }
       ],
-      "shell_type": "none",
+      "shell_type": "disabled",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 1,
@@ -76,7 +76,7 @@
       "description": "Gamma Friendly",
       "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
       "supported_reasoning_levels": [],
-      "shell_type": "none",
+      "shell_type": "disabled",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 2,

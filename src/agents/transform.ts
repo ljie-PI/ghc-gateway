@@ -148,7 +148,7 @@ function projectCodex(
       supported_reasoning_levels: reasoningLevels.map((effort) => ({
         effort, description: effort.charAt(0).toUpperCase() + effort.slice(1),
       })),
-      shell_type: model.capabilities.toolCalling ? "shell_command" : "none", visibility: "list", supported_in_api: true,
+      shell_type: model.capabilities.toolCalling ? "shell_command" : "disabled", visibility: "list", supported_in_api: true,
       priority: index, support_verbosity: model.capabilities.verbosity,
       supports_reasoning_summaries: model.capabilities.reasoningSummaries,
       supports_reasoning_summary_parameter: model.capabilities.reasoningSummaries,
