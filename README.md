@@ -121,9 +121,10 @@ Refresh reloads Overview statistics or the Accounts list; Accounts also clears o
 Feedback does not have a timed auto-dismiss. Models Refresh fetches a new account catalog; its generation
 and credential numbers are internal versions, and fetched is the last successful catalog-fetch time.
 Responses History is managed by the backend independently of the Admin UI; there is no dedicated history page.
-The Accounts view checks an active device authorization automatically at GitHub's required interval. Keep that
-view open until it reports completion; closing or leaving it stops browser polling, and no device code or token is
-stored in browser storage. Copying the device code marks the copy button with a checkmark; no manual checking is needed.
+The Accounts view checks an active device authorization automatically. The gateway enforces GitHub's required
+interval while the browser promptly retries transient local status failures. Keep that view open until it reports
+completion; closing or leaving it stops browser polling, and no device code or token is stored in browser storage.
+Copying the device code marks the copy button with a checkmark; no manual checking is needed.
 
 ## HTTP Interfaces
 

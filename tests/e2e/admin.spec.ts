@@ -167,16 +167,22 @@ test("device-flow disposal and terminal failures clean up polling", async ({ pag
   expect(devicePollRequests(fixture)).toHaveLength(4);
 });
 
-test("device-flow retries network failures without accepting stale responses", async ({ page }) => {
+test("device-flow keeps transient retry failures in progress without accepting stale responses", async ({ page }) => {
   await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
   const fixture = await openAdmin(page);
   fixture.state.devicePollStates = ["network", "complete"];
   await page.getByRole("button", { name: "Accounts" }).click();
   await page.getByRole("button", { name: "Start login" }).click();
   await advanceDeviceClock(page, fixture, 5_000);
-  await expect(page.getByRole("alert")).toContainText("gateway is unreachable");
-  await expect(page.getByText("retrying automatically")).toBeVisible();
-  await advanceDeviceClock(page, fixture, 5_000);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("Authorization in progress; checking automatically.", { exact: true }))
+    .toBeVisible();
+  await expect(page.getByText("last check failed", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Automatic checking will retry at the allowed interval.", { exact: true }))
+    .toHaveCount(0);
+  await advanceDeviceClock(page, fixture, 999);
+  await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
+  await advanceDeviceClock(page, fixture, 1);
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
 
