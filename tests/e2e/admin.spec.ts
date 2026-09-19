@@ -178,6 +178,8 @@ test("device-flow keeps transient retry failures in progress without accepting s
   await expect(page.getByText("Authorization in progress; checking automatically.", { exact: true }))
     .toBeVisible();
   await expect(page.getByText("last check failed", { exact: false })).toHaveCount(0);
+  await expect(page.getByText("Automatic checking will retry at the allowed interval.", { exact: true }))
+    .toHaveCount(0);
   await advanceDeviceClock(page, fixture, 999);
   await expect(page.getByText("Enterprise Admin")).toHaveCount(0);
   await advanceDeviceClock(page, fixture, 1);
