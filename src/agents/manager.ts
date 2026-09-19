@@ -91,6 +91,7 @@ export class FileAgentsManager implements AgentsManager {
         }
         for (const { step } of item.pendingLinks.values()) {
           candidates.push(step.scratch, path.join(step.scratch, "next"));
+          parents.push(step.scratch);
         }
         return item;
       } catch (error: unknown) {
