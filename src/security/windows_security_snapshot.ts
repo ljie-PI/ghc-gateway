@@ -28,8 +28,21 @@ export interface WindowsSecuritySnapshotDependencies {
     file: string,
     args: readonly string[],
     options: Readonly<WindowsSecuritySnapshotCommandOptions>,
+    input: Buffer,
   ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 }
+
+interface WindowsSecuritySnapshotCommandInput {
+  on(event: "error", listener: (error: unknown) => void): unknown;
+  end(input: Buffer): void;
+}
+
+type WindowsSecuritySnapshotCommandStarter = (
+  file: string,
+  args: readonly string[],
+  options: Readonly<WindowsSecuritySnapshotCommandOptions>,
+  callback: (error: Error | null, stdout: string, stderr: string) => void,
+) => { readonly stdin: WindowsSecuritySnapshotCommandInput | null };
 
 export class WindowsSecuritySnapshotError extends Error {
   constructor() {
@@ -40,28 +53,48 @@ export class WindowsSecuritySnapshotError extends Error {
 
 const MAX_REQUESTS = 16;
 const MAX_PATH_LENGTH = 4096;
-const MAX_INPUT_BYTES = 12 * 1024;
-const MAX_OUTPUT_BYTES = 256 * 1024;
+const MAX_INPUT_BYTES = 512 * 1024;
+const MAX_OUTPUT_BYTES = 1024 * 1024;
 const MAX_FACT_LENGTH = 16 * 1024;
 const QUERY_TIMEOUT_MS = 10_000;
 
 const DEFAULT_DEPENDENCIES: WindowsSecuritySnapshotDependencies = {
   platform: process.platform,
   environment: process.env,
-  runCommand: async (file, args, options) => await new Promise((resolve, reject) => {
-    execFile(file, [...args], options, (error, stdout, stderr) => {
-      if (error !== null) reject(error);
-      else resolve({ stdout, stderr });
-    });
-  }),
+  runCommand: runWindowsSecuritySnapshotCommand,
 };
+
+export async function runWindowsSecuritySnapshotCommand(
+  file: string,
+  args: readonly string[],
+  options: Readonly<WindowsSecuritySnapshotCommandOptions>,
+  input: Buffer,
+  start: WindowsSecuritySnapshotCommandStarter = execFile as WindowsSecuritySnapshotCommandStarter,
+): Promise<{ readonly stdout: string; readonly stderr: string }> {
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error: unknown) => {
+      if (!settled) { settled = true; reject(error); }
+    };
+    const child = start(file, args, options, (error, stdout, stderr) => {
+      if (error !== null) fail(error);
+      else if (!settled) { settled = true; resolve({ stdout, stderr }); }
+    });
+    if (child.stdin === null) fail(new Error());
+    else {
+      child.stdin.on("error", fail);
+      child.stdin.end(input);
+    }
+  });
+}
 
 const SCRIPT = `$ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding=[Text.UTF8Encoding]::new($false)
 Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1"
 Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1"
 Import-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1"
-$requests=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:GHCG_WINDOWS_SECURITY_REQUEST)) | ConvertFrom-Json
+$requests=[Console]::In.ReadToEnd() | ConvertFrom-Json
 $results=@($requests | ForEach-Object {
   $id=$_.id
   try {
@@ -92,8 +125,9 @@ export async function queryWindowsSecuritySnapshot(
         shell: false,
         timeout: QUERY_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
-        env: { ...dependencies.environment, GHCG_WINDOWS_SECURITY_REQUEST: input.toString("base64") },
+        env: { ...dependencies.environment },
       },
+      input,
     );
     if (stderr.length !== 0) throw new Error();
     return parseFacts(stdout, requests);
