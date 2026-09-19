@@ -166,9 +166,8 @@ export class AgentStore {
           if (!statesEqual(legacy, current)) throw new AgentError("agent_recovery_required");
         }
         if (exists(retiredStatePath)) throw new AgentError("agent_recovery_required");
-        fs.renameSync(legacyStatePath, retiredStatePath);
-        syncDirectory(legacyDirectory);
-        await writeMigrationMarker(legacyStatePath, this.statePath, "pending");
+        await copyStateDatabase(legacyStatePath, retiredStatePath, this.agent);
+        await replaceStateWithMigrationMarker(legacyStatePath, this.statePath, "pending");
         if (!exists(this.statePath)) await publishStateDatabase(this.statePath, legacy, this.agent);
         await completeMigrationMarker(legacyStatePath, this.statePath);
         return true;
@@ -329,6 +328,42 @@ async function publishStateDatabase(statePath: string, state: AgentState, agent:
     db.close();
   }
   fs.renameSync(temporary, statePath);
+  syncDirectory(path.dirname(statePath));
+}
+
+async function copyStateDatabase(source: string, target: string, agent: AgentId): Promise<void> {
+  await readStateDatabase(source, agent);
+  const temporary = `${target}.migrating`;
+  if (exists(temporary)) {
+    await assertPrivate(temporary, false);
+    fs.unlinkSync(temporary);
+  }
+  fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
+  protect(temporary);
+  const fd = fs.openSync(temporary, "r+");
+  try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  await readStateDatabase(temporary, agent);
+  fs.renameSync(temporary, target);
+  syncDirectory(path.dirname(target));
+}
+
+async function replaceStateWithMigrationMarker(
+  statePath: string,
+  targetStatePath: string,
+  phase: MigrationPhase,
+): Promise<void> {
+  await assertPrivate(statePath, false);
+  const db = new DatabaseSync(statePath, { timeout: 0 });
+  try {
+    db.exec("PRAGMA synchronous=FULL; BEGIN EXCLUSIVE; CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete')))");
+    db.prepare("INSERT INTO migration VALUES(?,?)").run(targetStatePath, phase);
+    db.prepare("UPDATE state SET document=? WHERE id=1").run(markerSentinel(targetStatePath));
+    db.exec("COMMIT");
+  } catch (error: unknown) {
+    try { db.exec("ROLLBACK"); } catch { /* The transaction may not have started. */ }
+    if (error instanceof AgentError) throw error;
+    throw new AgentError("agent_recovery_required");
+  } finally { db.close(); }
   syncDirectory(path.dirname(statePath));
 }
 

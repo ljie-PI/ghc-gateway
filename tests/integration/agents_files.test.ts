@@ -9,7 +9,7 @@ import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "../../src/agents/types.js";
 import { AgentStore, type AgentState } from "../../src/agents/store.js";
-import { protect, readImage } from "../../src/agents/files.js";
+import { privateDirectory, protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 import type { WindowsSecuritySnapshotFact, WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
 import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
@@ -53,13 +53,13 @@ function legacyStateRoot(home: string): string {
 async function saveState(root: string, agent: AgentId, state: AgentState): Promise<void> {
   await new AgentStore(root, agent).locked(async (save) => save(state));
 }
-async function writeMigrationMarker(file: string, target: string): Promise<void> {
+async function writeMigrationMarker(file: string, target: string, phase: "pending" | "complete" = "pending"): Promise<void> {
   fs.writeFileSync(file, "", { mode: 0o600 });
   protect(file);
   const db = new DatabaseSync(file);
   try {
     db.exec("CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete'))); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
-    db.prepare("INSERT INTO migration VALUES(?,'pending')").run(target);
+    db.prepare("INSERT INTO migration VALUES(?,?)").run(target, phase);
     db.prepare("INSERT INTO state VALUES(1,?)").run(JSON.stringify({ migratedTo: target }));
   } finally { db.close(); }
 }
@@ -109,12 +109,27 @@ describe("private repeatable agent configuration", () => {
     await expect(new AgentStore(legacyStateRoot(defaults.home), "claude").read())
       .rejects.toMatchObject({ code: "agent_recovery_required" });
 
-    const custom = harness({ dataDir: path.join(defaults.home, "custom-data") });
+    const customHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-custom-")));
+    homes.push(customHome);
+    const customDataDir = path.join(customHome, "custom-data");
+    const custom = harness({ dataDir: customDataDir });
     await apply(custom.manager, "codex");
-    expect(fs.existsSync(path.join(defaults.home, "custom-data", "agents", "codex", "state.db"))).toBe(true);
-    expect(fs.existsSync(path.join(defaults.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
+    expect(fs.existsSync(path.join(customDataDir, "agents", "codex", "state.db"))).toBe(true);
+    expect(fs.existsSync(path.join(custom.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
     await expect(new AgentStore(legacyStateRoot(custom.home), "codex").read())
       .rejects.toMatchObject({ code: "agent_recovery_required" });
+
+    const separatedHome = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-separated-")));
+    homes.push(separatedHome);
+    const codexHome = path.join(separatedHome, "separate-codex-home");
+    const separated = new FileAgentsManager({
+      home: separatedHome,
+      dataDir: path.join(separatedHome, "selected-data"),
+      env: { CODEX_HOME: codexHome },
+    });
+    const separatedStatus = (await separated.inspect(origin)).find((item) => item.id === "codex")!;
+    expect(separatedStatus.paths).toEqual([path.join(codexHome, "ghcg_models.json"), path.join(codexHome, "config.toml")]
+      .map((target) => process.platform === "win32" ? target.toLowerCase() : target));
   }, 180_000);
 
   it("migrates complete legacy state and retires its writable authority", async () => {
@@ -196,16 +211,17 @@ describe("private repeatable agent configuration", () => {
   }, 180_000);
 
   it("recovers migration interruptions before marker and before new-state publication", async () => {
-    for (const phase of ["retired", "marked"] as const) {
+    for (const phase of ["retired", "marked", "published"] as const) {
       const h = harness();
-      const state = { version: 2 as const, revision: phase === "retired" ? 11 : 12, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+      const state = { version: 2 as const, revision: phase === "retired" ? 11 : phase === "marked" ? 12 : 13, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
       const legacyDirectory = path.join(legacyStateRoot(h.home), "codex");
       const legacyState = path.join(legacyDirectory, "state.db");
       const retired = `${legacyState}.migrated`;
       const current = path.join(stateRoot(h.home), "codex", "state.db");
       await saveState(legacyStateRoot(h.home), "codex", state);
       fs.renameSync(legacyState, retired);
-      if (phase === "marked") await writeMigrationMarker(legacyState, current);
+      if (phase !== "retired") await writeMigrationMarker(legacyState, current);
+      if (phase === "published") await saveState(stateRoot(h.home), "codex", structuredClone(state));
 
       const manager = new FileAgentsManager({ home: h.home });
       expect((await manager.inspect(origin)).find((item) => item.id === "codex")?.mappings).toEqual(state.mappings);
@@ -213,6 +229,45 @@ describe("private repeatable agent configuration", () => {
       expect(fs.existsSync(legacyState)).toBe(true);
       expect(fs.existsSync(retired)).toBe(true);
     }
+  }, 180_000);
+
+  it("recovers a complete fence before the first current-state save", async () => {
+    const h = harness();
+    const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const current = path.join(stateRoot(h.home), "codex", "state.db");
+    await saveState(legacyStateRoot(h.home), "codex", {
+      version: 2, revision: 0, mappings: [], targets: [], lastAppliedAt: null, pending: null,
+    });
+    fs.unlinkSync(legacyState);
+    await writeMigrationMarker(legacyState, current, "complete");
+    const manager = new FileAgentsManager({ home: h.home });
+    expect((await manager.inspect(origin)).find((item) => item.id === "codex")).toMatchObject({ state: "not_managed" });
+    await apply(manager, "codex");
+    expect(fs.existsSync(current)).toBe(true);
+    await expect(new AgentStore(legacyStateRoot(h.home), "codex").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
+  }, 180_000);
+
+  it("cleans private migration temporaries while recovering", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 14, mappings: [mappings[1]!], targets: [], lastAppliedAt: null, pending: null };
+    const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const retired = `${legacyState}.migrated`;
+    const current = path.join(stateRoot(h.home), "codex", "state.db");
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    fs.renameSync(legacyState, retired);
+    fs.writeFileSync(`${legacyState}.marker`, "stale", { mode: 0o600 });
+    await privateDirectory(path.dirname(stateRoot(h.home)));
+    await privateDirectory(stateRoot(h.home));
+    await privateDirectory(path.dirname(current));
+    fs.writeFileSync(`${current}.migrating`, "stale", { mode: 0o600 });
+    protect(`${legacyState}.marker`);
+    protect(`${current}.migrating`);
+
+    expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex")?.mappings)
+      .toEqual(state.mappings);
+    expect(fs.existsSync(`${legacyState}.marker`)).toBe(false);
+    expect(fs.existsSync(`${current}.migrating`)).toBe(false);
   }, 180_000);
 
   it("serializes legacy migration across separate processes", async () => {
