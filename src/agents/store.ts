@@ -99,7 +99,7 @@ export class AgentStore {
       await assertPrivate(this.legacyRoot, true);
       await assertPrivate(legacyDirectory, true);
       await assertPrivate(legacyStatePath, false);
-      const marker = readMigrationMarker(legacyStatePath);
+      const marker = await readMigrationMarker(legacyStatePath);
       if (marker !== null) {
         if (!samePath(marker.target, this.statePath)) throw new AgentError("agent_recovery_required");
         if (exists(retiredStatePath)) await readStateDatabase(retiredStatePath, this.agent);
@@ -126,7 +126,7 @@ export class AgentStore {
       currentLock = await migrationLock(this.directory);
       if (exists(legacyStatePath)) {
         await assertPrivate(legacyStatePath, false);
-        const marker = readMigrationMarker(legacyStatePath);
+        const marker = await readMigrationMarker(legacyStatePath);
         if (marker !== null) {
           if (!samePath(marker.target, this.statePath)) throw new AgentError("agent_recovery_required");
           if (marker.phase === "complete" && exists(this.statePath)) {
@@ -148,7 +148,7 @@ export class AgentStore {
         return true;
       }
 
-      const marker = exists(legacyStatePath) ? readMigrationMarker(legacyStatePath) : null;
+      const marker = exists(legacyStatePath) ? await readMigrationMarker(legacyStatePath) : null;
       if (marker?.phase === "pending") {
         if (!exists(retiredStatePath)) throw new AgentError("agent_recovery_required");
         const retired = await readStateDatabase(retiredStatePath, this.agent);
@@ -195,6 +195,8 @@ export class AgentStore {
       fs.closeSync(fd);
       protect(this.statePath);
     }
+    await assertPrivateDatabase(this.statePath);
+    await assertPrivateDatabaseSidecars(this.statePath);
     const db = new DatabaseSync(this.statePath, { timeout: 0 });
     try {
       db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=8192; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
@@ -207,8 +209,7 @@ export class AgentStore {
     for (const suffix of ["-journal", "-wal", "-shm"]) {
       const sidecar = this.statePath + suffix;
       if (exists(sidecar)) {
-        assertNoLinks(sidecar);
-        if (!fs.lstatSync(sidecar).isFile()) throw new AgentError("agent_unsafe_path");
+        await assertPrivateDatabase(sidecar);
       }
     }
   }
@@ -229,6 +230,7 @@ async function migrationLock(directory: string): Promise<DatabaseSync> {
     if (created) protect(lockPath);
   }
   await assertPrivateDatabase(lockPath);
+  await assertPrivateDatabaseSidecars(lockPath);
   const lock = new DatabaseSync(lockPath, { timeout: 10_000 });
   try {
     lock.exec("BEGIN EXCLUSIVE");
@@ -241,6 +243,7 @@ async function migrationLock(directory: string): Promise<DatabaseSync> {
 
 async function readStateDatabase(statePath: string, agent: AgentId): Promise<AgentState> {
   await assertPrivateDatabase(statePath);
+  await assertPrivateDatabaseSidecars(statePath);
   const db = new DatabaseSync(statePath, { readOnly: true, timeout: 0 });
   try {
     const row = db.prepare("SELECT document FROM state WHERE id=1").get();
@@ -280,6 +283,7 @@ async function writeMigrationMarker(statePath: string, targetStatePath: string, 
   const fd = fs.openSync(temporary, "wx", 0o600);
   fs.closeSync(fd);
   protect(temporary);
+  await assertPrivateDatabase(temporary);
   const db = new DatabaseSync(temporary, { timeout: 0 });
   try {
     db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete'))); CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
@@ -296,10 +300,11 @@ async function writeMigrationMarker(statePath: string, targetStatePath: string, 
 
 async function completeMigrationMarker(statePath: string, targetStatePath: string): Promise<void> {
   await assertPrivateDatabase(statePath);
-  const marker = readMigrationMarker(statePath);
+  const marker = await readMigrationMarker(statePath);
   if (marker?.phase !== "pending" || !samePath(marker.target, targetStatePath)) {
     throw new AgentError("agent_recovery_required");
   }
+  await assertPrivateDatabaseSidecars(statePath);
   const db = new DatabaseSync(statePath, { timeout: 0 });
   try {
     db.exec("PRAGMA synchronous=FULL; BEGIN IMMEDIATE");
@@ -323,6 +328,7 @@ async function publishStateDatabase(statePath: string, state: AgentState, agent:
   const fd = fs.openSync(temporary, "wx", 0o600);
   fs.closeSync(fd);
   protect(temporary);
+  await assertPrivateDatabase(temporary);
   const db = new DatabaseSync(temporary, { timeout: 0 });
   try {
     db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=8192; CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
@@ -343,6 +349,7 @@ async function copyStateDatabase(source: string, target: string, agent: AgentId)
   }
   fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
   protect(temporary);
+  await assertPrivateDatabase(temporary);
   const fd = fs.openSync(temporary, "r+");
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   await readStateDatabase(temporary, agent);
@@ -356,6 +363,7 @@ async function replaceStateWithMigrationMarker(
   phase: MigrationPhase,
 ): Promise<void> {
   await assertPrivateDatabase(statePath);
+  await assertPrivateDatabaseSidecars(statePath);
   const db = new DatabaseSync(statePath, { timeout: 0 });
   try {
     db.exec("PRAGMA synchronous=FULL; BEGIN EXCLUSIVE; CREATE TABLE migration(target TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('pending','complete')))");
@@ -370,8 +378,9 @@ async function replaceStateWithMigrationMarker(
   syncDirectory(path.dirname(statePath));
 }
 
-function readMigrationMarker(statePath: string): MigrationMarker | null {
-  assertPrivateDatabaseSync(statePath);
+async function readMigrationMarker(statePath: string): Promise<MigrationMarker | null> {
+  await assertPrivateDatabase(statePath);
+  await assertPrivateDatabaseSidecars(statePath);
   const db = new DatabaseSync(statePath, { readOnly: true, timeout: 0 });
   try {
     const table = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='migration'").get();
@@ -407,10 +416,11 @@ async function assertPrivateDatabase(target: string): Promise<void> {
   if (fs.lstatSync(target).nlink !== 1) throw new AgentError("agent_unsafe_path");
 }
 
-function assertPrivateDatabaseSync(target: string): void {
-  assertNoLinks(target);
-  const stat = fs.lstatSync(target);
-  if (!stat.isFile() || stat.nlink !== 1) throw new AgentError("agent_unsafe_path");
+async function assertPrivateDatabaseSidecars(target: string): Promise<void> {
+  for (const suffix of ["-journal", "-wal", "-shm"]) {
+    const sidecar = target + suffix;
+    if (exists(sidecar)) await assertPrivateDatabase(sidecar);
+  }
 }
 
 function isSqliteBusy(error: unknown): boolean {

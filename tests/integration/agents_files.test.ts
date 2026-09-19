@@ -343,6 +343,21 @@ describe("private repeatable agent configuration", () => {
       .toMatchObject({ state: "recovery_required", mappings: [] });
   }, 180_000);
 
+  it("reports a busy migration marker read as retryable", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const markerPath = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    const marker = new DatabaseSync(markerPath, { timeout: 0 });
+    marker.exec("BEGIN EXCLUSIVE");
+    try {
+      await expect(new AgentStore(stateRoot(h.home), "codex", legacyStateRoot(h.home)).read())
+        .rejects.toMatchObject({ code: "agent_busy" });
+    } finally {
+      marker.exec("ROLLBACK");
+      marker.close();
+    }
+  }, 180_000);
+
   it.runIf(process.platform === "win32")("accepts case-insensitive Windows marker targets", async () => {
     const h = harness();
     await apply(h.manager, "codex");
