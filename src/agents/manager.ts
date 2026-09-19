@@ -492,15 +492,8 @@ export class FileAgentsManager implements AgentsManager {
       }
       revision = this.revision(state, images, paths, origin);
       backupAvailable = this.backupAvailable(state, images);
-      let nativeCatalogBlocksLegacy = false;
-      if (agent === "codex" && state.version < 3 && state.targets.length > 0) {
-        const takeoverCatalog = inspection?.takeoverImages === undefined
-          ? await readImage(this.takeoverPaths(state)[2])
-          : inspection.takeoverImages[2] ?? null;
-        nativeCatalogBlocksLegacy = takeoverCatalog !== null;
-      }
       if (agent === "codex" && state.pending === null
-        && (kind === "conflict" || kind === "not_managed" || nativeCatalogBlocksLegacy)) {
+        && (kind === "conflict" || kind === "not_managed")) {
         try {
           const evidence = inspection?.takeoverPaths !== undefined && inspection.takeoverImages !== undefined
             ? this.takeoverEvidenceFrom(state, origin, inspection.takeoverPaths, inspection.takeoverImages)
@@ -733,8 +726,8 @@ export class FileAgentsManager implements AgentsManager {
 
   private async execute(agent: AgentId, state: AgentState, save: (state: AgentState) => Promise<void>): Promise<void> {
     const pending = state.pending!;
-    // Backup, catalog, then config. Legacy restore intents retain their stored ordering.
-    const steps = pending.kind === "restore" ? [...pending.steps].reverse() : pending.steps;
+    // Backup, catalog, then config.
+    const steps = pending.steps;
     const positions = new Map<StepState, "before" | "after" | "gap">();
     for (const step of steps) {
       const target = state.targets[step.target]!.path;

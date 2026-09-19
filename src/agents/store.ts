@@ -432,6 +432,9 @@ function isSqliteBusy(error: unknown): boolean {
 }
 
 function validateStatePaths(state: AgentState, agent: AgentId): void {
+  if (agent === "codex" && state.targets.length > 0 && state.version !== 3) {
+    throw new AgentError("agent_recovery_required");
+  }
   const count = agent === "claude" ? state.version === 1 ? 1 : 2
     : state.version === 1 ? 2 : state.version === 2 ? 3 : 4;
   if (state.targets.length !== 0 && state.targets.length !== count) throw new AgentError("agent_recovery_required");

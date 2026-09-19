@@ -1142,6 +1142,7 @@ describe("private repeatable agent configuration", () => {
     const config = seed(h.home, ".codex/config.toml", original);
     const catalog = seed(h.home, ".codex/models.json", "external catalog\n");
     const auth = seed(h.home, ".codex/auth.json", "login-secret\n");
+    expect(await h.status("codex")).toMatchObject({ state: "not_managed" });
     await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
     expect(fs.readFileSync(config)).toEqual(original);
     expect(fs.readFileSync(catalog, "utf8")).toBe("external catalog\n");
@@ -1276,24 +1277,35 @@ describe("private repeatable agent configuration", () => {
     expect(fs.existsSync(path.join(h.home, ".codex/models.json.ghcg.bak"))).toBe(true);
   }, 300_000);
 
-  it("does not treat stale durable Codex state as provider ownership", async () => {
+  it("rejects pre-v3 Codex durable state before client mutation", async () => {
     const h = harness();
     const baseline = Buffer.from("model = \"old\"\n");
     const config = seed(h.home, ".codex/config.toml", baseline);
     const baselineImage = (await readImage(config))!;
     const catalog = path.join(h.home, ".codex/models.json");
-    const store = new AgentStore(path.join(h.home, ".ghc-gateway-agents"), "codex");
-    await store.locked(async (save) => save({
-      version: 2, revision: 1, mappings, lastAppliedAt: null, pending: null,
-      targets: [
-        { path: `${config}.ghcg.bak`, original: null, expected: null },
-        { path: catalog, original: null, expected: null },
-        { path: config, original: baselineImage, expected: baselineImage },
-      ],
-    }));
+    const root = stateRoot(h.home);
+    await privateDirectory(path.dirname(root));
+    await privateDirectory(root);
+    await privateDirectory(path.join(root, "codex"));
+    const statePath = path.join(root, "codex", "state.db");
+    fs.writeFileSync(statePath, "", { mode: 0o600 });
+    protect(statePath);
+    const db = new DatabaseSync(statePath);
+    try {
+      db.exec("CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
+      db.prepare("INSERT INTO state VALUES(1,?)").run(JSON.stringify({
+        version: 2, revision: 1, mappings, lastAppliedAt: null, pending: null,
+        targets: [
+          { path: `${config}.ghcg.bak`, original: null, expected: null },
+          { path: catalog, original: null, expected: null },
+          { path: config, original: baselineImage, expected: baselineImage },
+        ],
+      }));
+    } finally { db.close(); }
     const external = Buffer.from("model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\n");
     fs.writeFileSync(config, external);
-    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
+    expect(await h.status("codex")).toMatchObject({ state: "recovery_required", mappings: [] });
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent recovery required");
     expect(fs.readFileSync(config)).toEqual(external);
     expect(fs.existsSync(catalog)).toBe(false);
     expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
