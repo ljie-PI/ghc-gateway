@@ -4,13 +4,25 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentModel } from "./types.js";
 import { AgentStore, copyMappings, newImage, type AgentState, type StepState } from "./store.js";
-import { applyAccess, assertNoLinks, assertOwned, assertPrivate, canonical, digest, exists, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, syncDirectory, writeExclusive, type FileImage } from "./files.js";
+import { applyAccess, assertNoLinks, assertOwned, assertPrivate, assertSecurityPathUnchanged, canonical, digest, exists, observeSecurityPath, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, syncDirectory, writeExclusive, type FileImage, type SecurityPathObservation } from "./files.js";
 import { projectAgent } from "./transform.js";
+import {
+  queryWindowsSecuritySnapshot,
+  type WindowsSecuritySnapshotFact,
+  type WindowsSecuritySnapshotRequest,
+} from "../security/windows_security_snapshot.js";
+
+type PreparedInspection =
+  | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly error?: unknown }
+  | { readonly agent: AgentId; readonly error: unknown };
 
 export interface AgentManagerOptions {
   readonly home?: string;
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly now?: () => Date;
+  readonly queryWindowsSecuritySnapshot?: (
+    requests: readonly WindowsSecuritySnapshotRequest[],
+  ) => Promise<readonly WindowsSecuritySnapshotFact[]>;
   /** Deterministic failure/race injection at durable transaction boundaries. */
   readonly checkpoint?: (point: "before_intent" | "intent" | "stage_written" | "staged" | "displaced" | "linked" | "published" | "complete", agent: AgentId, index: number) => void;
 }
@@ -39,7 +51,61 @@ export class FileAgentsManager implements AgentsManager {
   }
 
   async inspect(origin: string): Promise<readonly AgentStatus[]> {
-    return await Promise.all((["claude", "codex"] as const).map((agent) => this.status(agent, origin)));
+    const agents = ["claude", "codex"] as const;
+    if (process.platform !== "win32") return await Promise.all(agents.map((agent) => this.status(agent, origin)));
+    let prepared = await Promise.all(agents.map(async (agent): Promise<PreparedInspection> => {
+      try {
+        const state = await new AgentStore(this.root, agent).read();
+        return { agent, state, paths: this.fallbackTargetPaths(agent, state) };
+      } catch (error: unknown) {
+        return { agent, error };
+      }
+    }));
+    const requests: WindowsSecuritySnapshotRequest[] = [];
+    const ids = new Map<string, string>();
+    const observations = new Map<string, SecurityPathObservation>();
+    prepared = prepared.map((item): PreparedInspection => {
+      if (!("paths" in item)) return item;
+      try {
+        for (const target of item.paths) {
+          let parent = path.dirname(target);
+          while (!exists(parent)) parent = path.dirname(parent);
+          for (const candidate of [parent, target]) {
+            const normalized = path.win32.normalize(candidate).toLowerCase();
+            if (ids.has(normalized)) continue;
+            const observation = observeSecurityPath(normalized);
+            const id = `path-${requests.length}`;
+            ids.set(normalized, id);
+            requests.push({ id, path: normalized });
+            observations.set(normalized, observation);
+          }
+        }
+        return item;
+      } catch (error: unknown) {
+        return { ...item, error };
+      }
+    });
+    if (requests.length === 0) {
+      return await Promise.all(prepared.map((item) => this.status(item.agent, origin, "paths" in item
+        ? { state: item.state, paths: item.paths, error: item.error }
+        : { error: item.error })));
+    }
+    let facts = new Map<string, WindowsSecuritySnapshotFact>();
+    try {
+      const result = await (this.options.queryWindowsSecuritySnapshot ?? queryWindowsSecuritySnapshot)(requests);
+      if (result.length !== requests.length || result.some((fact, index) => fact?.id !== requests[index]?.id)) throw new Error();
+      facts = new Map(requests.map((request, index) => [request.path, result[index]!]));
+    } catch (_error: unknown) {
+      const failure = new AgentError("agent_unsafe_path");
+      return await Promise.all(prepared.map((item) => "paths" in item
+        ? this.status(item.agent, origin, { state: item.state, paths: item.paths, error: item.error ?? failure })
+        : this.status(item.agent, origin, { error: item.error })));
+    }
+    return await Promise.all(prepared.map((item) => "paths" in item
+      ? this.status(item.agent, origin, item.error === undefined
+        ? { state: item.state, paths: item.paths, facts, observations }
+        : { state: item.state, paths: item.paths, error: item.error })
+      : this.status(item.agent, origin, { error: item.error })));
   }
 
   async apply(request: AgentApplyRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus> {
@@ -168,7 +234,17 @@ export class FileAgentsManager implements AgentsManager {
     } finally { this.busy.delete(agent); }
   }
 
-  private async status(agent: AgentId, origin: string): Promise<AgentStatus> {
+  private async status(
+    agent: AgentId,
+    origin: string,
+    inspection?: {
+      readonly state?: AgentState;
+      readonly paths?: readonly string[];
+      readonly facts?: ReadonlyMap<string, WindowsSecuritySnapshotFact>;
+      readonly observations?: ReadonlyMap<string, SecurityPathObservation>;
+      readonly error?: unknown;
+    },
+  ): Promise<AgentStatus> {
     let state: AgentState | null = null;
     let paths = this.paths[agent];
     let revision = "0".repeat(64);
@@ -176,14 +252,15 @@ export class FileAgentsManager implements AgentsManager {
     let backupAvailable = false;
     const images: (FileImage | null)[] = [];
     try {
-      state = await new AgentStore(this.root, agent).read();
-      paths = this.fallbackTargetPaths(agent, state);
+      state = inspection?.state ?? await new AgentStore(this.root, agent).read();
+      paths = inspection?.paths ?? this.fallbackTargetPaths(agent, state);
+      if (inspection?.error !== undefined) throw inspection.error;
       const validatedPaths: string[] = [];
       try {
         for (const [index, target] of paths.entries()) {
           const validated = canonical(target);
           validatedPaths.push(validated);
-          images.push(await this.image(validated, index, state));
+          images.push(await this.image(validated, index, state, inspection?.facts, inspection?.observations));
         }
       } catch (error: unknown) {
         backupAvailable = this.backupAvailable(state, images);
@@ -235,12 +312,25 @@ export class FileAgentsManager implements AgentsManager {
     }
     return images;
   }
-  private async image(target: string, index: number, state?: AgentState): Promise<FileImage | null> {
+  private async image(
+    target: string,
+    index: number,
+    state?: AgentState,
+    facts?: ReadonlyMap<string, WindowsSecuritySnapshotFact>,
+    observations?: ReadonlyMap<string, SecurityPathObservation>,
+  ): Promise<FileImage | null> {
     let parent = path.dirname(target);
     while (!exists(parent)) parent = path.dirname(parent);
-    await assertOwned(parent, true);
+    const parentFact = facts?.get(path.win32.normalize(parent).toLowerCase());
+    const targetFact = facts?.get(path.win32.normalize(target).toLowerCase());
+    const parentObservation = observations?.get(path.win32.normalize(parent).toLowerCase());
+    const targetObservation = observations?.get(path.win32.normalize(target).toLowerCase());
+    if (facts !== undefined && (parentFact === undefined || targetFact === undefined
+      || parentObservation === undefined || targetObservation === undefined)) throw new AgentError("agent_unsafe_path");
+    if (parentObservation !== undefined) assertSecurityPathUnchanged(parent, parentObservation, true);
+    await assertOwned(parent, true, undefined, parentFact);
     const stage = state?.pending?.steps.find((step) => step.target === index);
-    const image = await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"));
+    const image = await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"), targetFact, targetObservation);
     if (state?.version === 2 && state.targets.length > 0 && index === 0 && image !== null) {
       await assertPrivate(target, false);
     }

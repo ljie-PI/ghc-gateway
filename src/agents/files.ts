@@ -4,6 +4,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
+import type { WindowsSecuritySnapshotFact } from "../security/windows_security_snapshot.js";
 import { AgentError } from "./types.js";
 
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -11,6 +12,14 @@ export interface FileImage {
   readonly bytes: string;
   readonly mode: number;
   readonly acl: string | null;
+}
+export interface SecurityPathObservation {
+  readonly present: boolean;
+  readonly dev?: number;
+  readonly ino?: number;
+  readonly ctimeMs?: number;
+  readonly mtimeMs?: number;
+  readonly size?: number;
 }
 export function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -45,8 +54,50 @@ export function assertNoLinks(target: string): void {
     current = parent;
   }
 }
-export async function assertOwned(target: string, directory: boolean, allowedLink?: string): Promise<string | null> {
+export function observeSecurityPath(target: string): SecurityPathObservation {
   assertNoLinks(target);
+  if (!exists(target)) return { present: false };
+  const stat = fs.lstatSync(target);
+  return {
+    present: true,
+    dev: stat.dev,
+    ino: stat.ino,
+    ctimeMs: stat.ctimeMs,
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+  };
+}
+export function assertSecurityPathUnchanged(
+  target: string,
+  observation: SecurityPathObservation,
+  directory: boolean,
+): void {
+  assertNoLinks(target);
+  let stat: fs.Stats | null = null;
+  try {
+    stat = fs.lstatSync(target);
+  } catch (error: unknown) {
+    if (!isMissing(error)) throw error;
+  }
+  if (stat === null) {
+    if (observation.present) throw new AgentError("agent_unsafe_path");
+    return;
+  }
+  if (!observation.present || stat.dev !== observation.dev || stat.ino !== observation.ino || (!directory
+    && (stat.ctimeMs !== observation.ctimeMs || stat.mtimeMs !== observation.mtimeMs || stat.size !== observation.size))) {
+    throw new AgentError("agent_unsafe_path");
+  }
+}
+export async function assertOwned(
+  target: string,
+  directory: boolean,
+  allowedLink?: string,
+  security?: WindowsSecuritySnapshotFact,
+): Promise<string | null> {
+  assertNoLinks(target);
+  if (security !== undefined && (security.status !== "present" || security.reparse)) {
+    throw new AgentError("agent_unsafe_path");
+  }
   const stat = fs.lstatSync(target);
   const linked = allowedLink !== undefined && exists(allowedLink) ? fs.lstatSync(allowedLink) : null;
   if ((directory ? !stat.isDirectory() : !stat.isFile()) || (!directory && stat.nlink !== 1
@@ -57,12 +108,21 @@ export async function assertOwned(target: string, directory: boolean, allowedLin
     if (stat.uid !== process.getuid?.() || (stat.mode & 0o022) !== 0) throw new AgentError("agent_unsafe_path");
     return null;
   }
-  return await windowsAcl(target);
+  return security?.status === "present" ? security.sddl : await windowsAcl(target);
 }
-export async function readImage(target: string, allowedLink?: string): Promise<FileImage | null> {
+export async function readImage(
+  target: string,
+  allowedLink?: string,
+  security?: WindowsSecuritySnapshotFact,
+  observation?: SecurityPathObservation,
+): Promise<FileImage | null> {
+  if (observation !== undefined) assertSecurityPathUnchanged(target, observation, false);
   assertNoLinks(target);
-  if (!exists(target)) return null;
-  const recordedAcl = await assertOwned(target, false, allowedLink);
+  const present = exists(target);
+  if (security !== undefined && (security.status === "error" || security.status === "present" && security.reparse
+    || (security.status === "present") !== present)) throw new AgentError("agent_unsafe_path");
+  if (!present) return null;
+  const recordedAcl = await assertOwned(target, false, allowedLink, security);
   const before = fs.lstatSync(target);
   if (before.size > MAX_FILE_BYTES) throw new AgentError("agent_invalid_config");
   const fd = fs.openSync(target, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
