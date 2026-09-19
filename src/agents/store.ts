@@ -441,6 +441,15 @@ function validateStatePaths(state: AgentState, agent: AgentId): void {
     && state.targets[0]!.path !== `${state.targets.at(-1)!.path}.ghcg.bak`) throw new AgentError("agent_recovery_required");
   if (agent === "codex" && state.version === 3 && state.targets.length > 0
     && state.targets[1]!.path !== `${state.targets[2]!.path}.ghcg.bak`) throw new AgentError("agent_recovery_required");
+  if (agent === "codex" && state.version === 3 && state.targets.length > 0) {
+    const [configBackup, catalogBackup, catalog, config] = state.targets;
+    const directory = path.dirname(config!.path);
+    if (path.basename(config!.path) !== "config.toml" || path.basename(catalog!.path) !== "models.json"
+      || path.dirname(configBackup!.path) !== directory || path.dirname(catalogBackup!.path) !== directory
+      || path.dirname(catalog!.path) !== directory || configBackup!.path !== `${config!.path}.ghcg.bak`
+      || catalogBackup!.path !== `${catalog!.path}.ghcg.bak`
+      || new Set(state.targets.map((target) => target.path)).size !== 4) throw new AgentError("agent_recovery_required");
+  }
   if (state.legacyCatalog !== undefined && (!path.isAbsolute(state.legacyCatalog.path)
     || agent !== "codex")) throw new AgentError("agent_recovery_required");
   for (const target of state.targets) {

@@ -48,7 +48,7 @@ const AgentApplySchema = Type.Object({
   }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
 }, { additionalProperties: false });
 const AgentTakeoverSchema = Type.Object({
-  agent: AgentIdSchema,
+  agent: Type.Literal("codex"),
   expectedRevision: AgentRevisionSchema,
   catalogRevision: AgentRevisionSchema,
   takeoverRevision: AgentRevisionSchema,

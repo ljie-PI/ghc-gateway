@@ -19,6 +19,10 @@ interface PendingLinkObservation {
   readonly step: StepState;
   readonly scratch: SecurityPathObservation;
 }
+interface TakeoverEvidence extends NonNullable<AgentStatus["takeover"]> {
+  readonly images: readonly (FileImage | null)[];
+  readonly paths: readonly string[];
+}
 type ConsumedInspection =
   | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly images: readonly (FileImage | null)[]; readonly error?: unknown }
   | { readonly agent: AgentId; readonly error: unknown };
@@ -151,11 +155,19 @@ export class FileAgentsManager implements AgentsManager {
         const state = await store.read();
         let current = await this.images(paths, state);
         this.requireRevision(request.expectedRevision, state, current, paths, origin);
-        if (takeover) await this.requireTakeoverRevision(request as AgentTakeoverRequest, state, origin);
+        const takeoverEvidence = takeover
+          ? await this.requireTakeoverRevision(request as AgentTakeoverRequest, state, origin)
+          : undefined;
         assertCurrent();
         signal.throwIfAborted();
         const recovering = state.pending !== null;
         if (recovering) {
+          if (request.agent === "codex" && state.version === 1 && state.pending?.kind === "restore") {
+            const historical = state.pending.steps.find((step) => step.target === 0);
+            if (historical !== undefined) historical.after = historical.before;
+            if (state.targets[0] !== undefined) state.legacyCatalog = state.targets[0];
+            await save(state);
+          }
           // Resume only the already-durable transaction, never a new restore.
           current = [...await this.requireRecoverable(state, current)];
           await this.execute(request.agent, state, save);
@@ -168,7 +180,9 @@ export class FileAgentsManager implements AgentsManager {
         if (initial.pending === null) this.requireRevision(request.expectedRevision, state, current, livePaths, origin);
         const adoptLegacyRestore = legacyOwned && state.targets.length === 0;
         const projection = this.project(request, state, current, livePaths, origin, models, takeover || adoptLegacyRestore);
-        const prepared = await this.prepareTargets(request.agent, state, current, livePaths, takeover || adoptLegacyRestore);
+        const prepared = await this.prepareTargets(
+          request.agent, state, current, livePaths, takeover || adoptLegacyRestore, takeoverEvidence,
+        );
         current = prepared.current;
         const after = request.agent === "claude"
           ? [prepared.backup, newImage(projection.config, current[1]!)]
@@ -210,7 +224,14 @@ export class FileAgentsManager implements AgentsManager {
     );
   }
 
-  private async prepareTargets(agent: AgentId, state: AgentState, current: (FileImage | null)[], paths: readonly string[], takeover: boolean) {
+  private async prepareTargets(
+    agent: AgentId,
+    state: AgentState,
+    current: (FileImage | null)[],
+    paths: readonly string[],
+    takeover: boolean,
+    takeoverEvidence?: TakeoverEvidence,
+  ) {
     if ((agent === "claude" && state.version >= 2 || agent === "codex" && state.version === 3) && state.targets.length > 0) {
       this.requireBackup(state, current);
       return agent === "claude"
@@ -254,6 +275,13 @@ export class FileAgentsManager implements AgentsManager {
     if (existing !== null && existing.bytes !== original?.bytes) throw new AgentError("agent_conflict");
     if (!sameImage(clientImages.at(-1)!, current.at(-1)!)) throw new AgentError("agent_conflict");
     if (agent === "codex") {
+      if (takeoverEvidence !== undefined) {
+        const observed = [existing, existingCatalogBackup, ...clientImages];
+        if (!sameFilePaths(takeoverEvidence.paths, [backupPath, catalogBackupPath!, ...clientPaths])
+          || observed.some((image, index) => !sameImage(image, takeoverEvidence.images[index]!))) {
+          throw new AgentError("revision_conflict");
+        }
+      }
       if (clientImages[0] !== null && !takeover) throw new AgentError("agent_conflict");
       const oldCatalog = state.targets.find((item) => item.path.endsWith("ghcg-models.json") || item.path.endsWith("ghcg_models.json"));
       if (oldCatalog !== undefined) state.legacyCatalog = oldCatalog;
@@ -302,14 +330,15 @@ export class FileAgentsManager implements AgentsManager {
     request: AgentTakeoverRequest,
     state: AgentState,
     origin: string,
-  ): Promise<void> {
+  ): Promise<TakeoverEvidence> {
     const evidence = await this.takeoverEvidence(state, origin);
     if (request.takeoverRevision !== evidence.revision) {
       throw new AgentError("revision_conflict");
     }
+    return evidence;
   }
 
-  private async takeoverEvidence(state: AgentState, origin: string): Promise<NonNullable<AgentStatus["takeover"]>> {
+  private async takeoverEvidence(state: AgentState, origin: string): Promise<TakeoverEvidence> {
     const configPath = state.targets.at(-1)?.path ?? this.paths.codex.at(-1)!;
     const catalogPath = path.join(path.dirname(configPath), "models.json");
     const configBackupPath = `${configPath}.ghcg.bak`;
@@ -342,6 +371,8 @@ export class FileAgentsManager implements AgentsManager {
       catalogPath,
       configBackupPath,
       catalogBackupPath,
+      images,
+      paths,
     };
   }
 
@@ -428,7 +459,16 @@ export class FileAgentsManager implements AgentsManager {
       revision = this.revision(state, images, paths, origin);
       backupAvailable = this.backupAvailable(state, images);
       if (agent === "codex" && state.pending === null && (kind === "conflict" || kind === "not_managed")) {
-        try { takeover = await this.takeoverEvidence(state, origin); } catch { /* Unsafe conflicts remain fail closed. */ }
+        try {
+          const evidence = await this.takeoverEvidence(state, origin);
+          takeover = {
+            revision: evidence.revision,
+            configPath: evidence.configPath,
+            catalogPath: evidence.catalogPath,
+            configBackupPath: evidence.configBackupPath,
+            catalogBackupPath: evidence.catalogBackupPath,
+          };
+        } catch { /* Unsafe conflicts remain fail closed. */ }
       }
     } catch (error: unknown) {
       kind = error instanceof AgentError && error.code === "agent_unsafe_path" ? "unsafe_path" : "recovery_required";
@@ -941,4 +981,14 @@ export class FileAgentsManager implements AgentsManager {
 
 function samePaths(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((target, index) => target === right[index]);
+}
+
+function sameFilePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((target, index) => {
+    const other = right[index];
+    if (other === undefined) return false;
+    const resolved = path.resolve(target);
+    const resolvedOther = path.resolve(other);
+    return process.platform === "win32" ? resolved.toLowerCase() === resolvedOther.toLowerCase() : resolved === resolvedOther;
+  });
 }

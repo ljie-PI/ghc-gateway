@@ -733,30 +733,31 @@ describe("private repeatable agent configuration", () => {
       },
     });
     seed(h.home, ".codex/config.toml", "model = \"old\"\n");
-    const current = await h.status("codex");
     batches.length = 0;
-    await h.manager.apply({
-      agent: "codex", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
-    }, origin, models, () => undefined, new AbortController().signal);
+    await takeover(h.manager);
     const root = ["$HOME\\.codex"];
-    const targets = [...root, "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"];
+    const targets = [...root, "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"];
     const stage = (index: number, target: string) => [
       `$HOME\\.codex\\$SCRATCH${index}`,
       `$HOME\\.codex\\$SCRATCH${index}\\next`,
       target,
     ];
     expectSnapshotContract(batches, h.home, [
-      [...root, "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
-      [...root, "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+      ["$HOME", "$HOME\\.claude\\settings.json", ...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
+      targets,
+      [...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
+      targets,
+      [...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
+      targets,
       targets,
       [...root, "$HOME\\.codex\\config.toml.ghcg.bak"],
       root,
       stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
       stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
-      [...root, "$HOME\\.codex\\ghcg_models.json"],
+      [...root, "$HOME\\.codex\\models.json"],
       root,
-      stage(1, "$HOME\\.codex\\ghcg_models.json"),
-      stage(1, "$HOME\\.codex\\ghcg_models.json"),
+      stage(1, "$HOME\\.codex\\models.json"),
+      stage(1, "$HOME\\.codex\\models.json"),
       [...root, "$HOME\\.codex\\config.toml"],
       root,
       stage(2, "$HOME\\.codex\\config.toml"),
@@ -765,7 +766,7 @@ describe("private repeatable agent configuration", () => {
         "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next",
         "$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next"],
       stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
-      stage(1, "$HOME\\.codex\\ghcg_models.json"),
+      stage(1, "$HOME\\.codex\\models.json"),
       ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next", ...root,
         "$HOME\\.codex\\$SCRATCH2\\previous", "$HOME\\.codex\\config.toml"],
       ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\previous"],
@@ -790,10 +791,10 @@ describe("private repeatable agent configuration", () => {
     expectSnapshotContract(batches, h.home, [
       targets,
       targets,
-      [...root, "$HOME\\.codex\\ghcg_models.json"],
+      [...root, "$HOME\\.codex\\models.json"],
       root,
-      stage(0, "$HOME\\.codex\\ghcg_models.json"),
-      stage(0, "$HOME\\.codex\\ghcg_models.json"),
+      stage(0, "$HOME\\.codex\\models.json"),
+      stage(0, "$HOME\\.codex\\models.json"),
       [...root, "$HOME\\.codex\\config.toml"],
       root,
       stage(1, "$HOME\\.codex\\config.toml"),
@@ -801,9 +802,9 @@ describe("private repeatable agent configuration", () => {
       [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
         "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
       ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", ...root,
-        "$HOME\\.codex\\$SCRATCH0\\previous", "$HOME\\.codex\\ghcg_models.json"],
+        "$HOME\\.codex\\$SCRATCH0\\previous", "$HOME\\.codex\\models.json"],
       ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\previous"],
-      stage(0, "$HOME\\.codex\\ghcg_models.json"),
+      stage(0, "$HOME\\.codex\\models.json"),
       ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", ...root,
         "$HOME\\.codex\\$SCRATCH1\\previous", "$HOME\\.codex\\config.toml"],
       ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\previous"],
@@ -1012,6 +1013,37 @@ describe("private repeatable agent configuration", () => {
     expect(fs.existsSync(path.join(h.home, ".codex", "models.json"))).toBe(true);
     await apply(new FileAgentsManager({ home: h.home }), "codex");
     expect(fs.readFileSync(`${configPath}.ghcg.bak`)).toEqual(original);
+  }, 180_000);
+
+  it("migrates a version-2 ghcg_models.json pending Apply directly to models.json", async () => {
+    const h = harness();
+    const config = path.join(h.home, ".codex/config.toml");
+    const historical = path.join(h.home, ".codex/ghcg_models.json");
+    const projection = projectAgent("codex", null, mappings, origin, historical, models, null);
+    seed(h.home, ".codex/config.toml", projection.config);
+    seed(h.home, ".codex/ghcg_models.json", projection.catalog!);
+    const historicalBytes = fs.readFileSync(historical);
+    const configImage = (await readImage(config))!;
+    const historicalImage = (await readImage(historical))!;
+    const store = new AgentStore(stateRoot(h.home), "codex");
+    await store.locked(async (save) => save({
+      version: 2, revision: 4, mappings, lastAppliedAt: null,
+      targets: [
+        { path: `${config}.ghcg.bak`, original: null, expected: null },
+        { path: historical, original: null, expected: historicalImage },
+        { path: config, original: configImage, expected: configImage },
+      ],
+      pending: {
+        kind: "apply", garbage: [],
+        steps: [{
+          target: 1, before: historicalImage, after: historicalImage, phase: "planned",
+          scratch: path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000001"),
+        }],
+      },
+    }));
+    expect((await apply(h.manager, "codex")).state).toBe("installed");
+    expect(fs.readFileSync(historical)).toEqual(historicalBytes);
+    expect(fs.existsSync(path.join(h.home, ".codex/models.json"))).toBe(true);
   }, 180_000);
 
   it("drops only the legacy Subagent row while migrating the first Claude original", async () => {
@@ -1266,6 +1298,23 @@ describe("private repeatable agent configuration", () => {
     ]);
   }, 180_000);
 
+  it("serializes four-target Codex takeover across separate processes", async () => {
+    const h = harness();
+    seed(h.home, ".codex/config.toml", "model = \"external\"\n");
+    seed(h.home, ".codex/models.json", "external catalog\n");
+    const run = (modelId: string) => execFileAsync(process.execPath, [
+      "scripts/tooling/bootstrap.mjs",
+      "tests/fixtures/agent_takeover_contender.ts",
+      h.home,
+      origin,
+      modelId,
+    ], { cwd: path.resolve(import.meta.dirname, "../.."), windowsHide: true, timeout: 120_000 });
+    const results = await Promise.all([run("model-a"), run("model-b")]);
+    expect(results.map((result) => result.stdout.trim()).sort()).toEqual(["busy", "installed"]);
+    expect((await h.status("codex")).state).toBe("installed");
+    expect(fs.existsSync(path.join(h.home, ".codex/models.json.ghcg.bak"))).toBe(true);
+  }, 300_000);
+
   it("does not treat stale durable Codex state as provider ownership", async () => {
     const h = harness();
     const baseline = Buffer.from("model = \"old\"\n");
@@ -1431,18 +1480,18 @@ describe("private repeatable agent configuration", () => {
     if (process.platform === "win32") {
       expectSnapshotContract(raceBatches, h.home, [
         ["$HOME", "$HOME\\.claude\\settings.json", "$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak",
-          "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\ghcg_models.json"],
+          "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
+        ["$HOME\\.codex", "$HOME\\.codex\\models.json"],
         ["$HOME\\.codex"],
-        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\ghcg_models.json"],
-        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\ghcg_models.json"],
+        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\models.json"],
+        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\models.json"],
         ["$HOME\\.codex", "$HOME\\.codex\\config.toml"],
         ["$HOME\\.codex"],
         ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", "$HOME\\.codex\\config.toml"],
         ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml",
+        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml",
           "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
       ]);
     }
@@ -1620,7 +1669,7 @@ describe("private repeatable agent configuration", () => {
       ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
         "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
         "$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\next",
-        "$HOME", "$HOME\\.codex\\ghcg_models.json", "$HOME\\.codex\\config.toml"],
+        "$HOME", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
       ["$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\previous"],
       ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
         "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
@@ -1681,6 +1730,8 @@ describe("private repeatable agent configuration", () => {
     ["staged", 0],
     ["linked", 0],
     ["published", 0],
+    ["linked", 1],
+    ["published", 1],
     ["linked", 2],
     ["published", 2],
     ["displaced", 3],
@@ -1688,6 +1739,8 @@ describe("private repeatable agent configuration", () => {
   ] as const)("finishes Codex Apply after a crash at %s/%s without Restore", async (point, index) => {
     const original = Buffer.from("model = \"old\"\n# comment survives\n");
     const file = seed(homeWithCrash(), ".codex/config.toml", original);
+    const nativeCatalog = index === 1 ? Buffer.from("native catalog\n") : null;
+    if (nativeCatalog !== null) seed(homes.at(-1)!, ".codex/models.json", nativeCatalog);
     const crashed = new FileAgentsManager({
       home: homes.at(-1)!,
       now: () => new Date("2026-01-02T03:04:05Z"),
@@ -1703,8 +1756,13 @@ describe("private repeatable agent configuration", () => {
     });
     expect((await apply(restarted, "codex")).state).toBe("installed");
     expect(fs.readFileSync(`${file}.ghcg.bak`)).toEqual(original);
+    if (nativeCatalog !== null) {
+      expect(fs.readFileSync(path.join(homes.at(-1)!, ".codex/models.json.ghcg.bak"))).toEqual(nativeCatalog);
+    }
     expect(fs.readFileSync(file, "utf8")).toContain("model = \"model-a\"");
-    expect(fs.readdirSync(path.join(homes.at(-1)!, ".codex")).sort()).toEqual(["config.toml", "config.toml.ghcg.bak", "models.json"]);
+    expect(fs.readdirSync(path.join(homes.at(-1)!, ".codex")).sort()).toEqual([
+      "config.toml", "config.toml.ghcg.bak", "models.json", ...(nativeCatalog === null ? [] : ["models.json.ghcg.bak"]),
+    ]);
   }, 300_000);
 
   for (const agent of ["claude", "codex"] as const) {

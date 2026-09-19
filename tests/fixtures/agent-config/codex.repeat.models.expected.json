@@ -6,7 +6,7 @@
       "description": "Editable Gamma Label",
       "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
       "supported_reasoning_levels": [],
-      "shell_type": "shell_command",
+      "shell_type": "none",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 0,
@@ -40,7 +40,7 @@
           "description": "High"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "none",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 1,
@@ -60,7 +60,7 @@
       ],
       "context_window": 128000,
       "max_context_window": 144000,
-      "effective_context_window_percent": 88
+      "effective_context_window_percent": 100
     },
     {
       "slug": "claude-beta-live",
@@ -73,7 +73,7 @@
           "description": "Medium"
         }
       ],
-      "shell_type": "shell_command",
+      "shell_type": "none",
       "visibility": "list",
       "supported_in_api": true,
       "priority": 2,
@@ -93,7 +93,7 @@
       ],
       "context_window": 200000,
       "max_context_window": 220000,
-      "effective_context_window_percent": 90
+      "effective_context_window_percent": 100
     }
   ]
 }
