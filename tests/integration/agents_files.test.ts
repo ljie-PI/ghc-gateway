@@ -145,6 +145,12 @@ describe("private repeatable agent configuration", () => {
     const separatedStatus = (await separated.inspect(origin)).find((item) => item.id === "codex")!;
     expect(separatedStatus.paths).toEqual([path.join(codexHome, "models.json"), path.join(codexHome, "config.toml")]
       .map((target) => process.platform === "win32" ? target.toLowerCase() : target));
+    seed(separatedHome, "separate-codex-home/config.toml", "model = \"external\"\n");
+    seed(separatedHome, "separate-codex-home/models.json", "native catalog\n");
+    expect((await takeover(separated)).state).toBe("installed");
+    expect(fs.existsSync(path.join(codexHome, "models.json.ghcg.bak"))).toBe(true);
+    expect(fs.existsSync(path.join(codexHome, "config.toml.ghcg.bak"))).toBe(true);
+    expect(fs.existsSync(path.join(separatedHome, "selected-data", "agents", "codex", "state.db"))).toBe(true);
   }, 180_000);
 
   it("migrates complete legacy state and retires its writable authority", async () => {
@@ -1527,7 +1533,7 @@ describe("private repeatable agent configuration", () => {
 
     await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
       name: "AgentError",
-      code: process.platform === "win32" ? "agent_unsafe_path" : "agent_conflict",
+      code: "agent_conflict",
     });
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(external);
@@ -1723,7 +1729,8 @@ describe("private repeatable agent configuration", () => {
       ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
         "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
         "$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\next",
-        "$HOME", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
+        "$HOME", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml",
+        "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak"],
       ["$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\previous"],
       ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
         "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
