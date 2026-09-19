@@ -159,12 +159,13 @@ describe("private repeatable agent configuration", () => {
     const original = { bytes: Buffer.from("original").toString("base64"), mode: 0o600, acl: null };
     const expected = { bytes: Buffer.from("expected").toString("base64"), mode: 0o600, acl: null };
     const state = {
-      version: 2 as const,
+      version: 3 as const,
       revision: 7,
       mappings: [mappings[0]!],
       lastAppliedAt: "2026-01-02T03:04:05.000Z",
       targets: [
         { path: `${config}.ghcg.bak`, original: null, expected: original },
+        { path: `${catalog}.ghcg.bak`, original: null, expected: original },
         { path: catalog, original: null, expected },
         { path: config, original, expected },
       ],
@@ -172,7 +173,7 @@ describe("private repeatable agent configuration", () => {
         kind: "apply" as const,
         garbage: [path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000002")],
         steps: [{
-          target: 2,
+          target: 3,
           before: original,
           after: expected,
           phase: "planned" as const,
