@@ -9,6 +9,7 @@ import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "..
 import { AgentStore } from "../../src/agents/store.js";
 import { protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
+import type { WindowsSecuritySnapshotFact, WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
 import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
 
 const homes: string[] = [];
@@ -73,6 +74,173 @@ beforeAll(warmWindowsAgentAcl, 90_000);
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it.runIf(process.platform === "win32")("uses one ordered security batch per Inspect without cross-call reuse", async () => {
+    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        batches.push(requests);
+        return requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
+          : { id: request.id, status: "missing" });
+      },
+    });
+
+    await expect(h.manager.inspect(origin)).resolves.toMatchObject([
+      { id: "claude", state: "not_managed" },
+      { id: "codex", state: "not_managed" },
+    ]);
+    await h.manager.inspect(origin);
+
+    const normalizedHome = h.home.toLowerCase();
+    expect(batches).toEqual([0, 1].map(() => [
+      { id: "path-0", path: normalizedHome },
+      { id: "path-1", path: path.join(normalizedHome, ".claude", "settings.json") },
+      { id: "path-2", path: path.join(normalizedHome, ".codex", "ghcg_models.json") },
+      { id: "path-3", path: path.join(normalizedHome, ".codex", "config.toml") },
+    ]));
+  });
+
+  it.runIf(process.platform === "win32")("isolates a target query error to its consuming agent", async () => {
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => requests.map((request): WindowsSecuritySnapshotFact => {
+        if (request.path.endsWith("\\.claude\\settings.json")) return { id: request.id, status: "error" };
+        return fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
+          : { id: request.id, status: "missing" };
+      }),
+    });
+
+    expect(await h.manager.inspect(origin)).toMatchObject([
+      { id: "claude", state: "unsafe_path" },
+      { id: "codex", state: "not_managed" },
+    ]);
+  });
+
+  it.runIf(process.platform === "win32")("keeps a valid backup visible when a later target query fails", async () => {
+    const h = harness();
+    const config = seed(h.home, ".claude/settings.json", "{}\n");
+    await apply(h.manager, "claude");
+    const backup = (await readImage(`${config}.ghcg.bak`))!;
+    const manager = new FileAgentsManager({
+      home: h.home,
+      queryWindowsSecuritySnapshot: async (requests) => requests.map((request): WindowsSecuritySnapshotFact => {
+        if (request.path.endsWith("\\.claude\\settings.json")) return { id: request.id, status: "error" };
+        return fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: backup.acl! }
+          : { id: request.id, status: "missing" };
+      }),
+    });
+
+    expect((await manager.inspect(origin)).find((status) => status.id === "claude")).toMatchObject({
+      state: "unsafe_path",
+      backupAvailable: true,
+    });
+  }, 180_000);
+
+  it.runIf(process.platform === "win32")("fails both prepared agents closed on a global query failure", async () => {
+    const h = harness({ queryWindowsSecuritySnapshot: async () => { throw new Error("sensitive diagnostic"); } });
+    expect(await h.manager.inspect(origin)).toMatchObject([
+      { id: "claude", state: "unsafe_path" },
+      { id: "codex", state: "unsafe_path" },
+    ]);
+  });
+
+  it.runIf(process.platform === "win32")("fails both prepared agents closed on a malformed injected result", async () => {
+    const h = harness({ queryWindowsSecuritySnapshot: async () => [] });
+    expect(await h.manager.inspect(origin)).toMatchObject([
+      { id: "claude", state: "unsafe_path" },
+      { id: "codex", state: "unsafe_path" },
+    ]);
+  });
+
+  it.runIf(process.platform === "win32")("uses exact snapshot SDDL in Inspect revisions", async () => {
+    let sddl = "O:SYG:SYD:(A;;FA;;;SY)";
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
+        ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl }
+        : { id: request.id, status: "missing" }),
+    });
+    seed(h.home, ".claude/settings.json", "{}\n");
+
+    const first = await h.status("claude");
+    sddl = "O:SYG:SYD:PAI(A;;FA;;;SY)";
+    const second = await h.status("claude");
+
+    expect(first.state).toBe("not_managed");
+    expect(second.state).toBe("not_managed");
+    expect(second.revision).not.toBe(first.revision);
+  });
+
+  it.runIf(process.platform === "win32")("fails closed when target existence changes after the snapshot", async () => {
+    let raced = false;
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        const facts = requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
+          : { id: request.id, status: "missing" });
+        if (!raced) {
+          raced = true;
+          seed(h.home, ".claude/settings.json", "raced\n");
+        }
+        return facts;
+      },
+    });
+
+    expect(await h.status("claude")).toMatchObject({ state: "unsafe_path", backupAvailable: false });
+  });
+
+  it.runIf(process.platform === "win32")("fails closed when a present target disappears after the snapshot", async () => {
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        const facts = requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
+          : { id: request.id, status: "missing" });
+        fs.unlinkSync(path.join(h.home, ".claude", "settings.json"));
+        return facts;
+      },
+    });
+    seed(h.home, ".claude/settings.json", "present\n");
+
+    expect(await h.status("claude")).toMatchObject({ state: "unsafe_path", backupAvailable: false });
+  });
+
+  it.runIf(process.platform === "win32")("fails closed when a present target is replaced during the snapshot", async () => {
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        const facts = requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
+          : { id: request.id, status: "missing" });
+        const target = path.join(h.home, ".claude", "settings.json");
+        fs.unlinkSync(target);
+        fs.writeFileSync(target, "replacement\n");
+        return facts;
+      },
+    });
+    seed(h.home, ".claude/settings.json", "original\n");
+
+    expect(await h.status("claude")).toMatchObject({ state: "unsafe_path", backupAvailable: false });
+  });
+
+  it.runIf(process.platform === "win32")("keeps Apply on the existing per-path security path", async () => {
+    let batches = 0;
+    const h = harness({
+      queryWindowsSecuritySnapshot: async (requests) => {
+        batches += 1;
+        return requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
+          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
+          : { id: request.id, status: "missing" });
+      },
+    });
+    const current = await h.status("claude");
+    batches = 0;
+
+    await h.manager.apply({
+      agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+
+    expect(batches).toBe(0);
+  }, 180_000);
+
   it.each(["claude", "codex"] as const)("publishes exact %s first and repeat Apply fixture bytes", async (agent) => {
     const h = harness();
     const fixturePath = path.resolve("tests/fixtures/agent-config", `${agent}.input.json`);
