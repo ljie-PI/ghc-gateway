@@ -4,20 +4,20 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentModel } from "./types.js";
 import { AgentStore, copyMappings, newImage, type AgentState, type StepState } from "./store.js";
-import { applyAccess, assertNoLinks, assertOwned, assertOwnedFromSecuritySnapshot, assertPrivate, assertSecurityPathUnchanged, canonical, digest, exists, observeSecurityPath, privateDirectory, protect, readImage, readImageFromSecuritySnapshot, sameDisplacedContent, sameImage, sameSecurityPathIdentity, sameSecurityPathObservation, syncDirectory, writeExclusive, type FileImage, type SecurityPathAllowedLink, type SecurityPathObservation, type SecurityPathSnapshot } from "./files.js";
+import { applyAccess, assertNoLinks, assertOwned, assertOwnedFromSecuritySnapshot, assertPrivate, canonical, digest, exists, observeSecurityPath, privateDirectory, protect, readImage, readImageFromSecuritySnapshot, sameDisplacedContent, sameImage, sameSecurityPathIdentity, syncDirectory, writeExclusive, type FileImage, type SecurityPathAllowedLink, type SecurityPathSnapshot } from "./files.js";
 import { projectAgent } from "./transform.js";
 import {
-  queryWindowsSecuritySnapshot,
   type WindowsSecuritySnapshotFact,
   type WindowsSecuritySnapshotRequest,
 } from "../security/windows_security_snapshot.js";
+import { AgentWindowsSecurity } from "./windows_security.js";
 
 type PreparedInspection =
-  | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly privateObservation: SecurityPathObservation | undefined; readonly pendingLinks: ReadonlyMap<number, PendingLinkObservation>; readonly error?: unknown }
+  | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly privateSnapshot: SecurityPathSnapshot | undefined; readonly pendingLinks: ReadonlyMap<number, PendingLinkObservation>; readonly error?: unknown }
   | { readonly agent: AgentId; readonly error: unknown };
 interface PendingLinkObservation {
   readonly step: StepState;
-  readonly scratch: SecurityPathObservation;
+  readonly scratch: SecurityPathSnapshot;
 }
 type ConsumedInspection =
   | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly images: readonly (FileImage | null)[]; readonly error?: unknown }
@@ -41,10 +41,11 @@ export class FileAgentsManager implements AgentsManager {
   private readonly legacyRoot: string;
   private readonly paths: Record<AgentId, readonly string[]>;
   private readonly busy = new Set<AgentId>();
-  private windowsSnapshotSequence = 0;
+  private readonly windowsSecurity: AgentWindowsSecurity;
   private closed = false;
 
   constructor(private readonly options: AgentManagerOptions = {}) {
+    this.windowsSecurity = new AgentWindowsSecurity(options.queryWindowsSecuritySnapshot);
     // Resolve the existing home anchor once. macOS exposes its temporary home
     // paths through the system /var -> /private/var alias; canonicalizing that
     // trusted anchor avoids rejecting the OS alias while links below it remain
@@ -69,21 +70,24 @@ export class FileAgentsManager implements AgentsManager {
       try {
         const state = await this.store(agent).read();
         const paths = this.fallbackTargetPaths(agent, state);
-        const privateObservation = state.version === 2 && state.targets.length > 0
-          ? exists(paths[0]!) ? await this.privateObservation(paths[0]!, false) : observeSecurityPath(paths[0]!)
+        const privateSnapshot = state.version === 2 && state.targets.length > 0
+          ? exists(paths[0]!) ? await this.privateSnapshot(paths[0]!, false) : undefined
           : undefined;
         const pendingLinks = await this.pendingLinkObservations(state.pending?.steps ?? []);
-        return { agent, state, paths, privateObservation, pendingLinks };
+        return { agent, state, paths, privateSnapshot, pendingLinks };
       } catch (error: unknown) {
         return { agent, error };
       }
     }));
     const candidates: string[] = [];
+    const parents: string[] = [];
     prepared = prepared.map((item): PreparedInspection => {
       if (!("paths" in item)) return item;
       try {
         for (const target of item.paths) {
-          candidates.push(this.existingParent(target), target);
+          const parent = this.existingParent(target);
+          candidates.push(parent, target);
+          parents.push(parent);
         }
         for (const { step } of item.pendingLinks.values()) {
           candidates.push(step.scratch, path.join(step.scratch, "next"));
@@ -100,7 +104,7 @@ export class FileAgentsManager implements AgentsManager {
     }
     let snapshots: ReadonlyMap<string, SecurityPathSnapshot>;
     try {
-      snapshots = await this.windowsSecuritySnapshots(candidates);
+      snapshots = await this.windowsSecuritySnapshots(candidates, parents);
     } catch (_error: unknown) {
       const failure = new AgentError("agent_unsafe_path");
       return await Promise.all(prepared.map((item) => "paths" in item
@@ -200,14 +204,15 @@ export class FileAgentsManager implements AgentsManager {
     let existing: FileImage | null;
     let clientImages: (FileImage | null)[];
     if (process.platform === "win32") {
-      const privateObservation = exists(backupPath) ? await this.privateObservation(backupPath, false) : observeSecurityPath(backupPath);
+      const privateSnapshot = exists(backupPath) ? await this.privateSnapshot(backupPath, false) : undefined;
       const preparedPaths = [...new Set([backupPath, ...paths, ...clientPaths])];
       const prepared: (FileImage | null)[] = [];
       const snapshots = await this.windowsImages(preparedPaths, undefined, prepared);
       const preparedByPath = new Map(preparedPaths.map((target, index) => [target, prepared[index]!]));
       existing = preparedByPath.get(backupPath)!;
-      if (!sameSecurityPathObservation(privateObservation,
-        this.requireWindowsSnapshot(snapshots, backupPath).observation)) throw new AgentError("agent_unsafe_path");
+      const backupSnapshot = this.requireWindowsSnapshot(snapshots, backupPath);
+      if (privateSnapshot === undefined ? backupSnapshot.fact.status !== "missing"
+        : !this.windowsSecurity.samePrivate(privateSnapshot, backupSnapshot, false)) throw new AgentError("agent_unsafe_path");
       clientImages = clientPaths.map((target) => preparedByPath.get(target)!);
     } else {
       existing = await readImage(backupPath);
@@ -345,11 +350,11 @@ export class FileAgentsManager implements AgentsManager {
   }
   private async images(paths: readonly string[], state?: AgentState, images: (FileImage | null)[] = []): Promise<(FileImage | null)[]> {
     if (process.platform === "win32") {
-      const privateObservation = state?.version === 2 && state.targets.length > 0
+      const privateSnapshot = state?.version === 2 && state.targets.length > 0
         && paths[0] === state.targets[0]!.path
-        ? exists(paths[0]!) ? await this.privateObservation(paths[0]!, false) : observeSecurityPath(paths[0]!)
+        ? exists(paths[0]!) ? await this.privateSnapshot(paths[0]!, false) : undefined
         : undefined;
-      await this.windowsImages(paths, state, images, privateObservation);
+      await this.windowsImages(paths, state, images, privateSnapshot);
       return images;
     }
     for (const [index, target] of paths.entries()) {
@@ -361,15 +366,20 @@ export class FileAgentsManager implements AgentsManager {
     paths: readonly string[],
     state: AgentState | undefined,
     images: (FileImage | null)[],
-    privateObservation?: SecurityPathObservation,
+    privateSnapshot?: SecurityPathSnapshot,
   ): Promise<ReadonlyMap<string, SecurityPathSnapshot>> {
     const candidates: string[] = [];
-    for (const target of paths) candidates.push(this.existingParent(target), target);
+    const parents: string[] = [];
+    for (const target of paths) {
+      const parent = this.existingParent(target);
+      candidates.push(parent, target);
+      parents.push(parent);
+    }
     const pendingLinks = await this.pendingLinkObservations(state?.pending?.steps ?? []);
     for (const { step } of pendingLinks.values()) candidates.push(step.scratch, path.join(step.scratch, "next"));
-    const snapshots = await this.windowsSecuritySnapshots(candidates);
-    if (privateObservation !== undefined && !sameSecurityPathObservation(privateObservation,
-      this.requireWindowsSnapshot(snapshots, paths[0]!).observation)) throw new AgentError("agent_unsafe_path");
+    const snapshots = await this.windowsSecuritySnapshots(candidates, parents);
+    if (privateSnapshot !== undefined && !this.windowsSecurity.samePrivate(privateSnapshot,
+      this.requireWindowsSnapshot(snapshots, paths[0]!), false)) throw new AgentError("agent_unsafe_path");
     for (const [index, target] of paths.entries()) {
       const parent = this.existingParent(target);
       images.push(this.readWindowsTargetImage(target, parent, snapshots, pendingLinks.get(index)));
@@ -396,43 +406,17 @@ export class FileAgentsManager implements AgentsManager {
     while (!exists(parent)) parent = path.dirname(parent);
     return parent;
   }
-  private async windowsSecuritySnapshots(paths: readonly string[]): Promise<ReadonlyMap<string, SecurityPathSnapshot>> {
-    const snapshot = ++this.windowsSnapshotSequence;
-    const requests: WindowsSecuritySnapshotRequest[] = [];
-    const observations = new Map<string, SecurityPathObservation>();
-    const seen = new Set<string>();
-    for (const candidate of paths) {
-      const normalized = path.win32.normalize(candidate).toLowerCase();
-      if (seen.has(normalized)) continue;
-      seen.add(normalized);
-      observations.set(normalized, observeSecurityPath(normalized));
-      requests.push({ id: `snapshot-${snapshot}-path-${requests.length}`, path: normalized });
-    }
-    let facts: readonly WindowsSecuritySnapshotFact[];
-    try {
-      facts = await (this.options.queryWindowsSecuritySnapshot ?? queryWindowsSecuritySnapshot)(requests);
-      if (facts.length !== requests.length || facts.some((fact, index) => fact?.id !== requests[index]?.id)) {
-        throw new Error();
-      }
-    } catch (_error: unknown) {
-      throw new AgentError("agent_unsafe_path");
-    }
-    const result = new Map<string, SecurityPathSnapshot>();
-    for (const [index, request] of requests.entries()) {
-      const observation = observations.get(request.path);
-      const fact = facts[index];
-      if (observation === undefined || fact === undefined) throw new AgentError("agent_unsafe_path");
-      result.set(request.path, { observation, fact });
-    }
-    return result;
+  private async windowsSecuritySnapshots(
+    paths: readonly string[],
+    pathOnly: readonly string[] = [],
+  ): Promise<ReadonlyMap<string, SecurityPathSnapshot>> {
+    return await this.windowsSecurity.snapshot(paths, pathOnly);
   }
   private requireWindowsSnapshot(
     snapshots: ReadonlyMap<string, SecurityPathSnapshot>,
     target: string,
   ): SecurityPathSnapshot {
-    const snapshot = snapshots.get(path.win32.normalize(target).toLowerCase());
-    if (snapshot === undefined) throw new AgentError("agent_unsafe_path");
-    return snapshot;
+    return this.windowsSecurity.require(snapshots, target);
   }
   private consumeWindowsInspection(
     prepared: readonly PreparedInspection[],
@@ -450,8 +434,8 @@ export class FileAgentsManager implements AgentsManager {
           let parent = path.dirname(validated);
           while (!exists(parent)) parent = path.dirname(parent);
           const targetSnapshot = this.requireWindowsSnapshot(snapshots, validated);
-          if (index === 0 && item.privateObservation !== undefined
-            && !sameSecurityPathObservation(item.privateObservation, targetSnapshot.observation)) {
+          if (index === 0 && item.privateSnapshot !== undefined
+            && !this.windowsSecurity.samePrivate(item.privateSnapshot, targetSnapshot, false)) {
             throw new AgentError("agent_unsafe_path");
           }
           const image = this.readWindowsTargetImage(validated, parent, snapshots, item.pendingLinks.get(index));
@@ -578,14 +562,13 @@ export class FileAgentsManager implements AgentsManager {
         // same filesystem object. This catches pathname replacements as well as
         // content/access changes without trusting a stale pre-staging read.
         if (process.platform === "win32") {
-          const privateObservation = await this.privateObservation(step.scratch, true);
+          const privateSnapshot = await this.privateSnapshot(step.scratch, true);
           const entries = fs.readdirSync(step.scratch);
           const expectedEntries = step.after === null ? [] : ["next"];
           const parent = this.existingParent(target);
-          const snapshots = await this.windowsSecuritySnapshots([step.scratch, stage, parent, displaced, target]);
+          const snapshots = await this.windowsSecuritySnapshots([step.scratch, stage, parent, displaced, target], [parent]);
           const afterEntries = fs.readdirSync(step.scratch);
-          if (!sameSecurityPathIdentity(privateObservation,
-            this.requireWindowsSnapshot(snapshots, step.scratch).observation)
+          if (!this.windowsSecurity.samePrivate(privateSnapshot, this.requireWindowsSnapshot(snapshots, step.scratch), true)
             || this.requireWindowsSnapshot(snapshots, displaced).fact.status !== "missing"
             || entries.length !== expectedEntries.length || entries.some((entry, index) => entry !== expectedEntries[index])
             || afterEntries.length !== expectedEntries.length
@@ -593,7 +576,7 @@ export class FileAgentsManager implements AgentsManager {
             throw new AgentError("agent_recovery_required");
           }
           const live = this.readWindowsTargetImage(target, parent, snapshots,
-            { step, scratch: privateObservation }, true);
+            { step, scratch: privateSnapshot }, true);
           if (!sameImage(live, step.before)) throw new AgentError("agent_conflict");
         } else {
           if (exists(displaced)) throw new AgentError("agent_recovery_required");
@@ -682,7 +665,7 @@ export class FileAgentsManager implements AgentsManager {
       syncDirectory(path.dirname(scratch));
       return;
     }
-    const privateObservation = await this.privateObservation(scratch, true);
+    const privateSnapshot = await this.privateSnapshot(scratch, true);
     const entries = fs.readdirSync(scratch);
     if (entries.some((entry) => entry !== "previous" && entry !== "next")) throw new AgentError("agent_recovery_required");
     const expected = new Set(entries);
@@ -693,8 +676,9 @@ export class FileAgentsManager implements AgentsManager {
         const snapshots = await this.windowsSecuritySnapshots(liveTarget === undefined || name !== "next"
           ? [scratch, target]
           : [scratch, target, liveTarget]);
-        if (!sameSecurityPathIdentity(privateObservation,
-          this.requireWindowsSnapshot(snapshots, scratch).observation)) throw new AgentError("agent_unsafe_path");
+        if (!this.windowsSecurity.samePrivate(privateSnapshot, this.requireWindowsSnapshot(snapshots, scratch), true)) {
+          throw new AgentError("agent_unsafe_path");
+        }
         assertOwnedFromSecuritySnapshot(target, false, this.requireWindowsSnapshot(snapshots, target),
           name === "next" && liveTarget !== undefined
             ? this.allowedLink(snapshots, liveTarget)
@@ -704,7 +688,7 @@ export class FileAgentsManager implements AgentsManager {
         throw new AgentError("agent_recovery_required");
       }
     }
-    if (!sameSecurityPathIdentity(privateObservation, observeSecurityPath(scratch))
+    if (!sameSecurityPathIdentity(privateSnapshot.observation, observeSecurityPath(scratch))
       || fs.readdirSync(scratch).length !== 0) throw new AgentError("agent_recovery_required");
     fs.rmdirSync(scratch);
     syncDirectory(path.dirname(scratch));
@@ -713,7 +697,7 @@ export class FileAgentsManager implements AgentsManager {
     assertNoLinks(directory);
     if (exists(directory)) {
       if (process.platform === "win32") {
-        const snapshots = await this.windowsSecuritySnapshots([directory]);
+        const snapshots = await this.windowsSecuritySnapshots([directory], [directory]);
         assertOwnedFromSecuritySnapshot(directory, true, this.requireWindowsSnapshot(snapshots, directory));
       } else await assertOwned(directory, true);
       return;
@@ -722,7 +706,7 @@ export class FileAgentsManager implements AgentsManager {
     fs.mkdirSync(directory, { mode: 0o700 });
     // Never chmod or change ACLs of an existing client directory.
     if (process.platform === "win32") {
-      const snapshots = await this.windowsSecuritySnapshots([directory]);
+      const snapshots = await this.windowsSecuritySnapshots([directory], [directory]);
       assertOwnedFromSecuritySnapshot(directory, true, this.requireWindowsSnapshot(snapshots, directory));
     } else await assertOwned(directory, true);
     syncDirectory(path.dirname(directory));
@@ -738,20 +722,18 @@ export class FileAgentsManager implements AgentsManager {
     const snapshots = await this.windowsSecuritySnapshots(candidates);
     return this.readWindowsTargetImage(target, parent, snapshots, link);
   }
-  private async privateObservation(target: string, directory: boolean): Promise<SecurityPathObservation> {
-    const observation = observeSecurityPath(target);
-    await assertPrivate(target, directory);
-    assertSecurityPathUnchanged(target, observation, directory);
-    return observation;
+  private async privateSnapshot(target: string, directory: boolean): Promise<SecurityPathSnapshot> {
+    return await this.windowsSecurity.privateSnapshot(target, directory, async () => assertPrivate(target, directory));
   }
   private async privateChildImage(parent: string, target: string, allowedLink?: string): Promise<FileImage | null> {
     if (process.platform !== "win32") return await readImage(target, allowedLink);
-    const privateObservation = await this.privateObservation(parent, true);
+    const privateSnapshot = await this.privateSnapshot(parent, true);
     const snapshots = await this.windowsSecuritySnapshots(allowedLink === undefined
       ? [parent, target]
       : [parent, target, allowedLink]);
-    if (!sameSecurityPathIdentity(privateObservation,
-      this.requireWindowsSnapshot(snapshots, parent).observation)) throw new AgentError("agent_unsafe_path");
+    if (!this.windowsSecurity.samePrivate(privateSnapshot, this.requireWindowsSnapshot(snapshots, parent), true)) {
+      throw new AgentError("agent_unsafe_path");
+    }
     return readImageFromSecuritySnapshot(target, this.requireWindowsSnapshot(snapshots, target),
       allowedLink === undefined ? undefined : this.allowedLink(snapshots, allowedLink));
   }
@@ -759,7 +741,7 @@ export class FileAgentsManager implements AgentsManager {
     const observations = new Map<number, PendingLinkObservation>();
     for (const step of steps) {
       if (!exists(step.scratch)) continue;
-      observations.set(step.target, { step, scratch: await this.privateObservation(step.scratch, true) });
+      observations.set(step.target, { step, scratch: await this.privateSnapshot(step.scratch, true) });
     }
     return observations;
   }
@@ -774,8 +756,8 @@ export class FileAgentsManager implements AgentsManager {
     const targetSnapshot = this.requireWindowsSnapshot(snapshots, target);
     let allowedLink: SecurityPathAllowedLink | undefined;
     if (pendingLink !== undefined && (requireStage || targetSnapshot.observation.nlink === 2)) {
-      if (!sameSecurityPathIdentity(pendingLink.scratch,
-        this.requireWindowsSnapshot(snapshots, pendingLink.step.scratch).observation)) {
+      if (!this.windowsSecurity.samePrivate(pendingLink.scratch,
+        this.requireWindowsSnapshot(snapshots, pendingLink.step.scratch), true)) {
         throw new AgentError("agent_unsafe_path");
       }
       const stage = path.join(pendingLink.step.scratch, "next");

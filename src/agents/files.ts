@@ -117,7 +117,7 @@ export function assertOwnedFromSecuritySnapshot(
   directory: boolean,
   snapshot: SecurityPathSnapshot,
   allowedLink?: SecurityPathAllowedLink,
-): string {
+): string | null {
   assertSecurityPathUnchanged(target, snapshot.observation, directory);
   if (snapshot.fact.status !== "present" || snapshot.fact.reparse) throw new AgentError("agent_unsafe_path");
   if (allowedLink !== undefined) {
@@ -127,7 +127,7 @@ export function assertOwnedFromSecuritySnapshot(
     }
   }
   assertOwnedStat(target, directory, allowedLink?.snapshot.observation);
-  return snapshot.fact.sddl;
+  return snapshot.fact.sddl ?? null;
 }
 export async function assertOwned(
   target: string,

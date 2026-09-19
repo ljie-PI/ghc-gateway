@@ -802,6 +802,23 @@ describe("private repeatable agent configuration", () => {
     ]);
   }, 300_000);
 
+  it.runIf(process.platform === "win32")("preserves exact Windows descriptors through first and repeat Apply", async () => {
+    const h = harness();
+    const config = await stableSeed(h.home, ".claude/settings.json", "{}\n");
+    const original = (await readImage(config))!;
+
+    await apply(h.manager, "claude");
+    const firstConfig = (await readImage(config))!;
+    const firstBackup = (await readImage(`${config}.ghcg.bak`))!;
+    expect(firstConfig.acl).toBe(original.acl);
+    expect(firstBackup.acl).toBe(original.acl);
+
+    fs.writeFileSync(config, JSON.stringify({ env: { OTHER: "external" } }));
+    await apply(h.manager, "claude", [...mappings].reverse());
+    expect((await readImage(config))!.acl).toBe(firstConfig.acl);
+    expect((await readImage(`${config}.ghcg.bak`))!.acl).toBe(firstBackup.acl);
+  }, 180_000);
+
   it.each(["claude", "codex"] as const)("publishes exact %s first and repeat Apply fixture bytes", async (agent) => {
     const h = harness();
     const fixturePath = path.resolve("tests/fixtures/agent-config", `${agent}.input.json`);
@@ -1668,7 +1685,7 @@ describe("private repeatable agent configuration", () => {
 function snapshotContract(batches: readonly (readonly WindowsSecuritySnapshotRequest[])[], home: string) {
   const normalizedHome = home.toLowerCase();
   const scratches = new Map<string, string>();
-  return batches.map((batch) => ({
+  return batches.filter((batch) => batch[0]!.id.startsWith("snapshot-")).map((batch) => ({
     id: batch[0]!.id.replace(/-path-0$/u, ""),
     paths: batch.map((request) => request.path.replace(normalizedHome, "$HOME").replace(
       /\.ghcg-agents-(?:claude|codex)-[0-9a-f-]+/gu,
@@ -1698,9 +1715,10 @@ function expectDistinctSnapshotIds(
   batches: readonly (readonly WindowsSecuritySnapshotRequest[])[],
   home: string,
 ): void {
-  const contract = snapshotContract(batches, home);
+  const transactionBatches = batches.filter((batch) => batch[0]!.id.startsWith("snapshot-"));
+  const contract = snapshotContract(transactionBatches, home);
   expect(new Set(contract.map((snapshot) => snapshot.id)).size).toBe(contract.length);
-  for (const [batchIndex, batch] of batches.entries()) {
+  for (const [batchIndex, batch] of transactionBatches.entries()) {
     expect(batch.map((request) => request.id)).toEqual(
       batch.map((_, pathIndex) => `${contract[batchIndex]!.id}-path-${pathIndex}`),
     );

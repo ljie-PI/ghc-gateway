@@ -5,12 +5,13 @@ import { windowsPowerShellPath } from "./windows_acl.js";
 export interface WindowsSecuritySnapshotRequest {
   readonly id: string;
   readonly path: string;
+  readonly security?: false;
 }
 
 export type WindowsSecuritySnapshotFact =
   | { readonly id: string; readonly status: "missing" }
   | { readonly id: string; readonly status: "error" }
-  | { readonly id: string; readonly status: "present"; readonly reparse: boolean; readonly owner: string; readonly sddl: string };
+  | { readonly id: string; readonly status: "present"; readonly reparse: boolean; readonly owner?: string; readonly sddl?: string };
 
 export interface WindowsSecuritySnapshotCommandOptions {
   readonly encoding: "utf8";
@@ -51,10 +52,10 @@ export class WindowsSecuritySnapshotError extends Error {
   }
 }
 
-const MAX_REQUESTS = 16;
+const MAX_REQUESTS = 32;
 const MAX_PATH_LENGTH = 4096;
 const MAX_INPUT_BYTES = 512 * 1024;
-const MAX_OUTPUT_BYTES = 1024 * 1024;
+const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_FACT_LENGTH = 16 * 1024;
 const QUERY_TIMEOUT_MS = 10_000;
 
@@ -99,8 +100,9 @@ $results=@($requests | ForEach-Object {
   $id=$_.id
   try {
     $item=Get-Item -LiteralPath $_.path -Force -ErrorAction Stop
-    $acl=Get-Acl -LiteralPath $_.path -ErrorAction Stop
-    [ordered]@{id=$id;status='present';reparse=(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0);owner=$acl.Owner;sddl=$acl.Sddl}
+    $result=[ordered]@{id=$id;status='present';reparse=(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)}
+    if($_.security -ne $false){$acl=Get-Acl -LiteralPath $_.path -ErrorAction Stop;$result.owner=$acl.Owner;$result.sddl=$acl.Sddl}
+    $result
   } catch [Management.Automation.ItemNotFoundException] {
     [ordered]@{id=$id;status='missing'}
   } catch {
@@ -159,18 +161,23 @@ function parseFacts(stdout: string, requests: readonly WindowsSecuritySnapshotRe
   if (Buffer.byteLength(stdout, "utf8") > MAX_OUTPUT_BYTES || !stdout.startsWith("[") || !stdout.endsWith("]")) throw new Error();
   const value: unknown = JSON.parse(stdout);
   if (!Array.isArray(value) || value.length !== requests.length) throw new Error();
-  return value.map((row, index) => parseFact(row, requests[index]!.id));
+  return value.map((row, index) => parseFact(row, requests[index]!));
 }
 
-function parseFact(value: unknown, expectedId: string): WindowsSecuritySnapshotFact {
-  if (!isRecord(value) || value.id !== expectedId || typeof value.status !== "string") throw new Error();
+function parseFact(value: unknown, request: WindowsSecuritySnapshotRequest): WindowsSecuritySnapshotFact {
+  if (!isRecord(value) || value.id !== request.id || typeof value.status !== "string") throw new Error();
   if (value.status === "missing" || value.status === "error") {
     if (!hasExactKeys(value, ["id", "status"])) throw new Error();
-    return { id: expectedId, status: value.status };
+    return { id: request.id, status: value.status };
   }
-  if (value.status !== "present" || !hasExactKeys(value, ["id", "status", "reparse", "owner", "sddl"])
-    || typeof value.reparse !== "boolean" || !isBoundedFact(value.owner) || !isBoundedFact(value.sddl)) throw new Error();
-  return { id: expectedId, status: "present", reparse: value.reparse, owner: value.owner, sddl: value.sddl };
+  if (value.status !== "present" || typeof value.reparse !== "boolean") throw new Error();
+  if (request.security === false) {
+    if (!hasExactKeys(value, ["id", "status", "reparse"])) throw new Error();
+    return { id: request.id, status: "present", reparse: value.reparse };
+  }
+  if (!hasExactKeys(value, ["id", "status", "reparse", "owner", "sddl"])
+    || !isBoundedFact(value.owner) || !isBoundedFact(value.sddl)) throw new Error();
+  return { id: request.id, status: "present", reparse: value.reparse, owner: value.owner, sddl: value.sddl };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

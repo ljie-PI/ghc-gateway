@@ -18,7 +18,7 @@ const invalidRequests: readonly (readonly WindowsSecuritySnapshotRequest[])[] = 
   [{ id: "bad id", path: "C:\\one" }],
   [{ id: "control", path: "C:\\one\nfile" }],
   [{ id: "long", path: `C:\\${"x".repeat(4095)}` }],
-  Array.from({ length: 17 }, (_, index) => ({ id: `path-${index}`, path: `C:\\path-${index}` })),
+  Array.from({ length: 33 }, (_, index) => ({ id: `path-${index}`, path: `C:\\path-${index}` })),
 ];
 
 describe("Windows security snapshot query", () => {
@@ -66,11 +66,11 @@ describe("Windows security snapshot query", () => {
   });
 
   it("keeps special and Unicode paths as stdin data and accepts the full bounded aggregate", async () => {
-    const requests = Array.from({ length: 16 }, (_, index) => ({
+    const requests = Array.from({ length: 32 }, (_, index) => ({
       id: `path-${index}`,
       path: index === 0
         ? "C:\\Users\\例 [x] '$&;()\\settings.json"
-        : `C:\\${String.fromCharCode(0xd800 + index).repeat(4093)}`,
+        : `C:\\${String.fromCharCode(0x4e00 + index).repeat(4093)}`,
     }));
     let command: Parameters<WindowsSecuritySnapshotDependencies["runCommand"]> | undefined;
     const dependencies: WindowsSecuritySnapshotDependencies = {
@@ -85,7 +85,7 @@ describe("Windows security snapshot query", () => {
       },
     };
 
-    await expect(queryWindowsSecuritySnapshot(requests, dependencies)).resolves.toHaveLength(16);
+    await expect(queryWindowsSecuritySnapshot(requests, dependencies)).resolves.toHaveLength(32);
 
     const [file, args, options, input] = command!;
     expect([file, ...args]).not.toContain(expect.stringContaining("settings.json"));
@@ -108,15 +108,33 @@ describe("Windows security snapshot query", () => {
     ]);
   });
 
+  it("accepts path-only reparse facts without an unused descriptor", async () => {
+    const dependencies = fakeDependencies(JSON.stringify([
+      { id: "parent", status: "present", reparse: false },
+      { id: "target", status: "present", reparse: false, owner: "owner", sddl: "sddl" },
+    ]));
+    await expect(queryWindowsSecuritySnapshot([
+      { id: "parent", path: "C:\\parent", security: false },
+      { id: "target", path: "C:\\parent\\target" },
+    ], dependencies)).resolves.toEqual([
+      { id: "parent", status: "present", reparse: false },
+      { id: "target", status: "present", reparse: false, owner: "owner", sddl: "sddl" },
+    ]);
+    await expect(queryWindowsSecuritySnapshot(
+      [{ id: "parent", path: "C:\\parent", security: false }],
+      fakeDependencies(JSON.stringify([{ id: "parent", status: "present", reparse: false, owner: "owner", sddl: "sddl" }])),
+    )).rejects.toEqual(new WindowsSecuritySnapshotError());
+  });
+
   it("accepts the maximum bounded aggregate facts", async () => {
-    const requests = Array.from({ length: 16 }, (_, index) => ({ id: `path-${index}`, path: `C:\\path-${index}` }));
+    const requests = Array.from({ length: 32 }, (_, index) => ({ id: `path-${index}`, path: `C:\\path-${index}` }));
     const owner = "O".repeat(16 * 1024);
     const sddl = "S".repeat(16 * 1024);
     const output = JSON.stringify(requests.map((request) => ({
       id: request.id, status: "present", reparse: false, owner, sddl,
     })));
 
-    await expect(queryWindowsSecuritySnapshot(requests, fakeDependencies(output))).resolves.toHaveLength(16);
+    await expect(queryWindowsSecuritySnapshot(requests, fakeDependencies(output))).resolves.toHaveLength(32);
   });
 
   it("rejects a default-runner stdin EPIPE without waiting for command completion", async () => {
