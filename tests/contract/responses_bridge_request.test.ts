@@ -567,6 +567,12 @@ describe("Responses bridge request conversion", () => {
         configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
         effective: 4096, source: "unknown_fallback", valid: true,
       },
+      capabilities: {
+        contextWindowTokens: null, maxContextWindowTokens: null,
+        reasoningLevels: [], reasoningProtocols: [], inputModalities: ["text", "image"],
+        toolCalling: true, parallelToolCalling: true, reasoningSummaries: false,
+        verbosity: false, search: false,
+      },
       profile: {
         chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
         supportedParameters: { value: [], source: "unknown", conflict: false, liveState: "missing" },

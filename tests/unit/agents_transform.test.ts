@@ -11,11 +11,17 @@ const field = <T>(value: T | null) => ({ value, source: value === null ? "unknow
 const models = mappings.map((row, i) => ({
   modelId: row.modelId,
   protocols: field(["responses"] as const),
-  maxInputTokens: field(i === 0 ? 32000 : null),
-  profile: {
-    chatOutputTokenField: field(null),
-    supportedParameters: field<readonly string[]>(null),
-    reasoningEfforts: field<readonly []>(null),
+  capabilities: {
+    contextWindowTokens: i === 0 ? 32000 : null,
+    maxContextWindowTokens: i === 0 ? 32000 : null,
+    reasoningLevels: [] as const,
+    reasoningProtocols: [] as const,
+    inputModalities: ["text"] as const,
+    toolCalling: false,
+    parallelToolCalling: false,
+    reasoningSummaries: false,
+    verbosity: false,
+    search: false,
   },
 }));
 const account = {
@@ -136,11 +142,46 @@ describe("agent configuration projection", () => {
       { slug: "malformed-parameter", supported_reasoning_levels: [] },
       { slug: "conflicting-parameter", supported_reasoning_levels: [] },
       { slug: "malformed-efforts", supported_reasoning_levels: [] },
-      { slug: "native-responses", supported_reasoning_levels: [{ effort: "high", description: "High" }, { effort: "low", description: "Low" }] },
-      { slug: "chat-bridge", supported_reasoning_levels: [{ effort: "high", description: "High" }, { effort: "low", description: "Low" }] },
-      { slug: "messages-bridge", supported_reasoning_levels: [{ effort: "high", description: "High" }, { effort: "low", description: "Low" }] },
+      { slug: "native-responses", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
+      { slug: "chat-bridge", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
+      { slug: "messages-bridge", supported_reasoning_levels: [{ effort: "low", description: "Low" }, { effort: "high", description: "High" }] },
       { slug: "chat-priority", supported_reasoning_levels: [] },
     ]);
+  });
+  it("projects effective model capabilities without adapter-specific reinterpretation", async () => {
+    const [model] = await capabilityModels([{
+      id: "capable",
+      fields: {
+        supported_endpoints: ["/responses"],
+        supported_reasoning_efforts: ["high", "minimal", "none"],
+        capabilities: {
+          limits: { max_prompt_tokens: 120_000, max_context_window_tokens: 144_000 },
+          supports: {
+            reasoning_effort: ["high", "minimal", "none"], tool_calls: true, parallel_tool_calls: true, vision: true,
+            reasoning_summaries: true, verbosity: true, search: true,
+          },
+        },
+      },
+    }]);
+    const projection = projectAgent(
+      "codex", null, [{ modelId: "capable", displayName: "Capable" }], origin, "ghcg_models.json", [model!], null,
+    );
+    expect(JSON.parse(projection.catalog!.toString()).models[0]).toMatchObject({
+      context_window: 120_000,
+      max_context_window: 144_000,
+      supported_reasoning_levels: [
+        { effort: "none", description: "None" },
+        { effort: "minimal", description: "Minimal" },
+        { effort: "high", description: "High" },
+      ],
+      support_verbosity: true,
+      supports_reasoning_summaries: true,
+      supports_reasoning_summary_parameter: true,
+      supports_parallel_tool_calls: true,
+      supports_image_detail_original: true,
+      supports_search_tool: true,
+      input_modalities: ["text", "image"],
+    });
   });
   it("rejects stale Codex ownership evidence", () => {
     const source = Buffer.from("[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\n");

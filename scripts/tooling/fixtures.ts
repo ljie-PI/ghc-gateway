@@ -693,12 +693,21 @@ export async function projectAgentConfigFixture(
   const models: readonly AgentModel[] = input.models.map((model) => ({
     modelId: model.modelId,
     protocols: fixtureAgentField(model.protocols),
-    maxInputTokens: fixtureAgentField(model.maxInputTokens),
-    profile: {
-      chatOutputTokenField: fixtureAgentField(null),
-      supportedParameters: fixtureAgentField(model.supportedParameters),
-      reasoningEfforts: fixtureAgentField(model.reasoningEfforts),
-      contextWindowTokens: fixtureAgentField(model.contextWindowTokens),
+    capabilities: {
+      contextWindowTokens: model.maxInputTokens === null ? null
+        : model.contextWindowTokens === null ? model.maxInputTokens : Math.min(model.maxInputTokens, model.contextWindowTokens),
+      maxContextWindowTokens: model.contextWindowTokens ?? model.maxInputTokens,
+      reasoningLevels: model.reasoningEfforts ?? [],
+      reasoningProtocols: model.supportedParameters === null || model.protocols === null ? []
+        : model.protocols.filter((protocol) => ({
+          chat: ["reasoning_effort"], messages: ["output_config.effort", "output_config"], responses: ["reasoning", "reasoning.effort"],
+        })[protocol].some((parameter) => model.supportedParameters?.includes(parameter))),
+      inputModalities: ["text"],
+      toolCalling: false,
+      parallelToolCalling: false,
+      reasoningSummaries: false,
+      verbosity: false,
+      search: false,
     },
   }));
   const catalogPath = catalogPathOverride ?? input.catalogPath;
@@ -766,6 +775,7 @@ function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveMode
       source: "live",
       valid: true,
     },
+    capabilities: fixtureModelCapabilities([protocol]),
     profile: {
       chatOutputTokenField: {
         value: "max_tokens",
@@ -916,8 +926,8 @@ async function createResponsesFixtureGateway(expectations: readonly HttpExpectat
     const catalog = new CopilotModelCatalog({
       async fetch() {
         return { data: [
-          { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] } },
-          { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" } },
+          { id: "native", name: "Native", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/responses"] }, capabilities: { supports: { tool_calls: true, parallel_tool_calls: true, vision: true } } },
+          { id: "chat", name: "Chat", vendor: "github", model_picker_enabled: true, model_info: { supported_endpoints: ["/chat/completions"], chat_output_token_field: "max_tokens" }, capabilities: { supports: { tool_calls: true, parallel_tool_calls: true, vision: true } } },
         ] };
       },
     });
@@ -1006,6 +1016,7 @@ function fixtureCapability(
       source: "unknown_fallback",
       valid: true,
     },
+    capabilities: fixtureModelCapabilities(protocols ?? []),
     profile: {
       chatOutputTokenField: { value: "max_tokens", source: "builtin", conflict: false, liveState: "missing" },
       supportedParameters: {
@@ -1032,6 +1043,21 @@ function fixtureCapability(
       },
     },
     revision: { credentialGeneration: 0, catalogGeneration: 0, builtinRevision: null },
+  };
+}
+
+function fixtureModelCapabilities(protocols: readonly InferenceProtocol[]) {
+  return {
+    contextWindowTokens: 128_000,
+    maxContextWindowTokens: 128_000,
+    reasoningLevels: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+    reasoningProtocols: protocols,
+    inputModalities: ["text", "image"] as const,
+    toolCalling: true,
+    parallelToolCalling: true,
+    reasoningSummaries: false,
+    verbosity: false,
+    search: false,
   };
 }
 

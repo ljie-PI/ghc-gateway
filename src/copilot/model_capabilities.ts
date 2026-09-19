@@ -3,6 +3,7 @@ import type { ModelInfoLookup } from "./model_catalog.js";
 export type NativeModelProtocol = "chat" | "messages" | "responses";
 export type ChatOutputTokenField = "max_tokens" | "max_completion_tokens";
 export type SupportedReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type ModelInputModality = "text" | "image";
 export type CapabilityFieldState = "missing" | "value" | "malformed";
 export type CapabilitySource = "live" | "builtin" | "unknown";
 
@@ -37,6 +38,13 @@ export interface DeclaredModelCapabilities {
   readonly chatOutputTokenField: DeclaredField<ChatOutputTokenField>;
   readonly supportedParameters: DeclaredField<readonly string[]>;
   readonly reasoningEfforts: DeclaredField<readonly SupportedReasoningEffort[]>;
+  readonly reasoningEffort: DeclaredField<boolean>;
+  readonly toolCalls: DeclaredField<boolean>;
+  readonly parallelToolCalls: DeclaredField<boolean>;
+  readonly vision: DeclaredField<boolean>;
+  readonly reasoningSummaries: DeclaredField<boolean>;
+  readonly verbosity: DeclaredField<boolean>;
+  readonly search: DeclaredField<boolean>;
 }
 
 export interface EffectiveCapabilityField<T> {
@@ -60,6 +68,19 @@ export interface ModelCapabilityProfile {
   readonly reasoningEfforts: EffectiveCapabilityField<readonly SupportedReasoningEffort[]>;
 }
 
+export interface ModelCapabilities {
+  readonly contextWindowTokens: number | null;
+  readonly maxContextWindowTokens: number | null;
+  readonly reasoningLevels: readonly SupportedReasoningEffort[];
+  readonly reasoningProtocols: readonly NativeModelProtocol[];
+  readonly inputModalities: readonly ModelInputModality[];
+  readonly toolCalling: boolean;
+  readonly parallelToolCalling: boolean;
+  readonly reasoningSummaries: boolean;
+  readonly verbosity: boolean;
+  readonly search: boolean;
+}
+
 export interface BuiltinModelCapabilities {
   readonly revision: string;
   readonly capabilities: DeclaredModelCapabilities;
@@ -78,6 +99,13 @@ export const UNKNOWN_DECLARATIONS: DeclaredModelCapabilities = Object.freeze({
   chatOutputTokenField: missing<ChatOutputTokenField>(),
   supportedParameters: missing<readonly string[]>(),
   reasoningEfforts: missing<readonly SupportedReasoningEffort[]>(),
+  reasoningEffort: missing<boolean>(),
+  toolCalls: missing<boolean>(),
+  parallelToolCalls: missing<boolean>(),
+  vision: missing<boolean>(),
+  reasoningSummaries: missing<boolean>(),
+  verbosity: missing<boolean>(),
+  search: missing<boolean>(),
 });
 
 export function parseLiveModelCapabilities(record: Readonly<Record<string, unknown>>): DeclaredModelCapabilities {
@@ -120,10 +148,29 @@ export function parseLiveModelCapabilities(record: Readonly<Record<string, unkno
       ["capabilities", "supported_parameters"],
     ], parseSupportedParameters),
     reasoningEfforts: parseLocations(record, [
+      ["capabilities", "supports", "reasoning_effort"],
       ["supported_reasoning_efforts"],
       ["model_info", "supported_reasoning_efforts"],
       ["capabilities", "supported_reasoning_efforts"],
     ], parseReasoningEfforts),
+    reasoningEffort: parseLocations(
+      record,
+      [["capabilities", "supports", "reasoning_effort"]],
+      parseReasoningSupport,
+    ),
+    toolCalls: parseLocations(record, [["capabilities", "supports", "tool_calls"]], parseBoolean),
+    parallelToolCalls: parseLocations(record, [["capabilities", "supports", "parallel_tool_calls"]], parseBoolean),
+    vision: parseLocations(record, [["capabilities", "supports", "vision"]], parseBoolean),
+    reasoningSummaries: parseLocations(record, [
+      ["capabilities", "supports", "reasoning_summaries"],
+      ["capabilities", "supports", "reasoning_summary"],
+    ], parseBoolean),
+    verbosity: parseLocations(record, [["capabilities", "supports", "verbosity"]], parseBoolean),
+    search: parseLocations(record, [
+      ["capabilities", "supports", "tool_search"],
+      ["capabilities", "supports", "search"],
+      ["capabilities", "supports", "web_search"],
+    ], parseBoolean),
   });
 }
 
@@ -169,6 +216,13 @@ export function builtinCapabilitiesFromModelInfo(
         : missing<ChatOutputTokenField>(),
       supportedParameters: missing<readonly string[]>(),
       reasoningEfforts: missing<readonly SupportedReasoningEffort[]>(),
+      reasoningEffort: missing<boolean>(),
+      toolCalls: missing<boolean>(),
+      parallelToolCalls: missing<boolean>(),
+      vision: missing<boolean>(),
+      reasoningSummaries: missing<boolean>(),
+      verbosity: missing<boolean>(),
+      search: missing<boolean>(),
     }),
   };
 }
@@ -350,11 +404,22 @@ function parseSupportedParameters(input: unknown): DeclaredField<readonly string
 }
 
 function parseReasoningEfforts(input: unknown): DeclaredField<readonly SupportedReasoningEffort[]> {
-  const allowed = new Set<SupportedReasoningEffort>(["none", "minimal", "low", "medium", "high", "xhigh"]);
+  const order: readonly SupportedReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
+  const allowed = new Set(order);
   if (!Array.isArray(input) || input.some((value) => typeof value !== "string" || !allowed.has(value as SupportedReasoningEffort))) {
     return malformed();
   }
-  return value([...new Set(input as SupportedReasoningEffort[])].sort());
+  const efforts = new Set(input as SupportedReasoningEffort[]);
+  return value(order.filter((effort) => efforts.has(effort)));
+}
+
+function parseBoolean(input: unknown): DeclaredField<boolean> {
+  return typeof input === "boolean" ? value(input) : malformed();
+}
+
+function parseReasoningSupport(input: unknown): DeclaredField<boolean> {
+  const efforts = parseReasoningEfforts(input);
+  return efforts.state === "value" ? value((efforts.value?.length ?? 0) > 0) : malformed();
 }
 
 function missing<T>(): DeclaredField<T> {

@@ -3,8 +3,6 @@
   import { errorMessage, type AdminClient } from "../api.js";
   import type { AdminAccounts, AdminModels } from "../types.js";
 
-  type ModelItem = AdminModels["items"][number];
-
   let { client, pageNumber, onchanged }: { client: AdminClient; pageNumber: string; onchanged?: () => void } = $props();
   let accounts: AdminAccounts | null = $state(null);
   let data = $state<AdminModels | null>(null);
@@ -89,23 +87,8 @@
     return !disposed && requestGeneration === generation && accountId === targetAccountId;
   }
 
-  function sourceLabel(source: ModelItem["defaultOutputTokens"]["source"]): string {
-    switch (source) {
-      case "live": return "Upstream";
-      case "builtin": return "Built-in";
-      case "known_ceiling": return "Known ceiling policy";
-      case "unknown_fallback": return "Unknown ceiling fallback";
-      default: return "Unknown";
-    }
-  }
-
-  function declarationLabel(state: ModelItem["protocolsLiveState"]): string {
-    switch (state) {
-      case "value": return "Present";
-      case "missing": return "Missing";
-      case "malformed": return "Malformed";
-      default: return "Unknown";
-    }
+  function supportLabel(supported: boolean): string {
+    return supported ? "Supported" : "Not supported";
   }
 </script>
 
@@ -113,7 +96,7 @@
   <div>
     <p class="eyebrow">[{pageNumber}] LOCAL ADMINISTRATION</p>
     <h1 tabindex="-1">Models</h1>
-    <p>Inspect the account catalog and native interface metadata.</p>
+    <p>Inspect the account catalog and declared model capabilities.</p>
   </div>
   <button class="primary" onclick={refresh} disabled={!accountId || loading || busy === "refresh"}>
     {busy === "refresh" ? "Refreshing..." : "Refresh"}
@@ -164,9 +147,9 @@
       <span class="badge">{selectedData.items.length} models</span>
     </div>
     <details class="catalog-help" id="model-catalog-help">
-      <summary>About sources and token limits</summary>
-      <p>Only models discovered in the upstream catalog are listed.</p>
-      <p>Capability details show declared metadata, not live inference validation or proof of account entitlement.</p>
+      <summary>About model capabilities and token limits</summary>
+      <p>Only models discovered in the account catalog are listed.</p>
+      <p>Capabilities are catalog declarations used by the Gateway, not live inference validation or proof of account entitlement.</p>
       <p>Token limits apply to each request, not account quota. The input limit may be lower than the model's full context window.</p>
     </details>
     <div class="table-scroll">
@@ -211,19 +194,21 @@
             <tr class="model-details-row">
               <td colspan="3">
                 <details class="model-details">
-                  <summary>Capability details</summary>
+                  <summary>Model capabilities</summary>
                   <div class="capability-grid">
                     <dl>
-                      <div><dt>Context window</dt><dd>{model.metadata.contextWindowTokens?.value?.toLocaleString() ?? "Unknown"} · {declarationLabel(model.metadata.contextWindowTokens?.liveState ?? "missing")}</dd></div>
-                      <div><dt>Supported parameters</dt><dd>{model.metadata.supportedParameters.value === null ? "Unknown" : model.metadata.supportedParameters.value.join(", ") || "None"} · {declarationLabel(model.metadata.supportedParameters.liveState)}</dd></div>
-                      <div><dt>Reasoning efforts</dt><dd>{model.metadata.reasoningEfforts.value === null ? "Unknown" : model.metadata.reasoningEfforts.value.join(", ") || "None"} · {declarationLabel(model.metadata.reasoningEfforts.liveState)}</dd></div>
+                      <div><dt>Context window</dt><dd>{model.capabilities.contextWindowTokens?.toLocaleString() ?? "Unavailable"}</dd></div>
+                      <div><dt>Maximum context window</dt><dd>{model.capabilities.maxContextWindowTokens?.toLocaleString() ?? "Unavailable"}</dd></div>
+                      <div><dt>Reasoning levels</dt><dd>{model.capabilities.reasoningLevels.join(", ") || "Unavailable"}</dd></div>
+                      <div><dt>Input modalities</dt><dd>{model.capabilities.inputModalities.join(", ")}</dd></div>
+                      <div><dt>Tool calling</dt><dd>{supportLabel(model.capabilities.toolCalling)}</dd></div>
+                      <div><dt>Parallel tool calling</dt><dd>{supportLabel(model.capabilities.parallelToolCalling)}</dd></div>
+                      <div><dt>Reasoning summaries</dt><dd>{supportLabel(model.capabilities.reasoningSummaries)}</dd></div>
+                      <div><dt>Verbosity</dt><dd>{supportLabel(model.capabilities.verbosity)}</dd></div>
+                      <div><dt>Search</dt><dd>{supportLabel(model.capabilities.search)}</dd></div>
                       <div><dt>Native HTTP protocols</dt><dd>{model.protocols?.join(", ") || (model.protocols === null ? "Unknown" : "None")}</dd></div>
-                      <div><dt>Protocol metadata source</dt><dd>{sourceLabel(model.protocolsSource)}{model.protocolsConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.protocolsLiveState)}</dd></div>
-                      <div><dt>Max input tokens per request</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unknown"} · {sourceLabel(model.maxInputTokensSource)}{model.maxInputTokensConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.maxInputTokensLiveState)}</dd></div>
-                      <div><dt>Max output tokens per request</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unknown"} · {sourceLabel(model.maxOutputTokensSource)}{model.maxOutputTokensConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.maxOutputTokensLiveState)}</dd></div>
-                      <div><dt>Default output</dt><dd>{model.defaultOutputTokens.effective.toLocaleString()} · {sourceLabel(model.defaultOutputTokens.source)}{model.defaultOutputTokens.conflict ? " · Conflict" : ""}{model.defaultOutputTokens.valid ? "" : " · Invalid for current ceiling"} · Upstream declaration: {declarationLabel(model.defaultOutputTokens.liveState)}</dd></div>
-                      <div><dt>Chat budget field</dt><dd>{model.chatOutputTokenField ?? "Unknown"} · {sourceLabel(model.chatOutputTokenFieldSource)}{model.chatOutputTokenFieldConflict ? " · Conflict" : ""} · Upstream declaration: {declarationLabel(model.chatOutputTokenFieldLiveState)}</dd></div>
-                      <div><dt>Built-in revision</dt><dd>{model.builtinRevision ?? "None"}</dd></div>
+                      <div><dt>Maximum input tokens per request</dt><dd>{model.maxInputTokens?.toLocaleString() ?? "Unavailable"}</dd></div>
+                      <div><dt>Maximum output tokens per request</dt><dd>{model.maxOutputTokens?.toLocaleString() ?? "Unavailable"}</dd></div>
                     </dl>
                   </div>
                 </details>

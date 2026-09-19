@@ -83,7 +83,7 @@ ghcg models set <model-id>
 
 Preferred models are account-specific. If a catalog refresh removes a preferred model, it is marked invalid and must be explicitly reselected. The gateway never silently selects the first model.
 
-The Models Admin view shows read-only account-scoped native HTTP capabilities for Chat, Messages, and Responses, including metadata sources, conflicts, token limits, context windows, supported parameters, and reasoning efforts. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
+The Models Admin view shows read-only account-scoped native HTTP interfaces, token and context limits, reasoning levels, input modalities, tool calling, reasoning summaries, verbosity, and search support. These capabilities are catalog declarations used by the Gateway, not live inference validation. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
 
 Unknown or malformed capability declarations remain unknown. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
 

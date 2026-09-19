@@ -107,6 +107,12 @@ describe("native Responses execution", () => {
           configuration: { value: null, source: "unknown", conflict: false, liveState: "missing" },
           effective: 4096, source: "unknown_fallback", valid: true,
         },
+        capabilities: {
+          contextWindowTokens: null, maxContextWindowTokens: null,
+          reasoningLevels: [], reasoningProtocols: [], inputModalities: ["text"],
+          toolCalling: false, parallelToolCalling: false, reasoningSummaries: false,
+          verbosity: false, search: false,
+        },
         profile: {
           chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },
           supportedParameters: { value: null, source: "unknown", conflict: false, liveState: "missing" },
