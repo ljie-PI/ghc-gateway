@@ -2,11 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "../../src/agents/types.js";
-import { AgentStore } from "../../src/agents/store.js";
+import { AgentStore, type AgentState } from "../../src/agents/store.js";
 import { protect, readImage } from "../../src/agents/files.js";
 import { projectAgent } from "../../src/agents/transform.js";
 import type { WindowsSecuritySnapshotFact, WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
@@ -40,6 +41,15 @@ function harness(options: Omit<AgentManagerOptions, "home"> = {}) {
   const manager = new FileAgentsManager({ home, now: () => new Date("2026-01-02T03:04:05Z"), ...options });
   const status = async (agent: AgentId) => (await manager.inspect(origin)).find((item) => item.id === agent)!;
   return { home, manager, status };
+}
+function stateRoot(home: string, dataDir = path.join(home, ".ghc-gateway")): string {
+  return path.join(dataDir, "agents");
+}
+function legacyStateRoot(home: string): string {
+  return path.join(home, ".ghc-gateway-agents");
+}
+async function saveState(root: string, agent: AgentId, state: AgentState): Promise<void> {
+  await new AgentStore(root, agent).locked(async (save) => save(state));
 }
 async function apply(
   manager: FileAgentsManager,
@@ -80,6 +90,89 @@ beforeAll(warmWindowsAgentAcl, 90_000);
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
 
 describe("private repeatable agent configuration", () => {
+  it("stores default and custom Agent state under the selected data directory", async () => {
+    const defaults = harness();
+    await apply(defaults.manager, "claude");
+    expect(fs.existsSync(path.join(stateRoot(defaults.home), "claude", "state.db"))).toBe(true);
+    expect(fs.existsSync(legacyStateRoot(defaults.home))).toBe(false);
+
+    const custom = harness({ dataDir: path.join(defaults.home, "custom-data") });
+    await apply(custom.manager, "codex");
+    expect(fs.existsSync(path.join(defaults.home, "custom-data", "agents", "codex", "state.db"))).toBe(true);
+    expect(fs.existsSync(path.join(defaults.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
+  }, 180_000);
+
+  it("migrates complete legacy state and retires its writable authority", async () => {
+    const h = harness();
+    const config = path.join(h.home, ".claude", "settings.json");
+    const state = {
+      version: 2 as const,
+      revision: 7,
+      mappings: [mappings[0]!],
+      lastAppliedAt: "2026-01-02T03:04:05.000Z",
+      targets: [
+        { path: `${config}.ghcg.bak`, original: null, expected: null },
+        { path: config, original: null, expected: null },
+      ],
+      pending: {
+        kind: "apply" as const,
+        garbage: [path.join(h.home, ".claude", ".ghcg-agents-claude-00000000-0000-4000-8000-000000000002")],
+        steps: [{
+          target: 1,
+          before: null,
+          after: null,
+          phase: "planned" as const,
+          scratch: path.join(h.home, ".claude", ".ghcg-agents-claude-00000000-0000-4000-8000-000000000001"),
+        }],
+      },
+    };
+    await saveState(legacyStateRoot(h.home), "claude", state);
+
+    await h.manager.inspect(origin);
+    expect(await new AgentStore(stateRoot(h.home), "claude").read()).toEqual(state);
+    expect(fs.existsSync(path.join(legacyStateRoot(h.home), "claude", "state.db.migrated"))).toBe(true);
+    const marker = new DatabaseSync(path.join(legacyStateRoot(h.home), "claude", "state.db"), { readOnly: true });
+    try {
+      expect(marker.prepare("SELECT target FROM migration").get()).toEqual({
+        target: path.join(stateRoot(h.home), "claude", "state.db"),
+      });
+      expect(() => JSON.parse((marker.prepare("SELECT document FROM state WHERE id=1").get() as { document: string }).document))
+        .not.toThrow();
+    } finally { marker.close(); }
+    await expect(new AgentStore(legacyStateRoot(h.home), "claude").read())
+      .rejects.toMatchObject({ code: "agent_recovery_required" });
+  }, 180_000);
+
+  it("accepts equivalent dual state and fails closed for conflicting dual state", async () => {
+    const equivalent = harness();
+    const state = { version: 2 as const, revision: 4, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(equivalent.home), "codex", state);
+    await saveState(stateRoot(equivalent.home), "codex", structuredClone(state));
+    expect((await equivalent.status("codex")).mappings).toEqual(state.mappings);
+    expect(fs.existsSync(path.join(legacyStateRoot(equivalent.home), "codex", "state.db.migrated"))).toBe(true);
+
+    const conflict = harness();
+    await saveState(legacyStateRoot(conflict.home), "codex", state);
+    await saveState(stateRoot(conflict.home), "codex", { ...state, revision: 5 });
+    expect(await conflict.status("codex")).toMatchObject({ state: "recovery_required", mappings: [] });
+    expect(fs.existsSync(path.join(legacyStateRoot(conflict.home), "codex", "state.db.migrated"))).toBe(false);
+  }, 180_000);
+
+  it("converges concurrent migration and remains restart-safe", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 9, mappings: [mappings[1]!], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    const one = new FileAgentsManager({ home: h.home });
+    const two = new FileAgentsManager({ home: h.home });
+    const results = await Promise.allSettled([one.inspect(origin), two.inspect(origin)]);
+    expect(results.some((result) => result.status === "fulfilled")).toBe(true);
+    const restarted = new FileAgentsManager({ home: h.home });
+    expect((await restarted.inspect(origin)).find((item) => item.id === "codex")).toMatchObject({
+      state: "not_managed",
+      mappings: state.mappings,
+    });
+    expect(await new AgentStore(stateRoot(h.home), "codex").read()).toEqual(state);
+  }, 180_000);
   it.runIf(process.platform === "win32")("uses one ordered security batch per Inspect without cross-call reuse", async () => {
     const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
     const h = harness({
@@ -469,7 +562,7 @@ describe("private repeatable agent configuration", () => {
     const h = harness({
       checkpoint: (point) => {
         if (point !== "before_intent") return;
-        stateDatabaseExistedAtBoundary = fs.existsSync(path.join(h.home, ".ghc-gateway-agents", "codex", "state.db"));
+        stateDatabaseExistedAtBoundary = fs.existsSync(path.join(h.home, ".ghc-gateway", "agents", "codex", "state.db"));
         controller.abort();
       },
     });
@@ -478,7 +571,7 @@ describe("private repeatable agent configuration", () => {
       agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64), mappings,
     }, origin, models, () => undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(stateDatabaseExistedAtBoundary).toBe(false);
-    expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents", "codex", "state.db"))).toBe(false);
+    expect(fs.existsSync(path.join(h.home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
     expect(fs.existsSync(path.join(h.home, ".codex"))).toBe(false);
   }, 180_000);
 
@@ -486,7 +579,7 @@ describe("private repeatable agent configuration", () => {
     const h = harness();
     await apply(h.manager, "codex");
     const status = await h.status("codex");
-    const statePath = path.join(h.home, ".ghc-gateway-agents", "codex", "state.db");
+    const statePath = path.join(h.home, ".ghc-gateway", "agents", "codex", "state.db");
     const catalogPath = path.join(h.home, ".codex", "ghcg_models.json");
     const configPath = path.join(h.home, ".codex", "config.toml");
     const before = [statePath, catalogPath, configPath].map((file) => fs.readFileSync(file));
@@ -584,7 +677,7 @@ describe("private repeatable agent configuration", () => {
     expect(fs.readFileSync(catalog, "utf8")).toBe("external catalog\n");
     expect(fs.readFileSync(auth, "utf8")).toBe("login-secret\n");
     expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);
-    expect(fs.existsSync(path.join(h.home, ".ghc-gateway-agents"))).toBe(false);
+    expect(fs.existsSync(path.join(h.home, ".ghc-gateway", "agents"))).toBe(false);
   }, 180_000);
 
   it("does not treat stale durable Codex state as provider ownership", async () => {
@@ -899,7 +992,7 @@ describe("private repeatable agent configuration", () => {
   it.skipIf(process.platform === "win32")("rejects world-readable recovery state", async () => {
     const h = harness();
     await apply(h.manager, "claude");
-    fs.chmodSync(path.join(h.home, ".ghc-gateway-agents/claude/state.db"), 0o644);
+    fs.chmodSync(path.join(h.home, ".ghc-gateway/agents/claude/state.db"), 0o644);
     expect((await h.status("claude")).state).toBe("unsafe_path");
   }, 180_000);
 });

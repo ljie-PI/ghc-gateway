@@ -21,6 +21,7 @@ type ConsumedInspection =
 
 export interface AgentManagerOptions {
   readonly home?: string;
+  readonly dataDir?: string;
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly now?: () => Date;
   readonly queryWindowsSecuritySnapshot?: (
@@ -33,6 +34,7 @@ export interface AgentManagerOptions {
 export class FileAgentsManager implements AgentsManager {
   private readonly home: string;
   private readonly root: string;
+  private readonly legacyRoot: string;
   private readonly paths: Record<AgentId, readonly string[]>;
   private readonly busy = new Set<AgentId>();
   private closed = false;
@@ -43,7 +45,9 @@ export class FileAgentsManager implements AgentsManager {
     // trusted anchor avoids rejecting the OS alias while links below it remain
     // forbidden. A durable baseline pins its own target paths.
     this.home = fs.realpathSync.native(path.resolve(options.home ?? os.homedir()));
-    this.root = path.join(this.home, ".ghc-gateway-agents");
+    const dataDir = path.resolve(options.dataDir ?? path.join(this.home, ".ghc-gateway"));
+    this.root = path.join(dataDir, "agents");
+    this.legacyRoot = path.join(this.home, ".ghc-gateway-agents");
     const env = options.env ?? {};
     const claude = path.resolve(env.CLAUDE_CONFIG_DIR ?? path.join(this.home, ".claude"));
     const codex = path.resolve(env.CODEX_HOME ?? path.join(this.home, ".codex"));
@@ -58,7 +62,7 @@ export class FileAgentsManager implements AgentsManager {
     if (process.platform !== "win32") return await Promise.all(agents.map((agent) => this.status(agent, origin)));
     let prepared = await Promise.all(agents.map(async (agent): Promise<PreparedInspection> => {
       try {
-        const state = await new AgentStore(this.root, agent).read();
+        const state = await this.store(agent).read();
         return { agent, state, paths: this.fallbackTargetPaths(agent, state) };
       } catch (error: unknown) {
         return { agent, error };
@@ -115,7 +119,7 @@ export class FileAgentsManager implements AgentsManager {
     return await this.exclusive(request.agent, async () => {
       signal.throwIfAborted();
       validateMappings(request.agent, request.mappings);
-      const store = new AgentStore(this.root, request.agent);
+      const store = this.store(request.agent);
       // Parse and validate BEFORE making a recovery directory or lock file.
       const initial = await store.read();
       const paths = this.targetPaths(request.agent, initial);
@@ -255,7 +259,7 @@ export class FileAgentsManager implements AgentsManager {
     let backupAvailable = false;
     const images: (FileImage | null)[] = [];
     try {
-      state = inspection?.state ?? await new AgentStore(this.root, agent).read();
+      state = inspection?.state ?? await this.store(agent).read();
       paths = inspection?.paths ?? this.fallbackTargetPaths(agent, state);
       if (inspection?.images !== undefined) {
         images.push(...inspection.images);
@@ -299,6 +303,10 @@ export class FileAgentsManager implements AgentsManager {
       lastAppliedAt: state?.lastAppliedAt ?? null,
       mappings: state?.version === 1 && agent === "claude" ? state.mappings.slice(0, 3) : state?.mappings ?? [],
     };
+  }
+
+  private store(agent: AgentId): AgentStore {
+    return new AgentStore(this.root, agent, this.legacyRoot);
   }
 
   private backupAvailable(state: AgentState, images: readonly (FileImage | null)[]): boolean {

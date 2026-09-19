@@ -123,7 +123,7 @@ describe("Admin agents API", () => {
         home,
         checkpoint: (point) => {
           if (point !== "before_intent") return;
-          stateDatabaseExistedAtBoundary = fs.existsSync(path.join(home, ".ghc-gateway-agents", "codex", "state.db"));
+          stateDatabaseExistedAtBoundary = fs.existsSync(path.join(home, ".ghc-gateway", "agents", "codex", "state.db"));
           if (change === "default") defaultState = { defaultRevision: 3, defaultAccountId: second.accountId };
           if (change === "fallback") accounts = [first, second];
           if (change === "account") accounts = [{ ...first, revision: first.revision + 1 }];
@@ -143,7 +143,7 @@ describe("Admin agents API", () => {
         }, ORIGIN, new AbortController().signal)).rejects.toMatchObject({ code: "revision_conflict" });
 
         expect(stateDatabaseExistedAtBoundary).toBe(false);
-        expect(fs.existsSync(path.join(home, ".ghc-gateway-agents", "codex", "state.db"))).toBe(false);
+        expect(fs.existsSync(path.join(home, ".ghc-gateway", "agents", "codex", "state.db"))).toBe(false);
         expect(fs.existsSync(path.join(home, ".codex"))).toBe(false);
       } finally {
         manager.close();

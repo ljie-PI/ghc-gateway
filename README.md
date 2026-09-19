@@ -46,6 +46,8 @@ ghcg start --port 31401
 
 There is no watchdog, automatic restart, operating-system service installation, or second server process. Stop and restart verify the daemon PID, operating-system process start identity, instance nonce, and authenticated control endpoint before termination.
 
+Gateway runtime data, credentials, and Agent management state are stored under the selected data directory. The default Agent state paths are `~/.ghc-gateway/agents/claude/state.db` and `~/.ghc-gateway/agents/codex/state.db`; `--data-dir` or `GHC_GATEWAY_DATA_DIR` moves them to `<data-dir>/agents` without changing `CLAUDE_CONFIG_DIR` or `CODEX_HOME` client configuration targets.
+
 ## Authentication And Accounts
 
 Start GitHub.com device authorization:

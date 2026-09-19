@@ -339,7 +339,7 @@ export async function composeProductionDaemonGateway(
     };
     const uptimeMs = options.uptimeMs ?? (() => Math.max(0, Math.floor(process.uptime() * 1000)));
     const admin = createAdminModule({
-      agents: new FileAgentsManager({ env: composition.env }),
+      agents: new FileAgentsManager({ dataDir: composition.startup.dataDir, env: composition.env }),
       accounts: application.directory,
       deviceFlows,
       registry,
