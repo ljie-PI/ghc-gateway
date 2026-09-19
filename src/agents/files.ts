@@ -181,7 +181,11 @@ export function sameDisplacedContent(a: FileImage | null, b: FileImage | null): 
 }
 export async function privateDirectory(target: string): Promise<void> {
   assertNoLinks(target);
-  if (exists(target)) { await assertPrivate(target, true); return; }
+  if (exists(target)) {
+    if (process.platform === "win32") agentWindowsAcl(() => WINDOWS_ACL.restrict(target, true));
+    await assertPrivate(target, true);
+    return;
+  }
   try {
     fs.mkdirSync(target, { mode: 0o700 });
   } catch (error: unknown) {
