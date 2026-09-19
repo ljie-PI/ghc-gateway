@@ -155,7 +155,6 @@ export class FileAgentsManager implements AgentsManager {
       const initial = await store.read();
       const paths = this.targetPaths(request.agent, initial);
       const before = await this.images(paths, initial);
-      const legacyOwned = request.agent === "codex" && initial.version < 3 && initial.targets.length > 0;
       this.requireRevision(request.expectedRevision, initial, before, paths, origin);
       if (takeover) await this.requireTakeoverRevision(request as AgentTakeoverRequest, initial, origin);
       if (initial.pending === null) this.project(request, initial, before, paths, origin, models, takeover);
@@ -172,12 +171,6 @@ export class FileAgentsManager implements AgentsManager {
         signal.throwIfAborted();
         const recovering = state.pending !== null;
         if (recovering) {
-          if (request.agent === "codex" && state.version === 1 && state.pending?.kind === "restore") {
-            const historical = state.pending.steps.find((step) => step.target === 0);
-            if (historical !== undefined) historical.after = historical.before;
-            if (state.targets[0] !== undefined) state.legacyCatalog = state.targets[0];
-            await save(state);
-          }
           // Resume only the already-durable transaction, never a new restore.
           current = [...await this.requireRecoverable(state, current)];
           await this.execute(request.agent, state, save);
@@ -188,12 +181,9 @@ export class FileAgentsManager implements AgentsManager {
           current = await this.images(livePaths, state);
         }
         if (initial.pending === null) this.requireRevision(request.expectedRevision, state, current, livePaths, origin);
-        const adoptLegacyRestore = legacyOwned && state.targets.length === 0;
-        const legacyDestinationAbsent = adoptLegacyRestore
-          && !exists(path.join(path.dirname(livePaths.at(-1)!), "models.json"));
-        const projection = this.project(request, state, current, livePaths, origin, models, takeover || legacyDestinationAbsent);
+        const projection = this.project(request, state, current, livePaths, origin, models, takeover);
         const prepared = await this.prepareTargets(
-          request.agent, state, current, livePaths, takeover || legacyDestinationAbsent, takeoverEvidence,
+          request.agent, state, current, livePaths, takeover, takeoverEvidence,
         );
         current = prepared.current;
         const after = request.agent === "claude"
@@ -304,8 +294,6 @@ export class FileAgentsManager implements AgentsManager {
         }
       }
       if (clientImages[0] !== null && !takeover) throw new AgentError("agent_conflict");
-      const oldCatalog = state.targets.find((item) => item.path.endsWith("ghcg-models.json") || item.path.endsWith("ghcg_models.json"));
-      if (oldCatalog !== undefined) state.legacyCatalog = oldCatalog;
       if (existingCatalogBackup !== null) throw new AgentError("agent_conflict");
       state.targets = [
         { path: backupPath, original: existing, expected: existing },
@@ -504,15 +492,8 @@ export class FileAgentsManager implements AgentsManager {
       }
       revision = this.revision(state, images, paths, origin);
       backupAvailable = this.backupAvailable(state, images);
-      let nativeCatalogBlocksLegacy = false;
-      if (agent === "codex" && state.version < 3 && state.targets.length > 0) {
-        const takeoverCatalog = inspection?.takeoverImages === undefined
-          ? await readImage(this.takeoverPaths(state)[2])
-          : inspection.takeoverImages[2] ?? null;
-        nativeCatalogBlocksLegacy = takeoverCatalog !== null;
-      }
       if (agent === "codex" && state.pending === null
-        && (kind === "conflict" || kind === "not_managed" || nativeCatalogBlocksLegacy)) {
+        && (kind === "conflict" || kind === "not_managed")) {
         try {
           const evidence = inspection?.takeoverPaths !== undefined && inspection.takeoverImages !== undefined
             ? this.takeoverEvidenceFrom(state, origin, inspection.takeoverPaths, inspection.takeoverImages)
@@ -745,8 +726,8 @@ export class FileAgentsManager implements AgentsManager {
 
   private async execute(agent: AgentId, state: AgentState, save: (state: AgentState) => Promise<void>): Promise<void> {
     const pending = state.pending!;
-    // Backup, catalog, then config. Legacy restore intents retain their stored ordering.
-    const steps = pending.kind === "restore" ? [...pending.steps].reverse() : pending.steps;
+    // Backup, catalog, then config.
+    const steps = pending.steps;
     const positions = new Map<StepState, "before" | "after" | "gap">();
     for (const step of steps) {
       const target = state.targets[step.target]!.path;

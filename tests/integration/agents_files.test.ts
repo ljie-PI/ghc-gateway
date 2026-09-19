@@ -10,7 +10,6 @@ import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/ma
 import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "../../src/agents/types.js";
 import { AgentStore, type AgentState } from "../../src/agents/store.js";
 import { privateDirectory, protect, readImage } from "../../src/agents/files.js";
-import { projectAgent } from "../../src/agents/transform.js";
 import { queryWindowsSecuritySnapshot, type WindowsSecuritySnapshotFact, type WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
 import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
 
@@ -157,25 +156,24 @@ describe("private repeatable agent configuration", () => {
     const h = harness();
     const config = path.join(h.home, ".codex", "config.toml");
     const catalog = path.join(h.home, ".codex", "models.json");
-    const legacyCatalog = path.join(h.home, ".codex", "ghcg-models.json");
     const original = { bytes: Buffer.from("original").toString("base64"), mode: 0o600, acl: null };
     const expected = { bytes: Buffer.from("expected").toString("base64"), mode: 0o600, acl: null };
     const state = {
-      version: 2 as const,
+      version: 3 as const,
       revision: 7,
       mappings: [mappings[0]!],
       lastAppliedAt: "2026-01-02T03:04:05.000Z",
       targets: [
         { path: `${config}.ghcg.bak`, original: null, expected: original },
+        { path: `${catalog}.ghcg.bak`, original: null, expected: original },
         { path: catalog, original: null, expected },
         { path: config, original, expected },
       ],
-      legacyCatalog: { path: legacyCatalog, original: null, expected },
       pending: {
         kind: "apply" as const,
         garbage: [path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000002")],
         steps: [{
-          target: 2,
+          target: 3,
           before: original,
           after: expected,
           phase: "planned" as const,
@@ -991,91 +989,6 @@ describe("private repeatable agent configuration", () => {
     expect((await apply(h.manager, "claude")).state).toBe("installed");
     expect(JSON.parse(fs.readFileSync(file, "utf8")).env.ANTHROPIC_BASE_URL).toBe(origin);
   }, 180_000);
-  it.each([null, "apply", "restore"] as const)("migrates a legacy Codex baseline with pending %s", async (kind) => {
-    const h = harness();
-    const original = Buffer.from("\ufeff# first original\r\nmodel=\"old\"\r\n");
-    const configPath = seed(h.home, ".codex/config.toml", original);
-    const originalImage = (await readImage(configPath))!;
-    const catalogPath = path.join(h.home, ".codex", "ghcg-models.json");
-    const projection = projectAgent("codex", original, mappings, origin, catalogPath, models, null, true);
-    fs.writeFileSync(configPath, projection.config);
-    seed(h.home, ".codex/ghcg-models.json", projection.catalog!);
-    const current = [(await readImage(catalogPath))!, (await readImage(configPath))!];
-    const originals = [null, originalImage];
-    const store = new AgentStore(path.join(h.home, ".ghc-gateway-agents"), "codex");
-    await store.locked(async (save) => save({
-      version: 1, revision: 3, mappings, lastAppliedAt: "2026-01-02T03:04:05.000Z",
-      targets: [catalogPath, configPath].map((target, index) => ({ path: target, original: originals[index]!, expected: current[index]! })),
-      pending: kind === null ? null : {
-        kind, garbage: [],
-        steps: current.map((image, index) => ({
-          target: index, before: image, after: kind === "restore" ? originals[index]! : image,
-          phase: "planned",
-          scratch: path.join(h.home, ".codex", `.ghcg-agents-codex-00000000-0000-4000-8000-00000000000${index}`),
-        })),
-      },
-    }));
-    expect((await apply(h.manager, "codex")).state).toBe("installed");
-    expect(fs.readFileSync(`${configPath}.ghcg.bak`)).toEqual(original);
-    expect(fs.readFileSync(configPath, "utf8")).toContain("models.json");
-    expect(fs.existsSync(path.join(h.home, ".codex", "models.json"))).toBe(true);
-    await apply(new FileAgentsManager({ home: h.home }), "codex");
-    expect(fs.readFileSync(`${configPath}.ghcg.bak`)).toEqual(original);
-  }, 180_000);
-
-  it("migrates a version-2 ghcg_models.json pending Apply directly to models.json", async () => {
-    const h = harness();
-    const config = path.join(h.home, ".codex/config.toml");
-    const historical = path.join(h.home, ".codex/ghcg_models.json");
-    const projection = projectAgent("codex", null, mappings, origin, historical, models, null);
-    seed(h.home, ".codex/config.toml", projection.config);
-    seed(h.home, ".codex/ghcg_models.json", projection.catalog!);
-    const historicalBytes = fs.readFileSync(historical);
-    const configImage = (await readImage(config))!;
-    const historicalImage = (await readImage(historical))!;
-    const store = new AgentStore(stateRoot(h.home), "codex");
-    await store.locked(async (save) => save({
-      version: 2, revision: 4, mappings, lastAppliedAt: null,
-      targets: [
-        { path: `${config}.ghcg.bak`, original: null, expected: null },
-        { path: historical, original: null, expected: historicalImage },
-        { path: config, original: configImage, expected: configImage },
-      ],
-      pending: {
-        kind: "apply", garbage: [],
-        steps: [{
-          target: 1, before: historicalImage, after: historicalImage, phase: "planned",
-          scratch: path.join(h.home, ".codex", ".ghcg-agents-codex-00000000-0000-4000-8000-000000000001"),
-        }],
-      },
-    }));
-    expect((await apply(h.manager, "codex")).state).toBe("installed");
-    expect(fs.readFileSync(historical)).toEqual(historicalBytes);
-    expect(fs.existsSync(path.join(h.home, ".codex/models.json"))).toBe(true);
-  }, 180_000);
-
-  it("offers takeover when legacy state meets an existing native models.json", async () => {
-    const h = harness();
-    const config = path.join(h.home, ".codex/config.toml");
-    const historical = path.join(h.home, ".codex/ghcg-models.json");
-    const projection = projectAgent("codex", null, mappings, origin, historical, models, null);
-    seed(h.home, ".codex/config.toml", projection.config);
-    seed(h.home, ".codex/ghcg-models.json", projection.catalog!);
-    seed(h.home, ".codex/models.json", "native catalog\n");
-    const store = new AgentStore(stateRoot(h.home), "codex");
-    await store.locked(async (save) => save({
-      version: 1, revision: 1, mappings, lastAppliedAt: null, pending: null,
-      targets: [
-        { path: historical, original: null, expected: (await readImage(historical))! },
-        { path: config, original: null, expected: (await readImage(config))! },
-      ],
-    }));
-    const status = await h.status("codex");
-    expect(status.takeover).toMatchObject({ catalogPath: path.join(h.home, ".codex/models.json") });
-    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
-    expect((await takeover(h.manager)).state).toBe("installed");
-  }, 180_000);
-
   it("drops only the legacy Subagent row while migrating the first Claude original", async () => {
     const h = harness();
     const original = Buffer.from("{\"theme\":\"old\"}\n");
@@ -1230,6 +1143,7 @@ describe("private repeatable agent configuration", () => {
     const config = seed(h.home, ".codex/config.toml", original);
     const catalog = seed(h.home, ".codex/models.json", "external catalog\n");
     const auth = seed(h.home, ".codex/auth.json", "login-secret\n");
+    expect(await h.status("codex")).toMatchObject({ state: "not_managed" });
     await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
     expect(fs.readFileSync(config)).toEqual(original);
     expect(fs.readFileSync(catalog, "utf8")).toBe("external catalog\n");
@@ -1324,17 +1238,6 @@ describe("private repeatable agent configuration", () => {
     }
   });
 
-  it("retains both historical Codex catalogs while migrating to models.json", async () => {
-    const h = harness();
-    const dashed = seed(h.home, ".codex/ghcg-models.json", "dashed legacy\n");
-    const underscored = seed(h.home, ".codex/ghcg_models.json", "underscored legacy\n");
-    seed(h.home, ".codex/config.toml", "model = \"external\"\n");
-    await takeover(h.manager);
-    expect(fs.readFileSync(dashed, "utf8")).toBe("dashed legacy\n");
-    expect(fs.readFileSync(underscored, "utf8")).toBe("underscored legacy\n");
-    expect(fs.existsSync(path.join(h.home, ".codex/models.json"))).toBe(true);
-  }, 180_000);
-
   it("publishes models.json before config points Codex at it", async () => {
     const h = harness();
     seed(h.home, ".codex/config.toml", "model = \"external\"\n");
@@ -1375,24 +1278,35 @@ describe("private repeatable agent configuration", () => {
     expect(fs.existsSync(path.join(h.home, ".codex/models.json.ghcg.bak"))).toBe(true);
   }, 300_000);
 
-  it("does not treat stale durable Codex state as provider ownership", async () => {
+  it("rejects pre-v3 Codex durable state before client mutation", async () => {
     const h = harness();
     const baseline = Buffer.from("model = \"old\"\n");
     const config = seed(h.home, ".codex/config.toml", baseline);
     const baselineImage = (await readImage(config))!;
     const catalog = path.join(h.home, ".codex/models.json");
-    const store = new AgentStore(path.join(h.home, ".ghc-gateway-agents"), "codex");
-    await store.locked(async (save) => save({
-      version: 2, revision: 1, mappings, lastAppliedAt: null, pending: null,
-      targets: [
-        { path: `${config}.ghcg.bak`, original: null, expected: null },
-        { path: catalog, original: null, expected: null },
-        { path: config, original: baselineImage, expected: baselineImage },
-      ],
-    }));
+    const root = stateRoot(h.home);
+    await privateDirectory(path.dirname(root));
+    await privateDirectory(root);
+    await privateDirectory(path.join(root, "codex"));
+    const statePath = path.join(root, "codex", "state.db");
+    fs.writeFileSync(statePath, "", { mode: 0o600 });
+    protect(statePath);
+    const db = new DatabaseSync(statePath);
+    try {
+      db.exec("CREATE TABLE state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
+      db.prepare("INSERT INTO state VALUES(1,?)").run(JSON.stringify({
+        version: 2, revision: 1, mappings, lastAppliedAt: null, pending: null,
+        targets: [
+          { path: `${config}.ghcg.bak`, original: null, expected: null },
+          { path: catalog, original: null, expected: null },
+          { path: config, original: baselineImage, expected: baselineImage },
+        ],
+      }));
+    } finally { db.close(); }
     const external = Buffer.from("model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\n");
     fs.writeFileSync(config, external);
-    await expect(apply(h.manager, "codex")).rejects.toThrow("agent conflict");
+    expect(await h.status("codex")).toMatchObject({ state: "recovery_required", mappings: [] });
+    await expect(apply(h.manager, "codex")).rejects.toThrow("agent recovery required");
     expect(fs.readFileSync(config)).toEqual(external);
     expect(fs.existsSync(catalog)).toBe(false);
     expect(fs.existsSync(`${config}.ghcg.bak`)).toBe(false);

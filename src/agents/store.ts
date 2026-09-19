@@ -21,7 +21,6 @@ const Step = Type.Object({
 const StateSchema = Type.Object({
   version: Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)]), revision: Type.Integer({ minimum: 0 }),
   targets: Type.Array(Target, { maxItems: 4 }), mappings: Type.Array(Mapping, { maxItems: 16 }),
-  legacyCatalog: Type.Optional(Target),
   lastAppliedAt: Type.Union([Type.Null(), Type.String({ maxLength: 40 })]),
   pending: Type.Union([Type.Null(), Type.Object({
     kind: Type.Union([Type.Literal("apply"), Type.Literal("restore")]),
@@ -433,6 +432,9 @@ function isSqliteBusy(error: unknown): boolean {
 }
 
 function validateStatePaths(state: AgentState, agent: AgentId): void {
+  if (agent === "codex" && state.targets.length > 0 && state.version !== 3) {
+    throw new AgentError("agent_recovery_required");
+  }
   const count = agent === "claude" ? state.version === 1 ? 1 : 2
     : state.version === 1 ? 2 : state.version === 2 ? 3 : 4;
   if (state.targets.length !== 0 && state.targets.length !== count) throw new AgentError("agent_recovery_required");
@@ -450,8 +452,6 @@ function validateStatePaths(state: AgentState, agent: AgentId): void {
       || catalogBackup!.path !== `${catalog!.path}.ghcg.bak`
       || new Set(state.targets.map((target) => target.path)).size !== 4) throw new AgentError("agent_recovery_required");
   }
-  if (state.legacyCatalog !== undefined && (!path.isAbsolute(state.legacyCatalog.path)
-    || agent !== "codex")) throw new AgentError("agent_recovery_required");
   for (const target of state.targets) {
     if (!path.isAbsolute(target.path)) throw new AgentError("agent_recovery_required");
   }
