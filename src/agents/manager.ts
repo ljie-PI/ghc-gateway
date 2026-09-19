@@ -503,8 +503,8 @@ export class FileAgentsManager implements AgentsManager {
   private async validateDisplaced(step: StepState): Promise<void> {
     const displaced = path.join(step.scratch, "previous");
     if (exists(displaced)) {
-      if (process.platform !== "win32") await assertPrivate(step.scratch, true);
-      const saved = await this.privateChildImage(step.scratch, displaced);
+      const privateObservation = await this.privateObservation(step.scratch, true);
+      const saved = await this.privateChildImage(step.scratch, displaced, undefined, privateObservation);
       if (saved?.bytes !== step.before?.bytes) throw new AgentError("agent_recovery_required");
     }
   }
@@ -575,7 +575,7 @@ export class FileAgentsManager implements AgentsManager {
         // same filesystem object. This catches pathname replacements as well as
         // content/access changes without trusting a stale pre-staging read.
         if (process.platform === "win32") {
-          const privateObservation = await this.privateObservation(step.scratch, true);
+          const privateObservation = observeSecurityPath(step.scratch);
           const entries = fs.readdirSync(step.scratch);
           const expectedEntries = step.after === null ? [] : ["next"];
           const parent = this.existingParent(target);
@@ -745,13 +745,18 @@ export class FileAgentsManager implements AgentsManager {
     assertSecurityPathUnchanged(target, observation, directory);
     return observation;
   }
-  private async privateChildImage(parent: string, target: string, allowedLink?: string): Promise<FileImage | null> {
+  private async privateChildImage(
+    parent: string,
+    target: string,
+    allowedLink?: string,
+    expectedParent?: SecurityPathObservation,
+  ): Promise<FileImage | null> {
     if (process.platform !== "win32") return await readImage(target, allowedLink);
-    const privateObservation = await this.privateObservation(parent, true);
     const snapshots = await this.windowsSecuritySnapshots(allowedLink === undefined
       ? [parent, target]
       : [parent, target, allowedLink], [parent]);
-    if (!sameSecurityPathIdentity(privateObservation, this.requireWindowsSnapshot(snapshots, parent).observation)) {
+    if (expectedParent !== undefined && !sameSecurityPathIdentity(expectedParent,
+      this.requireWindowsSnapshot(snapshots, parent).observation)) {
       throw new AgentError("agent_unsafe_path");
     }
     return readImageFromSecuritySnapshot(target, this.requireWindowsSnapshot(snapshots, target),
@@ -761,7 +766,7 @@ export class FileAgentsManager implements AgentsManager {
     const observations = new Map<number, PendingLinkObservation>();
     for (const step of steps) {
       if (!exists(step.scratch)) continue;
-      observations.set(step.target, { step, scratch: await this.privateObservation(step.scratch, true) });
+      observations.set(step.target, { step, scratch: observeSecurityPath(step.scratch) });
     }
     return observations;
   }
