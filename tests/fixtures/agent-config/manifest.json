@@ -24,7 +24,7 @@
     "caseId": "agent-config.codex.first.catalog",
     "family": "agent-config",
     "input": "codex.input.json",
-    "expected": "codex.first.ghcg_models.expected.json",
+    "expected": "codex.first.models.expected.json",
     "encoder": "first-catalog"
   },
   {
@@ -38,7 +38,7 @@
     "caseId": "agent-config.codex.repeat.catalog",
     "family": "agent-config",
     "input": "codex.input.json",
-    "expected": "codex.repeat.ghcg_models.expected.json",
+    "expected": "codex.repeat.models.expected.json",
     "encoder": "repeat-catalog"
   }
 ]

@@ -1,4 +1,4 @@
-import type { AgentsView, AgentStatus, AgentApplyRequest } from "../../src/agents/types.js";
+import type { AgentsView, AgentStatus, AgentApplyRequest, AgentTakeoverRequest } from "../../src/agents/types.js";
 import type { AdminAgentModels } from "../../src/admin/api.js";
 import type {
   AdminAccount,
@@ -66,6 +66,7 @@ export class AdminClient {
     return this.request("/agents", signal === undefined ? undefined : { signal });
   }
   applyAgent(value: AgentApplyRequest): Promise<AgentStatus> { return this.mutate("/agents/apply", "POST", value); }
+  takeoverAgent(value: AgentTakeoverRequest): Promise<AgentStatus> { return this.mutate("/agents/takeover", "POST", value); }
   agentModels(signal?: AbortSignal): Promise<AdminAgentModels> {
     return this.request("/agents/models", signal === undefined ? undefined : { signal });
   }

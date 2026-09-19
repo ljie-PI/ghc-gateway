@@ -80,8 +80,8 @@ describe("agent configuration projection", () => {
   });
   it("generates a multi-model Responses catalog with actual request IDs and conservative metadata", () => {
     const source = "\ufeff# keep on restore\r\nmodel=\"old\"\r\nmodel_catalog_json=\"/external/catalog.json\"\r\nweb_search=\"live\"\r\n[model_providers.other]\r\nname=\"Other\"\r\n[mcp_servers.local]\r\ncommand=\"node\"\r\n";
-    const result = projectAgent("codex", Buffer.from(source), mappings, origin, "C:\\test\\ghcg_models.json", models, null);
-    expect(parse(result.config.toString())).toMatchObject({ model: "real-sonnet", model_provider: "ghc_gateway", model_catalog_json: "C:\\test\\ghcg_models.json",
+    const result = projectAgent("codex", Buffer.from(source), mappings, origin, "C:\\test\\models.json", models, null, true);
+    expect(parse(result.config.toString())).toMatchObject({ model: "real-sonnet", model_provider: "ghc_gateway", model_catalog_json: "C:\\test\\models.json",
       model_providers: { other: { name: "Other" }, ghc_gateway: { base_url: `${origin}/v1`, wire_api: "responses", requires_openai_auth: false, experimental_bearer_token: "ghcg-local" } },
       mcp_servers: { local: { command: "node" } }, web_search: "live" });
     const catalog = JSON.parse(result.catalog!.toString());
@@ -92,12 +92,12 @@ describe("agent configuration projection", () => {
   });
   it("refuses to replace an unmanaged Codex provider reserved by another owner", () => {
     const source = "model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\nwire_api = \"responses\"\n";
-    expect(() => projectAgent("codex", Buffer.from(source), mappings, origin, "ghcg_models.json", models, null))
+    expect(() => projectAgent("codex", Buffer.from(source), mappings, origin, "models.json", models, null))
       .toThrow("agent conflict");
   });
   it("reapplies current Codex configuration without losing unrelated settings", () => {
-    const first = projectAgent("codex", null, mappings.slice(0, 1), origin, "ghcg_models.json", models.slice(0, 1), null);
-    const second = projectAgent("codex", Buffer.from(`${first.config.toString()}\n[features]\nkeep = true\n`), mappings.slice(0, 1), origin, "ghcg_models.json", models.slice(0, 1), first.config);
+    const first = projectAgent("codex", null, mappings.slice(0, 1), origin, "models.json", models.slice(0, 1), null);
+    const second = projectAgent("codex", Buffer.from(`${first.config.toString()}\n[features]\nkeep = true\n`), mappings.slice(0, 1), origin, "models.json", models.slice(0, 1), first.config);
     expect(parse(second.config.toString()).features).toEqual({ keep: true });
   });
   it("projects input limits from shared field states without widening malformed or conflicting declarations", async () => {
@@ -110,7 +110,7 @@ describe("agent configuration projection", () => {
       { id: "malformed-context", fields: { supported_endpoints: ["/responses"], max_input_tokens: 128_000, capabilities: { limits: { max_context_window_tokens: null } } } },
     ] as const;
     const capabilitySnapshot = await capabilityModels(entries);
-    const projection = projectAgent("codex", null, entries.map(({ id }) => ({ modelId: id, displayName: id })), origin, "ghcg_models.json", capabilitySnapshot, null);
+    const projection = projectAgent("codex", null, entries.map(({ id }) => ({ modelId: id, displayName: id })), origin, "models.json", capabilitySnapshot, null);
     const catalog = JSON.parse(projection.catalog!.toString()) as { models: Record<string, unknown>[] };
     expect(catalog.models.map(({ slug, priority, context_window, max_context_window }) => ({
       slug, priority, context_window, max_context_window,
@@ -135,7 +135,7 @@ describe("agent configuration projection", () => {
       { id: "chat-priority", fields: { supported_endpoints: ["/chat/completions", "/messages"], supported_parameters: ["output_config.effort"], supported_reasoning_efforts: ["low", "high"] } },
     ] as const;
     const capabilitySnapshot = await capabilityModels(entries);
-    const projection = projectAgent("codex", null, entries.map(({ id }) => ({ modelId: id, displayName: id })), origin, "ghcg_models.json", capabilitySnapshot, null);
+    const projection = projectAgent("codex", null, entries.map(({ id }) => ({ modelId: id, displayName: id })), origin, "models.json", capabilitySnapshot, null);
     const catalog = JSON.parse(projection.catalog!.toString()) as { models: { slug: string; supported_reasoning_levels: unknown[] }[] };
     expect(catalog.models.map(({ slug, supported_reasoning_levels }) => ({ slug, supported_reasoning_levels }))).toEqual([
       { slug: "missing-parameter", supported_reasoning_levels: [] },
@@ -164,7 +164,7 @@ describe("agent configuration projection", () => {
       },
     }]);
     const projection = projectAgent(
-      "codex", null, [{ modelId: "capable", displayName: "Capable" }], origin, "ghcg_models.json", [model!], null,
+      "codex", null, [{ modelId: "capable", displayName: "Capable" }], origin, "models.json", [model!], null,
     );
     expect(JSON.parse(projection.catalog!.toString()).models[0]).toMatchObject({
       context_window: 120_000,
@@ -186,18 +186,18 @@ describe("agent configuration projection", () => {
   it("rejects stale Codex ownership evidence", () => {
     const source = Buffer.from("[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\n");
     const stale = Buffer.from("model = \"old\"\n");
-    expect(() => projectAgent("codex", source, mappings, origin, "ghcg_models.json", models, stale))
+    expect(() => projectAgent("codex", source, mappings, origin, "models.json", models, stale))
       .toThrow("agent conflict");
   });
   it("rejects an externally changed provider after Codex management begins", () => {
-    const first = projectAgent("codex", null, mappings, origin, "ghcg_models.json", models, null);
+    const first = projectAgent("codex", null, mappings, origin, "models.json", models, null);
     const changed = Buffer.from(first.config.toString().replace(`${origin}/v1`, "https://external.example/v1"));
-    expect(() => projectAgent("codex", changed, mappings, origin, "ghcg_models.json", models, first.config))
+    expect(() => projectAgent("codex", changed, mappings, origin, "models.json", models, first.config))
       .toThrow("agent conflict");
   });
   it("rejects an externally removed provider after Codex management begins", () => {
-    const first = projectAgent("codex", null, mappings, origin, "ghcg_models.json", models, null);
-    expect(() => projectAgent("codex", Buffer.from("model = \"external\"\n"), mappings, origin, "ghcg_models.json", models, first.config))
+    const first = projectAgent("codex", null, mappings, origin, "models.json", models, null);
+    expect(() => projectAgent("codex", Buffer.from("model = \"external\"\n"), mappings, origin, "models.json", models, first.config))
       .toThrow("agent conflict");
   });
   it.each(["profile=\"work\"", "[profiles.work]\nmodel=\"other\"", "[agents.worker]\nconfig_file=\"other.toml\"", "invalid=\"unterminated"])(

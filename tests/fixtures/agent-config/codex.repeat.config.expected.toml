@@ -1,6 +1,6 @@
 model = "unknown-gamma-live"
 model_provider = "ghc_gateway"
-model_catalog_json = "C:\\Users\\octo\\.codex\\ghcg_models.json"
+model_catalog_json = "C:\\Users\\octo\\.codex\\models.json"
 approval_policy = "never"
 web_search = "live"
 user_instructions = "Preserve this editable setting."

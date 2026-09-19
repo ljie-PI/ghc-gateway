@@ -24,11 +24,12 @@ function agentStatus(agent: "claude" | "codex", revision: string, state: AgentSt
     id: agent,
     state,
     revision,
-    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : ["C:/home/.codex/ghcg_models.json", "C:/home/.codex/config.toml"],
+    paths: agent === "claude" ? ["C:/home/.claude/settings.json"] : ["C:/home/.codex/models.json", "C:/home/.codex/config.toml"],
     endpoint: agent === "claude" ? ORIGIN : `${ORIGIN}/v1`,
     backupAvailable: state !== "not_managed",
     lastAppliedAt: state === "installed" ? "2027-01-15T08:00:00.000Z" : null,
     mappings: [],
+    takeover: null,
   };
 }
 
@@ -56,6 +57,10 @@ function agentStub(): AgentStub {
         assertCurrent();
         if (request.expectedRevision !== revisions[request.agent]) throw new AgentError("revision_conflict");
         return { ...agentStatus(request.agent, "c".repeat(64), "installed"), mappings: request.mappings };
+      },
+      async takeover(request, origin, models, assertCurrent, signal) {
+        calls.push(`takeover:${request.agent}:${request.takeoverRevision}`);
+        return await this.apply(request, origin, models, assertCurrent, signal);
       },
       close() {},
     },
@@ -90,6 +95,39 @@ const claudeMappings = [
 ];
 
 describe("Admin agents API", () => {
+  it("accepts strict content-free Codex takeover revisions", async () => {
+    const stub = agentStub();
+    const harness = await createHarness(stub);
+    try {
+      const auth = await login(harness.gateway, harness.admin);
+      const catalogResponse = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, {
+        headers: { cookie: auth.cookie, origin: ORIGIN },
+      }));
+      const catalog = await catalogResponse.json() as { data: { catalogRevision: string } };
+      const body = {
+        agent: "codex",
+        expectedRevision: "b".repeat(64),
+        catalogRevision: catalog.data.catalogRevision,
+        takeoverRevision: "d".repeat(64),
+        mappings: [{ displayName: "GPT Test", modelId: "gpt-test" }],
+      };
+      const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/takeover`, {
+        method: "POST",
+        headers: { cookie: auth.cookie, origin: ORIGIN, "x-ghcg-csrf": auth.csrf, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }));
+      expect(response.status).toBe(200);
+      expect(stub.calls).toContain(`takeover:codex:${"d".repeat(64)}`);
+
+      const extra = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/takeover`, {
+        method: "POST",
+        headers: { cookie: auth.cookie, origin: ORIGIN, "x-ghcg-csrf": auth.csrf, "content-type": "application/json" },
+        body: JSON.stringify({ ...body, config: "secret" }),
+      }));
+      expect(extra.status).toBe(400);
+      expect(await extra.json()).toMatchObject({ error: { code: "validation_failed" } });
+    } finally { await harness.close(); }
+  });
   it.each(["default", "fallback", "account", "credentials", "catalog"] as const)(
     "fences a concurrent %s revision change before durable Apply intent",
     async (change) => {

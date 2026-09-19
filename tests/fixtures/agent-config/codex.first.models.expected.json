@@ -1,11 +1,20 @@
 {
   "models": [
     {
-      "slug": "unknown-gamma-live",
-      "display_name": "Editable Gamma Label",
-      "description": "Editable Gamma Label",
+      "slug": "gpt-alpha-live",
+      "display_name": "Alpha Friendly",
+      "description": "Alpha Friendly",
       "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
-      "supported_reasoning_levels": [],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Low"
+        },
+        {
+          "effort": "high",
+          "description": "High"
+        }
+      ],
       "shell_type": "shell_command",
       "visibility": "list",
       "supported_in_api": true,
@@ -23,21 +32,20 @@
       "experimental_supported_tools": [],
       "input_modalities": [
         "text"
-      ]
+      ],
+      "context_window": 128000,
+      "max_context_window": 144000,
+      "effective_context_window_percent": 88
     },
     {
-      "slug": "gpt-alpha-live",
-      "display_name": "Editable Alpha Label",
-      "description": "Editable Alpha Label",
+      "slug": "claude-beta-live",
+      "display_name": "Beta Friendly",
+      "description": "Beta Friendly",
       "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
       "supported_reasoning_levels": [
         {
-          "effort": "low",
-          "description": "Low"
-        },
-        {
-          "effort": "high",
-          "description": "High"
+          "effort": "medium",
+          "description": "Medium"
         }
       ],
       "shell_type": "shell_command",
@@ -58,20 +66,16 @@
       "input_modalities": [
         "text"
       ],
-      "context_window": 128000,
-      "max_context_window": 144000
+      "context_window": 200000,
+      "max_context_window": 220000,
+      "effective_context_window_percent": 90
     },
     {
-      "slug": "claude-beta-live",
-      "display_name": "Editable Beta Label",
-      "description": "Editable Beta Label",
+      "slug": "unknown-gamma-live",
+      "display_name": "Gamma Friendly",
+      "description": "Gamma Friendly",
       "base_instructions": "You are Codex, a coding agent. Help the user with their coding tasks.",
-      "supported_reasoning_levels": [
-        {
-          "effort": "medium",
-          "description": "Medium"
-        }
-      ],
+      "supported_reasoning_levels": [],
       "shell_type": "shell_command",
       "visibility": "list",
       "supported_in_api": true,
@@ -89,9 +93,7 @@
       "experimental_supported_tools": [],
       "input_modalities": [
         "text"
-      ],
-      "context_window": 200000,
-      "max_context_window": 220000
+      ]
     }
   ]
 }

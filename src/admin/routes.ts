@@ -47,6 +47,16 @@ const AgentApplySchema = Type.Object({
     modelId: ModelIdSchema,
   }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
 }, { additionalProperties: false });
+const AgentTakeoverSchema = Type.Object({
+  agent: AgentIdSchema,
+  expectedRevision: AgentRevisionSchema,
+  catalogRevision: AgentRevisionSchema,
+  takeoverRevision: AgentRevisionSchema,
+  mappings: Type.Array(Type.Object({
+    displayName: Type.String({ minLength: 1, maxLength: 80, pattern: "^[^\\u0000-\\u001f\\u007f]+$" }),
+    modelId: ModelIdSchema,
+  }, { additionalProperties: false }), { minItems: 1, maxItems: 16 }),
+}, { additionalProperties: false });
 const RuntimeConfigUpdateSchema = Type.Object({
   expectedRevision: Type.Integer({ minimum: 0 }),
   config: RuntimeConfigSchema,
@@ -255,6 +265,9 @@ async function dispatch(
   case "agentsApply":
     response = success(await api.applyAgent(checked(AgentApplySchema, body), context.listenerOrigin, context.signal), context.requestId);
     break;
+  case "agentsTakeover":
+    response = success(await api.takeoverAgent(checked(AgentTakeoverSchema, body), context.listenerOrigin, context.signal), context.requestId);
+    break;
   case "configGet":
     response = success(api.runtimeConfig(), context.requestId);
     break;
@@ -379,7 +392,7 @@ class AdminDeviceFlowOwners {
 
 type RouteId = "bootstrap" | "session" | "logout" | "status" | "usage" | "accounts" | "deviceStart"
   | "devicePoll" | "deviceCancel" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
-  | "agentsGet" | "agentModels" | "agentsApply"
+  | "agentsGet" | "agentModels" | "agentsApply" | "agentsTakeover"
   | "configGet" | "configPut" | "historyGet" | "historyDelete" | "events" | "eventStream";
 
 interface MatchedRoute {
@@ -434,6 +447,7 @@ const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([
   route("GET", "/admin/api/v1/agents", "agentsGet"),
   route("GET", "/admin/api/v1/agents/models", "agentModels"),
   route("POST", "/admin/api/v1/agents/apply", "agentsApply", true, true),
+  route("POST", "/admin/api/v1/agents/takeover", "agentsTakeover", true, true),
   route("GET", "/admin/api/v1/models", "models", false, false, ["accountId"]),
   route("POST", "/admin/api/v1/models/refresh", "modelsRefresh", true, true),
   route("PUT", "/admin/api/v1/models/preferred", "modelsPreferred", true, true),

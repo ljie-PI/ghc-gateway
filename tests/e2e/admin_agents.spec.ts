@@ -1076,3 +1076,76 @@ test("canceling first Apply preserves the draft without reporting failure", asyn
   await expect(card.getByRole("textbox", { name: "Model 1 Display name", exact: true })).toHaveValue("Keep me");
   expect(fixture.requests.some((request) => request.url().endsWith("/agents/apply"))).toBe(false);
 });
+
+test("Codex takeover uses an accessible confirmation dialog and revision token", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  fixture.state.agents.codex = {
+    ...fixture.state.agents.codex,
+    state: "conflict",
+    mappings: [{ modelId: "gpt-alpha", displayName: "Alpha" }],
+    takeover: {
+      revision: "d".repeat(64),
+      configPath: "C:/Users/octo/.codex/config.toml",
+      catalogPath: "C:/Users/octo/.codex/models.json",
+      configBackupPath: "C:/Users/octo/.codex/config.toml.ghcg.bak",
+      catalogBackupPath: "C:/Users/octo/.codex/models.json.ghcg.bak",
+    },
+  };
+  await page.goto("/admin/#bootstrap_token=takeover-dialog");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Take over Codex configuration?" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("auth.json is untouched");
+  for (const target of fixture.state.agents.codex.takeover === null ? [] : [
+    fixture.state.agents.codex.takeover.configPath,
+    fixture.state.agents.codex.takeover.catalogPath,
+    fixture.state.agents.codex.takeover.configBackupPath,
+    fixture.state.agents.codex.takeover.catalogBackupPath,
+  ]) await expect(dialog).toContainText(target);
+
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/takeover"))).toBe(false);
+  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/takeover"))).toBe(false);
+
+  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  await dialog.getByRole("button", { name: "Take over configuration", exact: true }).click();
+  await expect(card.locator(".badge")).toHaveText("Configuration installed");
+  const request = fixture.requests.find((item) => item.url().endsWith("/agents/takeover"));
+  expect(request?.postDataJSON()).toMatchObject({
+    agent: "codex",
+    expectedRevision: "7".repeat(64),
+    catalogRevision: "c".repeat(64),
+    takeoverRevision: "d".repeat(64),
+    mappings: [{ modelId: "gpt-alpha", displayName: "Alpha" }],
+  });
+  expect(JSON.stringify(request?.postDataJSON())).not.toContain("config.toml");
+});
+
+test("stale Codex takeover preserves the draft and reports concise failure", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  fixture.state.agents.codex = {
+    ...fixture.state.agents.codex,
+    state: "conflict",
+    mappings: [{ modelId: "gpt-alpha", displayName: "Keep me" }],
+    takeover: {
+      revision: "d".repeat(64),
+      configPath: "C:/Users/octo/.codex/config.toml",
+      catalogPath: "C:/Users/octo/.codex/models.json",
+      configBackupPath: "C:/Users/octo/.codex/config.toml.ghcg.bak",
+      catalogBackupPath: "C:/Users/octo/.codex/models.json.ghcg.bak",
+    },
+  };
+  fixture.state.agentsTakeoverConflict = true;
+  await page.goto("/admin/#bootstrap_token=stale-takeover");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Take over configuration", exact: true }).click();
+  await expect(card.getByRole("alert")).toHaveText("Apply failed: stale configuration revision.");
+  await expect(card.getByRole("textbox", { name: "Model 1 Display name", exact: true })).toHaveValue("Keep me");
+});

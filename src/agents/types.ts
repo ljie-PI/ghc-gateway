@@ -22,6 +22,13 @@ export interface AgentStatus {
   readonly backupAvailable: boolean;
   readonly lastAppliedAt: string | null;
   readonly mappings: readonly AgentMapping[];
+  readonly takeover: null | {
+    readonly revision: string;
+    readonly configPath: string;
+    readonly catalogPath: string;
+    readonly configBackupPath: string;
+    readonly catalogBackupPath: string;
+  };
 }
 export interface AgentsView {
   readonly items: readonly AgentStatus[];
@@ -32,10 +39,14 @@ export interface AgentApplyRequest {
   readonly catalogRevision: string;
   readonly mappings: readonly AgentMapping[];
 }
+export interface AgentTakeoverRequest extends AgentApplyRequest {
+  readonly takeoverRevision: string;
+}
 export type AgentModel = Pick<EffectiveModelCapabilitySnapshot, "modelId" | "protocols" | "capabilities">;
 export interface AgentsManager {
   inspect(origin: string): Promise<readonly AgentStatus[]>;
   apply(request: AgentApplyRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus>;
+  takeover(request: AgentTakeoverRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus>;
   close(): void;
 }
 export const MAX_MAPPINGS = 16;

@@ -14,25 +14,25 @@ const Image = Type.Union([Type.Null(), Type.Object({
 const Mapping = Type.Object({ displayName: Type.String({ maxLength: 80 }), modelId: Type.String({ maxLength: 128 }) }, { additionalProperties: false });
 const Target = Type.Object({ path: Type.String({ maxLength: 4096 }), original: Image, expected: Image }, { additionalProperties: false });
 const Step = Type.Object({
-  target: Type.Integer({ minimum: 0, maximum: 2 }), before: Image, after: Image,
+  target: Type.Integer({ minimum: 0, maximum: 3 }), before: Image, after: Image,
   scratch: Type.String({ maxLength: 4096 }),
   phase: Type.Union([Type.Literal("planned"), Type.Literal("displaced"), Type.Literal("published")]),
 }, { additionalProperties: false });
 const StateSchema = Type.Object({
-  version: Type.Union([Type.Literal(1), Type.Literal(2)]), revision: Type.Integer({ minimum: 0 }),
-  targets: Type.Array(Target, { maxItems: 3 }), mappings: Type.Array(Mapping, { maxItems: 16 }),
+  version: Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)]), revision: Type.Integer({ minimum: 0 }),
+  targets: Type.Array(Target, { maxItems: 4 }), mappings: Type.Array(Mapping, { maxItems: 16 }),
   legacyCatalog: Type.Optional(Target),
   lastAppliedAt: Type.Union([Type.Null(), Type.String({ maxLength: 40 })]),
   pending: Type.Union([Type.Null(), Type.Object({
     kind: Type.Union([Type.Literal("apply"), Type.Literal("restore")]),
-    steps: Type.Array(Step, { minItems: 1, maxItems: 3 }),
+    steps: Type.Array(Step, { minItems: 1, maxItems: 4 }),
     garbage: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 2 }),
   }, { additionalProperties: false })]),
 }, { additionalProperties: false });
 export type AgentState = Static<typeof StateSchema>;
 export type StepState = NonNullable<AgentState["pending"]>["steps"][number];
 export function emptyState(): AgentState {
-  return { version: 2, revision: 0, targets: [], mappings: [], lastAppliedAt: null, pending: null };
+  return { version: 3, revision: 0, targets: [], mappings: [], lastAppliedAt: null, pending: null };
 }
 
 // A separate SQLite exclusive transaction is an OS-backed cross-process mutex.
@@ -433,11 +433,14 @@ function isSqliteBusy(error: unknown): boolean {
 }
 
 function validateStatePaths(state: AgentState, agent: AgentId): void {
-  const count = (agent === "claude" ? 1 : 2) + (state.version === 2 ? 1 : 0);
+  const count = agent === "claude" ? state.version === 1 ? 1 : 2
+    : state.version === 1 ? 2 : state.version === 2 ? 3 : 4;
   if (state.targets.length !== 0 && state.targets.length !== count) throw new AgentError("agent_recovery_required");
-  if (state.version === 2 && state.pending?.kind === "restore") throw new AgentError("agent_recovery_required");
-  if (state.version === 2 && state.targets.length > 0
+  if (state.version !== 1 && state.pending?.kind === "restore") throw new AgentError("agent_recovery_required");
+  if (state.version !== 1 && state.targets.length > 0
     && state.targets[0]!.path !== `${state.targets.at(-1)!.path}.ghcg.bak`) throw new AgentError("agent_recovery_required");
+  if (agent === "codex" && state.version === 3 && state.targets.length > 0
+    && state.targets[1]!.path !== `${state.targets[2]!.path}.ghcg.bak`) throw new AgentError("agent_recovery_required");
   if (state.legacyCatalog !== undefined && (!path.isAbsolute(state.legacyCatalog.path)
     || agent !== "codex")) throw new AgentError("agent_recovery_required");
   for (const target of state.targets) {
