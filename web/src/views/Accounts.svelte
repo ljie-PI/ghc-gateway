@@ -18,7 +18,6 @@
   let copied = $state(false);
   let copyFeedback = $state("");
   let copyFeedbackRevision = 0;
-  let pollState: "idle" | "waiting" | "checking" | "retrying" = $state("idle");
   let hostInput: HTMLInputElement | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let expiryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -27,7 +26,6 @@
   let loadGeneration = 0;
   let disposed = false;
   let nextPollAtMs = 0;
-  let pollIntervalSeconds = 1;
 
   onMount(() => {
     void load();
@@ -94,9 +92,7 @@
       const started = await client.startDeviceFlow(host, controller.signal);
       if (generation !== pollGeneration) return;
       flow = started;
-      pollIntervalSeconds = started.pollIntervalSeconds;
       nextPollAtMs = Date.parse(started.nextPollAt);
-      pollState = "waiting";
       scheduleExpiry(generation);
       schedulePoll(generation);
     } catch (error: unknown) {
@@ -133,7 +129,6 @@
   async function settleExpiry(generation: number): Promise<void> {
     const expiringFlow = flow;
     if (generation !== pollGeneration || expiringFlow === null) return;
-    pollState = "checking";
     try {
       const result = await client.cancelDeviceFlow(expiringFlow.flowId);
       if (generation !== pollGeneration) return;
@@ -160,14 +155,11 @@
       return;
     }
     if (Date.now() < nextPollAtMs) {
-      pollState = "waiting";
       schedulePoll(generation);
       return;
     }
-    pollState = "checking";
     const controller = new AbortController();
     pollAbort = controller;
-    nextPollAtMs = Math.min(expiresAtMs, Date.now() + pollIntervalSeconds * 1000);
     try {
       const result = await client.pollDeviceFlow(activeFlow.flowId, controller.signal);
       if (generation !== pollGeneration || flow?.flowId !== activeFlow.flowId) return;
@@ -177,9 +169,7 @@
         message = "";
         await load(false, completionGeneration);
       } else if (result.state === "pending") {
-        pollIntervalSeconds = result.pollIntervalSeconds;
         nextPollAtMs = Date.parse(result.nextPollAt);
-        pollState = "waiting";
         failure = "";
         schedulePoll(generation);
       } else {
@@ -194,14 +184,12 @@
       }
     } catch (error: unknown) {
       if (generation !== pollGeneration || isAbort(error)) return;
-      failure = errorMessage(error);
       if (error instanceof ApiError && (error.status === 401 || error.status === 404)) {
+        failure = errorMessage(error);
         clearFlow();
         return;
       }
-      pollState = "retrying";
-      message = "Automatic checking will retry at the allowed interval.";
-      nextPollAtMs = Math.max(nextPollAtMs, Date.now() + pollIntervalSeconds * 1000);
+      nextPollAtMs = Math.min(expiresAtMs, Date.now() + 1_000);
       schedulePoll(generation);
     } finally {
       if (generation === pollGeneration) pollAbort = null;
@@ -251,7 +239,6 @@
   function clearFlow(): void {
     stopPolling();
     flow = null;
-    pollState = "idle";
   }
 
   function dispose(): void {
@@ -408,13 +395,7 @@
       {#if copyFeedback}
         <p class="copy-feedback" role="status">{copyFeedback}</p>
       {/if}
-      <p>
-        {pollState === "checking"
-          ? "Checking GitHub now..."
-          : pollState === "retrying"
-            ? "The last check failed; retrying automatically."
-            : "Waiting for GitHub approval; checking automatically."}
-      </p>
+      <p>Authorization in progress; checking automatically.</p>
       <small>Expires {new Date(flow.expiresAt).toLocaleString()}. Keep this view open to finish connecting.</small>
     </div>
     <div>
