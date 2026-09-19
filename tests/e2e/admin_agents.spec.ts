@@ -885,7 +885,19 @@ test("combobox row IDs stay unique and stable across add and remove", async ({ p
 });
 
 test("combobox popups stay isolated and touch scrolling does not select", async ({ page }) => {
-  await openAgents(page);
+  const fixture = await installAdminFixture(page);
+  const base = fixture.state.models.items[0]!;
+  fixture.state.models = {
+    ...fixture.state.models,
+    items: Array.from({ length: 20 }, (_, index) => ({
+      ...base,
+      id: `touch-model-${index.toString().padStart(2, "0")}`,
+      name: `Touch Model ${index}`,
+    })),
+  };
+  await page.goto("/admin/#bootstrap_token=touch-scroll");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 500 });
   const codex = page.getByRole("region", { name: "Codex", exact: true });
   const claude = page.getByRole("region", { name: "Claude Code", exact: true });
   const codexInput = codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
@@ -896,18 +908,24 @@ test("combobox popups stay isolated and touch scrolling does not select", async 
   await expect(codex.locator(".agent-model-listbox")).toBeHidden();
   await expect(claude.getByRole("listbox").first()).toBeVisible();
 
-  const firstOption = claude.getByRole("option").first();
-  const box = await firstOption.boundingBox();
+  const listbox = claude.getByRole("listbox").first();
+  const box = await listbox.boundingBox();
   expect(box).not.toBeNull();
-  await firstOption.dispatchEvent("pointerdown", { pointerType: "touch", clientX: box!.x + 8, clientY: box!.y + 8 });
-  await firstOption.dispatchEvent("pointermove", { pointerType: "touch", clientX: box!.x + 8, clientY: box!.y - 16 });
-  await firstOption.dispatchEvent("pointerup", { pointerType: "touch", clientX: box!.x + 8, clientY: box!.y - 16 });
-  await firstOption.dispatchEvent("click");
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  const x = Math.round(box!.x + box!.width / 2);
+  const startY = Math.round(box!.y + box!.height - 18);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY }] });
+  for (const y of [startY - 30, startY - 60, startY - 90, startY - 120]) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
+  }
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect.poll(() => listbox.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect(claudeInput).toHaveValue("");
   await expect(codexInput).toHaveValue("");
 
-  await firstOption.click();
-  await expect(claudeInput).toHaveValue("gpt-alpha");
+  await claude.getByRole("option").last().click();
+  await expect(claudeInput).toHaveValue("touch-model-19");
 });
 
 test("combobox closes on outside focus and row removal", async ({ page }) => {
