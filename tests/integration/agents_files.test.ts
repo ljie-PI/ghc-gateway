@@ -585,7 +585,7 @@ describe("private repeatable agent configuration", () => {
       },
     });
     await expect(apply(crashed, "claude")).rejects.toThrow();
-    const store = new AgentStore(path.join(homes.at(-1)!, ".ghc-gateway-agents"), "claude");
+    const store = new AgentStore(stateRoot(homes.at(-1)!), "claude");
     const state = await store.read();
     const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
     const stage = path.join(step.scratch, "next");
@@ -1480,7 +1480,7 @@ describe("private repeatable agent configuration", () => {
       },
     });
     await expect(apply(crashed, "claude")).rejects.toThrow();
-    const store = new AgentStore(path.join(homes.at(-1)!, ".ghc-gateway-agents"), "claude");
+    const store = new AgentStore(stateRoot(homes.at(-1)!), "claude");
     const state = await store.read();
     const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
     fs.writeFileSync(path.join(step.scratch, "previous"), "invalid displaced bytes");
