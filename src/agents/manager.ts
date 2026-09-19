@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
-import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentModel } from "./types.js";
+import { AgentError, validateMappings, type AgentId, type AgentStatus, type AgentsManager, type AgentApplyRequest, type AgentTakeoverRequest, type AgentModel } from "./types.js";
 import { AgentStore, copyMappings, newImage, type AgentState, type StepState } from "./store.js";
 import { applyAccess, assertNoLinks, assertOwned, assertOwnedFromSecuritySnapshot, assertPrivate, assertSecurityPathUnchanged, canonical, digest, exists, observeSecurityPath, privateDirectory, protect, readImage, readImageFromSecuritySnapshot, sameDisplacedContent, sameImage, sameSecurityPathIdentity, sameSecurityPathObservation, syncDirectory, writeExclusive, type FileImage, type SecurityPathAllowedLink, type SecurityPathObservation, type SecurityPathSnapshot } from "./files.js";
-import { projectAgent } from "./transform.js";
+import { projectAgent, validateCodexTakeover } from "./transform.js";
 import {
   type WindowsSecuritySnapshotFact,
   type WindowsSecuritySnapshotRequest,
@@ -13,14 +13,18 @@ import {
 import { AgentWindowsSecurity } from "./windows_security.js";
 
 type PreparedInspection =
-  | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly privateObservation: SecurityPathObservation | undefined; readonly pendingLinks: ReadonlyMap<number, PendingLinkObservation>; readonly error?: unknown }
+  | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly privateObservations: ReadonlyMap<number, SecurityPathObservation>; readonly pendingLinks: ReadonlyMap<number, PendingLinkObservation>; readonly takeoverPaths?: readonly string[]; readonly takeoverPrivateObservations?: ReadonlyMap<number, SecurityPathObservation>; readonly error?: unknown }
   | { readonly agent: AgentId; readonly error: unknown };
 interface PendingLinkObservation {
   readonly step: StepState;
   readonly scratch: SecurityPathObservation;
 }
+interface TakeoverEvidence extends NonNullable<AgentStatus["takeover"]> {
+  readonly images: readonly (FileImage | null)[];
+  readonly paths: readonly string[];
+}
 type ConsumedInspection =
-  | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly images: readonly (FileImage | null)[]; readonly error?: unknown }
+  | { readonly agent: AgentId; readonly state: AgentState; readonly paths: readonly string[]; readonly images: readonly (FileImage | null)[]; readonly takeoverPaths?: readonly string[]; readonly takeoverImages?: readonly (FileImage | null)[]; readonly error?: unknown }
   | { readonly agent: AgentId; readonly error: unknown };
 
 export interface AgentManagerOptions {
@@ -59,7 +63,7 @@ export class FileAgentsManager implements AgentsManager {
     const codex = path.resolve(env.CODEX_HOME ?? path.join(this.home, ".codex"));
     this.paths = {
       claude: [path.join(claude, "settings.json")],
-      codex: [path.join(codex, "ghcg_models.json"), path.join(codex, "config.toml")],
+      codex: [path.join(codex, "models.json"), path.join(codex, "config.toml")],
     };
   }
 
@@ -70,11 +74,14 @@ export class FileAgentsManager implements AgentsManager {
       try {
         const state = await this.store(agent).read();
         const paths = this.fallbackTargetPaths(agent, state);
-        const privateObservation = state.version === 2 && state.targets.length > 0
-          ? exists(paths[0]!) ? await this.privateObservation(paths[0]!, false) : observeSecurityPath(paths[0]!)
-          : undefined;
+        const privateObservations = await this.privateTargetObservations(state, paths);
         const pendingLinks = await this.pendingLinkObservations(state.pending?.steps ?? []);
-        return { agent, state, paths, privateObservation, pendingLinks };
+        const takeoverPaths = agent === "codex" && state.pending === null ? this.takeoverPaths(state) : undefined;
+        const takeoverPrivateObservations = takeoverPaths === undefined
+          ? undefined : await this.takeoverPrivateObservations(takeoverPaths);
+        return takeoverPaths === undefined || takeoverPrivateObservations === undefined
+          ? { agent, state, paths, privateObservations, pendingLinks }
+          : { agent, state, paths, privateObservations, pendingLinks, takeoverPaths, takeoverPrivateObservations };
       } catch (error: unknown) {
         return { agent, error };
       }
@@ -92,6 +99,11 @@ export class FileAgentsManager implements AgentsManager {
         for (const { step } of item.pendingLinks.values()) {
           candidates.push(step.scratch, path.join(step.scratch, "next"));
           parents.push(step.scratch);
+        }
+        for (const target of item.takeoverPaths ?? []) {
+          const parent = this.existingParent(target);
+          candidates.push(parent, target);
+          parents.push(parent);
         }
         return item;
       } catch (error: unknown) {
@@ -119,6 +131,22 @@ export class FileAgentsManager implements AgentsManager {
   }
 
   async apply(request: AgentApplyRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus> {
+    return await this.mutate(request, origin, models, assertCurrent, signal, false);
+  }
+
+  async takeover(request: AgentTakeoverRequest, origin: string, models: readonly AgentModel[], assertCurrent: () => void, signal: AbortSignal): Promise<AgentStatus> {
+    if (request.agent !== "codex") throw new AgentError("validation_failed");
+    return await this.mutate(request, origin, models, assertCurrent, signal, true);
+  }
+
+  private async mutate(
+    request: AgentApplyRequest | AgentTakeoverRequest,
+    origin: string,
+    models: readonly AgentModel[],
+    assertCurrent: () => void,
+    signal: AbortSignal,
+    takeover: boolean,
+  ): Promise<AgentStatus> {
     return await this.exclusive(request.agent, async () => {
       signal.throwIfAborted();
       validateMappings(request.agent, request.mappings);
@@ -127,18 +155,29 @@ export class FileAgentsManager implements AgentsManager {
       const initial = await store.read();
       const paths = this.targetPaths(request.agent, initial);
       const before = await this.images(paths, initial);
+      const legacyOwned = request.agent === "codex" && initial.version < 3 && initial.targets.length > 0;
       this.requireRevision(request.expectedRevision, initial, before, paths, origin);
-      if (initial.pending === null) this.project(request, initial, before, paths, origin, models);
+      if (takeover) await this.requireTakeoverRevision(request as AgentTakeoverRequest, initial, origin);
+      if (initial.pending === null) this.project(request, initial, before, paths, origin, models, takeover);
       signal.throwIfAborted();
       assertCurrent();
       return await store.locked(async (save) => {
         const state = await store.read();
         let current = await this.images(paths, state);
         this.requireRevision(request.expectedRevision, state, current, paths, origin);
+        const takeoverEvidence = takeover
+          ? await this.requireTakeoverRevision(request as AgentTakeoverRequest, state, origin)
+          : undefined;
         assertCurrent();
         signal.throwIfAborted();
         const recovering = state.pending !== null;
         if (recovering) {
+          if (request.agent === "codex" && state.version === 1 && state.pending?.kind === "restore") {
+            const historical = state.pending.steps.find((step) => step.target === 0);
+            if (historical !== undefined) historical.after = historical.before;
+            if (state.targets[0] !== undefined) state.legacyCatalog = state.targets[0];
+            await save(state);
+          }
           // Resume only the already-durable transaction, never a new restore.
           current = [...await this.requireRecoverable(state, current)];
           await this.execute(request.agent, state, save);
@@ -149,12 +188,17 @@ export class FileAgentsManager implements AgentsManager {
           current = await this.images(livePaths, state);
         }
         if (initial.pending === null) this.requireRevision(request.expectedRevision, state, current, livePaths, origin);
-        const projection = this.project(request, state, current, livePaths, origin, models);
-        const prepared = await this.prepareTargets(request.agent, state, current, livePaths);
+        const adoptLegacyRestore = legacyOwned && state.targets.length === 0;
+        const legacyDestinationAbsent = adoptLegacyRestore
+          && !exists(path.join(path.dirname(livePaths.at(-1)!), "models.json"));
+        const projection = this.project(request, state, current, livePaths, origin, models, takeover || legacyDestinationAbsent);
+        const prepared = await this.prepareTargets(
+          request.agent, state, current, livePaths, takeover || legacyDestinationAbsent, takeoverEvidence,
+        );
         current = prepared.current;
         const after = request.agent === "claude"
           ? [prepared.backup, newImage(projection.config, current[1]!)]
-          : [prepared.backup, newImage(projection.catalog!, current[1]!), newImage(projection.config, current[2]!)];
+          : [prepared.configBackup, prepared.catalogBackup, newImage(projection.catalog!, current[2]!), newImage(projection.config, current[3]!)];
         const steps = this.plan(request.agent, state, current, after);
         for (const [index, target] of state.targets.entries()) target.expected = current[index]!;
         state.mappings = copyMappings(request.mappings);
@@ -176,10 +220,10 @@ export class FileAgentsManager implements AgentsManager {
     });
   }
 
-  private project(request: AgentApplyRequest, state: AgentState, images: readonly (FileImage | null)[], paths: readonly string[], origin: string, models: readonly AgentModel[]) {
+  private project(request: AgentApplyRequest, state: AgentState, images: readonly (FileImage | null)[], paths: readonly string[], origin: string, models: readonly AgentModel[], takeover = false) {
     const config = images.at(-1) ?? null;
     const managedConfig = state.targets.at(-1)?.expected ?? null;
-    const catalogPath = path.join(path.dirname(paths.at(-1)!), "ghcg_models.json");
+    const catalogPath = path.join(path.dirname(paths.at(-1)!), "models.json");
     return projectAgent(
       request.agent,
       config === null ? null : Buffer.from(config.bytes, "base64"),
@@ -188,43 +232,94 @@ export class FileAgentsManager implements AgentsManager {
       catalogPath,
       models,
       managedConfig === null ? null : Buffer.from(managedConfig.bytes, "base64"),
+      takeover,
     );
   }
 
-  private async prepareTargets(agent: AgentId, state: AgentState, current: (FileImage | null)[], paths: readonly string[]) {
-    if (state.version === 2 && state.targets.length > 0) {
+  private async prepareTargets(
+    agent: AgentId,
+    state: AgentState,
+    current: (FileImage | null)[],
+    paths: readonly string[],
+    takeover: boolean,
+    takeoverEvidence?: TakeoverEvidence,
+  ) {
+    if ((agent === "claude" && state.version >= 2 || agent === "codex" && state.version === 3) && state.targets.length > 0) {
       this.requireBackup(state, current);
-      return {
-        current,
-        backup: state.targets[0]!.expected,
-      };
+      if (agent === "codex" && takeoverEvidence !== undefined) {
+        const targetPaths = state.targets.map((target) => target.path);
+        const fresh = await this.images(targetPaths, state);
+        if (!sameFilePaths(takeoverEvidence.paths, targetPaths)
+          || fresh.some((image, index) => !sameImage(image, takeoverEvidence.images[index]!))) {
+          throw new AgentError("revision_conflict");
+        }
+        current = fresh;
+      }
+      return agent === "claude"
+        ? { current, backup: state.targets[0]!.expected, configBackup: null, catalogBackup: null }
+        : { current, backup: null, configBackup: state.targets[0]!.expected, catalogBackup: state.targets[1]!.expected };
     }
     const configPath = paths.at(-1)!;
     const backupPath = `${configPath}.ghcg.bak`;
-    const clientPaths = agent === "claude" ? [configPath] : [path.join(path.dirname(configPath), "ghcg_models.json"), configPath];
+    const clientPaths = agent === "claude" ? [configPath] : [path.join(path.dirname(configPath), "models.json"), configPath];
+    const catalogBackupPath = agent === "codex" ? `${clientPaths[0]}.ghcg.bak` : undefined;
     let existing: FileImage | null;
+    let existingCatalogBackup: FileImage | null = null;
     let clientImages: (FileImage | null)[];
     if (process.platform === "win32") {
       const privateObservation = exists(backupPath) ? await this.privateObservation(backupPath, false) : observeSecurityPath(backupPath);
-      const preparedPaths = [...new Set([backupPath, ...paths, ...clientPaths])];
+      const catalogBackupObservation = catalogBackupPath === undefined ? undefined
+        : exists(catalogBackupPath) ? await this.privateObservation(catalogBackupPath, false) : observeSecurityPath(catalogBackupPath);
+      const preparedPaths = [...new Set([backupPath, ...(catalogBackupPath === undefined ? [] : [catalogBackupPath]), ...paths, ...clientPaths])];
       const prepared: (FileImage | null)[] = [];
       const snapshots = await this.windowsImages(preparedPaths, undefined, prepared);
       const preparedByPath = new Map(preparedPaths.map((target, index) => [target, prepared[index]!]));
       existing = preparedByPath.get(backupPath)!;
       const backupSnapshot = this.requireWindowsSnapshot(snapshots, backupPath);
       if (!sameSecurityPathObservation(privateObservation, backupSnapshot.observation)) throw new AgentError("agent_unsafe_path");
+      if (catalogBackupPath !== undefined && catalogBackupObservation !== undefined) {
+        existingCatalogBackup = preparedByPath.get(catalogBackupPath)!;
+        if (!sameSecurityPathObservation(catalogBackupObservation,
+          this.requireWindowsSnapshot(snapshots, catalogBackupPath).observation)) throw new AgentError("agent_unsafe_path");
+      }
       clientImages = clientPaths.map((target) => preparedByPath.get(target)!);
     } else {
       existing = await readImage(backupPath);
       if (existing !== null) await assertPrivate(backupPath, false);
+      if (catalogBackupPath !== undefined) {
+        existingCatalogBackup = await readImage(catalogBackupPath);
+        if (existingCatalogBackup !== null) await assertPrivate(catalogBackupPath, false);
+      }
       clientImages = await this.images(clientPaths);
     }
     const original = state.targets.length === 0 ? current.at(-1)! : state.targets.at(-1)!.original;
     if (existing !== null && existing.bytes !== original?.bytes) throw new AgentError("agent_conflict");
     if (!sameImage(clientImages.at(-1)!, current.at(-1)!)) throw new AgentError("agent_conflict");
-    if (state.targets.length > 0 && agent === "codex" && paths[0] !== clientPaths[0]) {
-      if (clientImages[0] !== null) throw new AgentError("agent_conflict");
-      state.legacyCatalog = state.targets[0]!;
+    if (agent === "codex") {
+      if (takeoverEvidence !== undefined) {
+        const observed = [existing, existingCatalogBackup, ...clientImages];
+        if (!sameFilePaths(takeoverEvidence.paths, [backupPath, catalogBackupPath!, ...clientPaths])
+          || observed.some((image, index) => !sameImage(image, takeoverEvidence.images[index]!))) {
+          throw new AgentError("revision_conflict");
+        }
+      }
+      if (clientImages[0] !== null && !takeover) throw new AgentError("agent_conflict");
+      const oldCatalog = state.targets.find((item) => item.path.endsWith("ghcg-models.json") || item.path.endsWith("ghcg_models.json"));
+      if (oldCatalog !== undefined) state.legacyCatalog = oldCatalog;
+      if (existingCatalogBackup !== null) throw new AgentError("agent_conflict");
+      state.targets = [
+        { path: backupPath, original: existing, expected: existing },
+        { path: catalogBackupPath!, original: null, expected: null },
+        { path: clientPaths[0]!, original: clientImages[0]!, expected: clientImages[0]! },
+        { path: clientPaths[1]!, original, expected: clientImages[1]! },
+      ];
+      state.version = 3;
+      return {
+        current: [existing, existingCatalogBackup, ...clientImages],
+        backup: null,
+        configBackup: existing ?? (original === null ? null : newImage(Buffer.from(original.bytes, "base64"), null)),
+        catalogBackup: clientImages[0] === null ? null : newImage(Buffer.from(clientImages[0]!.bytes, "base64"), null),
+      };
     }
     const oldTargets = state.targets;
     state.targets = [
@@ -239,16 +334,94 @@ export class FileAgentsManager implements AgentsManager {
     return {
       current: [existing, ...clientImages],
       backup: existing ?? (original === null ? null : newImage(Buffer.from(original.bytes, "base64"), null)),
+      configBackup: null,
+      catalogBackup: null,
     };
   }
 
   private requireBackup(state: AgentState, images: readonly (FileImage | null)[]): void {
-    if (state.version !== 2 || state.targets.length === 0) return;
+    if (state.version === 1 || state.targets.length === 0) return;
     if (!sameImage(state.targets[0]!.expected, images[0]!)) throw new AgentError("agent_conflict");
+    if (state.version === 3 && state.targets.length === 4) {
+      if (!sameImage(state.targets[1]!.expected, images[1]!)) throw new AgentError("agent_conflict");
+    }
+  }
+
+  private async requireTakeoverRevision(
+    request: AgentTakeoverRequest,
+    state: AgentState,
+    origin: string,
+  ): Promise<TakeoverEvidence> {
+    const evidence = await this.takeoverEvidence(state, origin);
+    if (request.takeoverRevision !== evidence.revision) {
+      throw new AgentError("revision_conflict");
+    }
+    return evidence;
+  }
+
+  private async takeoverEvidence(state: AgentState, origin: string): Promise<TakeoverEvidence> {
+    const paths = this.takeoverPaths(state);
+    const images: (FileImage | null)[] = [];
+    if (process.platform === "win32") {
+      const observations = new Map<number, SecurityPathObservation>();
+      for (const index of [0, 1]) {
+        const target = paths[index]!;
+        observations.set(index, exists(target) ? await this.privateObservation(target, false) : observeSecurityPath(target));
+      }
+      await this.windowsImages(paths, undefined, images, observations);
+    } else images.push(...await this.images(paths));
+    return this.takeoverEvidenceFrom(state, origin, paths, images);
+  }
+
+  private takeoverEvidenceFrom(
+    state: AgentState,
+    origin: string,
+    paths: readonly string[],
+    images: readonly (FileImage | null)[],
+  ): TakeoverEvidence {
+    const [configBackupPath, catalogBackupPath, catalogPath, configPath] = paths as readonly [string, string, string, string];
+    if (state.targets.length === 0) {
+      if (images[0] !== null || images[1] !== null) throw new AgentError("agent_conflict");
+      if (images[2] === null && images[3] === null) throw new AgentError("agent_conflict");
+    } else {
+      const expectedConfigBackup = state.version === 1 ? null : state.targets[0]?.expected ?? null;
+      if (!sameImage(images[0]!, expectedConfigBackup)) throw new AgentError("agent_conflict");
+      const expectedCatalogBackup = state.version === 3 && state.targets.length === 4
+        ? state.targets[1]!.expected : null;
+      if (!sameImage(images[1]!, expectedCatalogBackup)) throw new AgentError("agent_conflict");
+    }
+    const config = images[3] ?? null;
+    validateCodexTakeover(config === null ? null : Buffer.from(config.bytes, "base64"));
+    return {
+      revision: digest({ state, images, paths, origin }),
+      configPath,
+      catalogPath,
+      configBackupPath,
+      catalogBackupPath,
+      images,
+      paths,
+    };
+  }
+
+  private takeoverPaths(state: AgentState): readonly [string, string, string, string] {
+    const configPath = state.targets.at(-1)?.path ?? this.paths.codex.at(-1)!;
+    const catalogPath = path.join(path.dirname(configPath), "models.json");
+    return [`${configPath}.ghcg.bak`, `${catalogPath}.ghcg.bak`, catalogPath, configPath];
+  }
+
+  private async takeoverPrivateObservations(
+    paths: readonly string[],
+  ): Promise<ReadonlyMap<number, SecurityPathObservation>> {
+    const observations = new Map<number, SecurityPathObservation>();
+    for (const index of [0, 1]) {
+      const target = paths[index]!;
+      observations.set(index, exists(target) ? await this.privateObservation(target, false) : observeSecurityPath(target));
+    }
+    return observations;
   }
 
   close(): void {
-    // Transactions contain at most three 1 MiB files and bounded OS calls.
+    // Transactions contain at most four 1 MiB files and bounded OS calls.
     this.closed = true;
   }
 
@@ -268,6 +441,8 @@ export class FileAgentsManager implements AgentsManager {
       readonly state?: AgentState;
       readonly paths?: readonly string[];
       readonly images?: readonly (FileImage | null)[];
+      readonly takeoverPaths?: readonly string[];
+      readonly takeoverImages?: readonly (FileImage | null)[];
       readonly error?: unknown;
     },
   ): Promise<AgentStatus> {
@@ -276,6 +451,7 @@ export class FileAgentsManager implements AgentsManager {
     let revision = "0".repeat(64);
     let kind: AgentStatus["state"] = "not_managed";
     let backupAvailable = false;
+    let takeover: AgentStatus["takeover"] = null;
     const images: (FileImage | null)[] = [];
     try {
       state = inspection?.state ?? await this.store(agent).read();
@@ -328,15 +504,39 @@ export class FileAgentsManager implements AgentsManager {
       }
       revision = this.revision(state, images, paths, origin);
       backupAvailable = this.backupAvailable(state, images);
+      let nativeCatalogBlocksLegacy = false;
+      if (agent === "codex" && state.version < 3 && state.targets.length > 0) {
+        const takeoverCatalog = inspection?.takeoverImages === undefined
+          ? await readImage(this.takeoverPaths(state)[2])
+          : inspection.takeoverImages[2] ?? null;
+        nativeCatalogBlocksLegacy = takeoverCatalog !== null;
+      }
+      if (agent === "codex" && state.pending === null
+        && (kind === "conflict" || kind === "not_managed" || nativeCatalogBlocksLegacy)) {
+        try {
+          const evidence = inspection?.takeoverPaths !== undefined && inspection.takeoverImages !== undefined
+            ? this.takeoverEvidenceFrom(state, origin, inspection.takeoverPaths, inspection.takeoverImages)
+            : await this.takeoverEvidence(state, origin);
+          takeover = {
+            revision: evidence.revision,
+            configPath: evidence.configPath,
+            catalogPath: evidence.catalogPath,
+            configBackupPath: evidence.configBackupPath,
+            catalogBackupPath: evidence.catalogBackupPath,
+          };
+        } catch { /* Unsafe conflicts remain fail closed. */ }
+      }
     } catch (error: unknown) {
       kind = error instanceof AgentError && error.code === "agent_unsafe_path" ? "unsafe_path" : "recovery_required";
     }
     return {
-      id: agent, state: kind, revision, paths: state?.version === 2 && state.targets.length > 0 ? paths.slice(1) : paths,
+      id: agent, state: kind, revision, paths: state !== null && state.version !== 1 && state.targets.length > 0
+        ? paths.slice(state.version === 3 && agent === "codex" ? 2 : 1) : paths,
       endpoint: agent === "claude" ? origin : `${origin}/v1`,
       backupAvailable,
       lastAppliedAt: state?.lastAppliedAt ?? null,
       mappings: state?.version === 1 && agent === "claude" ? state.mappings.slice(0, 3) : state?.mappings ?? [],
+      takeover,
     };
   }
 
@@ -345,11 +545,16 @@ export class FileAgentsManager implements AgentsManager {
   }
 
   private backupAvailable(state: AgentState, images: readonly (FileImage | null)[]): boolean {
-    if (state.version !== 2 || state.targets.length === 0) return false;
+    if (state.version === 1 || state.targets.length === 0) return false;
     const step = state.pending?.steps.find((candidate) => candidate.target === 0);
     const image = images[0];
     if (image === undefined || image === null) return false;
-    return sameImage(image, step?.after ?? state.targets[0]!.expected);
+    if (!sameImage(image, step?.after ?? state.targets[0]!.expected)) return false;
+    if (state.version === 3 && state.targets.length === 4 && state.targets[2]!.original !== null) {
+      const catalogStep = state.pending?.steps.find((candidate) => candidate.target === 1);
+      return images[1] !== null && sameImage(images[1]!, catalogStep?.after ?? state.targets[1]!.expected);
+    }
+    return true;
   }
 
   private fallbackTargetPaths(agent: AgentId, state: AgentState): readonly string[] {
@@ -361,11 +566,9 @@ export class FileAgentsManager implements AgentsManager {
   }
   private async images(paths: readonly string[], state?: AgentState, images: (FileImage | null)[] = []): Promise<(FileImage | null)[]> {
     if (process.platform === "win32") {
-      const privateObservation = state?.version === 2 && state.targets.length > 0
-        && paths[0] === state.targets[0]!.path
-        ? exists(paths[0]!) ? await this.privateObservation(paths[0]!, false) : observeSecurityPath(paths[0]!)
-        : undefined;
-      await this.windowsImages(paths, state, images, privateObservation);
+      const privateObservations = state === undefined ? new Map<number, SecurityPathObservation>()
+        : await this.privateTargetObservations(state, paths);
+      await this.windowsImages(paths, state, images, privateObservations);
       return images;
     }
     for (const [index, target] of paths.entries()) {
@@ -377,7 +580,7 @@ export class FileAgentsManager implements AgentsManager {
     paths: readonly string[],
     state: AgentState | undefined,
     images: (FileImage | null)[],
-    privateObservation?: SecurityPathObservation,
+    privateObservations: ReadonlyMap<number, SecurityPathObservation> = new Map(),
   ): Promise<ReadonlyMap<string, SecurityPathSnapshot>> {
     const candidates: string[] = [];
     const parents: string[] = [];
@@ -392,8 +595,10 @@ export class FileAgentsManager implements AgentsManager {
       parents.push(step.scratch);
     }
     const snapshots = await this.windowsSecuritySnapshots(candidates, parents);
-    if (privateObservation !== undefined && !sameSecurityPathObservation(privateObservation,
-      this.requireWindowsSnapshot(snapshots, paths[0]!).observation)) throw new AgentError("agent_unsafe_path");
+    for (const [index, observation] of privateObservations) {
+      if (!sameSecurityPathObservation(observation,
+        this.requireWindowsSnapshot(snapshots, paths[index]!).observation)) throw new AgentError("agent_unsafe_path");
+    }
     for (const [index, target] of paths.entries()) {
       const parent = this.existingParent(target);
       images.push(this.readWindowsTargetImage(target, parent, snapshots, pendingLinks.get(index)));
@@ -410,7 +615,8 @@ export class FileAgentsManager implements AgentsManager {
     await assertOwned(parent, true);
     const stage = state?.pending?.steps.find((step) => step.target === index);
     const image = await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"));
-    if (state?.version === 2 && state.targets.length > 0 && index === 0 && image !== null) {
+    if (state !== undefined && state.version !== 1 && state.targets.length > 0
+      && (index === 0 || state.version === 3 && state.targets.length === 4 && index === 1) && image !== null) {
       await assertPrivate(target, false);
     }
     return image;
@@ -440,6 +646,7 @@ export class FileAgentsManager implements AgentsManager {
       if (!("paths" in item)) return item;
       if (item.error !== undefined) return { ...item, images: [] };
       const images: (FileImage | null)[] = [];
+      const takeoverImages: (FileImage | null)[] = [];
       const validatedPaths: string[] = [];
       try {
         for (const [index, target] of item.paths.entries()) {
@@ -448,14 +655,26 @@ export class FileAgentsManager implements AgentsManager {
           let parent = path.dirname(validated);
           while (!exists(parent)) parent = path.dirname(parent);
           const targetSnapshot = this.requireWindowsSnapshot(snapshots, validated);
-          if (index === 0 && item.privateObservation !== undefined
-            && !sameSecurityPathObservation(item.privateObservation, targetSnapshot.observation)) {
+          const privateObservation = item.privateObservations.get(index);
+          if (privateObservation !== undefined
+            && !sameSecurityPathObservation(privateObservation, targetSnapshot.observation)) {
             throw new AgentError("agent_unsafe_path");
           }
           const image = this.readWindowsTargetImage(validated, parent, snapshots, item.pendingLinks.get(index));
           images.push(image);
         }
-        return { agent: item.agent, state: item.state, paths: validatedPaths, images };
+        for (const [index, target] of (item.takeoverPaths ?? []).entries()) {
+          const validated = canonical(target);
+          const parent = this.existingParent(validated);
+          const observation = item.takeoverPrivateObservations?.get(index);
+          if (observation !== undefined && !sameSecurityPathObservation(observation,
+            this.requireWindowsSnapshot(snapshots, validated).observation)) throw new AgentError("agent_unsafe_path");
+          takeoverImages.push(this.readWindowsTargetImage(validated, parent, snapshots));
+        }
+        return {
+          agent: item.agent, state: item.state, paths: validatedPaths, images,
+          ...(item.takeoverPaths === undefined ? {} : { takeoverPaths: item.takeoverPaths, takeoverImages }),
+        };
       } catch (error: unknown) {
         return { agent: item.agent, state: item.state, paths: item.paths, images, error };
       }
@@ -746,6 +965,20 @@ export class FileAgentsManager implements AgentsManager {
     assertSecurityPathUnchanged(target, observation, directory);
     return observation;
   }
+  private async privateTargetObservations(
+    state: AgentState,
+    paths: readonly string[],
+  ): Promise<ReadonlyMap<number, SecurityPathObservation>> {
+    const observations = new Map<number, SecurityPathObservation>();
+    if (state.version === 1 || state.targets.length === 0) return observations;
+    const indexes = state.version === 3 && state.targets.length === 4 ? [0, 1] : [0];
+    for (const index of indexes) {
+      if (paths[index] !== state.targets[index]?.path) continue;
+      const target = paths[index]!;
+      observations.set(index, exists(target) ? await this.privateObservation(target, false) : observeSecurityPath(target));
+    }
+    return observations;
+  }
   private async privateChildImage(
     parent: string,
     target: string,
@@ -816,4 +1049,14 @@ export class FileAgentsManager implements AgentsManager {
 
 function samePaths(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((target, index) => target === right[index]);
+}
+
+function sameFilePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((target, index) => {
+    const other = right[index];
+    if (other === undefined) return false;
+    const resolved = path.resolve(target);
+    const resolvedOther = path.resolve(other);
+    return process.platform === "win32" ? resolved.toLowerCase() === resolvedOther.toLowerCase() : resolved === resolvedOther;
+  });
 }

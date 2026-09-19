@@ -55,6 +55,7 @@ export interface AdminFixture {
     agents: Record<"claude" | "codex", AgentStatus>;
     agentsCatalogRevision: string | null;
     agentsApplyConflict: boolean;
+    agentsTakeoverConflict: boolean;
     agentsApplyResult: AgentStatus["state"] | null;
     agentsDelayMs: number;
     failAgents: boolean;
@@ -144,6 +145,7 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       agents: { claude: agentStatus("claude", 1), codex: agentStatus("codex", 7) },
       agentsCatalogRevision: "c".repeat(64),
       agentsApplyConflict: false,
+      agentsTakeoverConflict: false,
       agentsApplyResult: null,
       agentsDelayMs: 0,
       failAgents: false,
@@ -204,11 +206,12 @@ function agentStatus(agent: "claude" | "codex", seed: number): AgentStatus {
     revision: seed.toString(16).repeat(64),
     paths: agent === "claude"
       ? ["C:/Users/octo/.claude/settings.json"]
-      : ["C:/Users/octo/.codex/ghcg_models.json", "C:/Users/octo/.codex/config.toml"],
+      : ["C:/Users/octo/.codex/models.json", "C:/Users/octo/.codex/config.toml"],
     endpoint: agent === "claude" ? "http://127.0.0.1:31400" : "http://127.0.0.1:31400/v1",
     backupAvailable: false,
     lastAppliedAt: null,
     mappings: [],
+    takeover: null,
   };
 }
 
@@ -317,9 +320,11 @@ async function handle(
       items: fixture.state.models.items, usableModelIds: fixture.state.models.items.map((model) => model.id),
     });
   }
-  if (path === "/agents/apply" && request.method() === "POST") {
-    const body = request.postDataJSON() as { agent: "claude" | "codex"; expectedRevision: string; mappings: { displayName: string; modelId: string }[] };
+  if ((path === "/agents/apply" || path === "/agents/takeover") && request.method() === "POST") {
+    const body = request.postDataJSON() as { agent: "claude" | "codex"; expectedRevision: string; takeoverRevision?: string; mappings: { displayName: string; modelId: string }[] };
     if (fixture.state.agentsApplyConflict) return failure(route, 409, "agent_conflict");
+    if (path === "/agents/takeover" && (fixture.state.agentsTakeoverConflict
+      || body.takeoverRevision !== fixture.state.agents.codex.takeover?.revision)) return failure(route, 409, "revision_conflict");
     const current = fixture.state.agents[body.agent];
     if (body.expectedRevision !== current.revision) return failure(route, 409, "revision_conflict");
     const next: AgentStatus = {
@@ -329,6 +334,7 @@ async function handle(
       backupAvailable: true,
       lastAppliedAt: NOW,
       mappings: body.mappings,
+      takeover: null,
     };
     fixture.state.agents[body.agent] = next;
     return json(route, 200, next);

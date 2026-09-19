@@ -712,7 +712,7 @@ export async function projectAgentConfigFixture(
   }));
   const catalogPath = catalogPathOverride ?? input.catalogPath;
   const first = projectAgent(
-    input.agent, source, input.firstMappings, input.origin, catalogPath, models, null,
+    input.agent, source, input.firstMappings, input.origin, catalogPath, models, null, input.agent === "codex",
   );
   let repeatSource: Buffer;
   if (input.agent === "claude") {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AgentError, type AgentErrorCode, type AgentsManager, type AgentsView, type AgentApplyRequest, type AgentStatus } from "../agents/types.js";
+import { AgentError, type AgentErrorCode, type AgentsManager, type AgentsView, type AgentApplyRequest, type AgentTakeoverRequest, type AgentStatus } from "../agents/types.js";
 import type { DeviceFlowCancelResult } from "../accounts/device_flow.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { BoundAccount } from "../accounts/account_directory.js";
@@ -413,19 +413,35 @@ export class AdminManagementApi {
   }
 
   async applyAgent(request: AgentApplyRequest, origin: string, signal: AbortSignal): Promise<AgentStatus> {
+    return await this.mutateAgent(request, origin, signal, false);
+  }
+
+  async takeoverAgent(request: AgentTakeoverRequest, origin: string, signal: AbortSignal): Promise<AgentStatus> {
+    return await this.mutateAgent(request, origin, signal, true);
+  }
+
+  private async mutateAgent(
+    request: AgentApplyRequest | AgentTakeoverRequest,
+    origin: string,
+    signal: AbortSignal,
+    takeover: boolean,
+  ): Promise<AgentStatus> {
     if (this.agentMutations.has(request.agent)) throw new AgentError("agent_busy");
     this.agentMutations.add(request.agent);
     try {
       const captured = await this.agentCatalog(signal);
       if (captured.revision !== request.catalogRevision) throw new AdminApiError("revision_conflict");
       const models = this.dependencies.registry.modelsUsableForAgentMapping(captured.catalog);
-      return await this.requireAgents().apply(request, origin, models, () => {
+      const assertCurrent = () => {
         signal.throwIfAborted();
         if (!this.dependencies.registry.isCurrent(captured.catalog)
           || JSON.stringify(this.agentSelection()) !== JSON.stringify(captured.selection)) {
           throw new AgentError("revision_conflict");
         }
-      }, signal);
+      };
+      return takeover
+        ? await this.requireAgents().takeover(request as AgentTakeoverRequest, origin, models, assertCurrent, signal)
+        : await this.requireAgents().apply(request, origin, models, assertCurrent, signal);
     } finally { this.agentMutations.delete(request.agent); }
   }
 

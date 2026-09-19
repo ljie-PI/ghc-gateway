@@ -9,6 +9,19 @@ export interface AgentProjection {
   readonly catalog?: Buffer;
 }
 
+export function validateCodexTakeover(source: Buffer | null): void {
+  try {
+    const config = source === null ? {} as TomlTable : parse(source.toString("utf8").replace(/^\uFEFF/u, ""));
+    if (config.profile !== undefined || config.profiles !== undefined || config.agents !== undefined) {
+      throw new AgentError("agent_invalid_config");
+    }
+    if (config.model_providers !== undefined) object(config.model_providers);
+  } catch (error: unknown) {
+    if (error instanceof AgentError) throw error;
+    throw new AgentError("agent_invalid_config");
+  }
+}
+
 // These are client labels, never aliases in Gateway model resolution.
 export function projectAgent(
   agent: AgentId,
@@ -18,6 +31,7 @@ export function projectAgent(
   catalogPath: string,
   models: readonly AgentModel[],
   managedConfig: Buffer | null,
+  takeover = false,
 ): AgentProjection {
   validateMappings(agent, mappings);
   if (!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/u.test(origin) || Number(new URL(origin).port) > 65535) {
@@ -30,7 +44,7 @@ export function projectAgent(
     const source = original?.toString("utf8").replace(/^\uFEFF/u, "") ?? "";
     return agent === "claude"
       ? { config: projectClaude(source, mappings, origin) }
-      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig);
+      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig, takeover);
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
     // Parser diagnostics can contain configuration secrets.
@@ -88,6 +102,7 @@ function projectClaude(source: string, mappings: readonly AgentMapping[], origin
 function projectCodex(
   source: string, mappings: readonly AgentMapping[], origin: string, catalogPath: string, models: readonly AgentModel[],
   managedConfig: Buffer | null,
+  takeover: boolean,
 ): AgentProjection {
   const config = source === "" ? {} as TomlTable : parse(source);
   // Profiles and named subagents can override the provider/catalog. Refuse rather than
@@ -97,7 +112,10 @@ function projectCodex(
   }
   const providers = config.model_providers === undefined ? {} : object(config.model_providers);
   const reserved = "ghc_gateway";
-  if (managedConfig === null) {
+  if (takeover) {
+    // Explicit takeover owns only the root routing/provider/catalog fields.
+  } else if (managedConfig === null) {
+    if (source !== "") throw new AgentError("agent_conflict");
     if (providers[reserved] !== undefined) throw new AgentError("agent_conflict");
   } else {
     const managed = parse(managedConfig.toString("utf8").replace(/^\uFEFF/u, ""));
@@ -130,7 +148,7 @@ function projectCodex(
       supported_reasoning_levels: reasoningLevels.map((effort) => ({
         effort, description: effort.charAt(0).toUpperCase() + effort.slice(1),
       })),
-      shell_type: "shell_command", visibility: "list", supported_in_api: true,
+      shell_type: model.capabilities.toolCalling ? "shell_command" : "disabled", visibility: "list", supported_in_api: true,
       priority: index, support_verbosity: model.capabilities.verbosity,
       supports_reasoning_summaries: model.capabilities.reasoningSummaries,
       supports_reasoning_summary_parameter: model.capabilities.reasoningSummaries,
@@ -142,6 +160,9 @@ function projectCodex(
       ...(model.capabilities.contextWindowTokens === null ? {} : {
         context_window: model.capabilities.contextWindowTokens,
         max_context_window: model.capabilities.maxContextWindowTokens ?? model.capabilities.contextWindowTokens,
+        ...(model.capabilities.maxContextWindowTokens === null ? {} : {
+          effective_context_window_percent: 100,
+        }),
       }),
     };
   }) };

@@ -22,6 +22,7 @@
   let busy = $state(false);
   let failure = $state("");
   let notice = $state("");
+  let takeoverDialog = $state<HTMLDialogElement>();
   const dirty = $derived(serializedDrafts() !== baseline);
   const stateLabel = $derived({
     not_managed: "Not managed", installed: "Configuration installed", conflict: "External changes detected",
@@ -108,6 +109,47 @@
       failure = agentApplyErrorMessage(error);
     } finally { busy = false; }
   }
+  async function takeover(): Promise<void> {
+    const offer = status.takeover;
+    const selectedCatalog = catalog;
+    if (busy || offer === null) return;
+    if (selectedCatalog === null) {
+      failure = "Apply failed: model catalog unavailable.";
+      return;
+    }
+    try {
+      validateMappings(status.id, drafts);
+    } catch {
+      failure = "Apply failed: invalid model mapping.";
+      return;
+    }
+    if (drafts.some((row) => !selectedCatalog.usableModelIds.includes(row.modelId))) {
+      failure = "Apply failed: selected model is unavailable.";
+      return;
+    }
+    busy = true;
+    notice = "";
+    try {
+      const next = await client.takeoverAgent({
+        agent: status.id,
+        expectedRevision: status.revision,
+        catalogRevision: selectedCatalog.catalogRevision,
+        takeoverRevision: offer.revision,
+        mappings: drafts.map(({ displayName, modelId }) => ({ displayName, modelId })),
+      });
+      status = next;
+      loadedRevision = next.revision;
+      onchanged(next);
+      if (next.state === "installed") {
+        failure = "";
+        resetDrafts();
+        loadedRevision = next.revision;
+        notice = "Configuration installed. Restart Codex; inference has not been tested.";
+      } else failure = "Apply failed: configuration was not installed.";
+    } catch (error: unknown) {
+      failure = agentApplyErrorMessage(error);
+    } finally { busy = false; }
+  }
 </script>
 
 <section class="agent-card" aria-label={title} aria-busy={busy}>
@@ -152,6 +194,9 @@
     </fieldset>
     <div class="agent-actions">
       {#if failure}<p class="agent-apply-failure" role="alert">{failure}</p>{:else}<span></span>{/if}
+      {#if status.id === "codex" && status.takeover !== null}
+        <button type="button" disabled={busy} onclick={() => takeoverDialog?.showModal()}>Take over Codex configuration</button>
+      {/if}
       <button class="primary" type="submit" disabled={busy}>Apply changes</button>
     </div>
   </form>
@@ -164,4 +209,26 @@
       <dt>Last apply</dt><dd>{status.lastAppliedAt === null ? "Never" : new Date(status.lastAppliedAt).toLocaleString()}</dd>
     </dl>
   </details>
+  {#if status.id === "codex" && status.takeover !== null}
+    <dialog class="agent-takeover-dialog" bind:this={takeoverDialog} aria-labelledby="codex-takeover-title">
+      <form method="dialog">
+        <h3 id="codex-takeover-title">Take over Codex configuration?</h3>
+        <p>Gateway-managed model, provider, and catalog fields will change. Unrelated TOML settings are preserved, <code>auth.json</code> is untouched, and Codex must restart.</p>
+        <dl>
+          <dt>Configuration</dt><dd><code>{status.takeover.configPath}</code></dd>
+          <dt>Model catalog</dt><dd><code>{status.takeover.catalogPath}</code></dd>
+          <dt>Configuration backup</dt><dd><code>{status.takeover.configBackupPath}</code></dd>
+          <dt>Catalog backup</dt><dd><code>{status.takeover.catalogBackupPath}</code></dd>
+        </dl>
+        <div class="agent-dialog-actions">
+          <button value="cancel">Cancel</button>
+          <button class="primary" value="confirm" onclick={(event) => {
+            event.preventDefault();
+            takeoverDialog?.close();
+            void takeover();
+          }}>Take over configuration</button>
+        </div>
+      </form>
+    </dialog>
+  {/if}
 </section>

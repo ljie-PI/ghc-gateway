@@ -1,7 +1,7 @@
 {
   "agent": "codex",
   "origin": "http://127.0.0.1:32567",
-  "catalogPath": "C:\\Users\\octo\\.codex\\ghcg_models.json",
+  "catalogPath": "C:\\Users\\octo\\.codex\\models.json",
   "source": "model = \"stale-startup\"\nmodel_provider = \"external\"\nmodel_catalog_json = \"C:\\\\external\\\\models.json\"\napproval_policy = \"on-request\"\nweb_search = \"live\"\nmodel_reasoning_effort = \"high\"\nmodel_reasoning_summary = \"detailed\"\nmodel_verbosity = \"high\"\nmodel_context_window = 999999\nmodel_auto_compact_token_limit = 888888\nmodel_supports_reasoning_summaries = true\nreview_model = \"stale-review\"\nservice_tier = \"priority\"\n\n[model_providers.other]\nname = \"Other Provider\"\nbase_url = \"https://other.example/v1\"\nwire_api = \"chat\"\n\n[mcp_servers.local]\ncommand = \"node\"\nargs = [\"server.mjs\"]\n\n[hooks.Stop]\ncommand = \"notify\"\n",
   "firstMappings": [
     {
