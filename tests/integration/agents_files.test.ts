@@ -688,7 +688,7 @@ describe("private repeatable agent configuration", () => {
     })).toBe(true);
   }, 180_000);
 
-  it.runIf(process.platform === "win32")("keeps no-op Apply to pre-lock, post-lock, and final-status snapshots", async () => {
+  it.runIf(process.platform === "win32")("keeps no-op Apply to three transaction snapshots with private proofs", async () => {
     const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
     const h = harness({
       queryWindowsSecuritySnapshot: async (requests) => {
@@ -705,9 +705,14 @@ describe("private repeatable agent configuration", () => {
       agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
     }, origin, models, () => undefined, new AbortController().signal);
 
-    expect(batches).toHaveLength(3);
-    expect(batches.map((batch) => batch[0]!.id.match(/^snapshot-(\d+)-/u)?.[1])).toHaveLength(3);
-    expect(new Set(batches.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""))).size).toBe(3);
+    const transaction = batches.filter((batch) => batch[0]!.id.startsWith("snapshot-"));
+    const privateProofs = batches.filter((batch) => batch[0]!.id.startsWith("private-"));
+    expect(batches).toHaveLength(9);
+    expect(transaction).toHaveLength(3);
+    expect(privateProofs).toHaveLength(6);
+    expect(new Set(transaction.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""))).size).toBe(3);
+    expect(privateProofs.every((batch) => batch.length === 1
+      && batch[0]!.path.endsWith("\\settings.json.ghcg.bak"))).toBe(true);
   }, 180_000);
 
   it.runIf(process.platform === "win32")("keeps exact Codex first, no-op, and reordered snapshot contracts", async () => {
