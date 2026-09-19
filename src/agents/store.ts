@@ -165,8 +165,10 @@ export class AgentStore {
           const current = await readStateDatabase(this.statePath, this.agent);
           if (!statesEqual(legacy, current)) throw new AgentError("agent_recovery_required");
         }
-        if (exists(retiredStatePath)) throw new AgentError("agent_recovery_required");
-        await copyStateDatabase(legacyStatePath, retiredStatePath, this.agent);
+        if (exists(retiredStatePath)) {
+          const retired = await readStateDatabase(retiredStatePath, this.agent);
+          if (!statesEqual(legacy, retired)) throw new AgentError("agent_recovery_required");
+        } else await copyStateDatabase(legacyStatePath, retiredStatePath, this.agent);
         await replaceStateWithMigrationMarker(legacyStatePath, this.statePath, "pending");
         if (!exists(this.statePath)) await publishStateDatabase(this.statePath, legacy, this.agent);
         await completeMigrationMarker(legacyStatePath, this.statePath);
@@ -238,6 +240,7 @@ async function migrationLock(directory: string): Promise<DatabaseSync> {
 
 async function readStateDatabase(statePath: string, agent: AgentId): Promise<AgentState> {
   await assertPrivate(statePath, false);
+  if (fs.lstatSync(statePath).nlink !== 1) throw new AgentError("agent_unsafe_path");
   const db = new DatabaseSync(statePath, { readOnly: true, timeout: 0 });
   try {
     const row = db.prepare("SELECT document FROM state WHERE id=1").get();

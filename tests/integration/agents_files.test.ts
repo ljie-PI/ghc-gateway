@@ -211,15 +211,18 @@ describe("private repeatable agent configuration", () => {
   }, 180_000);
 
   it("recovers migration interruptions before marker and before new-state publication", async () => {
-    for (const phase of ["retired", "marked", "published"] as const) {
+    for (const phase of ["copied", "retired", "marked", "published"] as const) {
       const h = harness();
-      const state = { version: 2 as const, revision: phase === "retired" ? 11 : phase === "marked" ? 12 : 13, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+      const state = { version: 2 as const, revision: phase === "copied" ? 10 : phase === "retired" ? 11 : phase === "marked" ? 12 : 13, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
       const legacyDirectory = path.join(legacyStateRoot(h.home), "codex");
       const legacyState = path.join(legacyDirectory, "state.db");
       const retired = `${legacyState}.migrated`;
       const current = path.join(stateRoot(h.home), "codex", "state.db");
       await saveState(legacyStateRoot(h.home), "codex", state);
-      fs.renameSync(legacyState, retired);
+      if (phase === "copied") {
+        fs.copyFileSync(legacyState, retired);
+        protect(retired);
+      } else fs.renameSync(legacyState, retired);
       if (phase !== "retired") await writeMigrationMarker(legacyState, current);
       if (phase === "published") await saveState(stateRoot(h.home), "codex", structuredClone(state));
 
@@ -300,6 +303,16 @@ describe("private repeatable agent configuration", () => {
     await saveState(real, "codex", { version: 2, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null });
     fs.symlinkSync(real, legacyStateRoot(h.home), "dir");
     expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a hard-linked legacy state database", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 1, mappings: [], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "codex", state);
+    const legacyState = path.join(legacyStateRoot(h.home), "codex", "state.db");
+    fs.linkSync(legacyState, path.join(h.home, "state-alias.db"));
+    expect(await h.status("codex")).toMatchObject({ state: "unsafe_path", mappings: [] });
+    expect(() => new DatabaseSync(path.join(h.home, "state-alias.db"), { readOnly: true })).not.toThrow();
   });
 
   it("rejects a migration marker with a valid old state sentinel", async () => {
