@@ -758,20 +758,132 @@ for (const [change, state, revision, label] of [
   });
 }
 
+test("Refresh immediately dismisses unchanged Apply success", async ({ page }) => {
+  const fixture = await openAgents(page);
+  const codex = page.getByRole("region", { name: "Codex", exact: true });
+  const id = codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+  const name = codex.getByRole("textbox", { name: "Model 1 Display name", exact: true });
+  await id.fill("gpt-alpha");
+  await name.fill("Fast");
+  page.once("dialog", (dialog) => dialog.accept());
+  await codex.getByRole("button", { name: "Apply changes", exact: true }).click();
+  const success = codex.getByText(/Configuration installed\. Restart/);
+  await expect(success).toBeVisible();
+  await codex.getByRole("button", { name: "Add model", exact: true }).click();
+  const secondId = codex.getByRole("combobox", { name: "Model 2 Copilot model ID", exact: true });
+  const secondName = codex.getByRole("textbox", { name: "Model 2 Display name", exact: true });
+  await secondId.fill("claude-beta");
+  await secondName.fill("Draft Beta");
+  const stableIds = await codex.getByRole("combobox").evaluateAll((inputs) => inputs.map((input) => input.id));
+
+  const refresh = fixture.holdNextAgentsRead();
+  try {
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await refresh.started;
+    await expect(success).toHaveCount(0);
+    await expect(id).toHaveValue("gpt-alpha");
+    await expect(name).toHaveValue("Fast");
+    await expect(secondId).toHaveValue("claude-beta");
+    await expect(secondName).toHaveValue("Draft Beta");
+    expect(await codex.getByRole("combobox").evaluateAll((inputs) => inputs.map((input) => input.id))).toEqual(stableIds);
+    refresh.release();
+    await refresh.responseFinished;
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+    await expect(success).toHaveCount(0);
+    await expect(codex.locator(".agent-mapping-row")).toHaveCount(2);
+    await expect(secondName).toHaveValue("Draft Beta");
+    expect(await codex.getByRole("combobox").evaluateAll((inputs) => inputs.map((input) => input.id))).toEqual(stableIds);
+  } finally { refresh.release(); }
+});
+
+test("failed Refresh dismisses Apply failure and preserves the dirty draft", async ({ page }) => {
+  const fixture = await openAgents(page);
+  fixture.state.agentsApplyConflict = true;
+  const codex = page.getByRole("region", { name: "Codex", exact: true });
+  const id = codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+  const name = codex.getByRole("textbox", { name: "Model 1 Display name", exact: true });
+  await id.fill("gpt-alpha");
+  await name.fill("Keep draft");
+  page.once("dialog", (dialog) => dialog.accept());
+  await codex.getByRole("button", { name: "Apply changes", exact: true }).click();
+  await expect(codex.getByRole("alert")).toHaveText("Apply failed: external changes detected.");
+  await codex.getByRole("button", { name: "Add model", exact: true }).click();
+  const secondId = codex.getByRole("combobox", { name: "Model 2 Copilot model ID", exact: true });
+  const secondName = codex.getByRole("textbox", { name: "Model 2 Display name", exact: true });
+  await secondId.fill("claude-beta");
+  await secondName.fill("Surviving row");
+  const survivingId = await secondId.getAttribute("id");
+  await codex.getByRole("button", { name: "Remove model 1", exact: true }).click();
+  const remainingId = codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+  const remainingName = codex.getByRole("textbox", { name: "Model 1 Display name", exact: true });
+  await expect(remainingId).toHaveAttribute("id", survivingId!);
+
+  fixture.state.failAgents = true;
+  const refresh = fixture.holdNextAgentsRead();
+  try {
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await refresh.started;
+    await expect(codex.getByRole("alert")).toHaveCount(0);
+    await expect(codex.locator(".agent-mapping-row")).toHaveCount(1);
+    await expect(remainingId).toHaveAttribute("id", survivingId!);
+    await expect(remainingId).toHaveValue("claude-beta");
+    await expect(remainingName).toHaveValue("Surviving row");
+    refresh.release();
+    await refresh.responseFinished;
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+    await expect(page.getByRole("alert")).toContainText("internal error");
+    await expect(codex.getByRole("alert")).toHaveCount(0);
+    await expect(codex.locator(".agent-mapping-row")).toHaveCount(1);
+    await expect(remainingId).toHaveAttribute("id", survivingId!);
+    await expect(remainingName).toHaveValue("Surviving row");
+  } finally { refresh.release(); }
+});
+
 test("an in-flight Refresh cannot overwrite a newer Apply result", async ({ page }) => {
   const fixture = await openAgents(page);
   const codex = page.locator(".agent-card", { has: page.getByRole("heading", { name: "Codex" }) });
   await codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
   await codex.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Fast");
-  fixture.state.agentsDelayMs = 1_000;
-  await page.getByRole("button", { name: "Refresh", exact: true }).click({ noWaitAfter: true });
-  page.once("dialog", (dialog) => dialog.accept());
-  await codex.getByRole("button", { name: "Apply changes", exact: true }).click();
-  await expect(codex.locator(".badge")).toHaveText("Configuration installed");
-  await page.waitForTimeout(1_100);
-  await expect(codex.locator(".badge")).toHaveText("Configuration installed");
-  await expect(page.getByRole("alert")).toHaveCount(0);
+  const refresh = fixture.holdNextAgentsRead();
+  try {
+    await page.getByRole("button", { name: "Refresh", exact: true }).click({ noWaitAfter: true });
+    await refresh.started;
+    page.once("dialog", (dialog) => dialog.accept());
+    await codex.getByRole("button", { name: "Apply changes", exact: true }).click();
+    await expect(codex.locator(".badge")).toHaveText("Configuration installed");
+    await expect(codex.getByText(/Configuration installed\. Restart/)).toBeVisible();
+    refresh.release();
+    await refresh.responseFinished;
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+    await expect(codex.locator(".badge")).toHaveText("Configuration installed");
+    await expect(codex.getByText(/Configuration installed\. Restart/)).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  } finally { refresh.release(); }
 });
+
+for (const [state, label, message] of [
+  ["recovery_required", "Recovery required", "Apply failed: recovery required."],
+  ["unsafe_path", "Unsupported or unsafe path", "Apply failed: unsafe configuration path."],
+] as const) {
+  test(`Codex ${state} without takeover evidence uses ordinary Apply and remains fail closed`, async ({ page }) => {
+    const fixture = await installAdminFixture(page);
+    fixture.state.agents.codex = { ...fixture.state.agents.codex, state, takeover: null };
+    fixture.state.agentsApplyResult = state;
+    await page.goto("/admin/#bootstrap_token=codex-no-takeover");
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    const codex = page.getByRole("region", { name: "Codex", exact: true });
+    await expect(codex.locator(".badge")).toHaveText(label);
+    await codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).fill("gpt-alpha");
+    await codex.getByRole("textbox", { name: "Model 1 Display name", exact: true }).fill("Fast");
+
+    await codex.getByRole("button", { name: "Apply changes", exact: true }).click();
+
+    await expect(codex.getByRole("alert")).toHaveText(message);
+    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/apply"))).toHaveLength(1);
+    expect(fixture.requests.some((request) => request.url().endsWith("/agents/takeover"))).toBe(false);
+    await expect(page.getByRole("dialog", { name: "Take over Codex configuration?" })).toHaveCount(0);
+  });
+}
 
 test("Claude applies fixed roles plus extra model menu mappings", async ({ page }) => {
   const fixture = await openAgents(page);
@@ -860,12 +972,32 @@ test("model combobox filters usable choices and supports standard keyboard navig
   await expect(input).toHaveValue("claude-beta");
   await expect(displayName).toHaveValue("Beta");
   await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute("aria-expanded", "false");
+  await expect(input).not.toHaveAttribute("aria-activedescendant", /.+/u);
+  await expect(card.locator(".agent-model-listbox")).toBeHidden();
 
   await input.press("ArrowDown");
   await input.press("Escape");
   await expect(input).toHaveAttribute("aria-expanded", "false");
   await input.press("Tab");
   await expect(displayName).toBeFocused();
+});
+
+test("mouse model selection fills the row and collapses the combobox", async ({ page }) => {
+  await openAgents(page);
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+  const input = card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+  const displayName = card.getByRole("textbox", { name: "Model 1 Display name", exact: true });
+  await input.click();
+
+  await card.getByRole("option").filter({ hasText: "claude-beta" }).click();
+
+  await expect(input).toHaveValue("claude-beta");
+  await expect(displayName).toHaveValue("Beta");
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute("aria-expanded", "false");
+  await expect(input).not.toHaveAttribute("aria-activedescendant", /.+/u);
+  await expect(card.locator(".agent-model-listbox")).toBeHidden();
 });
 
 test("combobox row IDs stay unique and stable across add and remove", async ({ page }) => {
@@ -884,48 +1016,68 @@ test("combobox row IDs stay unique and stable across add and remove", async ({ p
   await expect(card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true })).toHaveAttribute("id", secondId!);
 });
 
-test("combobox popups stay isolated and touch scrolling does not select", async ({ page }) => {
-  const fixture = await installAdminFixture(page);
-  const base = fixture.state.models.items[0]!;
-  fixture.state.models = {
-    ...fixture.state.models,
-    items: Array.from({ length: 20 }, (_, index) => ({
-      ...base,
-      id: `touch-model-${index.toString().padStart(2, "0")}`,
-      name: `Touch Model ${index}`,
-    })),
-  };
-  await page.goto("/admin/#bootstrap_token=touch-scroll");
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
-  await page.setViewportSize({ width: 390, height: 500 });
-  const codex = page.getByRole("region", { name: "Codex", exact: true });
-  const claude = page.getByRole("region", { name: "Claude Code", exact: true });
-  const codexInput = codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
-  const claudeInput = claude.getByRole("combobox", { name: "Sonnet Copilot model ID", exact: true });
-  await codexInput.click();
-  await expect(codex.getByRole("listbox")).toBeVisible();
-  await claudeInput.click();
-  await expect(codex.locator(".agent-model-listbox")).toBeHidden();
-  await expect(claude.getByRole("listbox").first()).toBeVisible();
+test.describe("touch model combobox", () => {
+  test.use({ hasTouch: true });
 
-  const listbox = claude.getByRole("listbox").first();
-  const box = await listbox.boundingBox();
-  expect(box).not.toBeNull();
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
-  const x = Math.round(box!.x + box!.width / 2);
-  const startY = Math.round(box!.y + box!.height - 18);
-  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY }] });
-  for (const y of [startY - 30, startY - 60, startY - 90, startY - 120]) {
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
-  }
-  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-  await expect.poll(() => listbox.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
-  await expect(claudeInput).toHaveValue("");
-  await expect(codexInput).toHaveValue("");
+  test("combobox popups stay isolated and touch scrolling does not select", async ({ page }) => {
+    const fixture = await installAdminFixture(page);
+    const base = fixture.state.models.items[0]!;
+    fixture.state.models = {
+      ...fixture.state.models,
+      items: Array.from({ length: 20 }, (_, index) => ({
+        ...base,
+        id: `touch-model-${index.toString().padStart(2, "0")}`,
+        name: `Touch Model ${index}`,
+      })),
+    };
+    await page.goto("/admin/#bootstrap_token=touch-scroll");
+    await page.getByRole("button", { name: "Agents", exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 500 });
+    const codex = page.getByRole("region", { name: "Codex", exact: true });
+    const claude = page.getByRole("region", { name: "Claude Code", exact: true });
+    const codexInput = codex.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+    const claudeInput = claude.getByRole("combobox", { name: "Sonnet Copilot model ID", exact: true });
+    await codexInput.click();
+    await expect(codex.getByRole("listbox")).toBeVisible();
+    await claudeInput.click();
+    await expect(codex.locator(".agent-model-listbox")).toBeHidden();
+    await expect(claude.getByRole("listbox").first()).toBeVisible();
 
-  await claude.getByRole("option").last().click();
-  await expect(claudeInput).toHaveValue("touch-model-19");
+    const listbox = claude.getByRole("listbox").first();
+    const box = await listbox.boundingBox();
+    expect(box).not.toBeNull();
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+    const x = Math.round(box!.x + box!.width / 2);
+    const startY = Math.round(box!.y + box!.height - 18);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY }] });
+    for (const y of [startY - 30, startY - 60, startY - 90, startY - 120]) {
+      await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
+    }
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await expect.poll(() => listbox.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect(claudeInput).toHaveValue("");
+    await expect(codexInput).toHaveValue("");
+    await expect(claudeInput).toHaveAttribute("aria-expanded", "true");
+    await expect(listbox).toBeVisible();
+  });
+
+  test("touch tap selection fills the row and collapses the combobox", async ({ page }) => {
+    await openAgents(page);
+    const card = page.getByRole("region", { name: "Codex", exact: true });
+    const input = card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true });
+    const displayName = card.getByRole("textbox", { name: "Model 1 Display name", exact: true });
+    await input.tap();
+
+    await card.getByRole("option").filter({ hasText: "claude-beta" }).tap();
+
+    await expect(input).toHaveValue("claude-beta");
+    await expect(displayName).toHaveValue("Beta");
+    await expect(input).toBeFocused();
+    await expect(input).toHaveAttribute("aria-expanded", "false");
+    await expect(input).not.toHaveAttribute("aria-activedescendant", /.+/u);
+    await expect(card.locator(".agent-model-listbox")).toBeHidden();
+  });
 });
 
 test("combobox closes on outside focus and row removal", async ({ page }) => {
@@ -1039,7 +1191,7 @@ test("combobox opens above with bounded scrolling and follows the visual viewpor
   }, visualTop)).toBe(true);
 });
 
-test("Apply failures are concise, red, preserve drafts, and clear only after success", async ({ page }) => {
+test("Apply failures are concise, red, persist through edits, and clear after success", async ({ page }) => {
   const fixture = await openAgents(page);
   fixture.state.agentsApplyConflict = true;
   const card = page.getByRole("region", { name: "Codex", exact: true });
@@ -1094,9 +1246,13 @@ test("Codex takeover uses an accessible confirmation dialog and revision token",
   await page.goto("/admin/#bootstrap_token=takeover-dialog");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: "Codex", exact: true });
-  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  await expect(card.getByRole("button", { name: "Take over Codex configuration", exact: true })).toHaveCount(0);
+  const apply = card.getByRole("button", { name: "Apply changes", exact: true });
+  await apply.click();
   const dialog = page.getByRole("dialog", { name: "Take over Codex configuration?" });
   await expect(dialog).toBeVisible();
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/apply"))).toBe(false);
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/takeover"))).toBe(false);
   await expect(dialog).toContainText("auth.json is untouched");
   for (const target of fixture.state.agents.codex.takeover === null ? [] : [
     fixture.state.agents.codex.takeover.configPath,
@@ -1107,12 +1263,12 @@ test("Codex takeover uses an accessible confirmation dialog and revision token",
 
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(fixture.requests.some((request) => request.url().endsWith("/agents/takeover"))).toBe(false);
-  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  await apply.click();
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   expect(fixture.requests.some((request) => request.url().endsWith("/agents/takeover"))).toBe(false);
 
-  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  await apply.click();
   await dialog.getByRole("button", { name: "Take over configuration", exact: true }).click();
   await expect(card.locator(".badge")).toHaveText("Configuration installed");
   const request = fixture.requests.find((item) => item.url().endsWith("/agents/takeover"));
@@ -1144,8 +1300,39 @@ test("stale Codex takeover preserves the draft and reports concise failure", asy
   await page.goto("/admin/#bootstrap_token=stale-takeover");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: "Codex", exact: true });
-  await card.getByRole("button", { name: "Take over Codex configuration", exact: true }).click();
+  await card.getByRole("button", { name: "Apply changes", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Take over configuration", exact: true }).click();
   await expect(card.getByRole("alert")).toHaveText("Apply failed: stale configuration revision.");
   await expect(card.getByRole("textbox", { name: "Model 1 Display name", exact: true })).toHaveValue("Keep me");
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/apply"))).toBe(false);
+});
+
+test("unmanaged Codex takeover evidence routes Apply to the HTML dialog without native confirmation", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  fixture.state.agents.codex = {
+    ...fixture.state.agents.codex,
+    state: "not_managed",
+    takeover: {
+      revision: "d".repeat(64),
+      configPath: "C:/Users/octo/.codex/config.toml",
+      catalogPath: "C:/Users/octo/.codex/models.json",
+      configBackupPath: "C:/Users/octo/.codex/config.toml.ghcg.bak",
+      catalogBackupPath: "C:/Users/octo/.codex/models.json.ghcg.bak",
+    },
+  };
+  let nativeConfirmation = false;
+  page.on("dialog", (dialog) => {
+    nativeConfirmation = true;
+    void dialog.dismiss();
+  });
+  await page.goto("/admin/#bootstrap_token=unmanaged-takeover");
+  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  const card = page.getByRole("region", { name: "Codex", exact: true });
+
+  await card.getByRole("button", { name: "Apply changes", exact: true }).click();
+
+  await expect(page.getByRole("dialog", { name: "Take over Codex configuration?" })).toBeVisible();
+  expect(nativeConfirmation).toBe(false);
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/apply"))).toBe(false);
+  expect(fixture.requests.some((request) => request.url().endsWith("/agents/takeover"))).toBe(false);
 });

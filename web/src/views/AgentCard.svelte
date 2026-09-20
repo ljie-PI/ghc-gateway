@@ -6,12 +6,13 @@
 
   type DraftRow = AgentMapping & { readonly key: number };
 
-  let { client, status, catalog, modelsLoading, modelsUnavailable, onchanged }: {
+  let { client, status, catalog, modelsLoading, modelsUnavailable, manualRefreshGeneration, onchanged }: {
     client: AdminClient;
     status: AgentStatus;
     catalog: AdminAgentModels | null;
     modelsLoading: boolean;
     modelsUnavailable: boolean;
+    manualRefreshGeneration: number;
     onchanged: (status: AgentStatus) => void;
   } = $props();
   const title = $derived(status.id === "claude" ? "Claude Code" : "Codex");
@@ -23,6 +24,7 @@
   let failure = $state("");
   let notice = $state("");
   let takeoverDialog = $state<HTMLDialogElement>();
+  let handledRefreshGeneration = $state(0);
   const dirty = $derived(serializedDrafts() !== baseline);
   const stateLabel = $derived({
     not_managed: "Not managed", installed: "Configuration installed", conflict: "External changes detected",
@@ -39,6 +41,12 @@
     } else if (status.state !== "installed") {
       notice = "";
     }
+  });
+  $effect(() => {
+    if (manualRefreshGeneration === handledRefreshGeneration) return;
+    handledRefreshGeneration = manualRefreshGeneration;
+    notice = "";
+    failure = "";
   });
   function resetDrafts(): void {
     const mappings = status.mappings.length > 0 ? status.mappings
@@ -65,6 +73,10 @@
   }
   async function apply(): Promise<void> {
     if (busy) return;
+    if (status.id === "codex" && status.takeover !== null) {
+      takeoverDialog?.showModal();
+      return;
+    }
     notice = "";
     try {
       validateMappings(status.id, drafts);
@@ -194,9 +206,6 @@
     </fieldset>
     <div class="agent-actions">
       {#if failure}<p class="agent-apply-failure" role="alert">{failure}</p>{:else}<span></span>{/if}
-      {#if status.id === "codex" && status.takeover !== null}
-        <button type="button" disabled={busy} onclick={() => takeoverDialog?.showModal()}>Take over Codex configuration</button>
-      {/if}
       <button class="primary" type="submit" disabled={busy}>Apply changes</button>
     </div>
   </form>

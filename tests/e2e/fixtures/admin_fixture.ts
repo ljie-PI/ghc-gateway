@@ -28,11 +28,24 @@ interface HeldDevicePoll {
   readonly released: Promise<void>;
 }
 
+interface AgentsReadHold {
+  readonly started: Promise<void>;
+  readonly responseFinished: Promise<void>;
+  release(): void;
+}
+
+interface HeldAgentsRead {
+  markStarted(): void;
+  markResponseFinished(): void;
+  readonly released: Promise<void>;
+}
+
 export interface AdminFixture {
   readonly requests: Request[];
   readonly streamRequests: Request[];
   readonly streamRequestHeaders: Array<Record<string, string | string[] | undefined>>;
   holdNextDevicePoll(): DevicePollHold;
+  holdNextAgentsRead(): AgentsReadHold;
   readonly state: {
     authenticated: boolean;
     accounts: AdminAccounts;
@@ -57,7 +70,6 @@ export interface AdminFixture {
     agentsApplyConflict: boolean;
     agentsTakeoverConflict: boolean;
     agentsApplyResult: AgentStatus["state"] | null;
-    agentsDelayMs: number;
     failAgents: boolean;
     cancelCompletesDeviceFlow: boolean;
     streamBodies: string[];
@@ -69,6 +81,7 @@ export interface AdminFixture {
 export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   const github = account("github:1", "github.com", "octo");
   let heldDevicePoll: HeldDevicePoll | null = null;
+  let heldAgentsRead: HeldAgentsRead | null = null;
   const fixture: AdminFixture = {
     requests: [],
     streamRequests: [],
@@ -88,6 +101,17 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
         release = resolve;
       });
       heldDevicePoll = { markStarted, markResponseFinished, released };
+      return { started, responseFinished, release };
+    },
+    holdNextAgentsRead() {
+      if (heldAgentsRead !== null) throw new Error("An Agent read is already held");
+      let markStarted!: () => void;
+      let markResponseFinished!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
+      const responseFinished = new Promise<void>((resolve) => { markResponseFinished = resolve; });
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      heldAgentsRead = { markStarted, markResponseFinished, released };
       return { started, responseFinished, release };
     },
     state: {
@@ -147,7 +171,6 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       agentsApplyConflict: false,
       agentsTakeoverConflict: false,
       agentsApplyResult: null,
-      agentsDelayMs: 0,
       failAgents: false,
       cancelCompletesDeviceFlow: false,
       streamBodies: [sse("performance", { kind: "performance", status: status("healthy") })],
@@ -178,11 +201,20 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
   const { port } = streamServer.address() as AddressInfo;
   page.once("close", () => streamServer.close());
   page.once("crash", () => streamServer.close());
-  await page.route("**/admin/api/v1/**", (route) => handle(route, fixture, () => {
-    const heldPoll = heldDevicePoll;
-    heldDevicePoll = null;
-    return heldPoll;
-  }));
+  await page.route("**/admin/api/v1/**", (route) => handle(
+    route,
+    fixture,
+    () => {
+      const heldPoll = heldDevicePoll;
+      heldDevicePoll = null;
+      return heldPoll;
+    },
+    () => {
+      const heldRead = heldAgentsRead;
+      heldAgentsRead = null;
+      return heldRead;
+    },
+  ));
   await page.route("**/admin/api/v1/events/stream", async (route) => {
     fixture.requests.push(route.request());
     fixture.streamRequests.push(route.request());
@@ -267,6 +299,7 @@ async function handle(
   route: Route,
   fixture: AdminFixture,
   takeHeldDevicePoll: () => HeldDevicePoll | null,
+  takeHeldAgentsRead: () => HeldAgentsRead | null,
 ): Promise<void> {
   const request = route.request();
   fixture.requests.push(request);
@@ -309,13 +342,22 @@ async function handle(
     });
   }
   if (path === "/agents") {
-    if (fixture.state.failAgents) return failure(route, 500, "internal_error");
+    const failed = fixture.state.failAgents;
     const view: AgentsView = {
       items: [structuredClone(fixture.state.agents.claude), structuredClone(fixture.state.agents.codex)],
     };
-    if (fixture.state.agentsDelayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, fixture.state.agentsDelayMs));
+    const hold = takeHeldAgentsRead();
+    if (hold !== null) {
+      hold.markStarted();
+      await hold.released;
+      try {
+        if (failed) return await failure(route, 500, "internal_error");
+        return await json(route, 200, view);
+      } finally {
+        hold.markResponseFinished();
+      }
     }
+    if (failed) return failure(route, 500, "internal_error");
     return json(route, 200, view);
   }
   if (path === "/agents/models") {
