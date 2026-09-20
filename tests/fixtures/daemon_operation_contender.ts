@@ -9,7 +9,10 @@ const contender = process.argv[5];
 if (dataDir === undefined || gatePath === undefined || eventsPath === undefined || contender === undefined) {
   process.exitCode = 2;
 } else {
+  const processStartIdentity = identityForPid(process.pid);
   const lease = await new DaemonOperationLeaseFile({
+    processStartIdentity: async () => processStartIdentity,
+    processIdentity: async (pid) => identityForPid(pid),
     onInitializationPhase: async (phase) => {
       if (phase !== "database_prepared") return;
       writeSync(1, "ready\n");
@@ -24,6 +27,14 @@ if (dataDir === undefined || gatePath === undefined || eventsPath === undefined 
     lease.release();
   }
   writeSync(1, "done\n");
+}
+
+function identityForPid(pid: number): string {
+  if (process.platform === "win32") return `windows:${String(pid)}`;
+  if (process.platform === "darwin") {
+    return `macos:${new Date(Date.UTC(2026, 0, 1, 0, 0, pid)).toISOString().replace(".000Z", "Z")}`;
+  }
+  return `linux:01234567-89ab-cdef-0123-456789abcdef:${String(pid)}`;
 }
 
 async function waitFor(filePath: string): Promise<void> {

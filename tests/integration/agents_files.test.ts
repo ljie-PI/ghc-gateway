@@ -316,7 +316,7 @@ describe("private repeatable agent configuration", () => {
       const state = await store.read();
       const live = (await readImage(config))!;
       const scratch = path.join(path.dirname(state.targets[1]!.path), ".ghcg-agents-claude-00000000-0000-4000-8000-000000000001");
-      fs.mkdirSync(scratch);
+      fs.mkdirSync(scratch, { mode: 0o700 });
       fs.linkSync(config, path.join(scratch, "next"));
       state.targets[1]!.expected = { ...live, acl: "legacy-before" };
       state.pending = {
@@ -1523,7 +1523,7 @@ describe("private repeatable agent configuration", () => {
       const h = harness();
       seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
         agent === "claude" ? "{}\n" : "model = \"old\"\n");
-      await apply(h.manager, agent);
+      if (agent === "codex") await takeover(h.manager); else await apply(h.manager, agent);
       const expectedPaths = agent === "claude"
         ? [path.join(h.home, ".claude", "settings.json")]
         : [path.join(h.home, ".codex", "models.json"), path.join(h.home, ".codex", "config.toml")];

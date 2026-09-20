@@ -338,9 +338,9 @@ describe("daemon identity file", () => {
 
   it.skipIf(process.platform === "win32")("fails closed for symlink identity paths", async () => {
     const directory = await temporaryDirectory();
-    await new DaemonIdentityFile(directory).read();
+    await mkdir(directory, { mode: 0o700 });
     const outside = path.join(await temporaryDirectory(), "outside.json");
-    await new DaemonIdentityFile(path.dirname(outside)).read();
+    await mkdir(path.dirname(outside), { mode: 0o700 });
     await writeFile(outside, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
     await symlink(outside, path.join(directory, "daemon.json"), "file");
     const file = new DaemonIdentityFile(directory);
@@ -349,7 +349,7 @@ describe("daemon identity file", () => {
 
   it.skipIf(process.platform === "win32")("fails closed for weak file permissions", async () => {
     const directory = await temporaryDirectory();
-    await new DaemonIdentityFile(directory).read();
+    await mkdir(directory, { mode: 0o700 });
     const daemonPath = path.join(directory, "daemon.json");
     await writeFile(daemonPath, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
     await chmod(daemonPath, 0o644);
