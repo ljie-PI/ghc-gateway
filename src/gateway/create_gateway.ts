@@ -40,7 +40,7 @@ export interface GatewayConfig {
   readonly runtime: RuntimeConfigSnapshot;
 }
 
-export type LoopbackOrigin = `http://127.0.0.1:${number}`;
+export type LoopbackOrigin = "http://127.0.0.1" | `http://127.0.0.1:${number}`;
 
 export interface GatewayActivity {
   snapshot(): Readonly<{
@@ -57,14 +57,8 @@ export interface AdminRequestContext {
   readonly activity: GatewayActivity;
 }
 
-export type AdminBootstrapResult =
-  | { readonly kind: "issued"; readonly token: string; readonly expiresAt: string }
-  | { readonly kind: "capacity" }
-  | { readonly kind: "closed" };
-
 export interface AdminModule {
   handle(request: Request, context: Readonly<AdminRequestContext>): Promise<Response>;
-  mintBootstrap(): AdminBootstrapResult;
   close(): void;
 }
 
@@ -136,7 +130,7 @@ export async function createGateway(
     isClosed: () => closed,
     inflight,
     mountedInflight,
-    listenerOrigin: `http://${LOOPBACK_HOST}:${config.startup.port}` as LoopbackOrigin,
+    listenerOrigin: new URL(`http://${LOOPBACK_HOST}:${config.startup.port}`).origin as LoopbackOrigin,
     ...(dependencies.admin === undefined ? {} : { admin: dependencies.admin }),
     ...(dependencies.control === undefined ? {} : { control: dependencies.control }),
     ...(dependencies.adminStatic === undefined ? {} : { adminStatic: dependencies.adminStatic }),

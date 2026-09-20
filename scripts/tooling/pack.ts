@@ -70,6 +70,7 @@ export async function inspectAdminBundle(
   bytes: number;
   viteManifest: Readonly<Record<string, ViteManifestEntry>>;
 }>> {
+  const indexHtml = await readFile(path.join(root, "index.html"), "utf8");
   const manifestText = await readFile(path.join(root, ".vite", "manifest.json"), "utf8");
   const viteManifest = JSON.parse(manifestText) as Readonly<Record<string, ViteManifestEntry>>;
   const referenced = Object.values(viteManifest).flatMap((item) => [item.file, ...(item.css ?? [])]);
@@ -77,6 +78,11 @@ export async function inspectAdminBundle(
   const stylesheet = referenced.find((file) => isHashedAsset(file, "css"));
   if (javascript === undefined || stylesheet === undefined) {
     throw new Error("Admin Vite manifest must reference hashed JavaScript and CSS assets");
+  }
+  for (const asset of [javascript, stylesheet]) {
+    if (!indexHtml.includes(`/${asset}`) || indexHtml.includes(`/admin/${asset}`)) {
+      throw new Error("Admin index must reference root /assets URLs");
+    }
   }
 
   const packagedPaths = new Set(entry.files.map((file) => file.path.replaceAll("\\", "/")));

@@ -1,4 +1,4 @@
-export class SessionResource<T> {
+export class CachedResource<T> {
   private value: T | null = null;
   private generation = 0;
   private active: { controller: AbortController; promise: Promise<T> } | null = null;

@@ -41,7 +41,7 @@ test("local cards render before a held catalog and late choices preserve manual 
     } } });
   });
   try {
-    await page.goto("/admin/#bootstrap_token=synthetic-held-catalog");
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await expect(page.locator(".agent-card")).toHaveCount(2);
     await expect(page.getByText("Loading model choices...", { exact: true })).toBeVisible();
@@ -69,7 +69,7 @@ test("local cards render before a held catalog and late choices preserve manual 
 test("catalog failure leaves local inspection visible and Apply reports missing choices", async ({ page }) => {
   const fixture = await installAdminFixture(page);
   fixture.state.agentsCatalogRevision = null;
-  await page.goto("/admin/#bootstrap_token=synthetic-no-catalog");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   await expect(page.locator(".agent-card")).toHaveCount(2);
   const card = page.getByRole("region", { name: "Codex", exact: true });
@@ -126,7 +126,7 @@ for (const mutation of ["default selection", "removal"] as const) {
         displayName: "Enterprise Admin",
       }],
     };
-    await page.goto("/admin/#bootstrap_token=held-account-mutation");
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await expect(modelChoiceStatus(page)).toHaveText("2 model choices");
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
@@ -173,7 +173,7 @@ for (const mutation of ["default selection", "removal"] as const) {
     await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
     const fixture = await installAdminFixture(page);
     addEnterpriseAccount(fixture);
-    await page.goto(`/admin/#bootstrap_token=${mutation.replace(" ", "-")}`);
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await expect(modelChoiceStatus(page)).toHaveText("2 model choices");
     await page.getByRole("button", { name: "Accounts", exact: true }).click();
@@ -216,7 +216,7 @@ for (const change of ["account", "default", "credential"] as const) {
     await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
     const fixture = await installAdminFixture(page);
     if (change === "default") addEnterpriseAccount(fixture);
-    await page.goto(`/admin/#bootstrap_token=observe-${change}`);
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await expect(modelChoiceStatus(page)).toHaveText("2 model choices");
     await expect.poll(() => accountReads(fixture)).toBeGreaterThanOrEqual(1);
@@ -276,7 +276,7 @@ for (const change of ["account", "default", "credential"] as const) {
 test("account removal never publishes an older revision of the same account after Refresh", async ({ page }) => {
   const fixture = await installAdminFixture(page);
   addEnterpriseAccount(fixture);
-  await page.goto("/admin/#bootstrap_token=remove-refresh-race");
+  await page.goto("/");
   await page.getByRole("button", { name: "Accounts", exact: true }).click();
   const enterprise = page.getByRole("row").filter({ hasText: "Enterprise Admin" });
   await expect(enterprise).toBeVisible();
@@ -337,7 +337,7 @@ test("Agent catalog publication waits for an account baseline across navigation"
     await route.fallback().catch(() => undefined);
   }, { times: 1 });
   try {
-    await page.goto("/admin/#bootstrap_token=account-baseline");
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await started;
     await expect(page.locator(".agent-card")).toHaveCount(2);
@@ -367,7 +367,7 @@ test("manual Agent Refresh waits for a successful account baseline before loadin
     await route.fallback();
   }, { times: 1 });
   try {
-    await page.goto("/admin/#bootstrap_token=manual-refresh-baseline");
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await started;
     await expect(page.locator(".agent-card")).toHaveCount(2);
@@ -431,7 +431,7 @@ test("a held device-flow completion cannot invalidate agent choices after Accoun
   await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
   const fixture = await installAdminFixture(page);
   fixture.state.devicePollStates = ["complete"];
-  await page.goto("/admin/#bootstrap_token=held-device-completion");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   await expect(modelChoiceStatus(page)).toHaveText("2 model choices");
   await page.getByRole("button", { name: "Accounts", exact: true }).click();
@@ -456,7 +456,7 @@ test("device-flow account completion invalidates cached agent choices once", asy
   await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
   const fixture = await installAdminFixture(page);
   fixture.state.devicePollStates = ["complete"];
-  await page.goto("/admin/#bootstrap_token=device-completion");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   await expect(modelChoiceStatus(page)).toHaveText("2 model choices");
   await page.getByRole("button", { name: "Accounts", exact: true }).click();
@@ -469,45 +469,6 @@ test("device-flow account completion invalidates cached agent choices once", asy
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   await expect(modelChoiceStatus(page)).toHaveText("2 model choices");
   expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(2);
-});
-
-test("Admin Session teardown cancels a held agent catalog request", async ({ page }) => {
-  const fixture = await installAdminFixture(page);
-  let release = (): void => undefined;
-  let markStarted = (): void => undefined;
-  const held = new Promise<void>((resolve) => { release = resolve; });
-  const started = new Promise<void>((resolve) => { markStarted = resolve; });
-  await page.route("**/admin/api/v1/agents/models", async (route) => {
-    markStarted();
-    await held;
-    await route.fallback();
-  });
-  try {
-    await page.goto("/admin/#bootstrap_token=teardown-agent-catalog");
-    await page.getByRole("button", { name: "Agents", exact: true }).click();
-    await started;
-    const canceled = page.waitForEvent("requestfailed", {
-      predicate: (request) => request.url().endsWith("/agents/models"),
-      timeout: 5_000,
-    });
-    await page.getByRole("button", { name: "End session", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
-    release();
-    await canceled;
-    await page.waitForTimeout(50);
-    expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
-  } finally {
-    release();
-  }
-});
-
-test("Admin Session teardown does not reload an already loaded agent catalog", async ({ page }) => {
-  const fixture = await openAgents(page);
-  await expect(modelChoiceStatus(page)).toHaveText("2 model choices");
-  await page.getByRole("button", { name: "End session", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
-  await page.waitForTimeout(50);
-  expect(fixture.requests.filter((request) => request.url().endsWith("/agents/models"))).toHaveLength(1);
 });
 
 for (const action of ["read", "refresh"] as const) {
@@ -544,7 +505,7 @@ for (const action of ["read", "refresh"] as const) {
 
 async function openAgents(page: Page) {
   const fixture = await installAdminFixture(page);
-  await page.goto("/admin/#bootstrap_token=one-time-secret");
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await page.getByRole("button", { name: "Agents" }).click();
   await expect(page.getByRole("heading", { name: "Agents" })).toBeFocused();
@@ -646,7 +607,7 @@ test("agents view presents concise Codex-first cards with primary actions", asyn
   await expect(codex.locator(".agent-mapping-row")).toHaveCount(1);
 });
 
-test("Agents reuses the session snapshot until explicit Refresh", async ({ page }) => {
+test("Agents reuses the cached snapshot until explicit Refresh", async ({ page }) => {
   const fixture = await openAgents(page);
   await expect(page.locator(".agent-card")).toHaveCount(2);
   expect(fixture.requests.filter((request) => request.url().endsWith("/agents"))).toHaveLength(1);
@@ -869,7 +830,7 @@ for (const [state, label, message] of [
     const fixture = await installAdminFixture(page);
     fixture.state.agents.codex = { ...fixture.state.agents.codex, state, takeover: null };
     fixture.state.agentsApplyResult = state;
-    await page.goto("/admin/#bootstrap_token=codex-no-takeover");
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     const codex = page.getByRole("region", { name: "Codex", exact: true });
     await expect(codex.locator(".badge")).toHaveText(label);
@@ -908,7 +869,7 @@ test("conflict and recovery states keep Apply clickable while reporting backend 
   fixture.state.agents.codex = { ...fixture.state.agents.codex, state: "conflict" };
   fixture.state.agents.claude = { ...fixture.state.agents.claude, state: "recovery_required" };
   fixture.state.agentsApplyConflict = true;
-  await page.goto("/admin/#bootstrap_token=one-time-secret");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents" }).click();
   await expect(page.getByRole("heading", { name: "Agents" })).toBeFocused();
 
@@ -1030,7 +991,7 @@ test.describe("touch model combobox", () => {
         name: `Touch Model ${index}`,
       })),
     };
-    await page.goto("/admin/#bootstrap_token=touch-scroll");
+    await page.goto("/");
     await page.getByRole("button", { name: "Agents", exact: true }).click();
     await page.setViewportSize({ width: 390, height: 500 });
     const codex = page.getByRole("region", { name: "Codex", exact: true });
@@ -1106,7 +1067,7 @@ test("combobox reports no usable models and excludes unusable catalog items", as
       usableModelIds: [],
     } } });
   });
-  await page.goto("/admin/#bootstrap_token=no-usable-models");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: "Codex", exact: true });
   await card.getByRole("combobox", { name: "Model 1 Copilot model ID", exact: true }).click();
@@ -1164,7 +1125,7 @@ test("combobox opens above with bounded scrolling and follows the visual viewpor
       name: `Model ${index}`,
     })),
   };
-  await page.goto("/admin/#bootstrap_token=popup-above");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   await page.setViewportSize({ width: 390, height: 400 });
   const card = page.getByRole("region", { name: "Claude Code", exact: true });
@@ -1243,7 +1204,7 @@ test("Codex takeover uses an accessible confirmation dialog and revision token",
       catalogBackupPath: "C:/Users/octo/.codex/models.json.ghcg.bak",
     },
   };
-  await page.goto("/admin/#bootstrap_token=takeover-dialog");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: "Codex", exact: true });
   await expect(card.getByRole("button", { name: "Take over Codex configuration", exact: true })).toHaveCount(0);
@@ -1297,7 +1258,7 @@ test("stale Codex takeover preserves the draft and reports concise failure", asy
     },
   };
   fixture.state.agentsTakeoverConflict = true;
-  await page.goto("/admin/#bootstrap_token=stale-takeover");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: "Codex", exact: true });
   await card.getByRole("button", { name: "Apply changes", exact: true }).click();
@@ -1325,7 +1286,7 @@ test("unmanaged Codex takeover evidence routes Apply to the HTML dialog without 
     nativeConfirmation = true;
     void dialog.dismiss();
   });
-  await page.goto("/admin/#bootstrap_token=unmanaged-takeover");
+  await page.goto("/");
   await page.getByRole("button", { name: "Agents", exact: true }).click();
   const card = page.getByRole("region", { name: "Codex", exact: true });
 

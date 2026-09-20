@@ -32,7 +32,6 @@ describe("CLI parser", () => {
       "  models set <model-id>",
       "  config get [key]",
       "  config set <key> <value>",
-      "  admin open",
       "",
     ].join("\n"));
   });
@@ -126,7 +125,6 @@ describe("CLI parser", () => {
     expect(parseCli(["accounts", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
     expect(parseCli(["models", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
     expect(parseCli(["config", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
-    expect(parseCli(["admin", "--help"], { homedir: home }).command).toMatchObject({ kind: "help" });
     expect(parseCli(["auth", "login", "--help"], { homedir: home }).command).toEqual({
       kind: "help",
       text: "Usage: ghcg [--data-dir <path>] [--json] auth login [--host <domain>]\n",
@@ -151,7 +149,6 @@ describe("CLI parser", () => {
     expect(parseCli(["models", "set", "gpt"], { homedir: home }).command).toEqual({ kind: "control", operation: "models.set", args: { modelId: "gpt" } });
     expect(parseCli(["config", "get", "limits.requestBodyBytes"], { homedir: home }).command).toEqual({ kind: "control", operation: "config.get", args: { key: "limits.requestBodyBytes" } });
     expect(parseCli(["config", "set", "limits.requestBodyBytes", "1048576"], { homedir: home }).command).toEqual({ kind: "control", operation: "config.set", args: { key: "limits.requestBodyBytes", value: "1048576" } });
-    expect(parseCli(["admin", "open"], { homedir: home }).command).toEqual({ kind: "admin.open" });
   });
 
   it("rejects unknown commands, chat aliases, missing args, and misplaced startup flags", () => {
@@ -163,6 +160,10 @@ describe("CLI parser", () => {
       ["accounts", "use"],
       ["status", "--port", "31400"],
       ["auth", "login", "--host"],
+      ["admin"],
+      ["admin", "--help"],
+      ["admin", "open"],
+      ["admin", "open", "--help"],
       ["-h"],
       ["--bogus", "status"],
     ]) {

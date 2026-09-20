@@ -116,7 +116,6 @@ const gateway = await gatewayModule.createGateway({
     handle: (_request, context) => Promise.resolve(new Response(
       JSON.stringify(context.activity.snapshot()),
     )),
-    mintBootstrap: () => ({ kind: "closed" }),
     close: () => undefined,
   },
   delay: async (ms, signal) => {

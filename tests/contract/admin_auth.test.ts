@@ -1,264 +1,176 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createAdminModule } from "../../src/admin/routes.js";
 import type { AdminModule } from "../../src/gateway/create_gateway.js";
 import { createGateway, type Gateway } from "../../src/gateway/create_gateway.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
-import { adminDependencies, login, type TestAdminDependencies } from "./admin_test_harness.js";
+import { adminDependencies, type TestAdminDependencies } from "./admin_test_harness.js";
 
 const ORIGIN = "http://127.0.0.1:31400";
 
-describe("Admin authentication", () => {
-  it("exchanges a bootstrap token once with exact Origin and safe cookie flags", async () => {
+describe("direct Admin access", () => {
+  it("serves reads directly and leaves removed authentication routes unregistered", async () => {
     const harness = await createHarness();
     try {
-      const minted = harness.admin.mintBootstrap();
-      expect(minted.kind).toBe("issued");
-      if (minted.kind !== "issued") return;
+      const status = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/status`));
+      expect(status.status).toBe(200);
+      expect(status.headers.get("cache-control")).toBe("no-store");
+      expect(status.headers.has("set-cookie")).toBe(false);
+      expect(await status.json()).toMatchObject({ data: { health: "ok" } });
 
-      const wrongOrigin = await exchange(harness.gateway, minted.token, "http://localhost:31400");
-      expect(wrongOrigin.status).toBe(403);
-      expect(await wrongOrigin.json()).toEqual({
-        error: { code: "forbidden", message: "forbidden", requestId: "req_admin_auth" },
-      });
-
-      const first = await exchange(harness.gateway, minted.token);
-      expect(first.status).toBe(200);
-      expect(first.headers.get("cache-control")).toBe("no-store");
-      expect(first.headers.get("x-request-id")).toBe("req_admin_auth");
-      expect(first.headers.get("set-cookie")).toContain("HttpOnly; SameSite=Strict; Path=/admin");
-      const firstBody = await first.json() as { data: { csrfToken: string; idleExpiresAt: string; absoluteExpiresAt: string } };
-      expect(firstBody.data).toEqual({
-        csrfToken: "token-3",
-        idleExpiresAt: "2027-01-15T08:30:00.000Z",
-        absoluteExpiresAt: "2027-01-15T20:00:00.000Z",
-      });
-
-      expect((await exchange(harness.gateway, minted.token)).status).toBe(401);
-    } finally {
-      await harness.close();
-    }
-  });
-
-  it("enforces bootstrap expiry, one-use races, session caps, idle/absolute expiry, and close", async () => {
-    const now = { value: 1_800_000_000_000 };
-    const harness = await createHarness(now);
-    try {
-      const expired = issued(harness.admin.mintBootstrap());
-      now.value += 60_000;
-      expect((await exchange(harness.gateway, expired.token)).status).toBe(401);
-
-      const raced = issued(harness.admin.mintBootstrap());
-      const race = await Promise.all([exchange(harness.gateway, raced.token), exchange(harness.gateway, raced.token)]);
-      expect(race.map((response) => response.status).sort()).toEqual([200, 401]);
-
-      const raceCookie = race.find((response) => response.status === 200)?.headers.get("set-cookie") ?? "";
-      now.value += 30 * 60_000;
-      expect((await session(harness.gateway, raceCookie)).status).toBe(401);
-
-      for (let index = 0; index < 8; index += 1) {
-        expect(harness.admin.mintBootstrap().kind).toBe("issued");
-      }
-      expect(harness.admin.mintBootstrap()).toEqual({ kind: "capacity" });
-    } finally {
-      await harness.close();
-    }
-
-    const absolute = await createHarness({ value: 1_800_000_000_000 });
-    try {
-      const loggedIn = await login(absolute.gateway, absolute.admin);
-      expect((await mutate(
-        absolute.gateway,
-        "/admin/api/v1/device-flows",
-        loggedIn,
-        { host: "github.com" },
-      )).status).toBe(201);
-      for (let interval = 1; interval < 36; interval += 1) {
-        absolute.dependencies.now.value += 20 * 60_000;
-        expect((await session(absolute.gateway, loggedIn.cookie)).status).toBe(200);
-      }
-      absolute.dependencies.now.value += 20 * 60_000;
-      expect((await session(absolute.gateway, loggedIn.cookie)).status).toBe(401);
-      expect(absolute.dependencies.calls).toContain("device-cancel:flow-1");
-      absolute.admin.close();
-      absolute.admin.close();
-      expect(absolute.admin.mintBootstrap()).toEqual({ kind: "closed" });
-    } finally {
-      await absolute.close();
-    }
-  });
-
-  it("requires session, CSRF, and active listener Origin on every non-bootstrap mutation", async () => {
-    const harness = await createHarness();
-    try {
-      const loggedIn = await login(harness.gateway, harness.admin);
-      expect((await get(harness.gateway, "/admin/api/v1/status", loggedIn.cookie)).status).toBe(200);
-
-      expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, { host: "github.com" }, {
-        csrf: "",
-      })).status).toBe(403);
-      expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, { host: "github.com" }, {
-        origin: "http://127.0.0.1:9999",
-      })).status).toBe(403);
-      expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, { host: "github.com" })).status).toBe(201);
-      const otherSession = await login(harness.gateway, harness.admin);
-      expect((await get(
-        harness.gateway,
-        "/admin/api/v1/device-flows/flow-1",
-        otherSession.cookie,
-      )).status).toBe(403);
-      expect((await securedRequest(
-        harness.gateway,
-        "DELETE",
-        "/admin/api/v1/device-flows/flow-1",
-        otherSession,
-        undefined,
-        {},
-      )).status).toBe(403);
-
-      const mutations = [
+      for (const [method, path, body] of [
+        ["POST", "/admin/api/v1/auth/bootstrap", { token: "unused" }],
+        ["GET", "/admin/api/v1/auth/session", undefined],
         ["POST", "/admin/api/v1/auth/logout", undefined],
-        ["POST", "/admin/api/v1/device-flows", { host: "github.com" }],
-        ["DELETE", "/admin/api/v1/device-flows/flow-1", undefined],
-        ["DELETE", "/admin/api/v1/accounts/github.com%2F42", { expectedRevision: 3 }],
-        ["PUT", "/admin/api/v1/accounts/default", { accountId: "github.com/42", expectedRevision: 2 }],
-        ["POST", "/admin/api/v1/models/refresh", { accountId: "github.com/42" }],
-        ["PUT", "/admin/api/v1/models/preferred", { accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0 }],
-        ["PUT", "/admin/api/v1/config", { expectedRevision: 1, config: defaultRuntimeConfigSnapshot() }],
-        ["DELETE", "/admin/api/v1/history", { expectedRevision: 0 }],
-      ] as const;
-      for (const [method, path, body] of mutations) {
-        const missingCsrf = await securedRequest(harness.gateway, method, path, loggedIn, body, { csrf: "" });
-        expect(missingCsrf.status, `${method} ${path} without CSRF`).toBe(403);
-        const wrongOrigin = await securedRequest(harness.gateway, method, path, loggedIn, body, { origin: "http://127.0.0.1:9999" });
-        expect(wrongOrigin.status, `${method} ${path} with wrong Origin`).toBe(403);
+      ] as const) {
+        const response = await harness.gateway.fetch(new Request(`${ORIGIN}${path}`, {
+          method,
+          headers: { origin: ORIGIN, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }));
+        expect(response.status, `${method} ${path}`).toBe(404);
+        expect(await response.json()).toEqual({
+          error: { code: "not_found", message: "not found", requestId: "req_admin_access" },
+        });
       }
-
-      expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, {
-        host: "github.com",
-      })).status).toBe(201);
-      const logout = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/logout`, {
-        method: "POST",
-        headers: { cookie: loggedIn.cookie, origin: ORIGIN, "x-ghcg-csrf": loggedIn.csrf },
-      }));
-      expect(logout.status).toBe(204);
-      expect(await logout.text()).toBe("");
-      expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
-      expect(harness.dependencies.calls).toContain("device-cancel:flow-1");
-      expect((await session(harness.gateway, loggedIn.cookie)).status).toBe(401);
     } finally {
       await harness.close();
     }
   });
 
-  it("rejects a ninth live Admin Session", async () => {
+  it("requires only the exact listener Origin for mutations", async () => {
     const harness = await createHarness();
     try {
-      for (let index = 0; index < 8; index += 1) {
-        const token = issued(harness.admin.mintBootstrap());
-        expect((await exchange(harness.gateway, token.token)).status).toBe(200);
+      const mutations = [
+        ["POST", "/admin/api/v1/device-flows", { host: "github.com" }, 201],
+        ["DELETE", "/admin/api/v1/device-flows/flow-1", undefined, 200],
+        ["DELETE", "/admin/api/v1/accounts/github.com%2F42", { expectedRevision: 3 }, 200],
+        ["PUT", "/admin/api/v1/accounts/default", { accountId: "github.com/42", expectedRevision: 2 }, 200],
+        ["POST", "/admin/api/v1/models/refresh", { accountId: "github.com/42" }, 200],
+        ["PUT", "/admin/api/v1/models/preferred", {
+          accountId: "github.com/42", modelId: "gpt-test", expectedRevision: 0,
+        }, 200],
+        ["POST", "/admin/api/v1/agents/apply", {
+          agent: "claude", expectedRevision: "0".repeat(64), catalogRevision: "0".repeat(64),
+          mappings: [{ displayName: "GPT Test", modelId: "gpt-test" }],
+        }, 409],
+        ["POST", "/admin/api/v1/agents/takeover", {
+          agent: "codex", expectedRevision: "0".repeat(64), catalogRevision: "0".repeat(64),
+          takeoverRevision: "0".repeat(64), mappings: [{ displayName: "GPT Test", modelId: "gpt-test" }],
+        }, 409],
+        ["PUT", "/admin/api/v1/config", {
+          expectedRevision: 1, config: defaultRuntimeConfigSnapshot(),
+        }, 200],
+        ["DELETE", "/admin/api/v1/history", { expectedRevision: 0 }, 200],
+      ] as const;
+
+      for (const [method, path, body, acceptedStatus] of mutations) {
+        for (const origin of [undefined, "http://localhost:31400", "http://127.0.0.1:9999"]) {
+          const rejected = await mutate(harness.gateway, method, path, body, origin);
+          expect(rejected.status, `${method} ${path} with ${origin ?? "missing Origin"}`).toBe(403);
+        }
+        const accepted = await mutate(harness.gateway, method, path, body, ORIGIN);
+        expect(accepted.status, `${method} ${path} with exact Origin`).toBe(acceptedStatus);
+        expect(accepted.headers.has("set-cookie")).toBe(false);
       }
-      const ninth = issued(harness.admin.mintBootstrap());
-      expect((await exchange(harness.gateway, ninth.token)).status).toBe(503);
     } finally {
       await harness.close();
     }
   });
 
-  it("cancels and releases an owned flow at its deadline", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_800_000_000_000);
-    const harness = await createHarness({ value: 1_800_000_000_000 });
+  it("accepts the browser-canonical listener Origin on default HTTP port", async () => {
+    const harness = await createHarness(80);
     try {
-      const loggedIn = await login(harness.gateway, harness.admin);
-      expect((await mutate(harness.gateway, "/admin/api/v1/device-flows", loggedIn, {
-        host: "github.com",
-      })).status).toBe(201);
-      await vi.advanceTimersByTimeAsync(16 * 60_000);
-      expect(harness.dependencies.calls).toContain("device-cancel:flow-1");
-      expect((await get(
-        harness.gateway,
-        "/admin/api/v1/device-flows/flow-1",
-        loggedIn.cookie,
-      )).status).toBe(404);
+      const response = await harness.gateway.fetch(new Request("http://127.0.0.1/admin/api/v1/device-flows", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "http://127.0.0.1" },
+        body: JSON.stringify({ host: "github.com" }),
+      }));
+      expect(response.status).toBe(201);
     } finally {
       await harness.close();
-      vi.useRealTimers();
+    }
+  });
+
+  it("uses each device-flow ID as the capability for direct poll and cancel", async () => {
+    const harness = await createHarness();
+    try {
+      expect((await startFlow(harness.gateway, ORIGIN)).status).toBe(201);
+
+      const poll = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/device-flows/flow-1`));
+      expect(poll.status).toBe(200);
+      expect(await poll.json()).toMatchObject({ data: { state: "pending" } });
+
+      const cancel = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/device-flows/flow-1`, {
+        method: "DELETE",
+        headers: { origin: ORIGIN },
+      }));
+      expect(cancel.status).toBe(200);
+      expect(await cancel.json()).toEqual({ data: { state: "canceled" } });
+
+      expect((await harness.gateway.fetch(new Request(
+        `${ORIGIN}/admin/api/v1/device-flows/unknown`,
+      ))).status).toBe(404);
+      expect((await harness.gateway.fetch(new Request(
+        `${ORIGIN}/admin/api/v1/device-flows/unknown`,
+        { method: "DELETE", headers: { origin: ORIGIN } },
+      ))).status).toBe(404);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("reports a closed Admin module as not ready", async () => {
+    const harness = await createHarness();
+    try {
+      harness.admin.close();
+      harness.admin.close();
+      const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/status`));
+      expect(response.status).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        error: { code: "not_ready", message: "not ready", requestId: "req_admin_access" },
+      });
+    } finally {
+      await harness.close();
     }
   });
 });
 
-async function createHarness(now = { value: 1_800_000_000_000 }): Promise<{
+async function createHarness(port = 31_400): Promise<{
   readonly gateway: Gateway;
   readonly admin: AdminModule;
   readonly dependencies: TestAdminDependencies;
   readonly close: () => Promise<void>;
 }> {
-  const dependencies = adminDependencies(now);
-  let token = 0;
-  const admin = createAdminModule({ ...dependencies, createToken: () => `token-${++token}` });
+  const dependencies = adminDependencies();
+  const admin = createAdminModule(dependencies);
   const gateway = await createGateway({
-    startup: parseStartupConfig([], {}, { homedir: "Q:/tmp/admin-auth" }),
+    startup: parseStartupConfig(["--port", String(port)], {}, { homedir: "Q:/tmp/admin-access" }),
     runtime: defaultRuntimeConfigSnapshot(),
-  }, [], { admin, createRequestId: () => "req_admin_auth" });
+  }, [], { admin, createRequestId: () => "req_admin_access" });
   return { gateway, admin, dependencies, close: async () => gateway.close() };
 }
 
-function issued(result: ReturnType<AdminModule["mintBootstrap"]>): Extract<ReturnType<AdminModule["mintBootstrap"]>, { kind: "issued" }> {
-  if (result.kind !== "issued") throw new Error("bootstrap was not issued");
-  return result;
-}
-
-async function exchange(gateway: Gateway, token: string, origin = ORIGIN): Promise<Response> {
-  return await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/bootstrap`, {
-    method: "POST",
-    headers: { "content-type": "application/json", origin },
-    body: JSON.stringify({ token }),
-  }));
-}
-
-async function session(gateway: Gateway, cookie: string): Promise<Response> {
-  return await get(gateway, "/admin/api/v1/auth/session", cookie);
-}
-
-async function get(gateway: Gateway, path: string, cookie: string): Promise<Response> {
-  return await gateway.fetch(new Request(`${ORIGIN}${path}`, { headers: { cookie } }));
+async function startFlow(
+  gateway: Gateway,
+  origin: string | undefined,
+): Promise<Response> {
+  return await mutate(gateway, "POST", "/admin/api/v1/device-flows", { host: "github.com" }, origin);
 }
 
 async function mutate(
   gateway: Gateway,
-  path: string,
-  sessionValue: { readonly cookie: string; readonly csrf: string },
-  body: unknown,
-  override: { readonly csrf?: string; readonly origin?: string } = {},
-): Promise<Response> {
-  return await gateway.fetch(new Request(`${ORIGIN}${path}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      cookie: sessionValue.cookie,
-      origin: override.origin ?? ORIGIN,
-      "x-ghcg-csrf": override.csrf ?? sessionValue.csrf,
-    },
-    body: JSON.stringify(body),
-  }));
-}
-
-async function securedRequest(
-  gateway: Gateway,
   method: string,
   path: string,
-  sessionValue: { readonly cookie: string; readonly csrf: string },
   body: unknown,
-  override: { readonly csrf?: string; readonly origin?: string },
+  origin: string | undefined,
 ): Promise<Response> {
   return await gateway.fetch(new Request(`${ORIGIN}${path}`, {
     method,
     headers: {
       ...(body === undefined ? {} : { "content-type": "application/json" }),
-      cookie: sessionValue.cookie,
-      origin: override.origin ?? ORIGIN,
-      "x-ghcg-csrf": override.csrf ?? sessionValue.csrf,
+      ...(origin === undefined ? {} : { origin }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }));

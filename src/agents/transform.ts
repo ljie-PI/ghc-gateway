@@ -34,7 +34,7 @@ export function projectAgent(
   takeover = false,
 ): AgentProjection {
   validateMappings(agent, mappings);
-  if (!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/u.test(origin) || Number(new URL(origin).port) > 65535) {
+  if (!isLoopbackOrigin(origin)) {
     throw new AgentError("validation_failed");
   }
   if (mappings.some((mapping) => !models.some((model) => model.modelId === mapping.modelId))) {
@@ -50,6 +50,23 @@ export function projectAgent(
     // Parser diagnostics can contain configuration secrets.
     throw new AgentError("agent_invalid_config");
   }
+}
+
+function isLoopbackOrigin(value: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.origin === value
+    && parsed.protocol === "http:"
+    && parsed.hostname === "127.0.0.1"
+    && parsed.username === ""
+    && parsed.password === ""
+    && parsed.pathname === "/"
+    && parsed.search === ""
+    && parsed.hash === "";
 }
 
 function object(value: unknown): Record<string, unknown> {

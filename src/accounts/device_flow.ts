@@ -366,10 +366,6 @@ export class DeviceFlowService {
     return { status: "canceled" };
   }
 
-  has(flowId: string): boolean {
-    return this.flows.has(flowId);
-  }
-
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;

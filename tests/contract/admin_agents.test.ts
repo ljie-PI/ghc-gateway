@@ -12,7 +12,7 @@ import {
   type AgentStatus,
   type AgentsManager,
 } from "../../src/agents/types.js";
-import { adminDependencies, login, type TestAdminDependencies } from "./admin_test_harness.js";
+import { adminDependencies, type TestAdminDependencies } from "./admin_test_harness.js";
 import { AdminManagementApi } from "../../src/admin/api.js";
 import { FileAgentsManager } from "../../src/agents/manager.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
@@ -75,11 +75,9 @@ async function createHarness(stub: AgentStub | null): Promise<{
   readonly close: () => Promise<void>;
 }> {
   const dependencies = adminDependencies();
-  let token = 0;
   const admin = createAdminModule({
     ...dependencies,
     ...(stub === null ? {} : { agents: stub.manager }),
-    createToken: () => `agent-token-${++token}`,
   });
   const gateway = await createGateway({
     startup: parseStartupConfig([], {}, { homedir: "Q:/tmp/admin-agents" }),
@@ -99,10 +97,7 @@ describe("Admin agents API", () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
     try {
-      const auth = await login(harness.gateway, harness.admin);
-      const catalogResponse = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, {
-        headers: { cookie: auth.cookie, origin: ORIGIN },
-      }));
+      const catalogResponse = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`));
       const catalog = await catalogResponse.json() as { data: { catalogRevision: string } };
       const body = {
         agent: "codex",
@@ -113,7 +108,7 @@ describe("Admin agents API", () => {
       };
       const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/takeover`, {
         method: "POST",
-        headers: { cookie: auth.cookie, origin: ORIGIN, "x-ghcg-csrf": auth.csrf, "content-type": "application/json" },
+        headers: { origin: ORIGIN, "content-type": "application/json" },
         body: JSON.stringify(body),
       }));
       expect(response.status).toBe(200);
@@ -121,7 +116,7 @@ describe("Admin agents API", () => {
 
       const extra = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/takeover`, {
         method: "POST",
-        headers: { cookie: auth.cookie, origin: ORIGIN, "x-ghcg-csrf": auth.csrf, "content-type": "application/json" },
+        headers: { origin: ORIGIN, "content-type": "application/json" },
         body: JSON.stringify({ ...body, config: "secret" }),
       }));
       expect(extra.status).toBe(400);
@@ -237,10 +232,7 @@ describe("Admin agents API", () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
     try {
-      const session = await login(harness.gateway, harness.admin);
-      const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents`, {
-        headers: { cookie: session.cookie },
-      }));
+      const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents`));
       expect(response.status).toBe(200);
       const body = await response.json() as { data: { items: AgentStatus[] } };
       expect(body.data.items.map((item) => item.id)).toEqual(["claude", "codex"]);
@@ -248,9 +240,7 @@ describe("Admin agents API", () => {
       expect(body.data.items[1]).toMatchObject({ endpoint: `${ORIGIN}/v1` });
       expect(stub.calls).toEqual([`inspect:${ORIGIN}`]);
       expect(harness.dependencies.calls.some((call) => call.startsWith("catalog:"))).toBe(false);
-      const catalogResponse = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, {
-        headers: { cookie: session.cookie },
-      }));
+      const catalogResponse = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`));
       expect(catalogResponse.status).toBe(200);
       expect(await catalogResponse.json()).toMatchObject({ data: {
         catalogRevision: expect.stringMatching(/^[a-f0-9]{64}$/u),
@@ -262,45 +252,44 @@ describe("Admin agents API", () => {
     }
   });
 
-  it("enforces session, Origin, CSRF and strict request schemas on mutations", async () => {
+  it("enforces exact Origin and strict request schemas on mutations", async () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
     try {
-      const session = await login(harness.gateway, harness.admin);
-      const view = await (await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, {
-        headers: { cookie: session.cookie },
-      }))).json() as { data: { catalogRevision: string } };
+      const view = await (await harness.gateway.fetch(new Request(
+        `${ORIGIN}/admin/api/v1/agents/models`,
+      ))).json() as { data: { catalogRevision: string } };
       const base = { agent: "claude", expectedRevision: "a".repeat(64), catalogRevision: view.data.catalogRevision, mappings: claudeMappings };
 
-      const noSession = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN }, body: JSON.stringify(base),
+      const missingOrigin = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(base),
       }));
-      expect(noSession.status).toBe(401);
-
-      const noCsrf = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN, cookie: session.cookie }, body: JSON.stringify(base),
-      }));
-      expect(noCsrf.status).toBe(403);
+      expect(missingOrigin.status).toBe(403);
 
       const wrongOrigin = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers: { "content-type": "application/json", origin: "http://evil.example", cookie: session.cookie, "x-ghcg-csrf": session.csrf },
+        method: "POST", headers: { "content-type": "application/json", origin: "http://evil.example" },
         body: JSON.stringify(base),
       }));
       expect(wrongOrigin.status).toBe(403);
 
+      const accepted = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
+        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN }, body: JSON.stringify(base),
+      }));
+      expect(accepted.status).toBe(200);
+
       const extraField = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN, cookie: session.cookie, "x-ghcg-csrf": session.csrf },
+        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN },
         body: JSON.stringify({ ...base, configDir: "C:/evil" }),
       }));
       expect(extraField.status).toBe(400);
       expect(await extraField.json()).toMatchObject({ error: { code: "validation_failed" } });
 
       const badModel = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN, cookie: session.cookie, "x-ghcg-csrf": session.csrf },
+        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN },
         body: JSON.stringify({ ...base, mappings: [{ displayName: "X", modelId: "has space" }] }),
       }));
       expect(badModel.status).toBe(400);
-      expect(stub.calls.filter((call) => call.startsWith("apply:"))).toEqual([]);
+      expect(stub.calls.filter((call) => call.startsWith("apply:"))).toEqual(["apply:claude:gpt-test"]);
     } finally {
       await harness.close();
     }
@@ -310,12 +299,11 @@ describe("Admin agents API", () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
     try {
-      const session = await login(harness.gateway, harness.admin);
-      const view = await (await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, {
-        headers: { cookie: session.cookie },
-      }))).json() as { data: { catalogRevision: string } };
+      const view = await (await harness.gateway.fetch(new Request(
+        `${ORIGIN}/admin/api/v1/agents/models`,
+      ))).json() as { data: { catalogRevision: string } };
       const send = (body: unknown) => harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
-        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN, cookie: session.cookie, "x-ghcg-csrf": session.csrf },
+        method: "POST", headers: { "content-type": "application/json", origin: ORIGIN },
         body: JSON.stringify(body),
       }));
       const staleCatalog = await send({ agent: "claude", expectedRevision: "a".repeat(64), catalogRevision: "0".repeat(64), mappings: claudeMappings });
@@ -332,11 +320,10 @@ describe("Admin agents API", () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
     try {
-      const session = await login(harness.gateway, harness.admin);
-      const headers = { "content-type": "application/json", origin: ORIGIN, cookie: session.cookie, "x-ghcg-csrf": session.csrf };
-      const view = await (await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, {
-        headers: { cookie: session.cookie },
-      }))).json() as { data: { catalogRevision: string } };
+      const headers = { "content-type": "application/json", origin: ORIGIN };
+      const view = await (await harness.gateway.fetch(new Request(
+        `${ORIGIN}/admin/api/v1/agents/models`,
+      ))).json() as { data: { catalogRevision: string } };
 
       const applied = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/apply`, {
         method: "POST", headers, body: JSON.stringify({
@@ -373,14 +360,13 @@ describe("Admin agents API", () => {
     const stub = agentStub();
     const harness = await createHarness(stub);
     try {
-      const session = await login(harness.gateway, harness.admin);
       harness.dependencies.accounts.list = () => [];
       harness.dependencies.accounts.defaultState = () => ({ defaultRevision: 2, defaultAccountId: null });
-      const headers = { "content-type": "application/json", origin: ORIGIN, cookie: session.cookie, "x-ghcg-csrf": session.csrf };
+      const headers = { "content-type": "application/json", origin: ORIGIN };
 
-      const view = await (await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents`, {
-        headers: { cookie: session.cookie },
-      }))).json() as { data: { items: AgentStatus[] } };
+      const view = await (await harness.gateway.fetch(new Request(
+        `${ORIGIN}/admin/api/v1/agents`,
+      ))).json() as { data: { items: AgentStatus[] } };
       expect(view.data.items).toHaveLength(2);
       const unavailable = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents/models`, { headers }));
       expect(unavailable.status).toBe(400);
@@ -402,10 +388,7 @@ describe("Admin agents API", () => {
   it("returns not_found when the agents manager is not configured", async () => {
     const harness = await createHarness(null);
     try {
-      const session = await login(harness.gateway, harness.admin);
-      const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents`, {
-        headers: { cookie: session.cookie },
-      }));
+      const response = await harness.gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/agents`));
       expect(response.status).toBe(404);
     } finally {
       await harness.close();

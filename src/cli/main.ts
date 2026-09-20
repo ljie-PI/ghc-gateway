@@ -88,13 +88,6 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
       writeSuccess(stdout, parsed.json, result);
       return lifecycleExitCode(command.action, result);
     }
-    if (command.kind === "admin.open") {
-      writeSuccess(stdout, parsed.json, await client.adminOpen({
-        dataDir: parsed.dataDir,
-        ...(options.shutdownSignal === undefined ? {} : { signal: options.shutdownSignal }),
-      }));
-      return 0;
-    }
     if (command.operation === "auth.login.start" && !parsed.json) {
       return await runInteractiveLogin(client, command.args as { readonly host?: string }, { dataDir: parsed.dataDir }, stdout, options);
     }

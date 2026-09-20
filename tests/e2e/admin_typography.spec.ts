@@ -61,7 +61,7 @@ for (const width of [1440, 1100, 900, 851, 850, 601, 600, 390, 320]) {
       ...first, accountId: "ghes:2", host: "github.example.test", login: "enterprise", displayName: "Enterprise Admin",
     }] };
     fixture.state.events = [{ ...operationalEvent(1), metadata: { source: "synthetic ".repeat(30) } }];
-    await page.goto("/admin/#bootstrap_token=typography-fixture");
+    await page.goto("/");
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await expect(page.locator("body")).toHaveCSS("font-size", "16px");
     await expect(page.locator(".brand strong")).toHaveCSS("font-size", "20px");
@@ -127,7 +127,7 @@ for (const width of [851, 601]) {
   test(`Configuration labels do not overlap inputs at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     await installAdminFixture(page);
-    await page.goto("/admin/#bootstrap_token=config-typography");
+    await page.goto("/");
     const menu = page.getByRole("button", { name: "Open navigation" });
     if (await menu.isVisible()) await menu.click();
     await page.getByRole("navigation").getByRole("button", { name: "Configuration", exact: true }).click();
@@ -155,25 +155,10 @@ for (const width of [851, 601]) {
   });
 }
 
-test("loading, signed-out, empty and error states preserve the font minimum", async ({ page }) => {
+test("empty and error states preserve the font minimum", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 740 });
   const fixture = await installAdminFixture(page);
-  await page.goto("/admin/");
-  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeVisible();
-  await expectReadableText(page);
-  await expectContainedControls(page);
-
-  let release!: () => void;
-  const pending = new Promise<void>((resolve) => { release = resolve; });
-  await page.route("**/admin/api/v1/auth/bootstrap", async (route) => { await pending; await route.fallback(); }, { times: 1 });
-  await page.evaluate(() => { location.hash = "bootstrap_token=loading-typography"; });
-  const loading = page.getByRole("button", { name: "Try current session" }).click();
-  try {
-    await expect(page.getByRole("heading", { name: "Establishing a secure session" })).toBeVisible();
-    await expectReadableText(page);
-    await expectContainedControls(page);
-  } finally { release(); }
-  await loading;
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
   fixture.state.accounts = { ...fixture.state.accounts, defaultAccountId: null, items: [] };
   await page.getByRole("button", { name: "Open navigation" }).click();

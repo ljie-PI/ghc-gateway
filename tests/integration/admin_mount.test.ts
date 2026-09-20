@@ -37,7 +37,6 @@ describe("additive Gateway mount", () => {
           headers: { "Content-Type": "application/json; charset=utf-8" },
         });
       },
-      mintBootstrap: () => ({ kind: "capacity" }),
       close() {},
     };
     const control: LocalControlModule = {
@@ -49,15 +48,23 @@ describe("additive Gateway mount", () => {
     };
     const adminStatic: AdminStaticModule = {
       async handle(request) {
-        calls.push(`static:${new URL(request.url).pathname}`);
-        return new Response("static");
+        const pathname = new URL(request.url).pathname;
+        calls.push(`static:${pathname}`);
+        if (pathname === "/" || pathname === "/assets/app.js") {
+          return new Response("static");
+        }
+        return new Response("404 Not Found", { status: 404 });
       },
     };
     let nextId = 0;
     const gateway = await createGateway({
       startup: startup(32123),
       runtime: defaultRuntimeConfigSnapshot(),
-    }, [textRoute("/admin/api/v1/status", "protocol"), textRoute("/v1/example", "protocol")], {
+    }, [
+      textRoute("/admin/api/v1/status", "protocol"),
+      textRoute("/v1/example", "protocol"),
+      textRoute("/assets/protocol.js", "protocol asset"),
+    ], {
       admin,
       control,
       adminStatic,
@@ -72,15 +79,37 @@ describe("additive Gateway mount", () => {
     expect(await unknownAdmin.json()).toEqual({ error: { code: "not_found" } });
     expect(await (await gateway.fetch(new Request("http://127.0.0.1:32123/v1/example"))).text()).toBe("protocol");
     expect((await gateway.fetch(new Request("http://127.0.0.1:32123/healthz"))).status).toBe(200);
-    expect(await (await gateway.fetch(new Request("http://127.0.0.1:32123/admin/dashboard"))).text()).toBe("static");
-    expect(await (await gateway.fetch(new Request("http://127.0.0.1:32123/admin/api/v10"))).text()).toBe("static");
-    expect((await gateway.fetch(new Request("http://127.0.0.1:32123/admin/dashboard", { method: "POST" }))).status).toBe(404);
+    expect(await (await gateway.fetch(new Request("http://127.0.0.1:32123/assets/protocol.js"))).text()).toBe("protocol asset");
+    expect(await (await gateway.fetch(new Request("http://127.0.0.1:32123/"))).text()).toBe("static");
+    expect(await (await gateway.fetch(new Request("http://127.0.0.1:32123/assets/app.js"))).text()).toBe("static");
+    for (const pathname of [
+      "/admin",
+      "/admin/",
+      "/admin/dashboard",
+      "/admin/api/v10",
+      "/v1/missing",
+      "/healthz/missing",
+      "/readyz/missing",
+      "/__ghcg/missing",
+      "/assets",
+      "/assets/",
+      "/assets/missing.js",
+      "/unknown",
+    ]) {
+      const response = await gateway.fetch(new Request(`http://127.0.0.1:32123${pathname}`));
+      expect(response.status, pathname).toBe(404);
+      expect(response.headers.get("content-type"), pathname).not.toContain("text/html");
+    }
+    expect((await gateway.fetch(new Request("http://127.0.0.1:32123/", { method: "POST" }))).status).toBe(404);
 
     expect(calls).toEqual([
       "control:/__ghcg/control/v1/status:req_mount_1:http://127.0.0.1:32123",
       "admin:/admin/api/v1/missing",
-      "static:/admin/dashboard",
-      "static:/admin/api/v10",
+      "static:/",
+      "static:/assets/app.js",
+      "static:/assets",
+      "static:/assets/",
+      "static:/assets/missing.js",
     ]);
     expect(contexts[0]?.requestId).toBe("req_mount_2");
     expect(contexts[0]?.listenerOrigin).toBe("http://127.0.0.1:32123");
@@ -92,6 +121,7 @@ describe("additive Gateway mount", () => {
     });
     expect((await staticOnly.fetch(new Request("http://127.0.0.1:31400/admin/api/v1/missing"))).status).toBe(404);
     expect(calls).not.toContain("static:/admin/api/v1/missing");
+    expect(await (await staticOnly.fetch(new Request("http://127.0.0.1:31400/"))).text()).toBe("static");
     await staticOnly.close();
   });
 
@@ -105,7 +135,6 @@ describe("additive Gateway mount", () => {
         await new Promise<void>((resolve) => context.signal.addEventListener("abort", () => resolve(), { once: true }));
         return new Response(null);
       },
-      mintBootstrap: () => ({ kind: "capacity" }),
       close() {},
     };
     const gateway = await createGateway({ startup: startup(), runtime: defaultRuntimeConfigSnapshot() }, [], { admin });
@@ -147,7 +176,6 @@ describe("additive Gateway mount", () => {
       async handle(_request, context) {
         return Response.json(context.activity.snapshot());
       },
-      mintBootstrap: () => ({ kind: "capacity" }),
       close() {},
     };
     const gateway = await createGateway({ startup: startup(), runtime }, [route], { admin });
@@ -183,7 +211,6 @@ describe("additive Gateway mount", () => {
     const order: string[] = [];
     const admin: AdminModule = {
       handle: async () => new Response(null),
-      mintBootstrap: () => ({ kind: "closed" }),
       close: () => order.push("admin"),
     };
     const control: LocalControlModule = {

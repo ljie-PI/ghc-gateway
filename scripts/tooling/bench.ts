@@ -780,12 +780,12 @@ async function runStreamExecutions(runtime: BenchmarkRuntime, count: number, abo
 }
 
 async function loadAdminPage(gateway: Gateway): Promise<{ readonly assetCount: number }> {
-  const index = await gateway.fetch(new Request("http://127.0.0.1/admin/"));
+  const index = await gateway.fetch(new Request("http://127.0.0.1/"));
   assertStatus(index, 200, "Admin index");
   const html = await index.text();
   const assets = [...html.matchAll(/(?:src|href)="([^"]+)"/gu)]
     .map((match) => match[1])
-    .filter((value): value is string => value?.startsWith("/admin/assets/") === true);
+    .filter((value): value is string => value?.startsWith("/assets/") === true);
   for (const asset of assets) {
     const response = await gateway.fetch(new Request(`http://127.0.0.1${asset}`));
     assertStatus(response, 200, `Admin asset ${asset}`);

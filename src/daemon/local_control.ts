@@ -2,7 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { ControlOperation, ControlOperationMap, CliErrorCode } from "../cli/control_client.js";
 import { CliError, SAFE_ERROR_MESSAGES } from "../cli/control_client.js";
-import type { AdminModule, LocalControlModule } from "../gateway/create_gateway.js";
+import type { LocalControlModule } from "../gateway/create_gateway.js";
 
 const CONTROL_PREFIX = "/__ghcg/control/v1";
 const COMMAND_BODY_LIMIT = 1_048_576;
@@ -64,7 +64,6 @@ export interface LocalControlCommandDispatcher {
 
 export interface LocalControlDependencies {
   readonly identity: Readonly<LocalControlIdentity>;
-  readonly admin: AdminModule;
   readonly dispatcher: LocalControlCommandDispatcher;
   readonly requestStop: (signal: AbortSignal) => Promise<void> | void;
 }
@@ -136,20 +135,12 @@ export function createLocalControlModule(
         if (route === "status") {
           return success(200, { state: "running", instance }, context.requestId);
         }
-        if (route === "stop") {
-          if (!identity.managed) {
-            throw new ControlFailure("instance_mismatch");
-          }
-          await withAbort(Promise.resolve(dependencies.requestStop(signal)), signal);
-          signal.throwIfAborted();
-          return success(202, { instance }, context.requestId);
+        if (!identity.managed) {
+          throw new ControlFailure("instance_mismatch");
         }
-
-        const bootstrap = dependencies.admin.mintBootstrap();
-        if (bootstrap.kind !== "issued") {
-          throw new ControlFailure("not_ready");
-        }
-        return success(200, { token: bootstrap.token, expiresAt: bootstrap.expiresAt }, context.requestId);
+        await withAbort(Promise.resolve(dependencies.requestStop(signal)), signal);
+        signal.throwIfAborted();
+        return success(202, { instance }, context.requestId);
       } catch (error: unknown) {
         if (signal.aborted || isAbortError(error)) {
           return new Response(null);
@@ -183,15 +174,12 @@ function commandSchema<Operation extends ControlOperation, Arguments extends Ret
   }, { additionalProperties: false });
 }
 
-function matchRoute(method: string, path: string): "status" | "stop" | "admin-bootstrap" | "command" | null {
+function matchRoute(method: string, path: string): "status" | "stop" | "command" | null {
   if (method === "GET" && path === `${CONTROL_PREFIX}/status`) {
     return "status";
   }
   if (method === "POST" && path === `${CONTROL_PREFIX}/stop`) {
     return "stop";
-  }
-  if (method === "POST" && path === `${CONTROL_PREFIX}/admin-bootstrap`) {
-    return "admin-bootstrap";
   }
   if (method === "POST" && path === `${CONTROL_PREFIX}/command`) {
     return "command";

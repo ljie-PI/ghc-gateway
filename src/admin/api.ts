@@ -20,11 +20,10 @@ import type {
 } from "../telemetry/admin.js";
 import type { PerformanceSnapshot } from "../telemetry/performance.js";
 import { THRESHOLDS } from "../telemetry/performance.js";
-import { toIso } from "./auth.js";
 
 export type AdminErrorCode = AgentErrorCode
   | "validation_failed"
-  | "unauthenticated"
+  | "not_ready"
   | "forbidden"
   | "not_found"
   | "revision_conflict"
@@ -194,7 +193,6 @@ export interface AdminDeviceFlows {
     | { readonly status: "complete"; readonly accountId: string }
   >;
   cancel(flowId: string): Promise<DeviceFlowCancelResult>;
-  has(flowId: string): boolean;
 }
 
 export interface AdminDeviceFlow {
@@ -366,17 +364,16 @@ export class AdminManagementApi {
   }
 
   async cancelDeviceFlow(flowId: string): Promise<
-    | { readonly state: "canceled" | "not_found" }
+    | { readonly state: "canceled" }
     | { readonly state: "complete"; readonly account: AdminAccount }
   > {
     const result = await this.dependencies.deviceFlows.cancel(flowId);
+    if (result.status === "not_found") {
+      throw new AdminApiError("not_found");
+    }
     return result.status === "complete"
       ? { state: "complete", account: this.account(this.requireAccount(result.accountId)) }
       : { state: result.status };
-  }
-
-  hasDeviceFlow(flowId: string): boolean {
-    return this.dependencies.deviceFlows.has(flowId);
   }
 
   async removeAccount(accountId: string, expectedRevision: number, signal: AbortSignal): Promise<AdminAccount> {
@@ -769,6 +766,10 @@ function performanceMetrics(snapshot: PerformanceSnapshot): readonly AdminPerfor
 
 function nullableIso(ms: number | null): string | null {
   return ms === null ? null : toIso(ms);
+}
+
+function toIso(ms: number): string {
+  return new Date(ms).toISOString();
 }
 
 function performanceMetric(
