@@ -1,5 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync, linkSync, lstatSync, mkdirSync, renameSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { daemonRuntimeCliError } from "../../src/daemon/runtime.js";
 import { ProtectedFileSystem } from "../../src/daemon/protected_file.js";
 import { tmpdir } from "node:os";
@@ -387,6 +388,7 @@ function processDependencies(
       return value;
     },
     runCommand: async () => commandOutput,
+    nowMs: () => 1_000,
   };
 }
 
@@ -404,32 +406,174 @@ describe("process start identity", () => {
   });
 
   it("serializes Windows creation FILETIME without numeric precision loss", async () => {
-    const calls: Array<{ readonly file: string; readonly args: readonly string[] }> = [];
+    const calls: Array<{
+      readonly file: string;
+      readonly args: readonly string[];
+      readonly timeoutMs: number | undefined;
+    }> = [];
     const dependencies: ProcessIdentityDependencies = {
       ...processDependencies("win32", {}, "133852868960001234\r\n"),
-      runCommand: async (file, args) => {
-        calls.push({ file, args });
+      runCommand: async (file, args, _env, context) => {
+        calls.push({ file, args, timeoutMs: context?.timeoutMs });
         return "133852868960001234\r\n";
       },
     };
     await expect(captureProcessStartIdentity(4242, dependencies)).resolves.toBe("windows:133852868960001234");
+    expect(calls).toHaveLength(1);
     expect(calls[0]?.args.join(" ")).toContain("4242");
+    expect(calls[0]?.timeoutMs).toBe(10_000);
   });
 
+  it("bounds Windows identity capture by the earlier lifecycle deadline", async () => {
+    const timeouts: Array<number | undefined> = [];
+    const dependencies: ProcessIdentityDependencies = {
+      ...processDependencies("win32", {}, "133852868960001234\r\n"),
+      runCommand: async (_file, _args, _env, context) => {
+        timeouts.push(context?.timeoutMs);
+        return "133852868960001234\r\n";
+      },
+    };
+    await expect(captureProcessStartIdentity(4242, dependencies, { deadlineMs: 1_250 }))
+      .resolves.toBe("windows:133852868960001234");
+    expect(timeouts).toEqual([250]);
+  });
+
+  it("does not launch an identity command after caller cancellation", async () => {
+    const abort = new AbortController();
+    abort.abort();
+    const runCommand = vi.fn(async () => "133852868960001234\r\n");
+    const dependencies: ProcessIdentityDependencies = {
+      ...processDependencies("win32"),
+      runCommand,
+    };
+    await expect(captureProcessStartIdentity(4242, dependencies, { signal: abort.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("does not launch an identity command after the lifecycle deadline", async () => {
+    const runCommand = vi.fn(async () => "133852868960001234\r\n");
+    const dependencies: ProcessIdentityDependencies = {
+      ...processDependencies("win32"),
+      runCommand,
+    };
+    await expect(captureProcessStartIdentity(4242, dependencies, { deadlineMs: 1_000 }))
+      .rejects.toBeInstanceOf(ProcessIdentityError);
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("treats only Windows exit code 3 as process absence", async () => {
+    for (const [code, expected] of [[3, null], [4, "error"]] as const) {
+      const runCommand = vi.fn(async () => { throw Object.assign(new Error("exit"), { code }); });
+      const dependencies: ProcessIdentityDependencies = {
+        ...processDependencies("win32"),
+        runCommand,
+      };
+      if (expected === null) {
+        await expect(captureProcessStartIdentity(4242, dependencies)).resolves.toBeNull();
+      } else {
+        await expect(captureProcessStartIdentity(4242, dependencies)).rejects.toBeInstanceOf(ProcessIdentityError);
+      }
+      expect(runCommand).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("rejects malformed Windows creation FILETIME without retry", async () => {
+    const runCommand = vi.fn(async () => "not-a-filetime\r\n");
+    const dependencies: ProcessIdentityDependencies = {
+      ...processDependencies("win32"),
+      runCommand,
+    };
+    await expect(captureProcessStartIdentity(4242, dependencies)).rejects.toBeInstanceOf(ProcessIdentityError);
+    expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry failed Windows identity commands", async () => {
+    for (const cause of [
+      Object.assign(new Error("timeout"), { killed: true, signal: "SIGTERM" }),
+      Object.assign(new Error("denied"), { code: "EACCES" }),
+      Object.assign(new Error("failed"), { code: 7 }),
+    ]) {
+      const runCommand = vi.fn(async () => { throw cause; });
+      const dependencies: ProcessIdentityDependencies = {
+        ...processDependencies("win32"),
+        runCommand,
+      };
+      await expect(captureProcessStartIdentity(4242, dependencies)).rejects.toBeInstanceOf(ProcessIdentityError);
+      expect(runCommand).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("keeps verified Windows termination on its independent command timeout", async () => {
+    const timeouts: Array<number | undefined> = [];
+    const dependencies: ProcessIdentityDependencies = {
+      ...processDependencies("win32"),
+      runCommand: async (_file, _args, _env, context) => {
+        timeouts.push(context?.timeoutMs);
+        return "";
+      },
+    };
+    await expect(terminateProcessIfMatching(
+      4242,
+      "windows:133852868960001234",
+      dependencies,
+      { deadlineMs: 1_250 },
+    ))
+      .resolves.toBe(true);
+    expect(timeouts).toEqual([5_000]);
+  });
+
+  it.runIf(process.platform === "win32")(
+    "captures, compares, terminates, and observes a real Windows process",
+    { timeout: 60_000 },
+    async () => {
+      const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", resolve);
+        child.once("error", reject);
+      });
+      const pid = child.pid;
+      if (pid === undefined) throw new Error("Windows identity fixture child has no PID");
+      const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+      try {
+        const captured = await captureProcessStartIdentity(pid);
+        expect(captured).toMatch(/^windows:\d+$/u);
+        expect(captured).not.toBeNull();
+        await expect(isSameProcess(pid, captured!)).resolves.toBe(true);
+        const filetime = BigInt(captured!.slice("windows:".length));
+        await expect(isSameProcess(pid, `windows:${filetime + 1n}`)).resolves.toBe(false);
+        await expect(terminateProcessIfMatching(pid, captured!)).resolves.toBe(true);
+        await closed;
+        await expect(captureProcessStartIdentity(pid)).resolves.toBeNull();
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      }
+    },
+  );
+
   it("runs macOS ps in the C locale and canonicalizes lstart to UTC seconds", async () => {
-    const calls: Array<{ readonly args: readonly string[]; readonly env: Readonly<Record<string, string>> }> = [];
+    const calls: Array<{
+      readonly args: readonly string[];
+      readonly env: Readonly<Record<string, string>>;
+      readonly timeoutMs: number | undefined;
+    }> = [];
     const dependencies: ProcessIdentityDependencies = {
       platform: "darwin",
       readFile: async () => "",
-      runCommand: async (_file, args, env) => {
-        calls.push({ args, env });
+      runCommand: async (_file, args, env, context) => {
+        calls.push({ args, env, timeoutMs: context?.timeoutMs });
         return "Thu Sep  3 12:34:56 2026\n";
       },
     };
-    await expect(captureProcessStartIdentity(4242, dependencies)).resolves.toBe("macos:2026-09-03T12:34:56Z");
+    await expect(captureProcessStartIdentity(4242, dependencies, { deadlineMs: Date.now() + 1 }))
+      .resolves.toBe("macos:2026-09-03T12:34:56Z");
     expect(calls[0]).toMatchObject({
       args: ["-o", "lstart=", "-p", "4242"],
       env: { LC_ALL: "C", TZ: "UTC" },
+      timeoutMs: 5_000,
     });
   });
 
