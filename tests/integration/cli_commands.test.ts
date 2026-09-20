@@ -736,6 +736,27 @@ describe("CLI commands", () => {
     })).toBe(0);
     expect(controller.start).toHaveBeenCalledWith(expect.objectContaining({ port: 31_409, dataDir: expect.stringContaining("selected") }), {});
     expect(JSON.parse(stdout.chunks)).toMatchObject({ state: "running", managed: true, pid: 42 });
+
+    controller.restart.mockResolvedValueOnce({
+      state: "running",
+      managed: true,
+      pid: 43,
+      startedAt: "2026-09-03T00:01:00.000Z",
+      port: 31_400,
+      dataDir: path.join("Q:/tmp/home", ".ghc-gateway"),
+    });
+    expect(await runCli({
+      argv: ["restart"],
+      env: {},
+      homedir: "Q:/tmp/home",
+      stdout: new CaptureStream(),
+      stderr: new CaptureStream(),
+      daemonController: controller,
+    })).toBe(0);
+    expect(controller.restart).toHaveBeenCalledWith(expect.objectContaining({
+      dataDir: path.join("Q:/tmp/home", ".ghc-gateway"),
+      dataDirSource: "default",
+    }), {});
   });
 
   it("reports daemon identity security failures with exit code 4", async () => {

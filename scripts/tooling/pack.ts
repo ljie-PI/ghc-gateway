@@ -290,14 +290,6 @@ export async function runPackSmoke(): Promise<PackSmokeResult> {
   const temporaryRoot = await mkdtemp(path.join(temporaryParent, "ghc-gateway-pack-"));
   let primaryError: unknown;
   try {
-    if (process.platform === "win32") {
-      const identity = await runCommand("whoami", ["/user", "/fo", "csv", "/nh"], temporaryRoot);
-      const sid = /^"[^"]+","(S-\d+(?:-\d+)+)"$/u.exec(identity.stdout.trim())?.[1];
-      if (sid === undefined) throw new Error("unable to resolve package smoke directory owner");
-      await runCommand("icacls", [
-        temporaryRoot, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)(F)`,
-      ], temporaryRoot);
-    }
     const packDirectory = path.join(temporaryRoot, "tarball");
     const installDirectory = path.join(temporaryRoot, "install");
     await mkdir(packDirectory);
@@ -397,6 +389,14 @@ async function verifyInstalledPackage(
   const daemonData = path.join(temporaryRoot, "daemon");
   const daemonPort = await reservePort();
   const common = ["--data-dir", daemonData];
+  const initiallyStopped = await runNode(cliEntry, [...common, "status"], temporaryRoot, [3]);
+  if (!initiallyStopped.stdout.includes("stopped") || await pathExists(daemonData)) {
+    throw new Error("installed missing-root status was not read-only");
+  }
+  const initiallyStoppedByStop = await runNode(cliEntry, [...common, "stop"], temporaryRoot);
+  if (!initiallyStoppedByStop.stdout.includes("stopped") || await pathExists(daemonData)) {
+    throw new Error("installed missing-root stop was not read-only");
+  }
   await runNode(cliEntry, [...common, "start", "--port", String(daemonPort)], temporaryRoot);
   try {
     await waitForHealth(daemonPort);
@@ -432,6 +432,16 @@ function lifecycleResult(output: string): { readonly state: string; readonly pid
     throw new Error("installed lifecycle command returned an invalid result");
   }
   return { state: result.state, pid: result.pid, port: result.port };
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await stat(target);
+    return true;
+  } catch (error: unknown) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function readPackEntry(output: string, packDirectory: string): Promise<NpmPackEntry> {

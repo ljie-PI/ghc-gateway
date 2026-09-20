@@ -8,12 +8,12 @@ export type WindowsDirectoryCommand = (
 const WINDOWS_PRIVATE_DIRECTORY_CREATION_TIMEOUT_MS = 15_000;
 
 /** Create with final security, without modifying a directory another caller created first. */
-export function createWindowsPrivateDirectory(directory: string, sid: string, runCommand: WindowsDirectoryCommand): void {
+export function createWindowsPrivateDirectory(directory: string, runCommand: WindowsDirectoryCommand): void {
   const executable = path.win32.join(process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
     "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const script = `$ErrorActionPreference='Stop'
 try {
-  $sid=[Security.Principal.SecurityIdentifier]::new($env:GHCG_DIRECTORY_SID)
+  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
   $security=[Security.AccessControl.DirectorySecurity]::new()
   $security.SetOwner($sid)
   $security.SetAccessRuleProtection($true,$false)
@@ -25,7 +25,6 @@ try {
 }`;
   const result = runCommand(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
     GHCG_DIRECTORY_PATH: path.toNamespacedPath(directory),
-    GHCG_DIRECTORY_SID: sid,
   }, WINDOWS_PRIVATE_DIRECTORY_CREATION_TIMEOUT_MS).trim();
   if (result === "0") return;
   const hresult = Number(result);

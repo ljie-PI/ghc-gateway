@@ -1,5 +1,6 @@
 import path from "node:path";
 import { CliError } from "../cli/control_client.js";
+import type { DataDirSource } from "../config/startup_config.js";
 import { DaemonIdentityFileError } from "./identity_file.js";
 import type { DaemonOperationLeaseAccess, DaemonOperationLeaseHandle } from "./operation_lease.js";
 
@@ -7,6 +8,8 @@ export const MAX_PENDING_LIFECYCLE_OPERATIONS_PER_DIRECTORY = 64;
 
 export interface LifecycleOperationContext {
   readonly signal?: AbortSignal;
+  readonly dataDirSource?: DataDirSource;
+  readonly createDataDir?: boolean;
 }
 
 export interface LifecycleCoordinatorAccess {
@@ -19,6 +22,8 @@ export interface LifecycleCoordinatorAccess {
 
 interface QueueNode {
   readonly signal: AbortSignal | undefined;
+  readonly dataDirSource: DataDirSource | undefined;
+  readonly createDataDir: boolean | undefined;
   readonly operation: (signal: AbortSignal | undefined) => Promise<unknown>;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: unknown) => void;
@@ -55,6 +60,8 @@ export class LifecycleCoordinator implements LifecycleCoordinatorAccess {
     return await new Promise<T>((resolve, reject) => {
       const node: QueueNode = {
         signal,
+        dataDirSource: context.dataDirSource,
+        createDataDir: context.createDataDir,
         operation,
         resolve: (value) => resolve(value as T),
         reject,
@@ -91,13 +98,17 @@ export class LifecycleCoordinator implements LifecycleCoordinatorAccess {
         let lease: DaemonOperationLeaseHandle | undefined;
         try {
           if (node.signal?.aborted === true) throw new CliError("interrupted");
-          lease = await this.leases.acquire(lane.key, {
+          const acquired = await this.leases.acquire(lane.key, {
             ...(node.signal === undefined ? {} : { signal: node.signal }),
+            ...(node.dataDirSource === undefined ? {} : { dataDirSource: node.dataDirSource }),
+            ...(node.createDataDir === undefined ? {} : { createDataDir: node.createDataDir }),
           });
+          if (acquired === null) throw new SelectedRootMissingError();
+          lease = acquired;
           if (signalIsAborted(node.signal)) throw new CliError("interrupted");
           const result = await node.operation(node.signal);
           if (signalIsAborted(node.signal)) throw new CliError("interrupted");
-          lease.release();
+          lease?.release();
           lease = undefined;
           node.resolve(result);
         } catch (error: unknown) {
@@ -121,6 +132,13 @@ export class LifecycleCoordinator implements LifecycleCoordinatorAccess {
         void this.drain(lane);
       }
     }
+  }
+}
+
+export class SelectedRootMissingError extends Error {
+  constructor() {
+    super("selected data directory is missing");
+    this.name = "SelectedRootMissingError";
   }
 }
 

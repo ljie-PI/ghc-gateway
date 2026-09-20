@@ -60,6 +60,7 @@ describe("CLI parser", () => {
     }
     expect(serve.command.startup.port).toBe(31_401);
     expect(serve.command.startup.logLevel).toBe("debug");
+    expect(serve.command.startup.dataDirSource).toBe("default");
 
     const start = parseCli(["start", "--data-dir", "daemon-dir", "--port", "31402"], { homedir: home });
     expect(start.command).toMatchObject({ kind: "lifecycle", action: "start" });
@@ -67,7 +68,34 @@ describe("CLI parser", () => {
       throw new Error("expected start lifecycle");
     }
     expect(start.command.startup.dataDir).toBe(path.resolve("daemon-dir"));
+    expect(start.command.startup.dataDirSource).toBe("custom");
     expect(start.command.startup.port).toBe(31_402);
+  });
+
+  it("preserves startup data-directory provenance for serve, start, and restart", () => {
+    const defaultDataDir = path.join(home, ".ghc-gateway");
+    for (const command of ["serve", "start", "restart"] as const) {
+      const parsedDefault = parseCli([command], { homedir: home }).command;
+      if ((parsedDefault.kind !== "serve" && parsedDefault.kind !== "lifecycle") || parsedDefault.startup === undefined) {
+        throw new Error(`expected ${command} startup`);
+      }
+      expect(parsedDefault.startup).toMatchObject({ dataDir: defaultDataDir, dataDirSource: "default" });
+
+      const parsedExplicit = parseCli(["--data-dir", defaultDataDir, command], { homedir: home }).command;
+      if ((parsedExplicit.kind !== "serve" && parsedExplicit.kind !== "lifecycle") || parsedExplicit.startup === undefined) {
+        throw new Error(`expected explicit ${command} startup`);
+      }
+      expect(parsedExplicit.startup).toMatchObject({ dataDir: defaultDataDir, dataDirSource: "custom" });
+
+      const parsedEnvironment = parseCli([command], {
+        env: { GHC_GATEWAY_DATA_DIR: defaultDataDir },
+        homedir: home,
+      }).command;
+      if ((parsedEnvironment.kind !== "serve" && parsedEnvironment.kind !== "lifecycle") || parsedEnvironment.startup === undefined) {
+        throw new Error(`expected environment ${command} startup`);
+      }
+      expect(parsedEnvironment.startup).toMatchObject({ dataDir: defaultDataDir, dataDirSource: "custom" });
+    }
   });
 
   it("renders command help without starting foreground serve", () => {

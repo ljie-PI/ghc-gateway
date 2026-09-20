@@ -90,7 +90,7 @@ export class DaemonIdentityFile {
   }
 
   read(): DaemonIdentity | null {
-    this.ensureProtectedDirectory();
+    if (!this.protectedFiles.assertProtectedDirectoryIfExists()) return null;
     if (!pathExists(this.path)) {
       return null;
     }
@@ -148,7 +148,7 @@ export class DaemonIdentityFile {
     context: Readonly<ProcessIdentityContext> = {},
   ): Promise<boolean> {
     context.signal?.throwIfAborted();
-    this.ensureProtectedDirectory();
+    if (!this.protectedFiles.assertProtectedDirectoryIfExists()) return false;
     if (!pathExists(this.path)) {
       return false;
     }

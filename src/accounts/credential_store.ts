@@ -1,7 +1,22 @@
-import { chmodSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync, closeSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+  type BigIntStats,
+} from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
-import { WindowsAcl, windowsCommandPath } from "../security/windows_acl.js";
+import { readProtectedFileSync } from "../security/protected_file_read.js";
+
+const CREDENTIAL_FILE_MAX_BYTES = 1024n * 1024n;
 
 export type AccountId = string;
 
@@ -22,6 +37,10 @@ export interface CredentialStore {
   ): Promise<void>;
   removeAccount(accountId: AccountId): Promise<void>;
   prune(references: ReadonlyMap<AccountId, number>, signal?: AbortSignal): Promise<void>;
+}
+
+export interface FileCredentialStoreOptions {
+  readonly syncDirectory?: (directory: string) => void;
 }
 
 interface FileDocument {
@@ -72,8 +91,15 @@ export class MemoryCredentialStore implements CredentialStore {
 }
 
 export class FileCredentialStore implements CredentialStore {
-  constructor(private readonly filePath: string) {
+  private readonly syncDirectory: (directory: string) => void;
+
+  constructor(
+    private readonly filePath: string,
+    options: Readonly<FileCredentialStoreOptions> = {},
+  ) {
+    this.syncDirectory = options.syncDirectory ?? syncDirectory;
     ensureProtectedDirectory(path.dirname(filePath));
+    cleanupOrphanedStages(filePath, this.syncDirectory);
   }
 
   async readGeneration(accountId: AccountId, generation: number): Promise<SecretCredential | null> {
@@ -88,34 +114,36 @@ export class FileCredentialStore implements CredentialStore {
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
-    const document = readDocument(this.filePath);
-    const account = document.credentials[accountId] ?? {};
-    account[String(generation)] = value;
-    writeDocument(this.filePath, {
-      version: 1,
-      credentials: { ...document.credentials, [accountId]: account },
+    updateDocument(this.filePath, this.syncDirectory, (document) => {
+      const account = { ...document.credentials[accountId], [String(generation)]: value };
+      return {
+        version: 1,
+        credentials: { ...document.credentials, [accountId]: account },
+      };
     });
     signal?.throwIfAborted();
   }
 
   async removeAccount(accountId: AccountId): Promise<void> {
-    const document = readDocument(this.filePath);
-    const next = { ...document.credentials };
-    delete next[accountId];
-    writeDocument(this.filePath, { version: 1, credentials: next });
+    updateDocument(this.filePath, this.syncDirectory, (document) => {
+      const next = { ...document.credentials };
+      delete next[accountId];
+      return { version: 1, credentials: next };
+    });
   }
 
   async prune(references: ReadonlyMap<AccountId, number>, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    const document = readDocument(this.filePath);
-    const next: FileDocument["credentials"] = {};
-    for (const [accountId, generation] of references) {
-      const value = document.credentials[accountId]?.[String(generation)];
-      if (value !== undefined) {
-        next[accountId] = { [String(generation)]: value };
+    updateDocument(this.filePath, this.syncDirectory, (document) => {
+      const next: FileDocument["credentials"] = {};
+      for (const [accountId, generation] of references) {
+        const value = document.credentials[accountId]?.[String(generation)];
+        if (value !== undefined) {
+          next[accountId] = { [String(generation)]: value };
+        }
       }
-    }
-    writeDocument(this.filePath, { version: 1, credentials: next });
+      return { version: 1, credentials: next };
+    });
     signal?.throwIfAborted();
   }
 }
@@ -125,33 +153,127 @@ function emptyDocument(): FileDocument {
 }
 
 function readDocument(filePath: string): FileDocument {
+  const contents = readProtectedFile(filePath);
+  if (contents === null) {
+    return emptyDocument();
+  }
+  const parsed = JSON.parse(contents) as FileDocument;
+  if (parsed.version !== 1 || typeof parsed.credentials !== "object" || parsed.credentials === null) {
+    return emptyDocument();
+  }
+  return parsed;
+}
+
+function readProtectedFile(filePath: string): string | null {
   try {
     assertProtectedFile(filePath);
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as FileDocument;
-    if (parsed.version !== 1 || typeof parsed.credentials !== "object" || parsed.credentials === null) {
-      return emptyDocument();
-    }
-    return parsed;
   } catch (error: unknown) {
-    if (isNotFound(error)) {
-      return emptyDocument();
+    if (isNotFound(error)) return null;
+    throw error;
+  }
+  const result = readProtectedFileSync({
+    filePath,
+    maximumBytes: Number(CREDENTIAL_FILE_MAX_BYTES),
+    bigint: true,
+    observeBefore: () => assertProtectedFile(filePath),
+    settleMetadata: process.platform === "win32",
+    errors: {
+      changed: (phase) => new Error(`credential file changed during ${phase}`),
+      tooLarge: () => new Error("credential file is too large"),
+      incomplete: () => new Error("unable to read complete credential file"),
+    },
+  });
+  return result.buffer.toString("utf8");
+}
+
+function updateDocument(
+  filePath: string,
+  flushDirectory: (directory: string) => void,
+  update: (document: FileDocument) => FileDocument,
+): void {
+  const directory = path.dirname(filePath);
+  ensureProtectedDirectory(directory);
+  cleanupOrphanedStages(filePath, flushDirectory);
+  const preparationPath = stagingPreparationPath(filePath);
+  const tempPath = stagingPath(filePath);
+  const fd = openSync(preparationPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+  const staged = fstatSync(fd, { bigint: true });
+  let published = false;
+  try {
+    if (process.platform !== "win32") {
+      fchmodSync(fd, 0o600);
+    }
+    flushDirectory(directory);
+
+    const contents = `${JSON.stringify(update(readDocument(filePath)))}\n`;
+    if (Buffer.byteLength(contents) > Number(CREDENTIAL_FILE_MAX_BYTES)) {
+      throw new Error("credential file is too large");
+    }
+    writeContents(fd, contents);
+    fsyncSync(fd);
+    const named = assertProtectedFile(preparationPath);
+    if (!sameFile(staged, named)) {
+      throw new Error("credential file changed during publication");
+    }
+    closeSync(fd);
+    renameSync(preparationPath, tempPath);
+    flushDirectory(directory);
+    const prepared = assertProtectedFile(tempPath);
+    if (!sameFile(staged, prepared)) {
+      throw new Error("credential file changed during publication");
+    }
+    renameSync(tempPath, filePath);
+    published = true;
+    flushDirectory(directory);
+    const live = assertProtectedFile(filePath);
+    if (!sameFile(staged, live)) {
+      throw new Error("credential file changed during publication");
+    }
+  } catch (error: unknown) {
+    try {
+      closeSync(fd);
+    } catch {
+      // The descriptor may already be closed for publication.
+    }
+    if (!published && (unlinkIfSameFile(preparationPath, staged) || unlinkIfSameFile(tempPath, staged))) {
+      flushDirectory(directory);
     }
     throw error;
   }
 }
 
-function writeDocument(filePath: string, document: FileDocument): void {
-  ensureProtectedDirectory(path.dirname(filePath));
-  const tempPath = `${filePath}.${process.pid}.tmp`;
-  const fd = openSync(tempPath, "w", 0o600);
-  try {
-    writeSync(fd, `${JSON.stringify(document)}\n`, 0, "utf8");
-  } finally {
-    closeSync(fd);
+function writeContents(fd: number, contents: string): void {
+  const buffer = Buffer.from(contents, "utf8");
+  let offset = 0;
+  while (offset < buffer.length) {
+    const written = writeSync(fd, buffer, offset, buffer.length - offset, offset);
+    if (written === 0) {
+      throw new Error("unable to write complete credential file");
+    }
+    offset += written;
   }
-  protectFile(tempPath);
-  renameSync(tempPath, filePath);
-  protectFile(filePath);
+}
+
+function cleanupOrphanedStages(
+  filePath: string,
+  flushDirectory: (directory: string) => void,
+): void {
+  let changed = false;
+  for (const stagePath of [stagingPreparationPath(filePath), stagingPath(filePath)]) {
+    const stage = protectedFileIfExists(stagePath);
+    if (stage !== null) changed = unlinkIfSameFile(stagePath, stage) || changed;
+  }
+  if (changed) {
+    flushDirectory(path.dirname(filePath));
+  }
+}
+
+function stagingPath(filePath: string): string {
+  return `${filePath}.tmp`;
+}
+
+function stagingPreparationPath(filePath: string): string {
+  return `${filePath}.tmp.prepare`;
 }
 
 export function ensureProtectedDirectory(directory: string): void {
@@ -160,61 +282,81 @@ export function ensureProtectedDirectory(directory: string): void {
   if (stat.isSymbolicLink()) {
     throw new Error("credential directory must not be a symlink");
   }
-  assertOwnedByCurrentUser(stat);
-  if (process.platform === "win32") {
-    WINDOWS_ACL.restrict(directory, true);
-    assertWindowsAclCurrentUserOnly(directory);
-    return;
+  if (!stat.isDirectory()) {
+    throw new Error("credential directory must be a regular directory");
   }
-  chmodSync(directory, 0o700);
+  assertOwnedByCurrentUser(stat);
+  if (process.platform !== "win32") {
+    chmodSync(directory, 0o700);
+  }
 }
 
-function assertProtectedFile(filePath: string): void {
-  const stat = lstatSync(filePath);
-  if (stat.isSymbolicLink()) {
-    throw new Error("credential file must not be a symlink");
+function assertProtectedFile(filePath: string): BigIntStats {
+  const stat = lstatSync(filePath, { bigint: true });
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error("credential path must be a regular file");
   }
   assertOwnedByCurrentUser(stat);
-  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+  if (process.platform !== "win32" && (stat.mode & 0o077n) !== 0n) {
     throw new Error("credential file permissions must be 0600");
   }
-  if (process.platform === "win32") {
-    assertWindowsAclCurrentUserOnly(filePath);
+  if (stat.nlink !== 1n) {
+    throw new Error("credential file has unexpected hard links");
   }
+  return stat;
 }
 
-function assertOwnedByCurrentUser(stat: { uid: number }): void {
+function assertOwnedByCurrentUser(stat: { uid: number | bigint }): void {
   if (process.platform === "win32") {
     return;
   }
-  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const expected = typeof stat.uid === "bigint" && uid !== undefined ? BigInt(uid) : uid;
+  if (uid !== undefined && stat.uid !== expected) {
     throw new Error("credential path must be owned by the current user");
   }
 }
 
-function protectFile(filePath: string): void {
-  if (process.platform === "win32") {
-    WINDOWS_ACL.restrict(filePath, false);
-    assertWindowsAclCurrentUserOnly(filePath);
-    return;
-  }
-  chmodSync(filePath, 0o600);
+function sameFile(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
-const WINDOWS_ACL = new WindowsAcl((file, args) => execFileSync(
-  windowsCommandPath(file),
-  [...args],
-  { encoding: "utf8", windowsHide: true },
-));
+function unlinkIfSameFile(filePath: string, expected: BigIntStats): boolean {
+  try {
+    const current = lstatSync(filePath, { bigint: true });
+    if (sameFile(current, expected)) {
+      unlinkSync(filePath);
+      return true;
+    }
+  } catch (error: unknown) {
+    if (!isNotFound(error)) {
+      throw error;
+    }
+  }
+  return false;
+}
 
-function assertWindowsAclCurrentUserOnly(target: string): void {
-  if (!WINDOWS_ACL.isCurrentUserOnly(target)) {
-    throw new Error("credential ACL must be restricted to the current user");
+function protectedFileIfExists(filePath: string): BigIntStats | null {
+  try {
+    return assertProtectedFile(filePath);
+  } catch (error: unknown) {
+    if (isNotFound(error)) return null;
+    throw error;
   }
 }
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function syncDirectory(directory: string): void {
+  if (process.platform === "win32") return;
+  const fd = openSync(directory, constants.O_RDONLY);
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function unlinkIfExists(filePath: string): void {

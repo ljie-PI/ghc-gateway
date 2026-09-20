@@ -17,6 +17,33 @@ function deferred() {
 }
 
 describe("daemon lifecycle coordination", () => {
+  it("forwards selected-root provenance for start and restart", async () => {
+    const contexts: Array<Readonly<{ dataDirSource?: "default" | "custom" }>> = [];
+    const coordinator = new LifecycleCoordinator({
+      acquire: async (_dataDir, context) => {
+        contexts.push(context ?? {});
+        return { release() {} };
+      },
+    });
+    let identity: DaemonIdentity | null = null;
+    const controller = new DaemonController({
+      lifecycleCoordinator: coordinator,
+      identityFile: { read: async () => identity, remove: async () => false },
+      processIdentity: async () => identity?.processStartIdentity ?? null,
+      spawn: async () => ({ pid: 4242, unref() {} }),
+      delay: async () => { identity = runningIdentity(); },
+      nowMs: () => 0,
+      controlRequest: async (current) => ({ state: "running", instance: instanceOf(current) }),
+      terminate: async () => undefined,
+    });
+
+    await controller.start({ ...startup("provenance"), dataDirSource: "default" });
+    identity = null;
+    await controller.restart({ ...startup("provenance"), dataDirSource: "custom" });
+
+    expect(contexts.map(({ dataDirSource }) => dataDirSource)).toEqual(["default", "custom"]);
+  });
+
   it("runs one FIFO lane per canonical data directory while different directories proceed independently", async () => {
     const events: string[] = [];
     const leases = scriptedLeases(events);
@@ -590,7 +617,7 @@ function restartHarness(options: Readonly<{
 }
 
 function startup(dataDir: string): StartupConfig {
-  return { host: "127.0.0.1", port: 31_400, dataDir, logLevel: "info" };
+  return { host: "127.0.0.1", port: 31_400, dataDir, dataDirSource: "custom", logLevel: "info" };
 }
 
 function runningIdentity(): DaemonIdentity {

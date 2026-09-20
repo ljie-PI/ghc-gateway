@@ -3,6 +3,7 @@ import { CliError, type CliLifecycleResult } from "../cli/control_client.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import type { DaemonIdentity } from "./identity_file.js";
 import {
+  SelectedRootMissingError,
   sharedInProcessLifecycleCoordinator,
   type LifecycleCoordinatorAccess,
 } from "./lifecycle_coordinator.js";
@@ -100,9 +101,15 @@ export class DaemonController {
   }
 
   async status(dataDir: string, context: Readonly<DaemonLifecycleContext> = {}): Promise<CliLifecycleResult> {
-    return await this.coordinator.run(dataDir, context, async (signal) => (
-      await this.inspectWithinLane(dataDir, { ...(signal === undefined ? {} : { signal }) })
-    ).result);
+    const resolvedDataDir = path.resolve(dataDir);
+    try {
+      return await this.coordinator.run(resolvedDataDir, { ...context, createDataDir: false }, async (signal) => (
+        await this.inspectWithinLane(dataDir, { ...(signal === undefined ? {} : { signal }) })
+      ).result);
+    } catch (error: unknown) {
+      if (error instanceof SelectedRootMissingError) return emptyResult("stopped", resolvedDataDir);
+      throw error;
+    }
   }
 
   private async inspectWithinLane(
@@ -173,7 +180,10 @@ export class DaemonController {
     startup: Readonly<StartupConfig>,
     context: Readonly<DaemonLifecycleContext> = {},
   ): Promise<CliLifecycleResult> {
-    return await this.coordinator.run(startup.dataDir, context, async (signal) => await this.startWithinLane(
+    return await this.coordinator.run(startup.dataDir, {
+      ...context,
+      dataDirSource: startup.dataDirSource,
+    }, async (signal) => await this.startWithinLane(
       startup,
       { ...(signal === undefined ? {} : { signal }) },
     ));
@@ -261,10 +271,16 @@ export class DaemonController {
     dataDir: string,
     context: Readonly<DaemonLifecycleContext> = {},
   ): Promise<CliLifecycleResult> {
-    return await this.coordinator.run(dataDir, context, async (signal) => await this.stopWithinLane(
-      dataDir,
-      { ...(signal === undefined ? {} : { signal }) },
-    ));
+    const resolvedDataDir = path.resolve(dataDir);
+    try {
+      return await this.coordinator.run(resolvedDataDir, { ...context, createDataDir: false }, async (signal) => await this.stopWithinLane(
+        resolvedDataDir,
+        { ...(signal === undefined ? {} : { signal }) },
+      ));
+    } catch (error: unknown) {
+      if (error instanceof SelectedRootMissingError) return emptyResult("stopped", resolvedDataDir);
+      throw error;
+    }
   }
 
   private async stopWithinLane(
@@ -396,7 +412,10 @@ export class DaemonController {
     startup: Readonly<StartupConfig>,
     context: Readonly<DaemonLifecycleContext> = {},
   ): Promise<CliLifecycleResult> {
-    return await this.coordinator.run(startup.dataDir, context, async (signal) => {
+    return await this.coordinator.run(startup.dataDir, {
+      ...context,
+      dataDirSource: startup.dataDirSource,
+    }, async (signal) => {
       const withinContext = { ...(signal === undefined ? {} : { signal }) };
       const inspection = await this.inspectWithinLane(startup.dataDir, withinContext);
       const effectiveStartup = inspection.identity === null

@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { authenticatedControlRequest } from "../cli/control_client.js";
-import type { StartupConfig } from "../config/startup_config.js";
+import type { DataDirSource, StartupConfig } from "../config/startup_config.js";
 import type { HostedGateway } from "../gateway/create_gateway.js";
 import { GRACEFUL_SHUTDOWN_MS } from "../gateway/create_gateway.js";
 import { assertSupportedRuntime } from "../runtime_support.js";
@@ -41,6 +41,7 @@ export interface DaemonRuntimeDependencies {
   readonly acquireIdentity?: (
     dataDir: string,
     identity: DaemonIdentity,
+    dataDirSource: DataDirSource,
   ) => DaemonIdentityLease | Promise<DaemonIdentityLease>;
   readonly createLogger?: (managed: boolean, startup: StartupConfig) => DaemonLogger;
   readonly scheduleStop?: (stop: () => void) => void;
@@ -116,6 +117,7 @@ export async function spawnDaemonProcess(
   const child = spawnChild(execPath, [
     childEntry,
     "--data-dir", startup.dataDir,
+    "--internal-data-dir-source", startup.dataDirSource,
     "--port", String(startup.port),
     "--log-level", startup.logLevel,
   ], {
@@ -180,8 +182,10 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
     createdAt: now().toISOString(),
   });
   const acquire = dependencies.acquireIdentity
-    ?? ((dataDir: string, value: DaemonIdentity) => new DaemonIdentityFile(dataDir).acquire(value));
-  const lease = await acquire(options.startup.dataDir, identity);
+    ?? ((dataDir: string, value: DaemonIdentity, dataDirSource: DataDirSource) => (
+      new DaemonIdentityFile(dataDir, { dataDirSource }).acquire(value)
+    ));
+  const lease = await acquire(options.startup.dataDir, identity, options.startup.dataDirSource);
   try {
     const stopping = new AbortController();
     const scheduleStop = dependencies.scheduleStop ?? ((stop: () => void) => setImmediate(stop));

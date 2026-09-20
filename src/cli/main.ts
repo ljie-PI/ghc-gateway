@@ -5,7 +5,7 @@ import { CliError, HttpControlClient, type CliLifecycleResult, type ControlClien
 import { parseCli } from "./parser.js";
 import { exitCodeForError, writeError, writeSuccess, type WritableCliStream } from "./output.js";
 import type { HostedGateway } from "../gateway/create_gateway.js";
-import { parseStartupConfig, type StartupConfig } from "../config/startup_config.js";
+import type { StartupConfig } from "../config/startup_config.js";
 import { isSupportedNodeVersion } from "../runtime_support.js";
 import type { DaemonController } from "../daemon/controller.js";
 import {
@@ -78,7 +78,7 @@ export async function runCli(options: RunCliOptions = {}): Promise<number> {
         : command.action === "start"
           ? await controller.start(requireStartup(command.startup), context)
           : command.action === "restart"
-            ? await controller.restart(restartStartup(parsed.dataDir, env), context)
+            ? await controller.restart(requireStartup(command.startup), context)
             : command.action === "stop"
               ? await controller.stop(parsed.dataDir, context)
               : await controller.status(parsed.dataDir, context);
@@ -282,10 +282,6 @@ function requireStartup(startup: StartupConfig | undefined): StartupConfig {
     throw new CliError("internal_error");
   }
   return startup;
-}
-
-function restartStartup(dataDir: string, env: NodeJS.ProcessEnv): StartupConfig {
-  return parseStartupConfig([], { ...env, GHC_GATEWAY_DATA_DIR: dataDir });
 }
 
 async function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {

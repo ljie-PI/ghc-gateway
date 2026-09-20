@@ -155,7 +155,7 @@ export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === "agent_invalid_config") return "Unsupported or invalid client configuration. Check global configuration syntax and remove conflicting profiles before applying.";
     if (error.code === "agent_models_unavailable") return "Use exact enabled Copilot model IDs with usable capabilities from Models, then refresh.";
-    if (error.code === "agent_unsafe_path") return "The configuration path or access permissions are unsafe or unsupported. No forced overwrite is available.";
+    if (error.code === "agent_unsafe_path") return "The configuration path has an unsupported type or link, or changed during validation. No forced overwrite is available.";
     if (error.code === "agent_recovery_required") return "A configuration write was interrupted. Refresh and apply again to finish a recoverable write. If it still fails, retain the backup and recovery files and reconcile external changes before retrying.";
     if (error.code === "agent_conflict") return "The configuration or first backup changed. Refresh before applying; preserve the first backup and reconcile any conflicting backup changes.";
     if (error.code === "agent_busy") return "Another agent configuration operation is running. Try again after it finishes.";

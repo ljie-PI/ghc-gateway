@@ -1,4 +1,7 @@
 import path from "node:path";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vitest";
 import type { StartupConfig } from "../../src/config/startup_config.js";
 import {
@@ -9,12 +12,16 @@ import {
 } from "../../src/daemon/controller.js";
 import { CliError } from "../../src/cli/control_client.js";
 import type { DaemonIdentity } from "../../src/daemon/identity_file.js";
+import { DaemonIdentityFile } from "../../src/daemon/identity_file.js";
+import { LifecycleCoordinator } from "../../src/daemon/lifecycle_coordinator.js";
+import { DaemonOperationLeaseFile } from "../../src/daemon/operation_lease.js";
 
 const DATA_DIR = path.resolve("test-data");
 const STARTUP: StartupConfig = {
   host: "127.0.0.1",
   port: 31_400,
   dataDir: DATA_DIR,
+  dataDirSource: "custom",
   logLevel: "info",
 };
 const FIRST: DaemonIdentity = {
@@ -37,6 +44,34 @@ const SECOND: DaemonIdentity = {
 };
 
 describe("DaemonController lifecycle", () => {
+  it("returns stopped for status and stop without creating a missing selected root", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "ghcg-missing-lifecycle-"));
+    const dataDir = path.join(parent, "selected-root");
+    const controller = new DaemonController({
+      lifecycleCoordinator: new LifecycleCoordinator(new DaemonOperationLeaseFile({
+        processStartIdentity: async () => FIRST.processStartIdentity,
+      })),
+      identityFile: {
+        read: async (directory) => new DaemonIdentityFile(directory).read(),
+        remove: async (directory, expected, context) => await new DaemonIdentityFile(directory).remove(expected, context),
+      },
+      processIdentity: async () => { throw new Error("process identity must not be read"); },
+      spawn: async () => { throw new Error("daemon must not be spawned"); },
+      delay: async () => undefined,
+      nowMs: () => 0,
+      controlRequest: async () => { throw new Error("control endpoint must not be called"); },
+      terminate: async () => { throw new Error("process must not be terminated"); },
+    });
+    try {
+      await expect(controller.status(dataDir)).resolves.toMatchObject({ state: "stopped", dataDir });
+      expect(existsSync(dataDir)).toBe(false);
+      await expect(controller.stop(dataDir)).resolves.toMatchObject({ state: "stopped", dataDir });
+      expect(existsSync(dataDir)).toBe(false);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("reports stopped and treats an authenticated existing foreground gateway as start success", async () => {
     const stopped = harness();
     await expect(stopped.controller.status(DATA_DIR)).resolves.toEqual({

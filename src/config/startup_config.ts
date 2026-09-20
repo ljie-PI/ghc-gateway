@@ -6,11 +6,13 @@ export const DEFAULT_PORT = 31_400;
 export const DEFAULT_LOG_LEVEL = "info" as const;
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
+export type DataDirSource = "default" | "custom";
 
 export interface StartupConfig {
   readonly host: typeof LOOPBACK_HOST;
   readonly port: number;
   readonly dataDir: string;
+  readonly dataDirSource: DataDirSource;
   readonly logLevel: LogLevel;
 }
 
@@ -43,12 +45,17 @@ export function parseStartupConfig(
 
   const port = parsePort(firstDefined(flags.port, env.GHC_GATEWAY_PORT, String(DEFAULT_PORT)));
   const logLevel = parseLogLevel(firstDefined(flags.logLevel, env.GHC_GATEWAY_LOG_LEVEL, DEFAULT_LOG_LEVEL));
-  const dataDir = resolveDataDir(firstDefined(flags.dataDir, env.GHC_GATEWAY_DATA_DIR, path.join(homedir, ".ghc-gateway")));
+  const selectedDataDir = flags.dataDir !== undefined
+    ? { value: flags.dataDir, source: "custom" as const }
+    : env.GHC_GATEWAY_DATA_DIR !== undefined
+      ? { value: env.GHC_GATEWAY_DATA_DIR, source: "custom" as const }
+      : { value: path.join(homedir, ".ghc-gateway"), source: "default" as const };
 
   return {
     host: LOOPBACK_HOST,
     port,
-    dataDir,
+    dataDir: resolveDataDir(selectedDataDir.value),
+    dataDirSource: selectedDataDir.source,
     logLevel,
   };
 }
