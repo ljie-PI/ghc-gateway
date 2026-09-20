@@ -1,4 +1,5 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
+import type { SupportedReasoningEffort } from "../../copilot/model_capabilities.js";
 import type { WireJson, WireJsonObject } from "../../serialization/wire_json.js";
 
 export type InferenceProtocol = "chat" | "messages" | "responses";
@@ -119,7 +120,7 @@ export type SemanticOutputFormat =
   };
 
 export interface SemanticReasoning {
-  readonly effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined;
+  readonly effort?: SupportedReasoningEffort | undefined;
 }
 
 export interface SemanticRequest {

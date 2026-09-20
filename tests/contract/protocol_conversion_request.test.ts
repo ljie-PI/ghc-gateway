@@ -699,6 +699,79 @@ describe("shared conversion request codecs", () => {
     });
   });
 
+  it.each([
+    ["chat", "responses"],
+    ["chat", "messages"],
+    ["messages", "chat"],
+    ["messages", "responses"],
+    ["responses", "chat"],
+    ["responses", "messages"],
+  ] as const)("preserves max reasoning when converting %s to %s", (source, target) => {
+    const converted = prepareConvertedRequest(
+      source,
+      target,
+      reasoningRequest(source, "max"),
+      "target",
+      capability([target]),
+    );
+    expect(reasoningEffort(decoded(converted.bytes), target)).toBe("max");
+    expect(converted.degradations).not.toContain("reasoning.budget_coarsened");
+  });
+
+  it("coarsens max to xhigh only when the converted target declares xhigh", () => {
+    const base = capability(["chat"]);
+    const xhighOnly = {
+      ...base,
+      capabilities: {
+        ...base.capabilities,
+        reasoningLevels: ["xhigh"] as const,
+      },
+    };
+    const converted = prepareConvertedRequest(
+      "responses",
+      "chat",
+      reasoningRequest("responses", "max"),
+      "target",
+      xhighOnly,
+    );
+    expect(decoded(converted.bytes)).toMatchObject({ reasoning_effort: "xhigh" });
+    expect(converted.degradations).toContain("reasoning.budget_coarsened");
+  });
+
+  it("prefers a max-to-xhigh target over a target that would omit reasoning", () => {
+    const base = capability(["chat", "messages"]);
+    const xhighMessages = {
+      ...base,
+      capabilities: {
+        ...base.capabilities,
+        reasoningLevels: ["xhigh"] as const,
+        reasoningProtocols: ["messages"] as const,
+      },
+    };
+    const plan = planProtocolExecution({
+      source: "responses",
+      body: reasoningRequest("responses", "max"),
+      stream: false,
+      resolvedModel: "target",
+      capability: xhighMessages,
+    });
+    expect(plan).toMatchObject({ kind: "converted", target: "messages" });
+    expect(plan.kind === "converted" ? decoded(plan.request.bytes) : null).toMatchObject({
+      output_config: { effort: "xhigh" },
+    });
+    expect(plan.kind === "converted" ? plan.request.degradations : []).toContain("reasoning.budget_coarsened");
+  });
+
+  it("rejects an unrecognized reasoning effort when conversion is required", () => {
+    expect(() => prepareConvertedRequest(
+      "responses",
+      "chat",
+      reasoningRequest("responses", "ultra"),
+      "target",
+      capability(["chat"]),
+    )).toThrow();
+  });
+
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {
     const converted = prepareConvertedRequest("responses", "chat", body({
       model: "source",
@@ -1584,7 +1657,7 @@ function capability(
     capabilities: {
       contextWindowTokens: 128_000,
       maxContextWindowTokens: 128_000,
-      reasoningLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      reasoningLevels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
       reasoningProtocols: protocols,
       inputModalities: ["text", "image"],
       toolCalling: true,
@@ -1612,10 +1685,13 @@ function capability(
         liveState: "value",
       },
       reasoningEfforts: {
-        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        value: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         source: "live",
         conflict: false,
         liveState: "value",
+      },
+      unrecognizedReasoningEfforts: {
+        value: [], source: "live", conflict: false, liveState: "value",
       },
     },
     revision: {
@@ -1641,6 +1717,33 @@ function rawBody(value: string): WireJsonObject {
 
 function decoded(bytes: Uint8Array): Record<string, unknown> {
   return JSON.parse(decoder.decode(bytes)) as Record<string, unknown>;
+}
+
+function reasoningRequest(
+  source: "chat" | "messages" | "responses",
+  effort: string,
+): WireJsonObject {
+  if (source === "chat") {
+    return body({ model: "source", messages: [{ role: "user", content: "hi" }], reasoning_effort: effort });
+  }
+  if (source === "messages") {
+    return body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      output_config: { effort },
+    });
+  }
+  return body({ model: "source", input: "hi", reasoning: { effort } });
+}
+
+function reasoningEffort(
+  request: Record<string, unknown>,
+  target: "chat" | "messages" | "responses",
+): unknown {
+  if (target === "chat") return request.reasoning_effort;
+  if (target === "messages") return (request.output_config as Record<string, unknown> | undefined)?.effort;
+  return (request.reasoning as Record<string, unknown> | undefined)?.effort;
 }
 
 function toolMediaChatRequest(content: string) {

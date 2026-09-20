@@ -123,6 +123,63 @@ describe("Admin API", () => {
     }
   });
 
+  it("serializes recognized and future reasoning declarations independently", async () => {
+    const dependencies = adminDependencies();
+    const catalog = new CopilotModelCatalog({
+      async fetch() {
+        return { data: [
+          { id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
+          { id: "future", efforts: ["none", "ultra", "low"] },
+          { id: "future-only", efforts: ["ultra"] },
+          { id: "malformed", efforts: ["low", ""] },
+        ].map(({ id, efforts }) => ({
+          id, name: id, vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: { supports: { reasoning_effort: efforts } },
+        })) };
+      },
+    });
+    const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
+    dependencies.registry.get = registry.get.bind(registry);
+    const harness = await createHarness(dependencies);
+    try {
+      const session = await login(harness.gateway, harness.admin);
+      const response = (await read(harness.gateway, "/admin/api/v1/models", session.cookie)).data as {
+        items: Array<{ id: string; reasoningDeclarations: {
+          recognized: string[];
+          unrecognized: string[];
+          state: string;
+        } | null }>;
+      };
+      expect(response.items).toMatchObject([
+        {
+          id: "gpt-5.6-sol",
+          reasoningDeclarations: {
+            recognized: ["none", "low", "medium", "high", "xhigh", "max"],
+            unrecognized: [],
+            state: "value",
+          },
+        },
+        {
+          id: "future",
+          reasoningDeclarations: {
+            recognized: ["none", "low"],
+            unrecognized: ["ultra"],
+            state: "value",
+          },
+        },
+        {
+          id: "future-only",
+          reasoningDeclarations: { recognized: [], unrecognized: ["ultra"], state: "value" },
+        },
+        { id: "malformed", reasoningDeclarations: null },
+      ]);
+    } finally {
+      await harness.close();
+      await catalog.close();
+    }
+  });
+
   it("validates TypeBox DTOs without coercion and maps state failures", async () => {
     const harness = await createHarness();
     try {

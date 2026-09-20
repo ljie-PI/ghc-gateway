@@ -85,7 +85,7 @@ ghcg models set <model-id>
 
 Preferred models are account-specific. If a catalog refresh removes a preferred model, it is marked invalid and must be explicitly reselected. The gateway never silently selects the first model.
 
-The Models Admin view shows read-only account-scoped native HTTP interfaces, token and context limits, reasoning levels, input modalities, tool calling, reasoning summaries, verbosity, and search support. These capabilities are catalog declarations used by the Gateway, not live inference validation. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
+The Models Admin view shows read-only account-scoped native HTTP interfaces, token and context limits, reasoning levels, input modalities, tool calling, reasoning summaries, verbosity, and search support. Recognized reasoning levels are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; future catalog values remain visible as unrecognized declarations but are not advertised as executable Gateway support. These capabilities are catalog declarations used by the Gateway, not live inference validation. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
 
 Unknown or malformed boolean capability declarations fail closed as not supported; unknown protocols and numeric limits remain unavailable. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
 
@@ -169,10 +169,12 @@ Message order, images, function names and arguments, call IDs, result binding, s
 forced tool choice, and `parallel_tool_calls: false` are preserved when the route is eligible.
 File, audio, and server-hosted tools require an explicit adapter and are otherwise rejected.
 
-Optional reasoning effort or budget can be coarsened, and nonportable reasoning presentation or
-opaque state can be omitted on converted routes. These finite, content-free degradations do not
-change success accounting, add warning text, or trigger a retry. Native routes do not apply
-conversion-only degradation.
+Native routes preserve declared reasoning effort values exactly. Converted routes preserve `max`
+when the target declares it; an `xhigh`-only target can coarsen `max` to `xhigh`. Unrecognized future
+efforts are rejected when conversion is required. Other optional reasoning effort or budget can be
+coarsened, and nonportable reasoning presentation or opaque state can be omitted on converted
+routes. These finite, content-free degradations do not change success accounting, add warning text,
+or trigger a retry. Native routes do not apply conversion-only degradation.
 
 Responses continuations stay on their recorded account, model, origin, and upstream protocol.
 For Responses-to-Messages conversion, `previous_response_id` is consumed locally and is never sent

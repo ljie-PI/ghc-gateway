@@ -356,7 +356,7 @@ describe("protocol conversion matrix", () => {
 
   it.each([
     ["none", "none"],
-    ["max", "xhigh"],
+    ["max", "max"],
   ] as const)("uses normalized Responses reasoning effort %s on the extended Chat route", async (source, expected) => {
     const harness = await matrixGateway();
     try {
@@ -652,6 +652,7 @@ describe("protocol conversion matrix", () => {
     ["/v1/chat/completions", "{\"model\":\"native-responses\",\"messages\":[],\"n\":2}", 422],
     ["/v1/messages", "{\"model\":\"native-responses\",\"max_tokens\":8,\"messages\":[],\"stop_sequences\":[\"x\"]}", 400],
     ["/v1/responses", "{\"model\":\"native-messages\",\"input\":\"hi\",\"background\":true}", 422],
+    ["/v1/responses", "{\"model\":\"native-chat\",\"input\":\"hi\",\"reasoning\":{\"effort\":\"ultra\"}}", 422],
   ] as const)("rejects converted request %s before inference", async (path, body, status) => {
     const harness = await matrixGateway();
     try {
@@ -664,25 +665,28 @@ describe("protocol conversion matrix", () => {
     }
   });
 
-  it("preserves unknown extensions on all native paths", async () => {
+  it.each(["max", "ultra"] as const)("preserves %s reasoning and unknown extensions on all native paths", async (effort) => {
     const harness = await matrixGateway();
     try {
       const requests = [
-        protocolRequest("chat", "native-chat", { native_extension: { z: 1 } }),
-        protocolRequest("messages", "native-messages", { native_extension: { z: 2 } }),
-        protocolRequest("responses", "native-responses", { native_extension: { z: 3 } }),
+        protocolRequest("chat", "native-chat", { native_extension: { z: 1 }, reasoning_effort: effort }),
+        protocolRequest("messages", "native-messages", { native_extension: { z: 2 }, output_config: { effort } }),
+        protocolRequest("responses", "native-responses", { native_extension: { z: 3 }, reasoning: { effort } }),
       ];
       for (const request of requests) {
         expect((await harness.gw.fetch(request)).status).toBe(200);
       }
       expect(JSON.parse(decoder.decode(harness.chatBodies[0]))).toMatchObject({
         native_extension: { z: 1 },
+        reasoning_effort: effort,
       });
       expect(JSON.parse(decoder.decode(harness.messagesBodies[0]))).toMatchObject({
         native_extension: { z: 2 },
+        output_config: { effort },
       });
       expect(JSON.parse(decoder.decode(harness.responsesBodies[0]))).toMatchObject({
         native_extension: { z: 3 },
+        reasoning: { effort },
       });
     } finally {
       await harness.close();
@@ -1122,11 +1126,11 @@ function model(id: string, supportedEndpoints: string[]) {
         "reasoning.effort",
         "output_config.effort",
       ],
-      supported_reasoning_efforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      supported_reasoning_efforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
     },
     capabilities: {
       supports: {
-        reasoning_effort: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        reasoning_effort: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         tool_calls: true,
         parallel_tool_calls: true,
         vision: true,

@@ -7,6 +7,55 @@
     "encoder": "shared conversion request codecs"
   },
   {
+    "caseId": "protocol-conversion.reasoning-max-chat-to-responses",
+    "family": "protocol-conversion",
+    "input": "request/reasoning-max-chat-to-responses.input.json",
+    "expected": "request/reasoning-max-chat-to-responses.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
+    "caseId": "protocol-conversion.reasoning-max-chat-to-messages",
+    "family": "protocol-conversion",
+    "input": "request/reasoning-max-chat-to-messages.input.json",
+    "expected": "request/reasoning-max-chat-to-messages.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
+    "caseId": "protocol-conversion.reasoning-max-messages-to-chat",
+    "family": "protocol-conversion",
+    "input": "request/reasoning-max-messages-to-chat.input.json",
+    "expected": "request/reasoning-max-messages-to-chat.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
+    "caseId": "protocol-conversion.reasoning-max-messages-to-responses",
+    "family": "protocol-conversion",
+    "input": "request/reasoning-max-messages-to-responses.input.json",
+    "expected": "request/reasoning-max-messages-to-responses.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
+    "caseId": "protocol-conversion.reasoning-max-responses-to-chat",
+    "family": "protocol-conversion",
+    "input": "request/reasoning-max-responses-to-chat.input.json",
+    "expected": "request/reasoning-max-responses-to-chat.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
+    "caseId": "protocol-conversion.reasoning-max-responses-to-messages",
+    "family": "protocol-conversion",
+    "input": "request/reasoning-max-responses-to-messages.input.json",
+    "expected": "request/reasoning-max-responses-to-messages.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
+    "caseId": "protocol-conversion.reasoning-max-coarsened-to-chat",
+    "family": "protocol-conversion",
+    "input": "request/reasoning-max-coarsened-to-chat.input.json",
+    "expected": "request/reasoning-max-coarsened-to-chat.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
     "caseId": "protocol-conversion.buffered-messages-to-responses",
     "family": "protocol-conversion",
     "input": "buffered/messages-to-responses.input.json",

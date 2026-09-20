@@ -51,7 +51,7 @@
       "maxInputTokens": 128000,
       "contextWindowTokens": 144000,
       "supportedParameters": ["reasoning"],
-      "reasoningEfforts": ["low", "high"]
+      "reasoningEfforts": ["low", "high", "max"]
     },
     {
       "modelId": "claude-beta-live",

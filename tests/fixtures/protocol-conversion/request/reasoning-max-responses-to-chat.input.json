@@ -1,0 +1,1 @@
+{"kind":"request","source":"responses","target":"chat","payload":{"model":"source","input":"hi","reasoning":{"effort":"max"}}}

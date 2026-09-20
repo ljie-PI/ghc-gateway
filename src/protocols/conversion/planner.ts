@@ -1,6 +1,7 @@
 import {
   ModelCapabilityUnavailableError,
-  supportsModelReasoning,
+  resolveModelReasoningEffort,
+  type SupportedReasoningEffort,
 } from "../../copilot/model_capabilities.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import type { WireJsonObject } from "../../serialization/wire_json.js";
@@ -60,9 +61,11 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
 
   const orderedCandidates = decoded.reasoning === undefined
     ? candidates
-    : [...candidates].sort((left, right) => Number(
-      supportsModelReasoning(input.capability.capabilities, right, decoded.reasoning?.effort),
-    ) - Number(supportsModelReasoning(input.capability.capabilities, left, decoded.reasoning?.effort)));
+    : [...candidates].sort((left, right) => reasoningTargetRank(
+      input.capability,
+      right,
+      decoded.reasoning?.effort,
+    ) - reasoningTargetRank(input.capability, left, decoded.reasoning?.effort));
   let lastUnsupported: ConversionContractError | undefined;
   for (const target of orderedCandidates) {
     if (target === input.source) {
@@ -100,6 +103,15 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
     phase: "convert",
     cause: lastUnsupported,
   });
+}
+
+function reasoningTargetRank(
+  capability: ConversionPlanningInput["capability"],
+  target: InferenceProtocol,
+  effort: SupportedReasoningEffort | undefined,
+): number {
+  const resolution = resolveModelReasoningEffort(capability.capabilities, target, effort);
+  return resolution.kind === "exact" ? 2 : resolution.kind === "coarsened" ? 1 : 0;
 }
 
 export function prepareConvertedRequest(

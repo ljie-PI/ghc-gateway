@@ -4827,6 +4827,7 @@ function responseCapability(): EffectiveModelCapabilitySnapshot {
       chatOutputTokenField: { value: "max_tokens", source: "live", conflict: false, liveState: "value" },
       supportedParameters: { value: [], source: "live", conflict: false, liveState: "value" },
       reasoningEfforts: { value: [], source: "live", conflict: false, liveState: "value" },
+      unrecognizedReasoningEfforts: { value: [], source: "live", conflict: false, liveState: "value" },
     },
     revision: { credentialGeneration: 0, catalogGeneration: 1, builtinRevision: null },
   };

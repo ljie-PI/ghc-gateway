@@ -266,6 +266,12 @@ function capabilityModel(modelId: string) {
         conflict: false,
         liveState: "missing" as const,
       },
+      unrecognizedReasoningEfforts: {
+        value: null,
+        source: "unknown" as const,
+        conflict: false,
+        liveState: "missing" as const,
+      },
     },
     revision: {
       credentialGeneration: 4,

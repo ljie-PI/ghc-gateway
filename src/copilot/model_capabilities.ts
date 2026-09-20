@@ -2,7 +2,8 @@ import type { ModelInfoLookup } from "./model_catalog.js";
 
 export type NativeModelProtocol = "chat" | "messages" | "responses";
 export type ChatOutputTokenField = "max_tokens" | "max_completion_tokens";
-export type SupportedReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export const SUPPORTED_REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type SupportedReasoningEffort = typeof SUPPORTED_REASONING_EFFORTS[number];
 export type ModelInputModality = "text" | "image";
 export type CapabilityFieldState = "missing" | "value" | "malformed";
 export type CapabilitySource = "live" | "builtin" | "unknown";
@@ -37,7 +38,7 @@ export interface DeclaredModelCapabilities {
   readonly defaultOutputTokens: DeclaredField<number>;
   readonly chatOutputTokenField: DeclaredField<ChatOutputTokenField>;
   readonly supportedParameters: DeclaredField<readonly string[]>;
-  readonly reasoningEfforts: DeclaredField<readonly SupportedReasoningEffort[]>;
+  readonly reasoningEfforts: DeclaredField<ReasoningEffortDeclaration>;
   readonly reasoningEffort: DeclaredField<boolean>;
   readonly toolCalls: DeclaredField<boolean>;
   readonly parallelToolCalls: DeclaredField<boolean>;
@@ -45,6 +46,11 @@ export interface DeclaredModelCapabilities {
   readonly reasoningSummaries: DeclaredField<boolean>;
   readonly verbosity: DeclaredField<boolean>;
   readonly search: DeclaredField<boolean>;
+}
+
+export interface ReasoningEffortDeclaration {
+  readonly recognized: readonly SupportedReasoningEffort[];
+  readonly unrecognized: readonly string[];
 }
 
 export interface EffectiveCapabilityField<T> {
@@ -66,6 +72,7 @@ export interface ModelCapabilityProfile {
   readonly chatOutputTokenField: EffectiveCapabilityField<ChatOutputTokenField>;
   readonly supportedParameters: EffectiveCapabilityField<readonly string[]>;
   readonly reasoningEfforts: EffectiveCapabilityField<readonly SupportedReasoningEffort[]>;
+  readonly unrecognizedReasoningEfforts: EffectiveCapabilityField<readonly string[]>;
 }
 
 export interface ModelCapabilities {
@@ -90,6 +97,25 @@ export function supportsModelReasoning(
     && (effort === undefined || capabilities.reasoningLevels.includes(effort));
 }
 
+export type ModelReasoningEffortResolution =
+  | { readonly kind: "exact"; readonly effort: SupportedReasoningEffort }
+  | { readonly kind: "coarsened"; readonly effort: SupportedReasoningEffort }
+  | { readonly kind: "unsupported" };
+
+export function resolveModelReasoningEffort(
+  capabilities: Pick<ModelCapabilities, "reasoningLevels" | "reasoningProtocols">,
+  protocol: NativeModelProtocol,
+  effort: SupportedReasoningEffort | undefined,
+): ModelReasoningEffortResolution {
+  if (effort !== undefined && supportsModelReasoning(capabilities, protocol, effort)) {
+    return { kind: "exact", effort };
+  }
+  if (effort === "max" && supportsModelReasoning(capabilities, protocol, "xhigh")) {
+    return { kind: "coarsened", effort: "xhigh" };
+  }
+  return { kind: "unsupported" };
+}
+
 export interface BuiltinModelCapabilities {
   readonly revision: string;
   readonly capabilities: DeclaredModelCapabilities;
@@ -107,7 +133,7 @@ export const UNKNOWN_DECLARATIONS: DeclaredModelCapabilities = Object.freeze({
   defaultOutputTokens: missing<number>(),
   chatOutputTokenField: missing<ChatOutputTokenField>(),
   supportedParameters: missing<readonly string[]>(),
-  reasoningEfforts: missing<readonly SupportedReasoningEffort[]>(),
+  reasoningEfforts: missing<ReasoningEffortDeclaration>(),
   reasoningEffort: missing<boolean>(),
   toolCalls: missing<boolean>(),
   parallelToolCalls: missing<boolean>(),
@@ -224,7 +250,7 @@ export function builtinCapabilitiesFromModelInfo(
         ? parseChatOutputTokenField(record.chat_output_token_field)
         : missing<ChatOutputTokenField>(),
       supportedParameters: missing<readonly string[]>(),
-      reasoningEfforts: missing<readonly SupportedReasoningEffort[]>(),
+      reasoningEfforts: missing<ReasoningEffortDeclaration>(),
       reasoningEffort: missing<boolean>(),
       toolCalls: missing<boolean>(),
       parallelToolCalls: missing<boolean>(),
@@ -412,14 +438,18 @@ function parseSupportedParameters(input: unknown): DeclaredField<readonly string
   return value([...new Set(input)].sort());
 }
 
-function parseReasoningEfforts(input: unknown): DeclaredField<readonly SupportedReasoningEffort[]> {
-  const order: readonly SupportedReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
-  const allowed = new Set(order);
-  if (!Array.isArray(input) || input.some((value) => typeof value !== "string" || !allowed.has(value as SupportedReasoningEffort))) {
+function parseReasoningEfforts(input: unknown): DeclaredField<ReasoningEffortDeclaration> {
+  if (!Array.isArray(input) || input.some((value) => typeof value !== "string" || value.length === 0)) {
     return malformed();
   }
-  const efforts = new Set(input as SupportedReasoningEffort[]);
-  return value(order.filter((effort) => efforts.has(effort)));
+  const efforts = new Set(input as string[]);
+  const recognized = SUPPORTED_REASONING_EFFORTS.filter((effort) => efforts.has(effort));
+  const recognizedSet = new Set<string>(SUPPORTED_REASONING_EFFORTS);
+  const unrecognized = [...efforts].filter((effort) => !recognizedSet.has(effort)).sort();
+  return value(Object.freeze({
+    recognized: Object.freeze(recognized),
+    unrecognized: Object.freeze(unrecognized),
+  }));
 }
 
 function parseBoolean(input: unknown): DeclaredField<boolean> {
@@ -428,7 +458,9 @@ function parseBoolean(input: unknown): DeclaredField<boolean> {
 
 function parseReasoningSupport(input: unknown): DeclaredField<boolean> {
   const efforts = parseReasoningEfforts(input);
-  return efforts.state === "value" ? value((efforts.value?.length ?? 0) > 0) : malformed();
+  return efforts.state === "value"
+    ? value((efforts.value?.recognized.length ?? 0) > 0)
+    : malformed();
 }
 
 function missing<T>(): DeclaredField<T> {

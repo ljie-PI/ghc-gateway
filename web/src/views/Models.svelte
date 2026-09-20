@@ -15,6 +15,15 @@
   const requests = new AbortController();
   const selectedData = $derived.by(() => data?.accountId === accountId ? data : null);
 
+  function reasoningLevels(model: AdminModels["items"][number]): string {
+    if (model.reasoningDeclarations === null) return "Unavailable";
+    const declared = [
+      ...model.reasoningDeclarations.recognized,
+      ...model.reasoningDeclarations.unrecognized.map((level) => `${level} (unrecognized)`),
+    ];
+    return declared.join(", ") || "Unavailable";
+  }
+
   onMount(() => {
     void initialize();
     return () => {
@@ -199,7 +208,7 @@
                     <dl>
                       <div><dt>Context window</dt><dd>{model.capabilities.contextWindowTokens?.toLocaleString() ?? "Unavailable"}</dd></div>
                       <div><dt>Maximum context window</dt><dd>{model.capabilities.maxContextWindowTokens?.toLocaleString() ?? "Unavailable"}</dd></div>
-                      <div><dt>Reasoning levels</dt><dd>{model.capabilities.reasoningLevels.join(", ") || "Unavailable"}</dd></div>
+                      <div><dt>Reasoning levels</dt><dd>{reasoningLevels(model)}</dd></div>
                       <div><dt>Input modalities</dt><dd>{model.capabilities.inputModalities.join(", ")}</dd></div>
                       <div><dt>Tool calling</dt><dd>{supportLabel(model.capabilities.toolCalling)}</dd></div>
                       <div><dt>Parallel tool calling</dt><dd>{supportLabel(model.capabilities.parallelToolCalling)}</dd></div>
