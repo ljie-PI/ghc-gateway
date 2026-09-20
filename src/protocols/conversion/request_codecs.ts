@@ -1,5 +1,5 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
-import { chooseOutputTokenBudget, supportsModelReasoning } from "../../copilot/model_capabilities.js";
+import { chooseOutputTokenBudget, resolveModelReasoningEffort } from "../../copilot/model_capabilities.js";
 import {
   duplicateMemberNames,
   isWireJsonArray,
@@ -1366,12 +1366,9 @@ function encodeChatRequest(
     unsupported("REQ-R-EXT-STREAM");
   }
   validateConditionalTargetParameters(request, context.capability, "chat");
-  const reasoning = supportsTargetReasoning(context.capability, "chat", request.reasoning)
-    ? request.reasoning
-    : undefined;
-  const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
-    ? ["reasoning.presentation_omitted"]
-    : [];
+  const targetReasoning = reasoningForTarget(context.capability, "chat", request.reasoning);
+  const reasoning = targetReasoning.reasoning;
+  const reasoningDegradations = targetReasoning.degradations;
   const messages = request.responseBindings === undefined
     ? encodeChatMessages(request)
     : request.responseBindings.chatMessages;
@@ -1419,16 +1416,9 @@ function encodeResponsesRequest(
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
   validateConditionalTargetParameters(request, context.capability, "responses");
-  const reasoning = supportsTargetReasoning(
-    context.capability,
-    "responses",
-    request.reasoning,
-  )
-    ? request.reasoning
-    : undefined;
-  const reasoningDegradations: ConversionDegradationRule[] = request.reasoning !== undefined && reasoning === undefined
-    ? ["reasoning.presentation_omitted"]
-    : [];
+  const targetReasoning = reasoningForTarget(context.capability, "responses", request.reasoning);
+  const reasoning = targetReasoning.reasoning;
+  const reasoningDegradations = targetReasoning.degradations;
   if (request.stop !== undefined) {
     unsupported("REQ-TARGET-R-STOP");
   }
@@ -1478,22 +1468,14 @@ function encodeMessagesRequest(
   if (request.outputFormat?.kind === "json_schema" && request.outputFormat.description !== undefined) {
     unsupported("REQ-TARGET-M-FORMAT-DESCRIPTION");
   }
-  const reasoningSupported = supportsTargetReasoning(
-    context.capability,
-    "messages",
-    request.reasoning,
-  );
-  const targetReasoning = !reasoningSupported || request.reasoning?.effort === "none"
+  const resolvedReasoning = reasoningForTarget(context.capability, "messages", request.reasoning);
+  const targetReasoning = resolvedReasoning.reasoning?.effort === "none"
     ? undefined
-    : request.reasoning?.effort === "minimal"
+    : resolvedReasoning.reasoning?.effort === "minimal"
       ? { effort: "low" as const }
-      : request.reasoning;
-  const targetDegradations: ConversionDegradationRule[] = request.reasoning?.effort === "minimal"
-    ? ["reasoning.budget_coarsened"]
-    : [];
-  if (request.reasoning !== undefined && !reasoningSupported) {
-    targetDegradations.push("reasoning.presentation_omitted");
-  }
+      : resolvedReasoning.reasoning;
+  const targetDegradations = [...resolvedReasoning.degradations];
+  if (resolvedReasoning.reasoning?.effort === "minimal") targetDegradations.push("reasoning.budget_coarsened");
   const budget = outputBudget(request.maxOutputTokens, context.capability);
   const split = splitMessagesInstructions(request);
   const body = wireObject([
@@ -1513,12 +1495,21 @@ function encodeMessagesRequest(
   return encodedRequest(request, body, targetDegradations);
 }
 
-function supportsTargetReasoning(
+function reasoningForTarget(
   capability: Readonly<EffectiveModelCapabilitySnapshot>,
   target: InferenceProtocol,
   reasoning: SemanticReasoning | undefined,
-): boolean {
-  return supportsModelReasoning(capability.capabilities, target, reasoning?.effort);
+): {
+  readonly reasoning: SemanticReasoning | undefined;
+  readonly degradations: readonly ConversionDegradationRule[];
+} {
+  if (reasoning === undefined) return { reasoning: undefined, degradations: [] };
+  const resolution = resolveModelReasoningEffort(capability.capabilities, target, reasoning.effort);
+  if (resolution.kind === "exact") return { reasoning: { effort: resolution.effort }, degradations: [] };
+  if (resolution.kind === "coarsened") {
+    return { reasoning: { effort: resolution.effort }, degradations: ["reasoning.budget_coarsened"] };
+  }
+  return { reasoning: undefined, degradations: ["reasoning.presentation_omitted"] };
 }
 
 function validateConditionalTargetParameters(
@@ -2033,13 +2024,10 @@ function reasoningFromEffort(
   if (value === "none" && allowNone) {
     return { effort: "none" };
   }
-  if (value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh") {
+  if (value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max") {
     return { effort: value };
   }
-  if (value === "max") {
-    return { effort: "xhigh" };
-  }
-  invalid(ruleId);
+  unsupported(ruleId);
 }
 
 function mergeReasoning(

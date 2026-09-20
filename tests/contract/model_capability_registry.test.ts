@@ -174,6 +174,74 @@ describe("model capability registry", () => {
     });
   });
 
+  it("preserves future reasoning declarations without advertising them as executable levels", async () => {
+    const harness = await createHarness({
+      "github.com/1": [
+        {
+          id: "gpt-5.6-sol", name: "GPT-5.6 Sol", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: { supports: {
+            reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
+          } },
+        },
+        {
+          id: "future-mixed", name: "Future mixed", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          supported_reasoning_efforts: ["ultra", "low", "none", "ultra"],
+          capabilities: { supports: { reasoning_effort: ["none", "ultra", "low"] } },
+        },
+        {
+          id: "future-only", name: "Future only", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          supported_parameters: ["reasoning"],
+          supported_reasoning_efforts: ["ultra"],
+        },
+        {
+          id: "malformed-future", name: "Malformed future", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: { supports: { reasoning_effort: ["low", ""] } },
+        },
+        {
+          id: "malformed-member", name: "Malformed member", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: { supports: { reasoning_effort: ["low", 42] } },
+        },
+      ],
+    });
+    const snapshot = await harness.registry.get(harness.account1, signal);
+
+    expect(capability(snapshot, "gpt-5.6-sol").capabilities).toMatchObject({
+      reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"],
+      reasoningProtocols: ["responses"],
+    });
+    expect(capability(snapshot, "gpt-5.6-sol").profile.unrecognizedReasoningEfforts.value).toEqual([]);
+    expect(capability(snapshot, "future-mixed").capabilities).toMatchObject({
+      reasoningLevels: ["none", "low"],
+      reasoningProtocols: ["responses"],
+    });
+    expect(capability(snapshot, "future-mixed").profile.unrecognizedReasoningEfforts.value).toEqual(["ultra"]);
+    expect(capability(snapshot, "future-only").capabilities).toMatchObject({
+      reasoningLevels: [],
+      reasoningProtocols: [],
+    });
+    expect(capability(snapshot, "future-only").profile).toMatchObject({
+      reasoningEfforts: { value: [] },
+      unrecognizedReasoningEfforts: { value: ["ultra"] },
+    });
+    expect(capability(snapshot, "malformed-future").capabilities).toMatchObject({
+      reasoningLevels: [],
+      reasoningProtocols: [],
+    });
+    expect(capability(snapshot, "malformed-future").profile).toMatchObject({
+      reasoningEfforts: { value: null, liveState: "malformed" },
+      unrecognizedReasoningEfforts: { value: null, liveState: "malformed" },
+    });
+    expect(capability(snapshot, "malformed-member").profile).toMatchObject({
+      reasoningEfforts: { value: null, liveState: "malformed" },
+      unrecognizedReasoningEfforts: { value: null, liveState: "malformed" },
+    });
+  });
+
   it("applies field precedence without unioning conflicts or replacing explicit empty values", async () => {
     const builtins: BuiltinModelCapabilityLookup = {
       get() {

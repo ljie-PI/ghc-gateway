@@ -236,6 +236,11 @@ function modelItem(input: {
       verbosity: false,
       search: false,
     },
+    reasoningDeclarations: {
+      recognized: ["none", "high"],
+      unrecognized: [],
+      state: "value",
+    },
     protocols: ["chat", "responses"],
   };
 }

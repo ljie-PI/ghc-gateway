@@ -5,6 +5,7 @@ import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { ModelCapabilityRegistry } from "../copilot/capability_registry.js";
 import type {
+  CapabilityFieldState,
   NativeModelProtocol,
   ModelCapabilities,
 } from "../copilot/model_capabilities.js";
@@ -112,6 +113,11 @@ export interface AdminModels {
     readonly name: string;
     readonly vendor: string;
     readonly capabilities: ModelCapabilities;
+    readonly reasoningDeclarations: {
+      readonly recognized: ModelCapabilities["reasoningLevels"];
+      readonly unrecognized: readonly string[];
+      readonly state: CapabilityFieldState;
+    } | null;
     readonly protocols: readonly NativeModelProtocol[] | null;
     readonly maxInputTokens: number | null;
     readonly maxOutputTokens: number | null;
@@ -614,6 +620,13 @@ export class AdminManagementApi {
         name: model.name,
         vendor: model.vendor,
         capabilities: model.capabilities,
+        reasoningDeclarations: model.profile.reasoningEfforts.value === null
+          ? null
+          : {
+            recognized: model.profile.reasoningEfforts.value,
+            unrecognized: model.profile.unrecognizedReasoningEfforts.value ?? [],
+            state: model.profile.reasoningEfforts.liveState,
+          },
         protocols: model.protocols.value,
         maxInputTokens: model.maxInputTokens.value,
         maxOutputTokens: model.maxOutputTokens.value,

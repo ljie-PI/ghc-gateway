@@ -38,6 +38,10 @@
         {
           "effort": "high",
           "description": "High"
+        },
+        {
+          "effort": "max",
+          "description": "Max"
         }
       ],
       "shell_type": "disabled",

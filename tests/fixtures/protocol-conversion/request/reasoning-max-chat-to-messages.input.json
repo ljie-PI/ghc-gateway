@@ -1,0 +1,1 @@
+{"kind":"request","source":"chat","target":"messages","payload":{"model":"source","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":8,"reasoning_effort":"max"}}

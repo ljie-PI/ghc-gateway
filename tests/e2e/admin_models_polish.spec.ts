@@ -359,6 +359,56 @@ test("models label per-request token ceilings and retain unknowns and budget det
   await expect(unknown.locator("input, select, fieldset")).toHaveCount(0);
 });
 
+test("models distinguish recognized, future, and unavailable reasoning declarations", async ({ page }) => {
+  await openModels(page, (fixture) => {
+    const base = fixture.state.models.items[0]!;
+    fixture.state.models = {
+      ...fixture.state.models,
+      items: [
+        {
+          ...base,
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          reasoningDeclarations: {
+            recognized: ["none", "low", "medium", "high", "xhigh", "max"],
+            unrecognized: [], state: "value",
+          },
+        },
+        {
+          ...base,
+          id: "future",
+          name: "Future",
+          reasoningDeclarations: {
+            recognized: ["none", "low"], unrecognized: ["ultra"], state: "value",
+          },
+        },
+        {
+          ...base,
+          id: "future-only",
+          name: "Future only",
+          reasoningDeclarations: { recognized: [], unrecognized: ["ultra"], state: "value" },
+        },
+        {
+          ...base,
+          id: "unavailable",
+          name: "Malformed declaration",
+          reasoningDeclarations: null,
+        },
+      ],
+    };
+  });
+  for (const [id, expected] of [
+    ["gpt-5.6-sol", "none, low, medium, high, xhigh, max"],
+    ["future", "none, low, ultra (unrecognized)"],
+    ["future-only", "ultra (unrecognized)"],
+    ["unavailable", "Unavailable"],
+  ] as const) {
+    const model = page.locator(`tbody[data-model-id="${id}"]`);
+    await model.getByText("Model capabilities", { exact: true }).click();
+    await expect(model.locator("dl")).toContainText(`Reasoning levels${expected}`);
+  }
+});
+
 test("models allow inspection without metadata editing or preference actions", async ({ page }) => {
   const fixture = await openModels(page);
   const model = page.locator("tbody[data-model-id=\"claude-beta\"]");

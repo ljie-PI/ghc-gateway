@@ -12,6 +12,7 @@ import {
   type ModelCapabilities,
   type ModelCapabilityProfile,
   type NativeModelProtocol,
+  type ReasoningEffortDeclaration,
 } from "./model_capabilities.js";
 
 export interface EffectiveModelCapabilitySnapshot {
@@ -128,7 +129,15 @@ export class ModelCapabilityRegistry {
     const reasoningEfforts = effectiveField(
       live.reasoningEfforts,
       fallback.reasoningEfforts,
-      sameStrings,
+      sameReasoningDeclarations,
+    );
+    const recognizedReasoningEfforts = mapEffectiveField(
+      reasoningEfforts,
+      (declaration) => declaration.recognized,
+    );
+    const unrecognizedReasoningEfforts = mapEffectiveField(
+      reasoningEfforts,
+      (declaration) => declaration.unrecognized,
     );
     const defaultOutputTokens = effectiveField(
       live.defaultOutputTokens,
@@ -138,12 +147,16 @@ export class ModelCapabilityRegistry {
     const effectiveProtocols = protocols.value ?? [];
     const reasoningProtocols = reasoningEfforts.value === null
       ? []
-      : effectiveReasoningProtocols(
-        effectiveProtocols,
-        supportedParameters,
-        effectiveField(live.reasoningEffort, fallback.reasoningEffort),
-      );
-    const reasoningLevels = reasoningProtocols.length === 0 ? [] : reasoningEfforts.value ?? [];
+      : reasoningEfforts.value.recognized.length === 0
+        ? []
+        : effectiveReasoningProtocols(
+          effectiveProtocols,
+          supportedParameters,
+          effectiveField(live.reasoningEffort, fallback.reasoningEffort),
+        );
+    const reasoningLevels = reasoningProtocols.length === 0
+      ? []
+      : reasoningEfforts.value?.recognized ?? [];
     const toolCalling = supportedBoolean(live.toolCalls, fallback.toolCalls);
     const parallelToolCalling = toolCalling
       && supportedBoolean(live.parallelToolCalls, fallback.parallelToolCalls);
@@ -179,7 +192,10 @@ export class ModelCapabilityRegistry {
         search: supportedBoolean(live.search, fallback.search),
       },
       profile: {
-        chatOutputTokenField, supportedParameters, reasoningEfforts,
+        chatOutputTokenField,
+        supportedParameters,
+        reasoningEfforts: recognizedReasoningEfforts,
+        unrecognizedReasoningEfforts,
         contextWindowTokens,
       },
       revision: {
@@ -206,6 +222,26 @@ function deepFreeze<T>(value: T): T {
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameReasoningDeclarations(
+  left: ReasoningEffortDeclaration,
+  right: ReasoningEffortDeclaration,
+): boolean {
+  return sameStrings(left.recognized, right.recognized)
+    && sameStrings(left.unrecognized, right.unrecognized);
+}
+
+function mapEffectiveField<T, U>(
+  field: EffectiveCapabilityField<T>,
+  map: (value: T) => U,
+): EffectiveCapabilityField<U> {
+  return Object.freeze({
+    value: field.value === null ? null : map(field.value),
+    source: field.source,
+    conflict: field.conflict,
+    liveState: field.liveState,
+  });
 }
 
 const REASONING_PARAMETERS: Readonly<Record<NativeModelProtocol, readonly string[]>> = {

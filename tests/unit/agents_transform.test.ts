@@ -153,11 +153,11 @@ describe("agent configuration projection", () => {
       id: "capable",
       fields: {
         supported_endpoints: ["/responses"],
-        supported_reasoning_efforts: ["high", "minimal", "none"],
+        supported_reasoning_efforts: ["ultra", "max", "high", "minimal", "none"],
         capabilities: {
           limits: { max_prompt_tokens: 120_000, max_context_window_tokens: 144_000 },
           supports: {
-            reasoning_effort: ["high", "minimal", "none"], tool_calls: true, parallel_tool_calls: true, vision: true,
+            reasoning_effort: ["none", "minimal", "high", "max", "ultra"], tool_calls: true, parallel_tool_calls: true, vision: true,
             reasoning_summaries: true, verbosity: true, search: true,
           },
         },
@@ -173,6 +173,7 @@ describe("agent configuration projection", () => {
         { effort: "none", description: "None" },
         { effort: "minimal", description: "Minimal" },
         { effort: "high", description: "High" },
+        { effort: "max", description: "Max" },
       ],
       support_verbosity: true,
       supports_reasoning_summaries: true,

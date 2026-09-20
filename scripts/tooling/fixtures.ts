@@ -16,6 +16,7 @@ import { parseOpenaiChatCompletionsSse } from "../../src/protocols/openai_chat_c
 import { CopilotModelCatalog } from "../../src/copilot/model_catalog.js";
 import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.js";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
+import type { SupportedReasoningEffort } from "../../src/copilot/model_capabilities.js";
 import { serializeOpenaiModels } from "../../src/protocols/model_catalog/wire.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
@@ -605,6 +606,7 @@ async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): P
     readonly source: InferenceProtocol;
     readonly target: InferenceProtocol;
     readonly payload: unknown;
+    readonly targetReasoningEfforts?: readonly SupportedReasoningEffort[];
   };
   if (input.kind === "request") {
     const request = wireObjectFromUnknown(input.payload);
@@ -613,7 +615,7 @@ async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): P
       input.target,
       request,
       "fixture-target",
-      fixtureConversionCapability(input.target),
+      fixtureConversionCapability(input.target, input.targetReasoningEfforts),
     ).bytes);
   }
   if (input.kind === "buffered") {
@@ -673,7 +675,7 @@ interface AgentConfigFixtureInput {
     readonly maxInputTokens: number | null;
     readonly contextWindowTokens: number | null;
     readonly supportedParameters: readonly string[] | null;
-    readonly reasoningEfforts: readonly ("none" | "minimal" | "low" | "medium" | "high" | "xhigh")[] | null;
+    readonly reasoningEfforts: readonly ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
   }[];
 }
 
@@ -760,7 +762,10 @@ function wireObjectFromUnknown(value: unknown): WireJsonObject {
   return parsed;
 }
 
-function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveModelCapabilitySnapshot {
+function fixtureConversionCapability(
+  protocol: InferenceProtocol,
+  reasoningEfforts: readonly SupportedReasoningEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+): EffectiveModelCapabilitySnapshot {
   return {
     accountId: "github.com/fixture",
     modelId: "fixture-target",
@@ -775,7 +780,7 @@ function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveMode
       source: "live",
       valid: true,
     },
-    capabilities: fixtureModelCapabilities([protocol]),
+    capabilities: { ...fixtureModelCapabilities([protocol]), reasoningLevels: reasoningEfforts },
     profile: {
       chatOutputTokenField: {
         value: "max_tokens",
@@ -800,10 +805,13 @@ function fixtureConversionCapability(protocol: InferenceProtocol): EffectiveMode
         liveState: "value",
       },
       reasoningEfforts: {
-        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        value: reasoningEfforts,
         source: "live",
         conflict: false,
         liveState: "value",
+      },
+      unrecognizedReasoningEfforts: {
+        value: [], source: "live", conflict: false, liveState: "value",
       },
     },
     revision: {
@@ -1036,10 +1044,13 @@ function fixtureCapability(
         liveState: "missing",
       },
       reasoningEfforts: {
-        value: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        value: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
         source: "builtin",
         conflict: false,
         liveState: "missing",
+      },
+      unrecognizedReasoningEfforts: {
+        value: [], source: "builtin", conflict: false, liveState: "missing",
       },
     },
     revision: { credentialGeneration: 0, catalogGeneration: 0, builtinRevision: null },
@@ -1050,7 +1061,7 @@ function fixtureModelCapabilities(protocols: readonly InferenceProtocol[]) {
   return {
     contextWindowTokens: 128_000,
     maxContextWindowTokens: 128_000,
-    reasoningLevels: ["none", "minimal", "low", "medium", "high", "xhigh"] as const,
+    reasoningLevels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const,
     reasoningProtocols: protocols,
     inputModalities: ["text", "image"] as const,
     toolCalling: true,
