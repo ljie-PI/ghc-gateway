@@ -5,6 +5,7 @@ import { authenticatedControlRequest } from "../../src/cli/control_client.js";
 import { createGateway } from "../../src/gateway/create_gateway.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
+import { runManagedChild } from "../../src/daemon/child.js";
 import { runDaemonRuntime, spawnDaemonProcess } from "../../src/daemon/runtime.js";
 
 describe("daemon runtime listener", () => {
@@ -85,6 +86,35 @@ describe("daemon runtime listener", () => {
       "cleanup",
       "release",
     ]);
+  });
+
+  it("passes true-default provenance to foreground identity acquisition", async () => {
+    const shutdown = new AbortController();
+    let observedSource: "default" | "custom" | undefined;
+    await runDaemonRuntime({
+      startup: parseStartupConfig([], {}, { homedir: "Q:/tmp/runtime-default" }),
+      env: {},
+      managed: false,
+      shutdownSignal: shutdown.signal,
+      stderr: { write: () => undefined },
+      composeGateway: async () => ({
+        fetch: async () => new Response(null),
+        listen: async () => ({ host: "127.0.0.1", port: 31_400 }),
+        close: async () => undefined,
+      }),
+      onListening: () => shutdown.abort(),
+      dependencies: {
+        pid: 123,
+        captureProcessIdentity: async () => "windows:1",
+        createSecret: () => "secret",
+        acquireIdentity: (_dataDir, identity, dataDirSource) => {
+          observedSource = dataDirSource;
+          return { identity, cleanup: () => true, release: () => undefined };
+        },
+        createLogger: () => ({ write() {} }),
+      },
+    });
+    expect(observedSource).toBe("default");
   });
 
   it("cleans and releases its published identity when composition fails", async () => {
@@ -234,6 +264,48 @@ describe("production lifecycle adapter abort acknowledgement", () => {
 });
 
 describe("production daemon spawn adapter", () => {
+  it("passes the startup data-directory source to the managed child", async () => {
+    const child = new EventEmitter() as ChildProcess;
+    Object.defineProperty(child, "pid", { value: 4242 });
+    child.unref = vi.fn(() => child);
+    let observedArgs: readonly string[] = [];
+    const spawning = spawnDaemonProcess(
+      process.execPath,
+      "child.js",
+      {},
+      parseStartupConfig([], {}, { homedir: "Q:/tmp/managed-default" }),
+      { signal: new AbortController().signal, deadlineMs: Date.now() + 1_000 },
+      (_command, args) => {
+        observedArgs = args;
+        return child;
+      },
+    );
+    child.emit("spawn");
+    await spawning;
+    expect(observedArgs).toContain("--internal-data-dir-source");
+    expect(observedArgs[observedArgs.indexOf("--internal-data-dir-source") + 1]).toBe("default");
+  });
+
+  it("strictly parses managed-child provenance and treats a missing marker as custom", async () => {
+    const captured = [] as Array<ReturnType<typeof parseStartupConfig>>;
+    const captureRuntime: typeof runDaemonRuntime = async (options) => {
+      captured.push(options.startup);
+    };
+    await runManagedChild(["--data-dir", "managed", "--internal-data-dir-source", "default"], {}, captureRuntime);
+    await runManagedChild(["--data-dir", "managed"], {}, captureRuntime);
+    expect(captured.map((startup) => startup.dataDirSource)).toEqual(["default", "custom"]);
+
+    await expect(runManagedChild([
+      "--data-dir", "managed",
+      "--internal-data-dir-source", "default",
+      "--internal-data-dir-source", "custom",
+    ], {}, captureRuntime)).rejects.toThrow();
+    await expect(runManagedChild([
+      "--data-dir", "managed",
+      "--internal-data-dir-source", "inferred",
+    ], {}, captureRuntime)).rejects.toThrow();
+  });
+
   it("passes the abort signal to child_process and waits for a pre-spawn abort acknowledgement", async () => {
     const child = new EventEmitter() as ChildProcess;
     const abort = new AbortController();

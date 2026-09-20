@@ -58,7 +58,6 @@ export function parseCli(argv: readonly string[], options: ParseCliOptions = {})
   const commandContext = {
     env,
     homedir,
-    dataDir,
     ...(globals.dataDir === undefined ? {} : { cliDataDir: globals.dataDir }),
   };
   const command = parseCommand(globals.rest, commandContext);
@@ -108,7 +107,7 @@ function parseGlobal(argv: readonly string[]): { readonly json: boolean; readonl
 
 function parseCommand(
   tokens: readonly string[],
-  context: { readonly env: NodeJS.ProcessEnv; readonly homedir: string; readonly dataDir: string; readonly cliDataDir?: string },
+  context: { readonly env: NodeJS.ProcessEnv; readonly homedir: string; readonly cliDataDir?: string },
 ): ParsedCliCommand {
   const [command, groupAction, third, fourth, ...extra] = tokens;
   if (command === undefined || command === "--help") {
@@ -133,7 +132,11 @@ function parseCommand(
     if (tokens.length !== 1) {
       throw new CliError("usage_error");
     }
-    return { kind: "lifecycle", action: command };
+    return {
+      kind: "lifecycle",
+      action: command,
+      ...(command === "restart" ? { startup: parseServeStartup([], context) } : {}),
+    };
   }
   if (command === "auth") {
     if (groupAction === "--help") {
@@ -281,9 +284,9 @@ function parseCommand(
 
 function parseServeStartup(
   tokens: readonly string[],
-  context: { readonly env: NodeJS.ProcessEnv; readonly homedir: string; readonly dataDir: string; readonly cliDataDir?: string },
+  context: { readonly env: NodeJS.ProcessEnv; readonly homedir: string; readonly cliDataDir?: string },
 ): StartupConfig {
-  const argv: string[] = ["--data-dir", context.cliDataDir ?? context.dataDir];
+  const argv: string[] = context.cliDataDir === undefined ? [] : ["--data-dir", context.cliDataDir];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === "--port" || token === "--log-level" || token === "--data-dir") {

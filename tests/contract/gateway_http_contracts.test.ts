@@ -137,6 +137,7 @@ describe("startup config", () => {
     expect(parsed.port).toBe(4000);
     expect(parsed.logLevel).toBe("debug");
     expect(parsed.dataDir.endsWith("data")).toBe(true);
+    expect(parsed.dataDirSource).toBe("custom");
 
     const fromEnv = parseStartupConfig([], {
       GHC_GATEWAY_PORT: "255",
@@ -145,10 +146,20 @@ describe("startup config", () => {
     expect(fromEnv.port).toBe(255);
     expect(fromEnv.logLevel).toBe("error");
     expect(fromEnv.dataDir.replaceAll("\\", "/")).toContain(".ghc-gateway");
+    expect(fromEnv.dataDirSource).toBe("default");
 
     const defaults = parseStartupConfig([], {}, { homedir: "Q:\\home" });
     expect(defaults.port).toBe(31400);
     expect(defaults.logLevel).toBe("info");
+    expect(defaults.dataDirSource).toBe("default");
+  });
+
+  it("treats every explicit data directory as custom and rejects empty overrides", () => {
+    const defaultPath = path.join("Q:\\home", ".ghc-gateway");
+    expect(parseStartupConfig(["--data-dir", defaultPath], {}, { homedir: "Q:\\home" }).dataDirSource).toBe("custom");
+    expect(parseStartupConfig([], { GHC_GATEWAY_DATA_DIR: defaultPath }, { homedir: "Q:\\home" }).dataDirSource).toBe("custom");
+    expect(() => parseStartupConfig(["--data-dir", ""], {}, { homedir: "Q:\\home" })).toThrow(StartupConfigError);
+    expect(() => parseStartupConfig([], { GHC_GATEWAY_DATA_DIR: "" }, { homedir: "Q:\\home" })).toThrow(StartupConfigError);
   });
 
   it("rejects non-loopback bind before listen", () => {

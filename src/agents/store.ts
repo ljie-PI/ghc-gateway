@@ -68,9 +68,15 @@ export class AgentStore {
     const lockPath = path.join(this.directory, "lock.db");
     if (exists(lockPath)) await assertPrivate(lockPath, false);
     if (!exists(lockPath)) {
-      const fd = fs.openSync(lockPath, "wx", 0o600);
-      fs.closeSync(fd);
-      await protect(lockPath);
+      let created = false;
+      try {
+        const fd = fs.openSync(lockPath, "wx", 0o600);
+        fs.closeSync(fd);
+        created = true;
+      } catch (error: unknown) {
+        if (!isAlreadyExists(error)) throw error;
+      }
+      if (created) await protect(lockPath);
     }
     await assertPrivateDatabase(lockPath);
     await assertPrivateDatabaseSidecars(lockPath);
@@ -186,7 +192,8 @@ export class AgentStore {
 
   private async save(state: AgentState, beforeCommit?: () => void): Promise<void> {
     if (!Value.Check(StateSchema, state)) throw new AgentError("agent_recovery_required");
-    validateStatePaths(state, this.agent);
+    const normalized = normalizeStateImages(state);
+    validateStatePaths(normalized, this.agent);
     await this.checkDirectory();
     if (exists(this.statePath)) await assertPrivateDatabase(this.statePath);
     beforeCommit?.();
@@ -200,7 +207,7 @@ export class AgentStore {
     const db = new DatabaseSync(this.statePath, { timeout: 0 });
     try {
       db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=8192; CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL)");
-      db.prepare("INSERT INTO state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document").run(JSON.stringify(state));
+      db.prepare("INSERT INTO state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document").run(JSON.stringify(normalized));
     } finally { db.close(); }
   }
   private async checkDirectory(): Promise<void> {
@@ -252,15 +259,36 @@ async function readStateDatabase(statePath: string, agent: AgentId): Promise<Age
     const state: unknown = JSON.parse(row.document);
     if (!Value.Check(StateSchema, state)) throw new AgentError("agent_recovery_required");
     validateStatePaths(state, agent);
-    return state;
+    return normalizeStateImages(state);
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
+    if (isSqliteBusy(error)) throw new AgentError("agent_busy");
     throw new AgentError("agent_recovery_required");
   } finally { db.close(); }
 }
 
 function statesEqual(left: AgentState, right: AgentState): boolean {
   return isDeepStrictEqual(left, right);
+}
+
+function normalizeStateImages(state: AgentState): AgentState {
+  const image = (value: FileImage | null): FileImage | null => value === null ? null : { ...value, acl: null };
+  return {
+    ...state,
+    targets: state.targets.map((target) => ({
+      ...target,
+      original: image(target.original),
+      expected: image(target.expected),
+    })),
+    pending: state.pending === null ? null : {
+      ...state.pending,
+      steps: state.pending.steps.map((step) => ({
+        ...step,
+        before: image(step.before),
+        after: image(step.after),
+      })),
+    },
+  };
 }
 
 function samePath(left: string, right: string): boolean {
@@ -468,7 +496,7 @@ function validateStatePaths(state: AgentState, agent: AgentId): void {
   }
 }
 export function newImage(bytes: Buffer, original: FileImage | null): FileImage {
-  return { bytes: bytes.toString("base64"), mode: original?.mode ?? 0o600, acl: original?.acl ?? null };
+  return { bytes: bytes.toString("base64"), mode: original?.mode ?? 0o600, acl: null };
 }
 export function copyMappings(mappings: readonly AgentMapping[]): AgentMapping[] {
   return mappings.map((row) => ({ displayName: row.displayName, modelId: row.modelId }));

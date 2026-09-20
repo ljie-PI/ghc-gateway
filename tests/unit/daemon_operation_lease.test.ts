@@ -52,6 +52,51 @@ describe("daemon operation lease", () => {
     }
   });
 
+  it("creates a missing custom Windows root without a filesystem-security subprocess", async () => {
+    const directory = await temporaryDirectory();
+    const runCommand = vi.fn(() => { throw new Error("filesystem security subprocess must not run"); });
+    const lease = await operationLease({ platform: "win32", runCommand }).acquire(directory, {
+      dataDirSource: "custom",
+    });
+    lease.release();
+    expect(runCommand).not.toHaveBeenCalled();
+    expect(await lstat(path.join(directory, "daemon.operation.db"))).toMatchObject({ isFile: expect.any(Function) });
+  });
+
+  it("uses one atomic creation subprocess for a missing default Windows root", async () => {
+    const directory = await temporaryDirectory();
+    const runCommand = vi.fn((_file: string, args: readonly string[], environment?: Readonly<Record<string, string>>) => {
+      expect(args.join(" ")).toContain("WindowsIdentity]::GetCurrent().User");
+      mkdirSync(environment?.GHCG_DIRECTORY_PATH ?? "missing", { recursive: true });
+      return "0\r\n";
+    });
+    const lease = await operationLease({ platform: "win32", runCommand }).acquire(directory, {
+      dataDirSource: "default",
+    });
+    lease.release();
+    expect(runCommand).toHaveBeenCalledOnce();
+  });
+
+  it("uses no filesystem-security subprocess for an existing Windows root", async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(directory);
+    const runCommand = vi.fn(() => { throw new Error("filesystem security subprocess must not run"); });
+    const lease = await operationLease({ platform: "win32", runCommand }).acquire(directory, {
+      dataDirSource: "default",
+    });
+    lease.release();
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it("returns missing without probing a process or creating artifacts when root creation is disabled", async () => {
+    const directory = await temporaryDirectory();
+    const processStartIdentity = vi.fn(async () => START_IDENTITY);
+    await expect(operationLease({ processStartIdentity }).acquire(directory, { createDataDir: false }))
+      .resolves.toBeNull();
+    expect(processStartIdentity).not.toHaveBeenCalled();
+    await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("completes short writes while initializing the database", async () => {
     const directory = await temporaryDirectory();
     let writes = 0;
@@ -410,18 +455,6 @@ describe("daemon operation lease", () => {
     expect(observations).toEqual([ownerRecord({ state: "released", leaseToken: "test-token" })]);
   });
 
-  it("fails closed when Windows reports the persistent database as a reparse point", async () => {
-    const directory = await temporaryDirectory();
-    const runCommand = (file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string => {
-      const script = args.at(-1) ?? "";
-      if (file === "powershell.exe" && script.includes("ReparsePoint")
-        && script.includes("daemon.operation.db")) return "true\r\n";
-      return fakeWindowsSecurityCommand(file, args, environment);
-    };
-    await expect(operationLease({ platform: "win32", runCommand }).acquire(directory))
-      .rejects.toMatchObject({ code: "unsafe_path" });
-  });
-
   it.skipIf(process.platform === "win32")("fails closed for unsafe database, owner, temp, and sidecar paths", async () => {
     const cases: Array<(directory: string) => Promise<void>> = [
       async (directory) => { await chmod(path.join(directory, "daemon.operation.db"), 0o644); },
@@ -468,7 +501,6 @@ function operationLease(overrides: ConstructorParameters<typeof DaemonOperationL
     processStartIdentity: async () => START_IDENTITY,
     processIdentity: async () => START_IDENTITY,
     createToken: () => "test-token",
-    ...(process.platform === "win32" ? { runCommand: fakeWindowsSecurityCommand } : {}),
     ...overrides,
   });
 }
@@ -517,19 +549,4 @@ function deferred() {
   let resolve = (): void => undefined;
   const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
-}
-
-function fakeWindowsSecurityCommand(file: string, args: readonly string[], environment?: Readonly<Record<string, string>>): string {
-  if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
-    mkdirSync(environment.GHCG_DIRECTORY_PATH, { recursive: true, mode: 0o700 });
-    return "0\r\n";
-  }
-  if (file === "whoami") return "\"CONTOSO\\User\",\"S-1-5-21-1000\"\r\n";
-  if (file === "powershell.exe") {
-    return args.at(-1)?.includes("Get-Acl") === true ? "CONTOSO\\User\r\n" : "false\r\n";
-  }
-  if (file === "icacls" && args.length === 1) {
-    return `${args[0]} CONTOSO\\User:(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
-  }
-  return "";
 }

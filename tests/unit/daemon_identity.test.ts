@@ -1,12 +1,10 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, symlinkSync } from "node:fs";
+import { existsSync, linkSync, lstatSync, mkdirSync, renameSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { daemonRuntimeCliError } from "../../src/daemon/runtime.js";
 import { ProtectedFileSystem } from "../../src/daemon/protected_file.js";
-import { windowsCommandPath } from "../../src/security/windows_acl.js";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DaemonIdentityFile,
   DaemonIdentityFileError,
@@ -22,8 +20,6 @@ import {
   terminateProcessIfMatching,
   type ProcessIdentityDependencies,
 } from "../../src/daemon/process_identity.js";
-
-const WINDOWS_TEST_COMMAND_TIMEOUT_MS = 15_000;
 
 const identity: DaemonIdentity = {
   version: 1,
@@ -74,88 +70,122 @@ describe("daemon identity schema", () => {
 });
 
 describe("daemon identity file", () => {
-  it.runIf(process.platform === "win32")("publishes a new directory with owner and ACL already valid for another caller", async () => {
+  it("creates a missing default Windows root in one bounded operation that resolves its SID internally", async () => {
     const directory = await temporaryDirectory();
-    let observed = false;
-    let rejection: unknown;
+    const calls: Array<{
+      readonly command: string;
+      readonly args: readonly string[];
+      readonly environment: Readonly<Record<string, string>> | undefined;
+      readonly timeoutMs: number | undefined;
+    }> = [];
     const files = new ProtectedFileSystem(directory, {
+      platform: "win32",
+      dataDirSource: "default",
       runCommand: (command, args, environment, timeoutMs) => {
-        // Pause the creator at its first post-creation inspection. A second
-        // caller must already accept the visible directory before we continue.
-        if (!observed && args.join(" ").includes("Get-Item")) {
-          observed = true;
-          try { new ProtectedFileSystem(directory).ensureProtectedDirectory(); }
-          catch (error: unknown) { rejection = error; }
-        }
-        return nativeWindowsCommand(command, args, environment, timeoutMs);
+        calls.push({ command, args, environment, timeoutMs });
+        mkdirSync(environment?.GHCG_DIRECTORY_PATH ?? "missing", { recursive: true });
+        return "0\r\n";
       },
     });
     try {
       files.ensureProtectedDirectory();
-      expect(observed).toBe(true);
-      expect(rejection).toBeUndefined();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.timeoutMs).toBe(15_000);
+      expect(calls[0]?.environment).toEqual({ GHCG_DIRECTORY_PATH: expect.any(String) });
+      expect(calls[0]?.args.join(" ")).toContain("WindowsIdentity]::GetCurrent().User");
+      expect(calls[0]?.args.join(" ")).not.toContain("GHCG_DIRECTORY_SID");
     } finally { await rm(path.dirname(directory), { recursive: true, force: true }); }
   });
 
-  it.runIf(process.platform === "win32")("leaves a protected directory when its creator exits before validation", async () => {
+  it("creates a missing custom Windows root recursively without a subprocess", async () => {
     const directory = await temporaryDirectory();
-    const source = new URL("../../src/daemon/protected_file.ts", import.meta.url).href;
-    const script = `import {execFileSync} from 'node:child_process';
-      import path from 'node:path';
-      import {ProtectedFileSystem} from ${JSON.stringify(source)};
-      new ProtectedFileSystem(process.argv[1], {runCommand(file,args,environment,timeoutMs) {
-        if(args.join(' ').includes('Get-Item')) process.exit(23);
-        const executable=file==='whoami'||file==='icacls'
-          ? path.join(process.env.SystemRoot,'System32',file+'.exe') : file;
-        return execFileSync(executable,args,{encoding:'utf8',windowsHide:true,timeout:timeoutMs??${WINDOWS_TEST_COMMAND_TIMEOUT_MS},
-          maxBuffer:1048576,env:{...process.env,...environment},stdio:['ignore','pipe','pipe']});
-      }}).ensureProtectedDirectory();`;
+    const runCommand = vi.fn(() => { throw new Error("filesystem security subprocess must not run"); });
     try {
-      const child = spawnSync(process.execPath, ["--import", "tsx/esm", "--input-type=module", "-e", script, directory], {
-        cwd: path.resolve(import.meta.dirname, "../.."), encoding: "utf8", windowsHide: true, timeout: 30000,
-      });
-      expect(child.error).toBeUndefined();
-      expect(child.status).toBe(23);
-      expect(child.stderr).toBe("");
-      expect(() => new ProtectedFileSystem(directory).ensureProtectedDirectory()).not.toThrow();
+      new ProtectedFileSystem(directory, { platform: "win32", dataDirSource: "custom", runCommand })
+        .ensureProtectedDirectory();
+      expect(existsSync(directory)).toBe(true);
+      expect(runCommand).not.toHaveBeenCalled();
     } finally { await rm(path.dirname(directory), { recursive: true, force: true }); }
   });
 
-  it.runIf(process.platform === "win32")("does not reset the ACL of an existing directory", async () => {
+  it("trusts an existing Windows root and protected file without a security subprocess", async () => {
     const directory = await temporaryDirectory();
+    const runCommand = vi.fn(() => { throw new Error("filesystem security subprocess must not run"); });
     try {
-      const files = new ProtectedFileSystem(directory);
+      await mkdir(directory);
+      const daemonPath = path.join(directory, "daemon.json");
+      await writeFile(daemonPath, `${JSON.stringify(identity)}\n`);
+      const files = new ProtectedFileSystem(directory, { platform: "win32", dataDirSource: "default", runCommand });
       files.ensureProtectedDirectory();
-      const before = windowsSddl(directory);
-      files.ensureProtectedDirectory();
-      expect(windowsSddl(directory) === before).toBe(true);
+      expect(files.readProtectedFile(daemonPath)).toBe(`${JSON.stringify(identity)}\n`);
+      expect(runCommand).not.toHaveBeenCalled();
     } finally { await rm(path.dirname(directory), { recursive: true, force: true }); }
   });
 
-  it.runIf(process.platform === "win32").each(["directory", "junction"] as const)(
-    "does not take over a %s created between the existence check and creation", async (kind) => {
+  it("rejects a named-path replacement after reading the opened protected file", async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(directory, { mode: 0o700 });
+    const daemonPath = path.join(directory, "daemon.json");
+    const replacementPath = path.join(directory, "replacement.json");
+    await writeFile(daemonPath, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
+    await writeFile(replacementPath, `${JSON.stringify(otherIdentity())}\n`, { mode: 0o600 });
+    const files = new ProtectedFileSystem(directory, {
+      onProtectedReadComplete: (readPath) => {
+        renameSync(readPath, path.join(directory, "displaced.json"));
+        renameSync(replacementPath, readPath);
+      },
+    });
+
+    expect(() => files.readProtectedFile(daemonPath)).toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+    expect(JSON.parse(await readFile(daemonPath, "utf8"))).toEqual(otherIdentity());
+  });
+
+  it("rejects a named-path replacement between validation and open", async () => {
+    const directory = await temporaryDirectory();
+    await mkdir(directory, { mode: 0o700 });
+    const daemonPath = path.join(directory, "daemon.json");
+    const replacementPath = path.join(directory, "replacement.json");
+    await writeFile(daemonPath, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
+    await writeFile(replacementPath, `${JSON.stringify(otherIdentity())}\n`, { mode: 0o600 });
+    const files = new ProtectedFileSystem(directory, {
+      onProtectedReadBeforeOpen: (readPath) => {
+        renameSync(readPath, path.join(directory, "displaced.json"));
+        renameSync(replacementPath, readPath);
+      },
+    });
+
+    expect(() => files.readProtectedFile(daemonPath)).toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+    expect(JSON.parse(await readFile(daemonPath, "utf8"))).toEqual(otherIdentity());
+  });
+
+  it.each(["same-inode mutation", "hard-link change"] as const)(
+    "rejects a %s while reading a protected file",
+    async (change) => {
       const directory = await temporaryDirectory();
-      const outside = path.join(path.dirname(directory), "outside");
-      await mkdir(outside);
-      let before: string | undefined;
-      let raced = false;
-      const protectedPath = kind === "junction" ? outside : directory;
+      await mkdir(directory, { mode: 0o700 });
+      const daemonPath = path.join(directory, "daemon.json");
+      const aliasPath = path.join(directory, "daemon-alias.json");
+      const contents = `${JSON.stringify(identity)}\n`;
+      await writeFile(daemonPath, contents, { mode: 0o600 });
       const files = new ProtectedFileSystem(directory, {
-        runCommand: (command, args, environment, timeoutMs) => {
-          if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
-            raced = true;
-            if (kind === "junction") symlinkSync(outside, directory, "junction");
-            else mkdirSync(directory);
-            before = windowsSddl(protectedPath);
+        onProtectedReadComplete: (readPath) => {
+          if (change === "hard-link change") {
+            linkSync(readPath, aliasPath);
+            return;
           }
-          return nativeWindowsCommand(command, args, environment, timeoutMs);
+          const before = lstatSync(readPath);
+          writeFileSync(readPath, contents.replace("control-token", "control-taken"));
+          utimesSync(readPath, before.atime, before.mtime);
         },
       });
+
       try {
-        expect(() => files.ensureProtectedDirectory()).toThrowError(expect.objectContaining({ code: expect.stringMatching(/^unsafe_/u) }));
-        expect(raced).toBe(true);
-        expect(windowsSddl(protectedPath) === before).toBe(true);
-      } finally { await rm(path.dirname(directory), { recursive: true, force: true }); }
+        expect(() => files.readProtectedFile(daemonPath))
+          .toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+      } finally {
+        if (existsSync(aliasPath)) unlinkSync(aliasPath);
+        await rm(path.dirname(directory), { recursive: true, force: true });
+      }
     },
   );
 
@@ -168,8 +198,8 @@ describe("daemon identity file", () => {
     const directory = await temporaryDirectory();
     const files = new ProtectedFileSystem(directory, {
       platform: "win32",
-      runCommand: (command, _args, environment) => {
-        if (command === "whoami") return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
+      dataDirSource: "default",
+      runCommand: (_command, _args, environment) => {
         expect(environment?.GHCG_DIRECTORY_PATH).toBeDefined();
         return result;
       },
@@ -187,11 +217,8 @@ describe("daemon identity file", () => {
     let creationTimeoutMs: number | undefined;
     const files = new ProtectedFileSystem(directory, {
       platform: "win32",
-      runCommand: (command, _args, environment, timeoutMs) => {
-        if (command === "whoami") {
-          expect(timeoutMs).toBeUndefined();
-          return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
-        }
+      dataDirSource: "default",
+      runCommand: (_command, _args, environment, timeoutMs) => {
         expect(environment?.GHCG_DIRECTORY_PATH).toBeDefined();
         creationTimeoutMs = timeoutMs;
         throw failure;
@@ -211,28 +238,24 @@ describe("daemon identity file", () => {
     let creationAttempts = 0;
     let creationTimeoutMs: number | undefined;
     const runCommand = (
-      command: string,
-      args: readonly string[],
+      _command: string,
+      _args: readonly string[],
       environment?: Readonly<Record<string, string>>,
       timeoutMs?: number,
     ): string => {
-      if (command === "whoami") {
-        expect(timeoutMs).toBeUndefined();
-        return "\"CONTOSO\\current\",\"S-1-5-21-1000\"";
-      }
       if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
         creationAttempts += 1;
         creationTimeoutMs = timeoutMs;
         mkdirSync(environment.GHCG_DIRECTORY_PATH);
         throw failure;
       }
-      expect(timeoutMs).toBeUndefined();
-      return windowsSecurityCommand(command, args, directory, "CONTOSO\\current");
+      throw new Error("unexpected filesystem security subprocess");
     };
     try {
       let caught: unknown;
       try {
-        new ProtectedFileSystem(directory, { platform: "win32", runCommand }).ensureProtectedDirectory();
+        new ProtectedFileSystem(directory, { platform: "win32", dataDirSource: "default", runCommand })
+          .ensureProtectedDirectory();
       } catch (error: unknown) {
         caught = error;
       }
@@ -241,7 +264,9 @@ describe("daemon identity file", () => {
       expect(creationAttempts).toBe(1);
       expect(existsSync(directory)).toBe(true);
 
-      expect(() => new ProtectedFileSystem(directory, { platform: "win32", runCommand }).ensureProtectedDirectory())
+      expect(() => new ProtectedFileSystem(directory, {
+        platform: "win32", dataDirSource: "default", runCommand,
+      }).ensureProtectedDirectory())
         .not.toThrow();
       expect(creationAttempts).toBe(1);
     } finally {
@@ -249,41 +274,12 @@ describe("daemon identity file", () => {
     }
   });
 
-  it.each(["preserved", "substituted"] as const)("handles %s Unicode paths in icacls output without repairing permissions", async (outputPath) => {
-    const directory = path.join(await temporaryDirectory(), "雪");
-    let creations = 0;
-    let aclReads = 0;
-    const files = new ProtectedFileSystem(directory, {
-      platform: "win32",
-      runCommand: (command, args, environment) => {
-        if (environment?.GHCG_DIRECTORY_PATH !== undefined) {
-          creations += 1;
-          mkdirSync(environment.GHCG_DIRECTORY_PATH, { recursive: true, mode: 0o700 });
-          return "0\r\n";
-        }
-        if (command === "icacls") {
-          expect(args).toEqual([directory]);
-          aclReads += 1;
-          // Model the captured tool output, not a Unicode ban or a parser bypass.
-          const displayed = outputPath === "preserved" ? directory : directory.replaceAll("雪", "?");
-          return `${displayed} CONTOSO\\current:(OI)(CI)(F)\r\n`;
-        }
-        return windowsSecurityCommand(command, args, directory, "CONTOSO\\current");
-      },
-    });
-    try {
-      for (const attempt of ["first creation", "existing directory"]) {
-        let caught: unknown;
-        try { files.ensureProtectedDirectory(); } catch (error: unknown) { caught = error; }
-        if (outputPath === "preserved") expect(caught, attempt).toBeUndefined();
-        else {
-          expect(caught, attempt).toMatchObject({ code: "unsafe_permissions" });
-          expect(daemonRuntimeCliError(caught)).toBe("security_error");
-        }
-      }
-      expect(creations).toBe(1);
-      expect(aclReads).toBe(2);
-    } finally { await rm(path.dirname(path.dirname(directory)), { recursive: true, force: true }); }
+  it("does not create a missing root while reading or removing daemon identity", async () => {
+    const directory = await temporaryDirectory();
+    const file = new DaemonIdentityFile(directory);
+    expect(file.read()).toBeNull();
+    await expect(file.remove(identity)).resolves.toBe(false);
+    expect(existsSync(directory)).toBe(false);
   });
 
   it("publishes protected daemon.json while holding an exclusive lease", async () => {
@@ -342,9 +338,9 @@ describe("daemon identity file", () => {
 
   it.skipIf(process.platform === "win32")("fails closed for symlink identity paths", async () => {
     const directory = await temporaryDirectory();
-    await new DaemonIdentityFile(directory).read();
+    await mkdir(directory, { mode: 0o700 });
     const outside = path.join(await temporaryDirectory(), "outside.json");
-    await new DaemonIdentityFile(path.dirname(outside)).read();
+    await mkdir(path.dirname(outside), { mode: 0o700 });
     await writeFile(outside, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
     await symlink(outside, path.join(directory, "daemon.json"), "file");
     const file = new DaemonIdentityFile(directory);
@@ -353,7 +349,7 @@ describe("daemon identity file", () => {
 
   it.skipIf(process.platform === "win32")("fails closed for weak file permissions", async () => {
     const directory = await temporaryDirectory();
-    await new DaemonIdentityFile(directory).read();
+    await mkdir(directory, { mode: 0o700 });
     const daemonPath = path.join(directory, "daemon.json");
     await writeFile(daemonPath, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
     await chmod(daemonPath, 0o644);
@@ -361,72 +357,18 @@ describe("daemon identity file", () => {
     expect(() => file.read()).toThrowError(expect.objectContaining({ code: "unsafe_permissions" }));
   });
 
-  it.each(["CONTOSO\\current", "S-1-5-21-1000"])(
-    "accepts a Windows owner matching the current identity as %s",
-    async (owner) => {
-      const directory = await temporaryDirectory();
-      await mkdir(directory);
-      const file = new DaemonIdentityFile(directory, {
-        platform: "win32",
-        runCommand: (command, args) => windowsSecurityCommand(command, args, directory, owner),
-      });
-      expect(file.read()).toBeNull();
-    },
-  );
-
-  it("fails closed when Get-Acl reports a different Windows owner", async () => {
+  it("accepts an existing Windows identity root without owner or ACL inspection", async () => {
     const directory = await temporaryDirectory();
     await mkdir(directory);
-    const calls: string[] = [];
+    const runCommand = vi.fn(() => { throw new Error("filesystem security subprocess must not run"); });
     const file = new DaemonIdentityFile(directory, {
       platform: "win32",
-      runCommand: (command, args) => {
-        calls.push(`${command} ${args.join(" ")}`);
-        return windowsSecurityCommand(command, args, directory, "CONTOSO\\other");
-      },
+      runCommand,
     });
-    expect(() => file.read()).toThrowError(expect.objectContaining({ code: "unsafe_owner" }));
-    expect(calls.some((call) => call.includes("Get-Acl"))).toBe(true);
+    expect(file.read()).toBeNull();
+    expect(runCommand).not.toHaveBeenCalled();
   });
 });
-
-function windowsSddl(target: string): string {
-  return nativeWindowsCommand("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-    "Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1\"; (Get-Acl -LiteralPath $env:GHCG_TEST_PATH).Sddl",
-  ], { GHCG_TEST_PATH: target }).trim();
-}
-
-function nativeWindowsCommand(
-  command: string,
-  args: readonly string[],
-  environment?: Readonly<Record<string, string>>,
-  timeoutMs = WINDOWS_TEST_COMMAND_TIMEOUT_MS,
-): string {
-  const executable = command === "whoami" || command === "icacls" ? windowsCommandPath(command) : command;
-  return execFileSync(executable, [...args], {
-    encoding: "utf8", windowsHide: true, timeout: timeoutMs,
-    maxBuffer: 1024 * 1024,
-    env: { ...process.env, ...environment }, stdio: ["ignore", "pipe", "pipe"],
-  });
-}
-
-function windowsSecurityCommand(
-  command: string,
-  args: readonly string[],
-  target: string,
-  owner: string,
-): string {
-  if (command === "whoami") {
-    return "\"CONTOSO\\current\",\"S-1-5-21-1000\"\r\n";
-  }
-  if (command === "powershell.exe") {
-    return args.join(" ").includes("Get-Acl") ? `${owner}\r\n` : "false\r\n";
-  }
-  if (command === "icacls") {
-    return `${target} CONTOSO\\current:(F)\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
-  }
-  throw new Error(`unexpected command: ${command}`);
-}
 
 function processDependencies(
   platform: NodeJS.Platform,

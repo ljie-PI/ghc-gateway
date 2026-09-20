@@ -81,7 +81,7 @@
       failure = "Apply failed: selected model is unavailable.";
       return;
     }
-    if (status.state === "not_managed" && !window.confirm(`Apply ${title} configuration? The first original configuration will be retained in a private .ghcg.bak file when it exists. Later applies preserve that backup and update only Gateway-owned settings. Restart the client after applying.`)) return;
+    if (status.state === "not_managed" && !window.confirm(`Apply ${title} configuration? The first original configuration will be retained in a .ghcg.bak file when it exists. On Windows, that backup inherits the client configuration directory permissions. Later applies preserve the backup and update only Gateway-owned settings. Restart the client after applying.`)) return;
     busy = true;
     try {
       const next = await client.applyAgent({

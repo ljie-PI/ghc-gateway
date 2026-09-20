@@ -32,10 +32,29 @@ else {
       && (error.code === "agent_busy" || error.code === "revision_conflict" || error.code === "agent_conflict"))) throw error;
   }
   if (result === "busy") {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    let settled = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
       const status = (await manager.inspect(origin)).find((item) => item.id === "codex")!;
-      if (status.state === "installed") break;
+      if (status.state === "installed") { settled = true; break; }
+      if (status.state === "recovery_required") {
+        try {
+          await manager.apply({
+            agent: "codex", expectedRevision: status.revision, catalogRevision: "a".repeat(64),
+            mappings: [{ modelId, displayName: modelId }],
+          }, origin, [model], () => undefined, new AbortController().signal);
+          result = "installed";
+          settled = true;
+          break;
+        } catch (error: unknown) {
+          if (!(typeof error === "object" && error !== null && "code" in error
+            && (error.code === "agent_busy" || error.code === "revision_conflict"))) throw error;
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (!settled) {
+      const status = (await manager.inspect(origin)).find((item) => item.id === "codex")!;
+      if (status.state !== "installed") throw new Error(`Codex contender did not settle: ${status.state}`);
     }
   }
   manager.close();

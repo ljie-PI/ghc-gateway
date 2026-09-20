@@ -4,18 +4,16 @@ import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
 import { FileAgentsManager, type AgentManagerOptions } from "../../src/agents/manager.js";
 import { AgentError, type AgentId, type AgentMapping, type AgentModel } from "../../src/agents/types.js";
 import { AgentStore, type AgentState } from "../../src/agents/store.js";
-import { privateDirectory, protect, readImage } from "../../src/agents/files.js";
-import { queryWindowsSecuritySnapshot, type WindowsSecuritySnapshotFact, type WindowsSecuritySnapshotRequest } from "../../src/security/windows_security_snapshot.js";
+import { digest, privateDirectory, protect, readImage } from "../../src/agents/files.js";
 import { projectAgentConfigFixture } from "../../scripts/tooling/fixtures.js";
 
 const homes: string[] = [];
 const origin = "http://127.0.0.1:32567";
-let windowsAclWarmup: Promise<void> | undefined;
 const execFileAsync = promisify(execFile);
 const effective = <T>(value: T) => ({ value, source: "live" as const, conflict: false, liveState: "value" as const });
 const models: readonly AgentModel[] = ["model-a", "model-b", "model-c"].map((modelId) => ({
@@ -51,6 +49,27 @@ function legacyStateRoot(home: string): string {
 }
 async function saveState(root: string, agent: AgentId, state: AgentState): Promise<void> {
   await new AgentStore(root, agent).locked(async (save) => save(state));
+}
+function rewriteState(root: string, agent: AgentId, rewrite: (state: AgentState) => AgentState): string {
+  const statePath = path.join(root, agent, "state.db");
+  const db = new DatabaseSync(statePath);
+  try {
+    const row = db.prepare("SELECT document FROM state WHERE id=1").get() as { document: string };
+    const document = JSON.stringify(rewrite(JSON.parse(row.document) as AgentState));
+    db.prepare("UPDATE state SET document=? WHERE id=1").run(document);
+    return document;
+  } finally { db.close(); }
+}
+function withLegacyAcls(state: AgentState): AgentState {
+  for (const target of state.targets) {
+    if (target.original !== null) target.original.acl = "legacy-original";
+    if (target.expected !== null) target.expected.acl = "legacy-expected";
+  }
+  for (const step of state.pending?.steps ?? []) {
+    if (step.before !== null) step.before.acl = "legacy-before";
+    if (step.after !== null) step.after.acl = "legacy-after";
+  }
+  return state;
 }
 async function writeMigrationMarker(file: string, target: string, phase: "pending" | "complete" = "pending"): Promise<void> {
   fs.writeFileSync(file, "", { mode: 0o600 });
@@ -98,22 +117,46 @@ async function stableSeed(home: string, target: string, bytes: Buffer | string):
   if (await readImage(file) === null) throw new Error("stable Agent test seed is unavailable");
   return file;
 }
-async function warmWindowsAgentAcl(): Promise<void> {
-  if (process.platform !== "win32") return;
-  windowsAclWarmup ??= Promise.resolve().then(() => {
-    const executable = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-    try {
-      execFileSync(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-        "$ErrorActionPreference='Stop'; Import-Module \"$PSHOME\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1\"; Get-Acl -LiteralPath $PSHOME | Out-Null",
-      ], { windowsHide: true, timeout: 60_000, stdio: "ignore" });
-    } catch {
-      throw new Error("Windows Agent ACL test warm-up failed");
-    }
-  });
-  await windowsAclWarmup;
-}
-beforeAll(warmWindowsAgentAcl, 90_000);
 afterEach(() => { for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true }); });
+
+describe("Agent image reads", () => {
+  it("rejects a pathname replacement between validation and open", async () => {
+    const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agent-image-")));
+    homes.push(home);
+    const target = seed(home, "settings.json", "original");
+    const replacement = seed(home, "replacement.json", "replacement");
+
+    await expect(readImage(target, undefined, {
+      onBeforeOpen: () => {
+        fs.renameSync(target, path.join(home, "displaced.json"));
+        fs.renameSync(replacement, target);
+      },
+    })).rejects.toMatchObject({ code: "agent_conflict" });
+    expect(fs.readFileSync(target, "utf8")).toBe("replacement");
+  });
+
+  it.each(["same-inode mutation", "hard-link change"] as const)(
+    "rejects a %s after reading the opened image",
+    async (change) => {
+      const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agent-image-")));
+      homes.push(home);
+      const target = seed(home, "settings.json", "original");
+      const alias = path.join(home, "settings-alias.json");
+
+      await expect(readImage(target, undefined, {
+        onReadComplete: () => {
+          if (change === "hard-link change") {
+            fs.linkSync(target, alias);
+            return;
+          }
+          const before = fs.lstatSync(target);
+          fs.writeFileSync(target, "mutated!");
+          fs.utimesSync(target, before.atime, before.mtime);
+        },
+      })).rejects.toMatchObject({ code: "agent_conflict" });
+    },
+  );
+});
 
 describe("private repeatable agent configuration", () => {
   it("stores default and custom Agent state under the selected data directory", async () => {
@@ -196,6 +239,143 @@ describe("private repeatable agent configuration", () => {
     } finally { marker.close(); }
     await expect(new AgentStore(legacyStateRoot(h.home), "codex").read())
       .rejects.toMatchObject({ code: "agent_recovery_required" });
+  }, 180_000);
+
+  it("normalizes every decoded legacy ACL without rewriting state during read", async () => {
+    const h = harness();
+    const config = path.join(h.home, ".claude", "settings.json");
+    const backup = `${config}.ghcg.bak`;
+    const image = { bytes: Buffer.from("{}\n").toString("base64"), mode: 0o600, acl: null };
+    const root = stateRoot(h.home);
+    await saveState(root, "claude", {
+      version: 2, revision: 4, mappings: [], lastAppliedAt: null,
+      targets: [
+        { path: backup, original: image, expected: image },
+        { path: config, original: image, expected: image },
+      ],
+      pending: {
+        kind: "apply", garbage: [], steps: [{
+          target: 1, before: image, after: image, phase: "planned",
+          scratch: path.join(path.dirname(config), ".ghcg-agents-claude-00000000-0000-4000-8000-000000000001"),
+        }],
+      },
+    });
+    const persisted = rewriteState(root, "claude", (state) => {
+      for (const target of state.targets) {
+        if (target.original !== null) target.original.acl = "legacy-original";
+        if (target.expected !== null) target.expected.acl = "legacy-expected";
+      }
+      for (const step of state.pending!.steps) {
+        if (step.before !== null) step.before.acl = "legacy-before";
+        if (step.after !== null) step.after.acl = "legacy-after";
+      }
+      return state;
+    });
+
+    const decoded = await new AgentStore(root, "claude").read();
+
+    expect(decoded.targets.flatMap((target) => [target.original?.acl, target.expected?.acl])).toEqual([
+      null, null, null, null,
+    ]);
+    expect(decoded.pending!.steps.flatMap((step) => [step.before?.acl, step.after?.acl])).toEqual([null, null]);
+    const db = new DatabaseSync(path.join(root, "claude", "state.db"), { readOnly: true });
+    try {
+      expect((db.prepare("SELECT document FROM state WHERE id=1").get() as { document: string }).document).toBe(persisted);
+    } finally { db.close(); }
+  });
+
+  it("compares current and legacy migration state after ACL normalization", async () => {
+    const h = harness();
+    const state = { version: 2 as const, revision: 4, mappings: [mappings[0]!], targets: [], lastAppliedAt: null, pending: null };
+    await saveState(legacyStateRoot(h.home), "claude", state);
+    await saveState(stateRoot(h.home), "claude", structuredClone(state));
+    const config = path.join(h.home, ".claude", "settings.json");
+    seed(h.home, ".claude/settings.json", "legacy");
+    const image = { ...(await readImage(config))!, acl: "legacy-sddl" };
+    const addTargets = (value: AgentState, acl: string): AgentState => ({
+      ...value,
+      targets: [
+        { path: `${config}.ghcg.bak`, original: null, expected: null },
+        { path: config, original: { ...image, acl }, expected: { ...image, acl } },
+      ],
+    });
+    rewriteState(legacyStateRoot(h.home), "claude", (value) => addTargets(value, "legacy-one"));
+    rewriteState(stateRoot(h.home), "claude", (value) => addTargets(value, "legacy-two"));
+    expect((await h.manager.inspect(origin)).find((item) => item.id === "claude")).toMatchObject({
+      state: "installed",
+      mappings: state.mappings,
+    });
+  });
+
+  it("cleans an ACL-only planned step without replacing the live inode", async () => {
+    const h = harness();
+    const config = seed(h.home, ".claude/settings.json", "{}\n");
+    await apply(h.manager, "claude");
+    const store = new AgentStore(stateRoot(h.home), "claude");
+    await store.locked(async (save) => {
+      const state = await store.read();
+      const live = (await readImage(config))!;
+      const scratch = path.join(path.dirname(state.targets[1]!.path), ".ghcg-agents-claude-00000000-0000-4000-8000-000000000001");
+      fs.mkdirSync(scratch, { mode: 0o700 });
+      fs.linkSync(config, path.join(scratch, "next"));
+      state.targets[1]!.expected = { ...live, acl: "legacy-before" };
+      state.pending = {
+        kind: "apply", garbage: [], steps: [{
+          target: 1,
+          before: { ...live, acl: "legacy-before" },
+          after: { ...live, acl: "legacy-after" },
+          phase: "planned",
+          scratch,
+        }],
+      };
+      await save(state);
+    });
+    rewriteState(stateRoot(h.home), "claude", (state) => {
+      state.targets[1]!.expected!.acl = "legacy-before";
+      state.pending!.steps[0]!.before!.acl = "legacy-before";
+      state.pending!.steps[0]!.after!.acl = "legacy-after";
+      return state;
+    });
+    const before = fs.lstatSync(config);
+    const pending = await h.status("claude");
+
+    await h.manager.apply({
+      agent: "claude", expectedRevision: pending.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal);
+
+    const after = fs.lstatSync(config);
+    expect({ dev: after.dev, ino: after.ino, nlink: after.nlink }).toEqual({ dev: before.dev, ino: before.ino, nlink: 1 });
+    expect(fs.existsSync(path.join(path.dirname(config), ".ghcg-agents-claude-00000000-0000-4000-8000-000000000001"))).toBe(false);
+  }, 180_000);
+
+  it.each([
+    ["clean", undefined, -1],
+    ["planned", "intent", -1],
+    ["displaced", "displaced", 1],
+    ["published", "published", 1],
+    ["linked", "linked", 1],
+  ] as const)("recovers legacy ACL images from %s state", async (_phase, point, index) => {
+    const home = homeWithCrash();
+    seed(home, ".claude/settings.json", "{}\n");
+    const manager = new FileAgentsManager({
+      home,
+      ...(point === undefined ? {} : { checkpoint: (hitPoint, agent, hitIndex) => {
+        if (hitPoint === point && agent === "claude" && hitIndex === index) throw new Error("simulated crash");
+      } }),
+    });
+    if (point === undefined) await apply(manager, "claude");
+    else await expect(apply(manager, "claude")).rejects.toThrow();
+    rewriteState(stateRoot(home), "claude", withLegacyAcls);
+
+    const restarted = new FileAgentsManager({ home });
+    const first = (await restarted.inspect(origin)).find((item) => item.id === "claude")!;
+    const second = (await restarted.inspect(origin)).find((item) => item.id === "claude")!;
+    expect(second.revision).toBe(first.revision);
+    expect((await restarted.apply({
+      agent: "claude", expectedRevision: second.revision, catalogRevision: "a".repeat(64), mappings,
+    }, origin, models, () => undefined, new AbortController().signal)).state).toBe("installed");
+    expect(fs.lstatSync(path.join(home, ".claude", "settings.json")).nlink).toBe(1);
+    expect(fs.readdirSync(path.join(home, ".claude")).sort()).toEqual(["settings.json", "settings.json.ghcg.bak"]);
   }, 180_000);
 
   it("accepts equivalent dual state and fails closed for conflicting dual state", async () => {
@@ -448,396 +628,19 @@ describe("private repeatable agent configuration", () => {
     expect((await new FileAgentsManager({ home: h.home }).inspect(origin)).find((item) => item.id === "codex")?.state)
       .toBe("installed");
   }, 180_000);
-  it.runIf(process.platform === "win32")("uses one ordered security batch per Inspect without cross-call reuse", async () => {
-    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        batches.push(requests);
-        return requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
-          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
-          : { id: request.id, status: "missing" });
-      },
-    });
-
-    await expect(h.manager.inspect(origin)).resolves.toMatchObject([
-      { id: "claude", state: "not_managed" },
-      { id: "codex", state: "not_managed" },
-    ]);
-    await h.manager.inspect(origin);
-
-    const normalizedHome = h.home.toLowerCase();
-    expect(batches).toEqual([1, 2].map((snapshot) => [
-      { id: `snapshot-${snapshot}-path-0`, path: normalizedHome, security: false },
-      { id: `snapshot-${snapshot}-path-1`, path: path.join(normalizedHome, ".claude", "settings.json") },
-      { id: `snapshot-${snapshot}-path-2`, path: path.join(normalizedHome, ".codex", "models.json") },
-      { id: `snapshot-${snapshot}-path-3`, path: path.join(normalizedHome, ".codex", "config.toml") },
-      { id: `snapshot-${snapshot}-path-4`, path: path.join(normalizedHome, ".codex", "config.toml.ghcg.bak") },
-      { id: `snapshot-${snapshot}-path-5`, path: path.join(normalizedHome, ".codex", "models.json.ghcg.bak") },
-    ]));
-  });
-
-  it.runIf(process.platform === "win32")("isolates a target query error to its consuming agent", async () => {
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => requests.map((request): WindowsSecuritySnapshotFact => {
-        if (request.path.endsWith("\\.claude\\settings.json")) return { id: request.id, status: "error" };
-        return fs.existsSync(request.path)
-          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
-          : { id: request.id, status: "missing" };
-      }),
-    });
-
-    expect(await h.manager.inspect(origin)).toMatchObject([
-      { id: "claude", state: "unsafe_path" },
-      { id: "codex", state: "not_managed" },
-    ]);
-  });
-
-  it.runIf(process.platform === "win32")("keeps a valid backup visible when a later target query fails", async () => {
-    const h = harness();
-    const config = seed(h.home, ".claude/settings.json", "{}\n");
-    await apply(h.manager, "claude");
-    const backup = (await readImage(`${config}.ghcg.bak`))!;
-    const manager = new FileAgentsManager({
-      home: h.home,
-      queryWindowsSecuritySnapshot: async (requests) => requests.map((request): WindowsSecuritySnapshotFact => {
-        if (request.path.endsWith("\\.claude\\settings.json")) return { id: request.id, status: "error" };
-        return fs.existsSync(request.path)
-          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: backup.acl! }
-          : { id: request.id, status: "missing" };
-      }),
-    });
-
-    expect((await manager.inspect(origin)).find((status) => status.id === "claude")).toMatchObject({
-      state: "unsafe_path",
-      backupAvailable: true,
-    });
-  }, 180_000);
-
-  it.runIf(process.platform === "win32")("fails both prepared agents closed on a global query failure", async () => {
-    const h = harness({ queryWindowsSecuritySnapshot: async () => { throw new Error("sensitive diagnostic"); } });
-    expect(await h.manager.inspect(origin)).toMatchObject([
-      { id: "claude", state: "unsafe_path" },
-      { id: "codex", state: "unsafe_path" },
-    ]);
-  });
-
-  it.runIf(process.platform === "win32")("fails both prepared agents closed on a malformed injected result", async () => {
-    const h = harness({ queryWindowsSecuritySnapshot: async () => [] });
-    expect(await h.manager.inspect(origin)).toMatchObject([
-      { id: "claude", state: "unsafe_path" },
-      { id: "codex", state: "unsafe_path" },
-    ]);
-  });
-
-  it.runIf(process.platform === "win32")("uses exact snapshot SDDL in Inspect revisions", async () => {
-    let sddl = "O:SYG:SYD:(A;;FA;;;SY)";
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
-        ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl }
-        : { id: request.id, status: "missing" }),
-    });
-    seed(h.home, ".claude/settings.json", "{}\n");
-
-    const first = await h.status("claude");
-    sddl = "O:SYG:SYD:PAI(A;;FA;;;SY)";
-    const second = await h.status("claude");
-
-    expect(first.state).toBe("not_managed");
-    expect(second.state).toBe("not_managed");
-    expect(second.revision).not.toBe(first.revision);
-  });
-
-  it.runIf(process.platform === "win32")("fails closed when target existence changes after the snapshot", async () => {
-    let raced = false;
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        const facts = requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
-          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
-          : { id: request.id, status: "missing" });
-        if (!raced) {
-          raced = true;
-          seed(h.home, ".claude/settings.json", "raced\n");
-        }
-        return facts;
-      },
-    });
-
-    expect(await h.status("claude")).toMatchObject({ state: "unsafe_path", backupAvailable: false });
-  });
-
-  it.runIf(process.platform === "win32")("fails closed when a present target disappears after the snapshot", async () => {
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        const facts = requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
-          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
-          : { id: request.id, status: "missing" });
-        fs.unlinkSync(path.join(h.home, ".claude", "settings.json"));
-        return facts;
-      },
-    });
-    seed(h.home, ".claude/settings.json", "present\n");
-
-    expect(await h.status("claude")).toMatchObject({ state: "unsafe_path", backupAvailable: false });
-  });
-
-  it.runIf(process.platform === "win32")("fails closed when a present target is replaced during the snapshot", async () => {
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        const facts = requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
-          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
-          : { id: request.id, status: "missing" });
-        const target = path.join(h.home, ".claude", "settings.json");
-        fs.unlinkSync(target);
-        fs.writeFileSync(target, "replacement\n");
-        return facts;
-      },
-    });
-    seed(h.home, ".claude/settings.json", "original\n");
-
-    expect(await h.status("claude")).toMatchObject({ state: "unsafe_path", backupAvailable: false });
-  });
-
-  it.runIf(process.platform === "win32")("does not authorize a linked live target from a replaced staged pathname", async () => {
-    const original = seed(homeWithCrash(), ".claude/settings.json", "{}\n");
-    const crashed = new FileAgentsManager({
-      home: homes.at(-1)!,
-      checkpoint: (point, agent, index) => {
-        if (point === "linked" && agent === "claude" && index === 1) throw new Error("simulated crash");
-      },
-    });
-    await expect(apply(crashed, "claude")).rejects.toThrow();
-    const store = new AgentStore(stateRoot(homes.at(-1)!), "claude");
-    const state = await store.read();
-    const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
-    const stage = path.join(step.scratch, "next");
-    let raced = false;
-    const manager = new FileAgentsManager({
-      home: homes.at(-1)!,
-      queryWindowsSecuritySnapshot: async (requests) => {
-        const facts = await queryWindowsSecuritySnapshot(requests);
-        if (!raced && requests.some((request) => request.path === stage.toLowerCase())
-          && requests.some((request) => request.path === original.toLowerCase())) {
-          raced = true;
-          fs.unlinkSync(stage);
-          fs.writeFileSync(stage, "unrelated stage", { mode: 0o600 });
-        }
-        return facts;
-      },
-    });
-
-    expect((await manager.inspect(origin)).find((item) => item.id === "claude")).toMatchObject({
-      state: "unsafe_path",
-      backupAvailable: true,
-    });
-    expect(raced).toBe(true);
-  }, 180_000);
-
-  it.runIf(process.platform === "win32")("uses distinct deduplicated security snapshots throughout Apply", async () => {
-    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        batches.push(requests);
-        return requests.map((request): WindowsSecuritySnapshotFact => fs.existsSync(request.path)
-          ? { id: request.id, status: "present", reparse: false, owner: "owner", sddl: "O:SYG:SYD:(A;;FA;;;SY)" }
-          : { id: request.id, status: "missing" });
-      },
-    });
-    const current = await h.status("claude");
-    batches.length = 0;
-
-    await h.manager.apply({
-      agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
-    }, origin, models, () => undefined, new AbortController().signal);
-
-    expect(batches.length).toBeGreaterThan(1);
-    expect(batches.every((batch) => new Set(batch.map((request) => request.path.toLowerCase())).size === batch.length)).toBe(true);
-    const prefixes = batches.map((batch) => {
-      const match = /^snapshot-(\d+)-path-0$/u.exec(batch[0]!.id);
-      expect(match).not.toBeNull();
-      expect(batch.map((request) => request.id)).toEqual(batch.map((_, index) => `snapshot-${match![1]}-path-${index}`));
-      return match![1];
-    });
-    expect(new Set(prefixes).size).toBe(prefixes.length);
-    expect(batches.some((batch) => batch.some((request) => request.path.endsWith("\\.claude\\settings.json")))).toBe(true);
-  }, 180_000);
-
-  it.runIf(process.platform === "win32")("separates real Apply security boundaries and batches full target sets", async () => {
-    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const checkpoints = new Map<string, number>();
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        batches.push(requests);
-        return await queryWindowsSecuritySnapshot(requests);
-      },
-      checkpoint: (point, _agent, index) => { checkpoints.set(`${point}/${index}`, batches.length); },
-    });
-    seed(h.home, ".claude/settings.json", "{}\n");
-    const current = await h.status("claude");
-    batches.length = 0;
-
-    await h.manager.apply({
-      agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
-    }, origin, models, () => undefined, new AbortController().signal);
-
-    const config = path.join(h.home, ".claude", "settings.json").toLowerCase();
-    const backup = `${config}.ghcg.bak`;
-    const prefixes = batches.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""));
-    expect(new Set(prefixes).size).toBe(prefixes.length);
-    expect(batches.every((batch) => new Set(batch.map((request) => request.path)).size === batch.length)).toBe(true);
-    expect(batches[0]!.map((request) => request.path)).toContain(config);
-    expect(batches[1]!.map((request) => request.path)).toContain(config);
-    expect(prefixes[0]).not.toBe(prefixes[1]);
-
-    const staged = checkpoints.get("staged/1")!;
-    const displaced = checkpoints.get("displaced/1")!;
-    const linked = checkpoints.get("linked/1")!;
-    const complete = checkpoints.get("complete/-1")!;
-    expect(batches.slice(staged).some((batch) => {
-      const paths = batch.map((request) => request.path);
-      return paths.includes(backup) && paths.includes(config);
-    })).toBe(true);
-    expect(batches.slice(staged, displaced).some((batch) => batch.length === 5
-      && batch.some((request) => request.path === config)
-      && batch.some((request) => request.path.endsWith("\\next"))
-      && batch.some((request) => request.path.endsWith("\\previous")))).toBe(true);
-    expect(batches.slice(displaced, linked).some((batch) => batch.length === 3
-      && batch.some((request) => request.path.endsWith("\\next")))).toBe(true);
-    expect(batches.slice(linked, complete).some((batch) => batch.some((request) => request.path.endsWith("\\previous")))).toBe(true);
-    expect(batches.slice(complete).some((batch) => {
-      const paths = batch.map((request) => request.path);
-      return paths.includes(backup) && paths.includes(config);
-    })).toBe(true);
-  }, 180_000);
-
-  it.runIf(process.platform === "win32")("keeps no-op Apply to three transaction snapshots", async () => {
-    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        batches.push(requests);
-        return await queryWindowsSecuritySnapshot(requests);
-      },
-    });
-    seed(h.home, ".claude/settings.json", "{}\n");
-    await apply(h.manager, "claude");
-    const current = await h.status("claude");
-    batches.length = 0;
-
-    await h.manager.apply({
-      agent: "claude", expectedRevision: current.revision, catalogRevision: "a".repeat(64), mappings,
-    }, origin, models, () => undefined, new AbortController().signal);
-
-    expect(batches).toHaveLength(3);
-    expect(new Set(batches.map((batch) => batch[0]!.id.replace(/-path-0$/u, ""))).size).toBe(3);
-  }, 180_000);
-
-  it.runIf(process.platform === "win32")("keeps exact Codex first, no-op, and reordered snapshot contracts", async () => {
-    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const h = harness({
-      queryWindowsSecuritySnapshot: async (requests) => {
-        batches.push(requests);
-        return await queryWindowsSecuritySnapshot(requests);
-      },
-    });
-    seed(h.home, ".codex/config.toml", "model = \"old\"\n");
-    batches.length = 0;
-    await takeover(h.manager);
-    const root = ["$HOME\\.codex"];
-    const targets = [...root, "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"];
-    const stage = (index: number, target: string) => [
-      `$HOME\\.codex\\$SCRATCH${index}`,
-      `$HOME\\.codex\\$SCRATCH${index}\\next`,
-      target,
-    ];
-    expectSnapshotContract(batches, h.home, [
-      ["$HOME", "$HOME\\.claude\\settings.json", ...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml",
-        "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak"],
-      [...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
-      targets,
-      [...root, "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
-      targets,
-      targets,
-      [...root, "$HOME\\.codex\\config.toml.ghcg.bak"],
-      root,
-      stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
-      stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
-      [...root, "$HOME\\.codex\\models.json"],
-      root,
-      stage(1, "$HOME\\.codex\\models.json"),
-      stage(1, "$HOME\\.codex\\models.json"),
-      [...root, "$HOME\\.codex\\config.toml"],
-      root,
-      stage(2, "$HOME\\.codex\\config.toml"),
-      stage(2, "$HOME\\.codex\\config.toml"),
-      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
-        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next",
-        "$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next"],
-      stage(0, "$HOME\\.codex\\config.toml.ghcg.bak"),
-      stage(1, "$HOME\\.codex\\models.json"),
-      ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next", ...root,
-        "$HOME\\.codex\\$SCRATCH2\\previous", "$HOME\\.codex\\config.toml"],
-      ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\previous"],
-      stage(2, "$HOME\\.codex\\config.toml"),
-      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
-        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next",
-        "$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\next"],
-      ["$HOME\\.codex\\$SCRATCH2", "$HOME\\.codex\\$SCRATCH2\\previous"],
-      targets,
-    ]);
-    const installed = await h.status("codex");
-    batches.length = 0;
-    await h.manager.apply({
-      agent: "codex", expectedRevision: installed.revision, catalogRevision: "a".repeat(64), mappings,
-    }, origin, models, () => undefined, new AbortController().signal);
-    expectSnapshotContract(batches, h.home, [targets, targets, targets]);
-    const repeated = await h.status("codex");
-    batches.length = 0;
-    await h.manager.apply({
-      agent: "codex", expectedRevision: repeated.revision, catalogRevision: "a".repeat(64), mappings: [...mappings].reverse(),
-    }, origin, models, () => undefined, new AbortController().signal);
-    expectSnapshotContract(batches, h.home, [
-      targets,
-      targets,
-      [...root, "$HOME\\.codex\\models.json"],
-      root,
-      stage(0, "$HOME\\.codex\\models.json"),
-      stage(0, "$HOME\\.codex\\models.json"),
-      [...root, "$HOME\\.codex\\config.toml"],
-      root,
-      stage(1, "$HOME\\.codex\\config.toml"),
-      stage(1, "$HOME\\.codex\\config.toml"),
-      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
-        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
-      ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", ...root,
-        "$HOME\\.codex\\$SCRATCH0\\previous", "$HOME\\.codex\\models.json"],
-      ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\previous"],
-      stage(0, "$HOME\\.codex\\models.json"),
-      ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", ...root,
-        "$HOME\\.codex\\$SCRATCH1\\previous", "$HOME\\.codex\\config.toml"],
-      ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\previous"],
-      stage(1, "$HOME\\.codex\\config.toml"),
-      [...targets, "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next",
-        "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
-      ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\previous"],
-      ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\previous"],
-      targets,
-    ]);
-  }, 300_000);
-
-  it.runIf(process.platform === "win32")("preserves exact Windows descriptors through first and repeat Apply", async () => {
+  it.runIf(process.platform === "win32")("produces only ACL-neutral Windows images and stable revisions", async () => {
     const h = harness();
     const config = await stableSeed(h.home, ".claude/settings.json", "{}\n");
-    const original = (await readImage(config))!;
+    const before = await h.status("claude");
 
     await apply(h.manager, "claude");
     const firstConfig = (await readImage(config))!;
     const firstBackup = (await readImage(`${config}.ghcg.bak`))!;
-    expect(firstConfig.acl).toBe(original.acl);
-    expect(firstBackup.acl).toBe(original.acl);
-
-    fs.writeFileSync(config, JSON.stringify({ env: { OTHER: "external" } }));
-    await apply(h.manager, "claude", [...mappings].reverse());
-    expect((await readImage(config))!.acl).toBe(firstConfig.acl);
-    expect((await readImage(`${config}.ghcg.bak`))!.acl).toBe(firstBackup.acl);
+    const installed = await h.status("claude");
+    expect(before.state).toBe("not_managed");
+    expect(firstConfig.acl).toBeNull();
+    expect(firstBackup.acl).toBeNull();
+    expect((await h.status("claude")).revision).toBe(installed.revision);
   }, 180_000);
 
   it.each(["claude", "codex"] as const)("publishes exact %s first and repeat Apply fixture bytes", async (agent) => {
@@ -1376,54 +1179,121 @@ describe("private repeatable agent configuration", () => {
     expect(fs.readFileSync(original)).toEqual(external);
   }, 180_000);
 
-  it.runIf(process.platform === "win32")("requires the staged image in the immediate pre-rename snapshot", async () => {
-    const original = seed(homeWithCrash(), ".claude/settings.json", JSON.stringify({ env: { OTHER: "keep" } }));
-    let removed = false;
+  it("rejects a replaced staged pathname before displacing the live target", async () => {
+    const home = homeWithCrash();
+    const original = seed(home, ".claude/settings.json", "{}\n");
+    let replaced = false;
     const manager = new FileAgentsManager({
-      home: homes.at(-1)!,
-      queryWindowsSecuritySnapshot: async (requests) => {
-        const facts = await queryWindowsSecuritySnapshot(requests);
-        if (!removed && requests.some((request) => request.path.endsWith("\\next"))
-          && requests.some((request) => request.path.endsWith("\\previous"))
-          && requests.some((request) => request.path === original.toLowerCase())) {
-          removed = true;
-          const stage = requests.find((request) => request.path.endsWith("\\next"))!.path;
-          fs.unlinkSync(stage);
-        }
-        return facts;
+      home,
+      checkpoint: (point, agent, index) => {
+        if (replaced || point !== "staged" || agent !== "claude" || index !== 1) return;
+        const scratch = fs.readdirSync(path.dirname(original))
+          .filter((entry) => entry.startsWith(".ghcg-agents-claude-"))
+          .find((entry) => fs.readFileSync(path.join(path.dirname(original), entry, "next"), "utf8") !== "{}\n");
+        if (scratch === undefined) throw new Error("missing scratch");
+        const stage = path.join(path.dirname(original), scratch, "next");
+        fs.unlinkSync(stage);
+        fs.writeFileSync(stage, "replacement");
+        replaced = true;
       },
     });
 
-    await expect(apply(manager, "claude")).rejects.toMatchObject({
-      name: "AgentError",
-      code: "agent_recovery_required",
-    });
-    expect(removed).toBe(true);
-    expect(fs.readFileSync(original, "utf8")).toBe(JSON.stringify({ env: { OTHER: "keep" } }));
+    await expect(apply(manager, "claude")).rejects.toMatchObject({ code: "agent_recovery_required" });
+    expect(replaced).toBe(true);
+    expect(fs.readFileSync(original, "utf8")).toBe("{}\n");
   }, 180_000);
 
-  it.runIf(process.platform === "win32")("rejects an unexpected scratch child before renaming the live target", async () => {
-    const original = seed(homeWithCrash(), ".claude/settings.json", "{}\n");
+  it("rejects an unexpected scratch child before displacing the live target", async () => {
+    const home = homeWithCrash();
+    const original = seed(home, ".claude/settings.json", "{}\n");
     let inserted = false;
     const manager = new FileAgentsManager({
-      home: homes.at(-1)!,
-      queryWindowsSecuritySnapshot: async (requests) => {
-        const facts = await queryWindowsSecuritySnapshot(requests);
-        const scratch = requests.find((request) => request.path.endsWith("\\previous"));
-        if (!inserted && scratch !== undefined && requests.some((request) => request.path === original.toLowerCase())) {
-          inserted = true;
-          fs.writeFileSync(path.join(path.dirname(scratch.path), "unexpected"), "unrelated");
-        }
-        return facts;
+      home,
+      checkpoint: (point, agent, index) => {
+        if (inserted || point !== "staged" || agent !== "claude" || index !== 1) return;
+        const scratch = fs.readdirSync(path.dirname(original))
+          .filter((entry) => entry.startsWith(".ghcg-agents-claude-"))
+          .find((entry) => fs.readFileSync(path.join(path.dirname(original), entry, "next"), "utf8") !== "{}\n");
+        if (scratch === undefined) throw new Error("missing scratch");
+        fs.writeFileSync(path.join(path.dirname(original), scratch, "unexpected"), "unrelated");
+        inserted = true;
       },
     });
 
-    await expect(apply(manager, "claude")).rejects.toMatchObject({
-      name: "AgentError",
-      code: "agent_recovery_required",
-    });
+    await expect(apply(manager, "claude")).rejects.toMatchObject({ code: "agent_recovery_required" });
     expect(inserted).toBe(true);
     expect(fs.readFileSync(original, "utf8")).toBe("{}\n");
+  }, 180_000);
+
+  it("preserves a replacement installed immediately before scratch cleanup", async () => {
+    const home = homeWithCrash();
+    seed(home, ".claude/settings.json", "{}\n");
+    const replacement = Buffer.from("replacement must survive\n");
+    let replaced: string | undefined;
+    const manager = new FileAgentsManager({
+      home,
+      checkpoint: (point, agent, index) => {
+        if (replaced !== undefined || point !== "cleanup" || agent !== "claude" || index !== 1) return;
+        const directory = path.join(home, ".claude");
+        const scratch = fs.readdirSync(directory).find((entry) => entry.startsWith(".ghcg-agents-claude-")
+          && fs.existsSync(path.join(directory, entry, "previous")));
+        if (scratch === undefined) throw new Error("missing displaced scratch artifact");
+        replaced = path.join(directory, scratch, "previous");
+        fs.unlinkSync(replaced);
+        fs.writeFileSync(replaced, replacement, { mode: 0o600 });
+      },
+    });
+
+    let failure: unknown;
+    try { await apply(manager, "claude"); } catch (error: unknown) { failure = error; }
+    expect(replaced).toBeDefined();
+    expect(failure).toMatchObject({ code: "agent_recovery_required" });
+    expect(fs.readFileSync(replaced!)).toEqual(replacement);
+    expect((await manager.inspect(origin)).find((item) => item.id === "claude")?.state).toBe("recovery_required");
+  }, 180_000);
+
+  it("recovers after crashing with a transaction-authorized cleanup quarantine", async () => {
+    const home = homeWithCrash();
+    seed(home, ".claude/settings.json", "{}\n");
+    const crashed = new FileAgentsManager({
+      home,
+      checkpoint: (point, agent, index) => {
+        if (point === "quarantined" && agent === "claude" && index === 1) throw new Error("simulated crash");
+      },
+    });
+
+    await expect(apply(crashed, "claude")).rejects.toMatchObject({ code: "agent_recovery_required" });
+    const state = await new AgentStore(stateRoot(home), "claude").read();
+    const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
+    expect(fs.readdirSync(step.scratch)).toEqual([
+      `previous.cleanup-${digest([step.scratch, "previous"])}`,
+    ]);
+
+    const restarted = new FileAgentsManager({ home });
+    await expect(apply(restarted, "claude")).resolves.toMatchObject({ state: "installed" });
+    expect(fs.existsSync(step.scratch)).toBe(false);
+    expect(fs.readdirSync(path.join(home, ".claude")).sort()).toEqual(["settings.json", "settings.json.ghcg.bak"]);
+  }, 180_000);
+
+  it("rejects and preserves a plausible cleanup quarantine not authorized by the transaction", async () => {
+    const home = homeWithCrash();
+    seed(home, ".claude/settings.json", "{}\n");
+    const crashed = new FileAgentsManager({
+      home,
+      checkpoint: (point, agent, index) => {
+        if (point === "published" && agent === "claude" && index === 1) throw new Error("simulated crash");
+      },
+    });
+    await expect(apply(crashed, "claude")).rejects.toMatchObject({ code: "agent_recovery_required" });
+    const state = await new AgentStore(stateRoot(home), "claude").read();
+    const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
+    const unauthorized = path.join(step.scratch, "previous.cleanup-00000000-0000-4000-8000-000000000099");
+    fs.renameSync(path.join(step.scratch, "previous"), unauthorized);
+
+    const restarted = new FileAgentsManager({ home });
+    await expect(apply(restarted, "claude")).rejects.toMatchObject({ code: "agent_recovery_required" });
+    expect(fs.readFileSync(unauthorized, "utf8")).toBe("{}\n");
+    expect(fs.existsSync(step.scratch)).toBe(true);
   }, 180_000);
 
   it("rejects a changed-target race before publishing another changed target", async () => {
@@ -1433,13 +1303,8 @@ describe("private repeatable agent configuration", () => {
     const config = path.join(h.home, ".codex/config.toml");
     const beforeCatalog = fs.readFileSync(catalog);
     const external = Buffer.from("model = \"external\"\n");
-    const raceBatches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
     const manager = new FileAgentsManager({
       home: h.home,
-      queryWindowsSecuritySnapshot: async (requests) => {
-        raceBatches.push(requests);
-        return await queryWindowsSecuritySnapshot(requests);
-      },
       checkpoint: (point, agent, index) => {
         if (point === "staged" && agent === "codex" && index === 3) fs.writeFileSync(config, external);
       },
@@ -1451,24 +1316,6 @@ describe("private repeatable agent configuration", () => {
     });
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(external);
-    if (process.platform === "win32") {
-      expectSnapshotContract(raceBatches, h.home, [
-        ["$HOME", "$HOME\\.claude\\settings.json", "$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak",
-          "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\models.json"],
-        ["$HOME\\.codex"],
-        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\models.json"],
-        ["$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\models.json"],
-        ["$HOME\\.codex", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex"],
-        ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next", "$HOME\\.codex\\config.toml"],
-        ["$HOME\\.codex", "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml",
-          "$HOME\\.codex\\$SCRATCH0", "$HOME\\.codex\\$SCRATCH0\\next", "$HOME\\.codex\\$SCRATCH1", "$HOME\\.codex\\$SCRATCH1\\next"],
-      ]);
-    }
   }, 180_000);
 
   it("rejects a separate-process backup race before publishing repeat Apply", async () => {
@@ -1496,13 +1343,13 @@ describe("private repeatable agent configuration", () => {
 
     await expect(apply(manager, "codex", [...mappings].reverse())).rejects.toMatchObject({
       name: "AgentError",
-      code: process.platform === "win32" ? "agent_unsafe_path" : "agent_conflict",
+      code: "agent_conflict",
     });
     expect(fs.readFileSync(backup)).toEqual(external);
     expect(fs.readFileSync(catalog)).toEqual(beforeCatalog);
     expect(fs.readFileSync(config)).toEqual(beforeConfig);
     expect((await manager.inspect(origin)).find((item) => item.id === "codex")!.state)
-      .toBe(process.platform === "win32" ? "unsafe_path" : "recovery_required");
+      .toBe("recovery_required");
   }, 180_000);
 
   it("rejects an unchanged catalog race before publishing current config changes", async () => {
@@ -1546,20 +1393,10 @@ describe("private repeatable agent configuration", () => {
   }, 180_000);
 
   it("serializes concurrent applies from two Gateway instances sharing a home", async () => {
-    const firstBatches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const secondBatches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const h = harness({ queryWindowsSecuritySnapshot: async (requests) => {
-      firstBatches.push(requests);
-      return await queryWindowsSecuritySnapshot(requests);
-    } });
-    const second = new FileAgentsManager({ home: h.home, queryWindowsSecuritySnapshot: async (requests) => {
-      secondBatches.push(requests);
-      return await queryWindowsSecuritySnapshot(requests);
-    } });
+    const h = harness();
+    const second = new FileAgentsManager({ home: h.home });
     const reversed = [...mappings].reverse();
     const firstStatus = await h.status("claude");
-    firstBatches.length = 0;
-    secondBatches.length = 0;
     const [one, two] = await Promise.allSettled([
       h.manager.apply({ agent: "claude", expectedRevision: firstStatus.revision, catalogRevision: "a".repeat(64), mappings }, origin, models, () => undefined, new AbortController().signal),
       second.apply({ agent: "claude", expectedRevision: firstStatus.revision, catalogRevision: "a".repeat(64), mappings: reversed }, origin, models, () => undefined, new AbortController().signal),
@@ -1572,37 +1409,10 @@ describe("private repeatable agent configuration", () => {
     const live = JSON.parse(fs.readFileSync(path.join(h.home, ".claude/settings.json"), "utf8"));
     const winner = one.status === "fulfilled" ? mappings : reversed;
     expect(live.env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe(winner[0]!.modelId);
-    if (process.platform === "win32") {
-      const target = "$HOME\\.claude\\settings.json";
-      const backup = `${target}.ghcg.bak`;
-      const scratch = "$HOME\\.claude\\$SCRATCH0";
-      const winning = [
-        ["$HOME", target],
-        ["$HOME", target],
-        ["$HOME", backup, target],
-        ["$HOME", target],
-        ["$HOME"],
-        ["$HOME\\.claude"],
-        [scratch, `${scratch}\\next`, target],
-        [scratch, `${scratch}\\next`, target],
-        ["$HOME\\.claude", backup, target, scratch, `${scratch}\\next`],
-        [scratch, `${scratch}\\next`, target],
-        ["$HOME\\.claude", backup, target, scratch, `${scratch}\\next`],
-        ["$HOME\\.claude", backup, target],
-      ];
-      const contracts = [firstBatches, secondBatches]
-        .map((batches) => snapshotContract(batches, h.home).map((snapshot) => snapshot.paths));
-      expect(contracts).toContainEqual(winning);
-      const losing = contracts.find((contract) => contract.length !== winning.length)!;
-      // Lock scheduling determines whether the loser reaches its post-lock snapshot.
-      expect([[ ["$HOME", target] ], [["$HOME", target], ["$HOME", target]]]).toContainEqual(losing);
-      expectDistinctSnapshotIds(firstBatches, h.home);
-      expectDistinctSnapshotIds(secondBatches, h.home);
-    }
     expect((await h.status("claude")).state).toBe("installed");
   }, 300_000);
 
-  it.runIf(process.platform === "win32")("refreshes pending status images after displaced validation rejects", async () => {
+  it.runIf(process.platform === "win32")("reports pending recovery after displaced validation rejects", async () => {
     const original = seed(homeWithCrash(), ".claude/settings.json", "{}\n");
     const crashed = new FileAgentsManager({
       home: homes.at(-1)!,
@@ -1615,44 +1425,15 @@ describe("private repeatable agent configuration", () => {
     const state = await store.read();
     const step = state.pending!.steps.find((candidate) => candidate.target === 1)!;
     fs.writeFileSync(path.join(step.scratch, "previous"), "invalid displaced bytes");
-    let mutated = false;
-    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const manager = new FileAgentsManager({
-      home: homes.at(-1)!,
-      queryWindowsSecuritySnapshot: async (requests) => {
-        batches.push(requests);
-        const facts = await queryWindowsSecuritySnapshot(requests);
-        if (!mutated && requests.some((request) => request.path.endsWith("\\previous"))) {
-          mutated = true;
-          fs.unlinkSync(`${original}.ghcg.bak`);
-        }
-        return facts;
-      },
-    });
+    fs.unlinkSync(`${original}.ghcg.bak`);
+    const manager = new FileAgentsManager({ home: homes.at(-1)! });
 
     const status = (await manager.inspect(origin)).find((item) => item.id === "claude")!;
 
     expect(status).toMatchObject({ state: "recovery_required", backupAvailable: false });
-    const displacedBatch = batches.findIndex((batch) => batch.some((request) => request.path.endsWith("\\previous")));
-    const refresh = batches.slice(displacedBatch + 1).find((batch) => {
-      const paths = batch.map((request) => request.path);
-      return paths.includes(`${original}.ghcg.bak`.toLowerCase()) && paths.includes(original.toLowerCase());
-    });
-    expect(refresh).toBeDefined();
-    expectSnapshotContract(batches, homes.at(-1)!, [
-      ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
-        "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
-        "$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\next",
-        "$HOME", "$HOME\\.codex\\models.json", "$HOME\\.codex\\config.toml",
-        "$HOME\\.codex\\config.toml.ghcg.bak", "$HOME\\.codex\\models.json.ghcg.bak"],
-      ["$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\previous"],
-      ["$HOME\\.claude", "$HOME\\.claude\\settings.json.ghcg.bak", "$HOME\\.claude\\settings.json",
-        "$HOME\\.claude\\$SCRATCH0", "$HOME\\.claude\\$SCRATCH0\\next",
-        "$HOME\\.claude\\$SCRATCH1", "$HOME\\.claude\\$SCRATCH1\\next"],
-    ]);
   }, 180_000);
 
-  it.runIf(process.platform === "win32")("keeps the exact linked-crash recovery snapshot contract", async () => {
+  it.runIf(process.platform === "win32")("recovers an exact linked-crash staged/live pair", async () => {
     const home = homeWithCrash();
     seed(home, ".claude/settings.json", "{}\n");
     const crashed = new FileAgentsManager({
@@ -1662,41 +1443,15 @@ describe("private repeatable agent configuration", () => {
       },
     });
     await expect(apply(crashed, "claude")).rejects.toThrow();
-    const batches: (readonly WindowsSecuritySnapshotRequest[])[] = [];
-    const restarted = new FileAgentsManager({ home, queryWindowsSecuritySnapshot: async (requests) => {
-      batches.push(requests);
-      return await queryWindowsSecuritySnapshot(requests);
-    } });
+    const restarted = new FileAgentsManager({ home });
     const pending = (await restarted.inspect(origin)).find((item) => item.id === "claude")!;
-    batches.length = 0;
 
     await restarted.apply({
       agent: "claude", expectedRevision: pending.revision, catalogRevision: "a".repeat(64), mappings,
     }, origin, models, () => undefined, new AbortController().signal);
 
-    const target = "$HOME\\.claude\\settings.json";
-    const backup = `${target}.ghcg.bak`;
-    const scratch0 = "$HOME\\.claude\\$SCRATCH0";
-    const scratch1 = "$HOME\\.claude\\$SCRATCH1";
-    const full = ["$HOME\\.claude", backup, target,
-      scratch0, `${scratch0}\\next`, scratch1, `${scratch1}\\next`];
-    expectSnapshotContract(batches, home, [
-      full,
-      full,
-      [scratch1, `${scratch1}\\previous`],
-      full,
-      ["$HOME\\.claude", backup, scratch0, `${scratch0}\\next`],
-      [scratch1, `${scratch1}\\previous`],
-      ["$HOME\\.claude", target, scratch1, `${scratch1}\\next`],
-      full,
-      [scratch1, `${scratch1}\\previous`],
-      full,
-      full,
-      [scratch1, `${scratch1}\\previous`],
-      [scratch1, `${scratch1}\\next`, target],
-      ["$HOME\\.claude", backup, target],
-      ["$HOME\\.claude", backup, target],
-    ]);
+    expect(fs.lstatSync(path.join(home, ".claude", "settings.json")).nlink).toBe(1);
+    expect(fs.readdirSync(path.join(home, ".claude")).sort()).toEqual(["settings.json", "settings.json.ghcg.bak"]);
   }, 180_000);
 
   it.each([
@@ -1768,7 +1523,7 @@ describe("private repeatable agent configuration", () => {
       const h = harness();
       seed(h.home, agent === "claude" ? ".claude/settings.json" : ".codex/config.toml",
         agent === "claude" ? "{}\n" : "model = \"old\"\n");
-      await apply(h.manager, agent);
+      if (agent === "codex") await takeover(h.manager); else await apply(h.manager, agent);
       const expectedPaths = agent === "claude"
         ? [path.join(h.home, ".claude", "settings.json")]
         : [path.join(h.home, ".codex", "models.json"), path.join(h.home, ".codex", "config.toml")];
@@ -1821,49 +1576,6 @@ describe("private repeatable agent configuration", () => {
     expect((await h.status("claude")).state).toBe("unsafe_path");
   }, 180_000);
 });
-
-function snapshotContract(batches: readonly (readonly WindowsSecuritySnapshotRequest[])[], home: string) {
-  const normalizedHome = home.toLowerCase();
-  const scratches = new Map<string, string>();
-  return batches.filter((batch) => batch[0]!.id.startsWith("snapshot-")).map((batch) => ({
-    id: batch[0]!.id.replace(/-path-0$/u, ""),
-    paths: batch.map((request) => request.path.replace(normalizedHome, "$HOME").replace(
-      /\.ghcg-agents-(?:claude|codex)-[0-9a-f-]+/gu,
-      (scratch) => {
-        let token = scratches.get(scratch);
-        if (token === undefined) {
-          token = `$SCRATCH${scratches.size}`;
-          scratches.set(scratch, token);
-        }
-        return token;
-      },
-    )),
-  }));
-}
-
-function expectSnapshotContract(
-  batches: readonly (readonly WindowsSecuritySnapshotRequest[])[],
-  home: string,
-  expectedPaths: readonly (readonly string[])[],
-): void {
-  const contract = snapshotContract(batches, home);
-  expect(contract.map((snapshot) => snapshot.paths)).toEqual(expectedPaths);
-  expectDistinctSnapshotIds(batches, home);
-}
-
-function expectDistinctSnapshotIds(
-  batches: readonly (readonly WindowsSecuritySnapshotRequest[])[],
-  home: string,
-): void {
-  const transactionBatches = batches.filter((batch) => batch[0]!.id.startsWith("snapshot-"));
-  const contract = snapshotContract(transactionBatches, home);
-  expect(new Set(contract.map((snapshot) => snapshot.id)).size).toBe(contract.length);
-  for (const [batchIndex, batch] of transactionBatches.entries()) {
-    expect(batch.map((request) => request.id)).toEqual(
-      batch.map((_, pathIndex) => `${contract[batchIndex]!.id}-path-${pathIndex}`),
-    );
-  }
-}
 
 function homeWithCrash(): string {
   const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ghcg-agents-")));

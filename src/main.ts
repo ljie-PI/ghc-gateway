@@ -23,6 +23,7 @@ import { defaultRuntimeConfigSnapshot, parseRuntimeConfigSnapshot, type RuntimeC
 import { parseStartupConfig, type StartupConfig } from "./config/startup_config.js";
 import { createGateway, type GatewayDependencies, type HostedGateway, type RouteRegistration } from "./gateway/create_gateway.js";
 import type { DaemonRuntimeComposition } from "./daemon/runtime.js";
+import { ProtectedFileSystem } from "./daemon/protected_file.js";
 import { createLocalControlModule } from "./daemon/local_control.js";
 import { closeDatabase, openDatabase } from "./persistence/database.js";
 import { MIGRATION_MANIFEST } from "./persistence/generated_migrations.js";
@@ -43,7 +44,9 @@ import type { SqliteDatabase } from "./persistence/sqlite.js";
 export interface BootstrapOptions {
   readonly argv?: readonly string[];
   readonly env?: NodeJS.ProcessEnv;
-  readonly startup?: StartupConfig;
+  readonly startup?: Omit<StartupConfig, "dataDirSource"> & {
+    readonly dataDirSource?: StartupConfig["dataDirSource"];
+  };
   readonly routes?: readonly RouteRegistration[];
   readonly dependencies?: Readonly<GatewayDependencies>;
   readonly homedir?: string;
@@ -77,11 +80,16 @@ export interface ApplicationContext {
 
 export async function bootstrapGateway(options: BootstrapOptions = {}): Promise<HostedGateway> {
   const env = options.env ?? {};
-  const startup = options.startup ?? parseStartupConfig(
-    options.argv ?? [],
-    env,
-    options.homedir === undefined ? {} : { homedir: options.homedir },
-  );
+  const startup: StartupConfig = options.startup === undefined
+    ? parseStartupConfig(
+      options.argv ?? [],
+      env,
+      options.homedir === undefined ? {} : { homedir: options.homedir },
+    )
+    : {
+      ...options.startup,
+      dataDirSource: options.startup.dataDirSource ?? "custom",
+    };
   const context = options.application ?? (options.routes === undefined ? await createProductionApplicationContext(startup, env) : undefined);
   const routes = options.routes ?? (context === undefined ? [] : createPublicRouteRegistrations(context));
   return createGateway(
@@ -159,6 +167,7 @@ export async function createProductionApplicationContext(
   startup: StartupConfig,
   env: NodeJS.ProcessEnv = {},
 ): Promise<ApplicationContext> {
+  new ProtectedFileSystem(startup.dataDir, { dataDirSource: startup.dataDirSource }).ensureProtectedDirectory();
   const credentials = new FileCredentialStore(path.join(startup.dataDir, "credentials.json"));
   const accountCoordinator = new AccountCoordinator();
   const database = openDatabase({

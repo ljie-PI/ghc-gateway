@@ -1,11 +1,12 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LOOPBACK_HOST, type StartupConfig } from "../../src/config/startup_config.js";
 import { createProductionApplicationContext } from "../../src/main.js";
 import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { MIGRATION_MANIFEST } from "../../src/persistence/generated_migrations.js";
+import { ProtectedFileSystem } from "../../src/daemon/protected_file.js";
 
 const EXPECTED_VERSIONS = [1, 10, 20, 21, 30, 41];
 
@@ -14,11 +15,25 @@ async function createStartup(): Promise<StartupConfig> {
     host: LOOPBACK_HOST,
     port: 31_400,
     dataDir: await mkdtemp(path.join(tmpdir(), "ghc-gateway-production-db-")),
+    dataDirSource: "custom",
     logLevel: "info",
   };
 }
 
 describe("production migration manifest", () => {
+  it("initializes the selected root before composing production stores", async () => {
+    const startup = { ...await createStartup(), dataDirSource: "default" as const };
+    const initialized = vi.spyOn(ProtectedFileSystem.prototype, "ensureProtectedDirectory");
+
+    const application = await createProductionApplicationContext(startup);
+    try {
+      expect(initialized).toHaveBeenCalledOnce();
+    } finally {
+      initialized.mockRestore();
+      await application.close?.();
+    }
+  });
+
   it.each([
     { name: "fresh", seedFirstMigration: false },
     { name: "migrated within new v1", seedFirstMigration: true },

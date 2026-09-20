@@ -179,7 +179,7 @@ async function startHttpSdkGateway(origin: string, requestId: string) {
     disposers.push(async () => registry.close());
     const history = new SqliteResponsesHistory(database, { nowMs });
     gateway = await bootstrapGateway({
-      startup: { host: "127.0.0.1", port, dataDir, logLevel: "error" },
+      startup: { host: "127.0.0.1", port, dataDir, dataDirSource: "custom", logLevel: "error" },
       application: {
         database, credentials, accountCoordinator, directory, registry, copilot, history, modelsSource,
         close: dispose,

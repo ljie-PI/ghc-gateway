@@ -46,7 +46,7 @@ ghcg start --port 31401
 
 There is no watchdog, automatic restart, operating-system service installation, or second server process. Stop and restart verify the daemon PID, operating-system process start identity, instance nonce, and authenticated control endpoint before termination.
 
-Gateway runtime data, credentials, and Agent management state are stored under the selected data directory. The default Agent state paths are `~/.ghc-gateway/agents/claude/state.db` and `~/.ghc-gateway/agents/codex/state.db`; `--data-dir` or `GHC_GATEWAY_DATA_DIR` moves them to `<data-dir>/agents` without changing `CLAUDE_CONFIG_DIR` or `CODEX_HOME` client configuration targets.
+Gateway runtime data, credentials, and Agent management state are stored under the selected data directory. The default Agent state paths are `~/.ghc-gateway/agents/claude/state.db` and `~/.ghc-gateway/agents/codex/state.db`; `--data-dir` or `GHC_GATEWAY_DATA_DIR` moves them to `<data-dir>/agents` without changing `CLAUDE_CONFIG_DIR` or `CODEX_HOME` client configuration targets. On Windows, a missing true-default data directory is atomically created for the current user. Existing directories and every explicit CLI or environment path, including one equal to the default path, are trusted as caller-managed permission boundaries.
 
 ## Authentication And Accounts
 
@@ -113,7 +113,7 @@ Each Model mapping selects an exact Copilot model ID with autocomplete; selectio
 Claude Code keeps its Sonnet, Opus, and Haiku role rows and allows extra ordinary menu models using `modelPicker` (Claude Code **2.1.243 or newer**). The mapped menu replaces built-in options, subject to the client's Default/current-model entries and managed-settings policy. There is no separate Subagent mapping.
 Codex receives only its selected mappings in `models.json`, referenced by `model_catalog_json` in `config.toml`. Codex reads that catalog at startup; restart it after applying changes.
 **Apply changes** can be repeated without editing the mappings. It updates gateway-owned routing and model fields in the current config; unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude login credentials are left untouched. Immediately before publishing, Apply rechecks the complete managed target set, including unchanged backups and catalogs; concurrent file changes are reported rather than silently overwritten.
-Before replacing an existing config for the first time, the gateway creates a private `config.toml.ghcg.bak` or `settings.json.ghcg.bak` alongside it. Later applies never replace that first original backup. If the original config was absent, no backup of a later generated config is created.
+Before replacing an existing config for the first time, the gateway creates `config.toml.ghcg.bak` or `settings.json.ghcg.bak` alongside it. Later applies never replace that first original backup. If the original config was absent, no backup of a later generated config is created. On Windows, the backup inherits the client configuration directory's permissions and is not guaranteed to be current-user-only.
 There is no Restore operation. A recoverable interrupted write can be completed by refreshing and applying again; retain backup/recovery files and reconcile conflicting external changes if it cannot complete safely.
 Local configuration inspection loads independently of model choices and works without an account. Apply validates mappings against the current Copilot catalog and requires a signed-in account. Status means configuration installed, not a tested client connection.
 Overview shows cumulative usage for the last 24 hours, 7 days, and 28 days, using the gateway's clock
@@ -232,7 +232,7 @@ The default data directory is `~/.ghc-gateway` and contains:
 - `daemon.json` with protected process identity and local-control authentication
 - `logs/*.jsonl` with bounded, sanitized daemon logs
 
-Credentials and daemon identity use protected atomic files. Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors.
+Credentials and daemon identity use protected atomic files. On Windows, files under the selected data root inherit that root's permissions; existing and custom roots are not inspected or repaired, so callers must secure them. Agent targets under `CLAUDE_CONFIG_DIR` and `CODEX_HOME` likewise inherit and trust those client-directory permissions while link, type, file-identity, and concurrent-replacement checks remain enforced. Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors.
 
 Responses History stores only minimal bridge tool checkpoints, at most 512 responses, with a seven-day default TTL. Separate content-free route receipts bind observed response IDs to the account, resolved model, trusted upstream origin, native or converted protocol owner, conversion version, and checkpoint state. Receipts are independently bounded at 2048 and do not consume the 512-checkpoint limit.
 

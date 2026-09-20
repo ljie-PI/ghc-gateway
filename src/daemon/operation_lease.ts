@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { DataDirSource } from "../config/startup_config.js";
 import {
   captureProcessStartIdentity,
   isCanonicalProcessStartIdentity,
@@ -43,10 +44,23 @@ export interface DaemonOperationLeaseHandle {
 
 export interface DaemonOperationLeaseContext {
   readonly signal?: AbortSignal;
+  readonly dataDirSource?: DataDirSource;
+  readonly createDataDir?: boolean;
 }
 
 export interface DaemonOperationLeaseAccess {
-  acquire(dataDir: string, context?: Readonly<DaemonOperationLeaseContext>): Promise<DaemonOperationLeaseHandle>;
+  acquire(
+    dataDir: string,
+    context?: Readonly<DaemonOperationLeaseContext & { readonly createDataDir?: true }>,
+  ): Promise<DaemonOperationLeaseHandle>;
+  acquire(
+    dataDir: string,
+    context: Readonly<DaemonOperationLeaseContext & { readonly createDataDir: false }>,
+  ): Promise<DaemonOperationLeaseHandle | null>;
+  acquire(
+    dataDir: string,
+    context: Readonly<DaemonOperationLeaseContext>,
+  ): Promise<DaemonOperationLeaseHandle | null>;
 }
 
 export interface DaemonOperationLeaseFileOptions extends ProtectedFileOptions {
@@ -127,10 +141,31 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
 
   async acquire(
     dataDir: string,
+    context?: Readonly<DaemonOperationLeaseContext & { readonly createDataDir?: true }>,
+  ): Promise<DaemonOperationLeaseHandle>;
+  async acquire(
+    dataDir: string,
+    context: Readonly<DaemonOperationLeaseContext & { readonly createDataDir: false }>,
+  ): Promise<DaemonOperationLeaseHandle | null>;
+  async acquire(
+    dataDir: string,
+    context: Readonly<DaemonOperationLeaseContext>,
+  ): Promise<DaemonOperationLeaseHandle | null>;
+  async acquire(
+    dataDir: string,
     context: Readonly<DaemonOperationLeaseContext> = {},
-  ): Promise<DaemonOperationLeaseHandle> {
+  ): Promise<DaemonOperationLeaseHandle | null> {
     const signal = context.signal;
     signal?.throwIfAborted();
+    const files = new ProtectedFileSystem(dataDir, {
+      ...this.protectedOptions,
+      dataDirSource: context.dataDirSource ?? "custom",
+    });
+    if (context.createDataDir === false) {
+      if (!files.assertProtectedDirectoryIfExists()) return null;
+    } else {
+      files.ensureProtectedDirectory();
+    }
     const processStartIdentity = await this.captureOwnerIdentity(signal);
     const held: OperationOwner = {
       version: 1,
@@ -139,8 +174,6 @@ export class DaemonOperationLeaseFile implements DaemonOperationLeaseAccess {
       processStartIdentity,
       leaseToken: this.createToken(),
     };
-    const files = new ProtectedFileSystem(dataDir, this.protectedOptions);
-    files.ensureProtectedDirectory();
     const databasePath = path.join(files.directory, OPERATION_DATABASE);
     const ownerPath = path.join(files.directory, OPERATION_OWNER);
     const tempPath = path.join(files.directory, OPERATION_OWNER_TEMP);
