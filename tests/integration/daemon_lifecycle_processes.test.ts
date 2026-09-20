@@ -6,7 +6,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonIdentityFile, type DaemonIdentityLease } from "../../src/daemon/identity_file.js";
-import { captureProcessStartIdentity } from "../../src/daemon/process_identity.js";
+import { ProcessIdentityError, captureProcessStartIdentity } from "../../src/daemon/process_identity.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 const children = new Set<ChildProcess>();
@@ -161,7 +161,7 @@ describe("daemon lifecycle coordination across CLI processes", () => {
 async function processFixture() {
   const root = await mkdtemp(path.join(tmpdir(), "ghcg-lifecycle-processes-"));
   const dataDir = path.join(root, "data");
-  const processStartIdentity = await captureProcessStartIdentity(process.pid);
+  const processStartIdentity = await captureFixtureProcessIdentity();
   if (processStartIdentity === null) throw new Error("test process identity unavailable");
   let requestCount = 0;
   let blockedResponse: ServerResponse | undefined;
@@ -212,6 +212,25 @@ async function processFixture() {
       await rm(root, { recursive: true, force: true });
     },
   };
+}
+
+async function captureFixtureProcessIdentity(): Promise<string | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await captureProcessStartIdentity(process.pid);
+    } catch (error: unknown) {
+      if (!isWindowsProcessIdentityTimeout(error) || attempt === 2) throw error;
+    }
+  }
+  throw new Error("unreachable process identity retry state");
+}
+
+function isWindowsProcessIdentityTimeout(error: unknown): boolean {
+  if (process.platform !== "win32" || !(error instanceof ProcessIdentityError)) return false;
+  const cause = error.cause;
+  return typeof cause === "object" && cause !== null
+    && "killed" in cause && cause.killed === true
+    && "signal" in cause && cause.signal === "SIGTERM";
 }
 
 function writeStatus(response: ServerResponse, processStartIdentity: string): void {
