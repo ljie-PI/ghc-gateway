@@ -127,8 +127,8 @@
     const model = matches[index];
     if (model === undefined) return;
     onselect(model);
-    close();
     input.focus({ preventScroll: true });
+    close();
   }
 
   function optionId(index: number): string {
@@ -184,7 +184,8 @@
     }
   }
 
-  function pointerClick(index: number): void {
+  function pointerClick(event: MouseEvent, index: number): void {
+    event.preventDefault();
     pointerStart = null;
     if (suppressPointerClick) {
       suppressPointerClick = false;
@@ -232,7 +233,7 @@
             onpointermove={(event) => pointerMove(event, index)}
             onpointerdown={pointerDown}
             onpointercancel={() => { pointerStart = null; suppressPointerClick = false; }}
-            onclick={() => pointerClick(index)}
+            onclick={(event) => pointerClick(event, index)}
             onkeydown={(event) => { if (event.key === "Enter" || event.key === " ") choose(index); }}
           >
             <strong>{model.id}</strong><span>{model.name}</span>

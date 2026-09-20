@@ -37,6 +37,7 @@
   let accountObservationTimer: ReturnType<typeof setTimeout> | null = null;
   let catalogRefreshRequested = false;
   let forceCatalogRefresh = false;
+  let manualRefreshGeneration = $state(0);
   const accountObservation = new AbortController();
   const orderedItems = $derived(data?.items.toSorted((left, right) =>
     (left.id === "codex" ? 0 : 1) - (right.id === "codex" ? 0 : 1)) ?? []);
@@ -114,6 +115,7 @@
   }
 
   function refresh(): void {
+    manualRefreshGeneration += 1;
     void load(true);
     catalogRefreshRequested = true;
     forceCatalogRefresh = true;
@@ -136,7 +138,7 @@
   {:else if catalog === null}<p class="notice" role="status">Model catalog unavailable. Sign in if needed, then refresh. Local configuration inspection does not require a Copilot account.</p>{/if}
   <div class="agent-cards">
     {#each orderedItems as status (status.id)}
-      <AgentCard {client} {status} {catalog} {onchanged} {modelsLoading} modelsUnavailable={modelsFailure !== "" || (!modelsLoading && catalog === null)} />
+      <AgentCard {client} {status} {catalog} {onchanged} {modelsLoading} {manualRefreshGeneration} modelsUnavailable={modelsFailure !== "" || (!modelsLoading && catalog === null)} />
     {/each}
   </div>
 {:else if loading}<p class="loading-line" aria-busy="true">Reading agent configuration...</p>{/if}
