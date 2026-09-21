@@ -20,17 +20,21 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { LogLevel } from "../config/startup_config.js";
 import { LOG_LINE_LIMIT_BYTES, sanitizeMetadata, utf8Bytes } from "../telemetry/sanitize.js";
+import { DiagnosticRecorder, DIAGNOSTIC_LIMITS, sanitizeDiagnosticRecord, type DiagnosticRecord } from "../telemetry/diagnostics.js";
 
 export const LOG_FILE_BYTES = 10 * 1024 * 1024;
 export const LOG_FILE_COUNT = 5;
 export const LOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-const PRUNE_STATE_NAME = ".gateway-prune-state.json";
-const PRUNE_COMMIT_NAME = ".gateway-prune-commit.json";
-const PRUNE_STATE_TEMP_NAME = ".gateway-prune-state.json.tmp";
-const PRUNE_COMMIT_TEMP_NAME = ".gateway-prune-commit.json.tmp";
 const PRUNE_STATE_MAX_BYTES = 1024;
-const PRUNE_CANDIDATE_PATTERN = /^\.gateway-prune-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.jsonl$/u;
+type LogChannel = "gateway" | "diagnostics";
+
+export function createFileDiagnostics(directory: string, onFailure?: () => void): DiagnosticRecorder {
+  const file = new JsonlLogger(directory, Date.now, { channel: "diagnostics" });
+  return new DiagnosticRecorder({ write: (record) => file.writeDiagnostic(record) }, {
+    ...(onFailure === undefined ? {} : { onFailure }),
+  });
+}
 
 const LOG_LEVEL_PRIORITY: Readonly<Record<LogLevel, number>> = {
   trace: 0,
@@ -45,6 +49,7 @@ export interface DaemonLogger {
 }
 
 export interface JsonlLoggerOptions {
+  readonly channel?: LogChannel;
   readonly onBeforePrune?: (filePath: string) => void;
   readonly onAfterPruneRename?: (filePath: string) => void;
   readonly onPruneCheckpoint?: (checkpoint: PruneCheckpoint) => void;
@@ -76,6 +81,7 @@ interface FileObservation {
 
 export class JsonlLogger implements DaemonLogger {
   private rotationSequence = 0;
+  private readonly channel: LogChannel;
 
   constructor(
     private readonly directory: string,
@@ -83,6 +89,8 @@ export class JsonlLogger implements DaemonLogger {
     private readonly options: Readonly<JsonlLoggerOptions> = {},
     private readonly threshold: LogLevel = "info",
   ) {
+    this.channel = options.channel ?? "gateway";
+    if (this.channel !== "gateway" && this.channel !== "diagnostics") throw new Error("invalid log channel");
     const existed = pathExists(directory);
     if (!existed) {
       mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -95,10 +103,10 @@ export class JsonlLogger implements DaemonLogger {
   }
 
   write(record: Record<string, unknown>): void {
+    if (this.channel !== "gateway") throw new Error("diagnostic records require the typed writer");
     if (!shouldWrite(record, this.threshold)) {
       return;
     }
-    this.prune();
     const sanitized = sanitizeMetadata(record);
     const category = typeof record.category === "string" && /^[a-z0-9_]+$/u.test(record.category)
       ? record.category
@@ -119,6 +127,18 @@ export class JsonlLogger implements DaemonLogger {
     if (utf8Bytes(line) > LOG_LINE_LIMIT_BYTES) {
       line = JSON.stringify({ ts: timestamp, overflow: true, reason: "log_line_truncated" });
     }
+    this.appendLine(line, timestamp);
+  }
+
+  writeDiagnostic(record: Readonly<DiagnosticRecord>): void {
+    if (this.channel !== "diagnostics") throw new Error("diagnostic log channel required");
+    const line = JSON.stringify(sanitizeDiagnosticRecord(record));
+    if (utf8Bytes(line) + 1 > DIAGNOSTIC_LIMITS.recordBytes) throw new Error("diagnostic record exceeds limit");
+    this.appendLine(line, this.nowMs());
+  }
+
+  private appendLine(line: string, timestamp: number): void {
+    this.prune();
     const encoded = `${line}\n`;
     const active = this.activeFile();
     if (fileSize(active) + utf8Bytes(encoded) > LOG_FILE_BYTES) {
@@ -129,7 +149,7 @@ export class JsonlLogger implements DaemonLogger {
   }
 
   private activeFile(): string {
-    return path.join(this.directory, "gateway.jsonl");
+    return path.join(this.directory, `${this.channel}.jsonl`);
   }
 
   private rotate(active: string, timestamp: number): void {
@@ -138,7 +158,7 @@ export class JsonlLogger implements DaemonLogger {
     }
     let rotated: string;
     do {
-      rotated = path.join(this.directory, `gateway.${timestamp}.${this.rotationSequence}.jsonl`);
+      rotated = path.join(this.directory, `${this.channel}.${timestamp}.${this.rotationSequence}.jsonl`);
       this.rotationSequence += 1;
     } while (pathExists(rotated));
     renameSync(active, rotated);
@@ -148,7 +168,7 @@ export class JsonlLogger implements DaemonLogger {
     this.recoverPrune();
     const now = this.nowMs();
     const files = readdirSync(this.directory)
-      .filter((name) => /^gateway\.\d+\.\d+\.jsonl$/u.test(name))
+      .filter((name) => new RegExp(`^${this.channel}\\.\\d+\\.\\d+\\.jsonl$`, "u").test(name))
       .map((name) => path.join(this.directory, name))
       .map((file) => ({ file, stat: assertSafeFile(file) }))
       .sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs);
@@ -175,7 +195,7 @@ export class JsonlLogger implements DaemonLogger {
     const current = assertSafeFile(filePath);
     if (!sameFileObservation(observed, current)) return;
     const statePath = this.pruneStatePath();
-    const candidateName = `.gateway-prune-${randomUUID()}.jsonl`;
+    const candidateName = `.${this.channel}-prune-${randomUUID()}.jsonl`;
     const quarantined = path.join(this.directory, candidateName);
     if (pathExists(quarantined)) throw new Error("log prune quarantine already exists");
     const stateStat = publishPruneState(statePath, this.pruneStateTempPath(), {
@@ -220,15 +240,15 @@ export class JsonlLogger implements DaemonLogger {
   private recoverPrune(): void {
     const statePath = this.pruneStatePath();
     const commitPath = this.pruneCommitPath();
-    recoverPruneStateTemporary(this.pruneStateTempPath(), pathExists(statePath), pathExists(commitPath));
+    recoverPruneStateTemporary(this.pruneStateTempPath(), pathExists(statePath), pathExists(commitPath), this.channel);
     const prepared = pathExists(statePath) ? readPruneState(statePath) : undefined;
-    recoverPruneCommitTemporary(this.pruneCommitTempPath(), pathExists(commitPath), prepared?.state);
+    recoverPruneCommitTemporary(this.pruneCommitTempPath(), pathExists(commitPath), prepared?.state, this.channel);
     const committed = pathExists(commitPath) ? readPruneState(commitPath) : undefined;
     if (prepared === undefined && committed === undefined) return;
     const transaction = committed?.state ?? prepared?.state;
     if (transaction === undefined) return;
-    assertPruneOriginalName(transaction.originalName);
-    assertPruneCandidateName(transaction.candidateName);
+    assertPruneOriginalName(transaction.originalName, this.channel);
+    assertPruneCandidateName(transaction.candidateName, this.channel);
     const quarantined = path.join(this.directory, transaction.candidateName);
     if (prepared === undefined && pathExists(quarantined)) {
       throw new Error("log prune commit is missing its prepared state");
@@ -261,19 +281,19 @@ export class JsonlLogger implements DaemonLogger {
   }
 
   private pruneStatePath(): string {
-    return path.join(this.directory, PRUNE_STATE_NAME);
+    return path.join(this.directory, `.${this.channel}-prune-state.json`);
   }
 
   private pruneCommitPath(): string {
-    return path.join(this.directory, PRUNE_COMMIT_NAME);
+    return path.join(this.directory, `.${this.channel}-prune-commit.json`);
   }
 
   private pruneStateTempPath(): string {
-    return path.join(this.directory, PRUNE_STATE_TEMP_NAME);
+    return path.join(this.directory, `.${this.channel}-prune-state.json.tmp`);
   }
 
   private pruneCommitTempPath(): string {
-    return path.join(this.directory, PRUNE_COMMIT_TEMP_NAME);
+    return path.join(this.directory, `.${this.channel}-prune-commit.json.tmp`);
   }
 
 }
@@ -521,6 +541,7 @@ function recoverPruneStateTemporary(
   filePath: string,
   finalExists: boolean,
   commitExists: boolean,
+  channel: LogChannel,
 ): void {
   if (!pathExists(filePath)) return;
   if (finalExists || commitExists) {
@@ -529,8 +550,8 @@ function recoverPruneStateTemporary(
   const temporary = readPruneStateBytes(filePath);
   const state = parsePruneStateIfComplete(temporary.value);
   if (state !== undefined) {
-    assertPruneOriginalName(state.originalName);
-    assertPruneCandidateName(state.candidateName);
+    assertPruneOriginalName(state.originalName, channel);
+    assertPruneCandidateName(state.candidateName, channel);
     if (pathExists(path.join(path.dirname(filePath), state.candidateName))) {
       throw new Error("log prune temporary conflicts with quarantine");
     }
@@ -542,6 +563,7 @@ function recoverPruneCommitTemporary(
   filePath: string,
   finalExists: boolean,
   prepared: PruneState | undefined,
+  channel: LogChannel,
 ): void {
   if (!pathExists(filePath)) return;
   if (finalExists || prepared === undefined) {
@@ -550,8 +572,8 @@ function recoverPruneCommitTemporary(
   const temporary = readPruneStateBytes(filePath);
   const committed = parsePruneStateIfComplete(temporary.value);
   if (committed !== undefined) {
-    assertPruneOriginalName(committed.originalName);
-    assertPruneCandidateName(committed.candidateName);
+    assertPruneOriginalName(committed.originalName, channel);
+    assertPruneCandidateName(committed.candidateName, channel);
     if (prepared.originalName !== committed.originalName
       || prepared.candidateName !== committed.candidateName
       || !matchesAfterRenameObservation(committed.observation, prepared.observation)) {
@@ -601,14 +623,14 @@ function isFileObservation(value: unknown): value is FileObservation {
   ));
 }
 
-function assertPruneOriginalName(originalName: string): void {
-  if (originalName !== "gateway.jsonl" && !/^gateway\.\d+\.\d+\.jsonl$/u.test(originalName)) {
+function assertPruneOriginalName(originalName: string, channel: LogChannel): void {
+  if (originalName !== `${channel}.jsonl` && !new RegExp(`^${channel}\\.\\d+\\.\\d+\\.jsonl$`, "u").test(originalName)) {
     throw new Error("invalid log prune target");
   }
 }
 
-function assertPruneCandidateName(candidateName: string): void {
-  if (!PRUNE_CANDIDATE_PATTERN.test(candidateName)) {
+function assertPruneCandidateName(candidateName: string, channel: LogChannel): void {
+  if (!new RegExp(`^\\.${channel}-prune-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.jsonl$`, "u").test(candidateName)) {
     throw new Error("invalid log prune quarantine");
   }
 }

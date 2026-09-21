@@ -14,6 +14,7 @@ export interface StartupConfig {
   readonly dataDir: string;
   readonly dataDirSource: DataDirSource;
   readonly logLevel: LogLevel;
+  readonly diagnostics?: boolean;
 }
 
 export interface StartupParseOptions {
@@ -57,17 +58,22 @@ export function parseStartupConfig(
     dataDir: resolveDataDir(selectedDataDir.value),
     dataDirSource: selectedDataDir.source,
     logLevel,
+    ...(flags.diagnostics === true ? { diagnostics: true } : {}),
   };
 }
 
-function parseFlags(argv: readonly string[]): { port?: string; dataDir?: string; logLevel?: string } {
-  const flags: { port?: string; dataDir?: string; logLevel?: string } = {};
+function parseFlags(argv: readonly string[]): { port?: string; dataDir?: string; logLevel?: string; diagnostics?: boolean } {
+  const flags: { port?: string; dataDir?: string; logLevel?: string; diagnostics?: boolean } = {};
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === undefined) {
       continue;
     }
     const next = argv[index + 1];
+    if (token === "--diagnostics") {
+      flags.diagnostics = true;
+      continue;
+    }
     if (token === "--port") {
       flags.port = requireValue("--port", next);
       index += 1;

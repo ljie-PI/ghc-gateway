@@ -127,13 +127,13 @@ function parseCommand(
     if (groupAction === "--help") {
       return { kind: "help", text: commandHelp(command) };
     }
-    if (tokens.length !== 1) {
+    if (tokens.length !== 1 && (command !== "restart" || tokens.slice(1).some((token) => token !== "--diagnostics"))) {
       throw new CliError("usage_error");
     }
     return {
       kind: "lifecycle",
       action: command,
-      ...(command === "restart" ? { startup: parseServeStartup([], context) } : {}),
+      ...(command === "restart" ? { startup: parseServeStartup(tokens.slice(1), context) } : {}),
     };
   }
   if (command === "auth") {
@@ -275,6 +275,10 @@ function parseServeStartup(
   const argv: string[] = context.cliDataDir === undefined ? [] : ["--data-dir", context.cliDataDir];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
+    if (token === "--diagnostics") {
+      argv.push(token);
+      continue;
+    }
     if (token === "--port" || token === "--log-level" || token === "--data-dir") {
       argv.push(token, readValue(tokens, index));
       index += 1;
@@ -323,6 +327,9 @@ function commandHelp(command: string): string {
   return [
     `Usage: ghcg [--data-dir <path>] [--json] ${command}`,
     "",
+    ...(["serve", "start", "restart"].includes(command)
+      ? ["  --diagnostics  Write bounded, content-free request diagnostics for this invocation.", ""]
+      : []),
   ].join("\n");
 }
 

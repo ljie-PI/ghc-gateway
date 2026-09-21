@@ -3,6 +3,8 @@ import { encodeAnthropicMessagesSseEvent } from "../anthropic_messages/wire.js";
 import { encodeOpenaiChatCompletionsDone, encodeOpenaiChatCompletionsSseChunk } from "../openai_chat_completions/wire.js";
 import { encodeOpenaiResponsesSseEvent } from "../openai_responses/wire.js";
 import { SemanticItemLedger } from "./ledger.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import { diagnosticObjectShape, diagnosticShape } from "./diagnostics.js";
 import { decodeProtocolStream } from "./stream_decoders.js";
 import type {
   ConversionDegradationRule,
@@ -25,6 +27,7 @@ import {
 } from "./stream_keys.js";
 
 export interface StreamConversionContext {
+  readonly diagnostics?: RequestDiagnostics | undefined;
   readonly source: InferenceProtocol;
   readonly target: InferenceProtocol;
   readonly model: string;
@@ -65,6 +68,7 @@ export async function* convertProtocolStream(
     context.eventLimitBytes,
     context.accumulatorBytes,
     context.measureEvent,
+    context.diagnostics,
   )) {
     try {
       if (event.kind === "usage") {
@@ -631,19 +635,21 @@ class ChatEmitter implements StreamEmitter {
   }
 
   private chunk(delta: ReturnType<typeof wireObject>, finish?: string): ConvertedStreamEmission {
+    const payload = wireObject([
+      ["id", this.id],
+      ["object", "chat.completion.chunk"],
+      ["created", wireNumber(this.created)],
+      ["model", this.context.model],
+      ["choices", wireArray([wireObject([
+        ["index", wireNumber(0)],
+        ["delta", delta],
+        ["finish_reason", finish ?? null],
+      ])])],
+    ]);
+    this.context.diagnostics?.shape("client_output", () => diagnosticShape(payload));
     return {
       kind: "wire",
-      bytes: encodeOpenaiChatCompletionsSseChunk(wireObject([
-        ["id", this.id],
-        ["object", "chat.completion.chunk"],
-        ["created", wireNumber(this.created)],
-        ["model", this.context.model],
-        ["choices", wireArray([wireObject([
-          ["index", wireNumber(0)],
-          ["delta", delta],
-          ["finish_reason", finish ?? null],
-        ])])],
-      ])),
+      bytes: encodeOpenaiChatCompletionsSseChunk(payload),
     };
   }
 }
@@ -1073,6 +1079,7 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   private event(value: Record<string, unknown>): ConvertedStreamEmission {
+    this.context.diagnostics?.shape("client_output", () => diagnosticObjectShape(value));
     return {
       kind: "wire",
       bytes: encodeAnthropicMessagesSseEvent(value as { readonly type: string; readonly [key: string]: unknown }),
@@ -1552,6 +1559,7 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   private event(value: ReturnType<typeof wireObject>): ConvertedStreamEmission {
+    this.context.diagnostics?.shape("client_output", () => diagnosticShape(value));
     return { kind: "wire", bytes: encodeOpenaiResponsesSseEvent(value) };
   }
 }

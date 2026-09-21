@@ -3,6 +3,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { ControlOperation, ControlOperationMap, CliErrorCode } from "../cli/control_client.js";
 import { CliError, SAFE_ERROR_MESSAGES } from "../cli/control_client.js";
 import type { LocalControlModule } from "../gateway/create_gateway.js";
+import type { DiagnosticsStatus } from "../telemetry/diagnostics.js";
 
 const CONTROL_PREFIX = "/__ghcg/control/v1";
 const COMMAND_BODY_LIMIT = 1_048_576;
@@ -63,6 +64,7 @@ export interface LocalControlCommandDispatcher {
 }
 
 export interface LocalControlDependencies {
+  readonly diagnostics?: () => DiagnosticsStatus;
   readonly identity: Readonly<LocalControlIdentity>;
   readonly dispatcher: LocalControlCommandDispatcher;
   readonly requestStop: (signal: AbortSignal) => Promise<void> | void;
@@ -133,7 +135,10 @@ export function createLocalControlModule(
         await requireNoBody(request, signal);
         signal.throwIfAborted();
         if (route === "status") {
-          return success(200, { state: "running", instance }, context.requestId);
+          return success(200, {
+            state: "running", instance,
+            ...(dependencies.diagnostics === undefined ? {} : { diagnostics: dependencies.diagnostics() }),
+          }, context.requestId);
         }
         if (!identity.managed) {
           throw new ControlFailure("instance_mismatch");

@@ -17,8 +17,10 @@ import {
 import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { SemanticUsage } from "../conversion/types.js";
 import { mergeMessagesUsage } from "../conversion/usage.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import { diagnosticShape } from "../conversion/diagnostics.js";
 
-export function serializeNativeMessagesRequest(body: WireJsonObject, model: string): Uint8Array {
+export function serializeNativeMessagesRequest(body: WireJsonObject, model: string, diagnostics?: RequestDiagnostics): Uint8Array {
   let replaced = false;
   const members = body.members.map((member) => {
     if (member.key !== "model") {
@@ -30,10 +32,12 @@ export function serializeNativeMessagesRequest(body: WireJsonObject, model: stri
   if (!replaced) {
     members.push({ key: "model", value: model });
   }
-  return serializeWireJson({ kind: "object", members });
+  const request = { kind: "object", members } as const;
+  diagnostics?.shape("upstream_request", () => diagnosticShape(request));
+  return serializeWireJson(request);
 }
 
-export function validatedNativeMessagesBody(bytes: Uint8Array, maxBytes: number): Uint8Array {
+export function validatedNativeMessagesBody(bytes: Uint8Array, maxBytes: number, diagnostics?: RequestDiagnostics): Uint8Array {
   try {
     const parsed = parseWireJson(bytes, { maxBytes, maxDepth: 64 });
     if (!isWireJsonObject(parsed)) {
@@ -48,6 +52,8 @@ export function validatedNativeMessagesBody(bytes: Uint8Array, maxBytes: number)
     ) {
       invalid();
     }
+    diagnostics?.shape("upstream_output", () => diagnosticShape(parsed));
+    diagnostics?.shape("client_output", () => diagnosticShape(parsed));
     return bytes;
   } catch (error: unknown) {
     if (error instanceof GatewayFailureError) {
@@ -104,11 +110,13 @@ export async function createNativeMessagesStreamResponse(input: {
     input.scope.config.timeouts.streamIdleMs,
   );
   return await createStreamExecutionResponse({
+    diagnostics: input.scope.diagnostics,
     upstream: input.upstream,
     emissions: nativeMessagesEmissions(
       timed,
       input.scope.config.limits.sseEventBytes,
       input.scope.config.limits.accumulatorBytes,
+      input.scope.diagnostics,
     ),
     signal: input.scope.signal,
     deliverySignal: input.scope.deliverySignal,
@@ -129,9 +137,10 @@ async function* nativeMessagesEmissions(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
   accumulatorBytes: number,
+  diagnostics?: RequestDiagnostics,
 ): AsyncIterable<StreamExecutionEmission<SemanticUsage>> {
   const iterator = bytes[Symbol.asyncIterator]();
-  const observer = new NativeMessagesObserver(eventLimitBytes);
+  const observer = new NativeMessagesObserver(eventLimitBytes, diagnostics);
   const presemanticRecords: Uint8Array[] = [];
   let prefetchedBytes = 0;
   try {
@@ -236,7 +245,7 @@ class NativeMessagesObserver {
     reasoningTokens: 0,
   };
 
-  constructor(private readonly eventLimitBytes: number) {}
+  constructor(private readonly eventLimitBytes: number, private readonly diagnostics?: RequestDiagnostics) {}
 
   get hasSemantic(): boolean {
     return this.semantic;
@@ -376,6 +385,7 @@ class NativeMessagesObserver {
       .map((line) => line.slice(6).trim())
       .at(-1);
     if (event === "error") {
+      this.diagnostics?.event("error");
       this.semantic = true;
       throw new GatewayFailureError({
         kind: "upstream_stream_error",
@@ -409,6 +419,9 @@ class NativeMessagesObserver {
       invalid();
     }
     const type = types[0];
+    this.diagnostics?.event(type);
+    this.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
+    this.diagnostics?.shape("client_output", () => diagnosticShape(payload));
     if (type === "error") {
       this.semantic = true;
       throw new GatewayFailureError({

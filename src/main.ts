@@ -40,6 +40,8 @@ import { TelemetryRuntime } from "./telemetry/runtime.js";
 import type { ProtocolPerformanceObserver } from "./telemetry/runtime.js";
 import { VERSION } from "./version.js";
 import type { SqliteDatabase } from "./persistence/sqlite.js";
+import { createFileDiagnostics } from "./daemon/logger.js";
+import { DISABLED_DIAGNOSTICS, type DiagnosticRecorder } from "./telemetry/diagnostics.js";
 
 export interface BootstrapOptions {
   readonly argv?: readonly string[];
@@ -92,6 +94,17 @@ export async function bootstrapGateway(options: BootstrapOptions = {}): Promise<
     };
   const context = options.application ?? (options.routes === undefined ? await createProductionApplicationContext(startup, env) : undefined);
   const routes = options.routes ?? (context === undefined ? [] : createPublicRouteRegistrations(context));
+  let ownedDiagnostics: DiagnosticRecorder | undefined;
+  if (startup.diagnostics === true && options.dependencies?.diagnostics === undefined) {
+    try {
+      ownedDiagnostics = createFileDiagnostics(path.join(startup.dataDir, "logs"), () => {
+        process.stderr.write("{\"level\":\"error\",\"category\":\"diagnostics_failed\"}\n");
+      });
+    } catch (error: unknown) {
+      await context?.close?.();
+      throw error;
+    }
+  }
   return createGateway(
     {
       startup,
@@ -100,11 +113,17 @@ export async function bootstrapGateway(options: BootstrapOptions = {}): Promise<
     routes,
     {
       ...options.dependencies,
+      ...(ownedDiagnostics === undefined ? {} : { diagnostics: ownedDiagnostics }),
       onClose: async () => {
-        await options.dependencies?.onClose?.();
-        await context?.close?.();
+        try {
+          await options.dependencies?.onClose?.();
+          await context?.close?.();
+        } finally {
+          await ownedDiagnostics?.close();
+        }
       },
       onForceClose: () => {
+        ownedDiagnostics?.forceClose();
         try {
           void Promise.resolve(options.dependencies?.onForceClose?.()).catch(() => undefined);
         } catch {
@@ -285,6 +304,9 @@ export async function composeProductionDaemonGateway(
   composition: Readonly<DaemonRuntimeComposition>,
   options: Readonly<ProductionDaemonCompositionOptions> = {},
 ): Promise<HostedGateway> {
+  if (composition.startup.diagnostics === true && composition.diagnostics === undefined) {
+    throw new Error("diagnostic runtime is required");
+  }
   const application = options.application
     ?? await createProductionApplicationContext(composition.startup, composition.env);
   let supplementalTelemetryRuntime: TelemetryRuntime | undefined;
@@ -348,6 +370,7 @@ export async function composeProductionDaemonGateway(
     };
     const uptimeMs = options.uptimeMs ?? (() => Math.max(0, Math.floor(process.uptime() * 1000)));
     const admin = createAdminModule({
+      diagnostics: () => composition.diagnostics?.snapshot() ?? DISABLED_DIAGNOSTICS,
       agents: new FileAgentsManager({ dataDir: composition.startup.dataDir, env: composition.env }),
       accounts: application.directory,
       deviceFlows,
@@ -382,6 +405,7 @@ export async function composeProductionDaemonGateway(
       registry,
     });
     const control = createLocalControlModule({
+      diagnostics: () => composition.diagnostics?.snapshot() ?? DISABLED_DIAGNOSTICS,
       identity: composition.identity,
       dispatcher,
       requestStop: composition.requestStop,
@@ -392,6 +416,7 @@ export async function composeProductionDaemonGateway(
       env: composition.env,
       application: applicationWithDeviceFlows,
       dependencies: {
+        ...(composition.diagnostics === undefined ? {} : { diagnostics: composition.diagnostics }),
         admin,
         control,
         adminStatic,

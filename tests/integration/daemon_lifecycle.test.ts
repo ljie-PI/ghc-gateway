@@ -44,6 +44,20 @@ const SECOND: DaemonIdentity = {
 };
 
 describe("DaemonController lifecycle", () => {
+  it("reports actual diagnostic status without reconfiguring an existing daemon", async () => {
+    const fixture = harness({ identity: FIRST });
+    const diagnostics = { enabled: true, state: "failed", pendingRecords: 0, droppedRecords: 3, reason: "io_error" } as const;
+    fixture.controlRequest = async (identity) => ({ state: "running", instance: instanceOf(identity), diagnostics });
+    expect(await fixture.controller.status(DATA_DIR)).toMatchObject({ state: "running", diagnostics });
+    expect(await fixture.controller.start({ ...STARTUP, diagnostics: true })).toMatchObject({ state: "running", diagnostics });
+    expect(fixture.spawn).not.toHaveBeenCalled();
+  });
+
+  it("does not infer diagnostics for older daemons without status support", async () => {
+    const fixture = harness({ identity: FIRST });
+    expect(await fixture.controller.status(DATA_DIR)).not.toHaveProperty("diagnostics");
+  });
+
   it("returns stopped for status and stop without creating a missing selected root", async () => {
     const parent = await mkdtemp(path.join(tmpdir(), "ghcg-missing-lifecycle-"));
     const dataDir = path.join(parent, "selected-root");

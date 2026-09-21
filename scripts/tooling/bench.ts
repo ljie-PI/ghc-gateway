@@ -15,7 +15,8 @@ import { ModelCapabilityRegistry } from "../../src/copilot/capability_registry.j
 import { RuntimeConfigStore } from "../../src/config/runtime_config.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import type { DaemonIdentity } from "../../src/daemon/identity_file.js";
-import type { DaemonLogger } from "../../src/daemon/logger.js";
+import { createFileDiagnostics, type DaemonLogger } from "../../src/daemon/logger.js";
+import type { DiagnosticRecorder, DiagnosticsStatus } from "../../src/telemetry/diagnostics.js";
 import type { Gateway } from "../../src/gateway/create_gateway.js";
 import {
   composeProductionDaemonGateway,
@@ -104,6 +105,7 @@ export interface BenchmarkEnvironment {
 }
 
 export interface BenchmarkRunResult {
+  readonly requestDiagnostics?: DiagnosticsStatus;
   readonly run: number;
   readonly environment: BenchmarkEnvironment;
   readonly browserIncluded: false;
@@ -154,6 +156,7 @@ interface IdleWorkerResult {
 }
 
 export interface BenchmarkWorkload {
+  readonly diagnostics?: boolean;
   readonly memoryStreams: number;
   readonly bufferedSamples: number;
   readonly eventSamples: number;
@@ -290,6 +293,7 @@ class EventLoopSampler {
 }
 
 interface BenchmarkRuntime {
+  readonly requestDiagnostics?: DiagnosticRecorder;
   readonly gateway: Gateway;
   readonly backend: BenchmarkCopilotBackend;
   readonly database: SqliteDatabase;
@@ -377,7 +381,7 @@ export async function runBenchmarkIteration(
   run: number,
   workload: Readonly<BenchmarkWorkload> = DEFAULT_WORKLOAD,
 ): Promise<BenchmarkRunResult> {
-  const runtime = await createBenchmarkRuntime();
+  const runtime = await createBenchmarkRuntime(workload.diagnostics === true);
   const eventLoop = new EventLoopSampler();
   try {
     eventLoop.start();
@@ -416,6 +420,7 @@ export async function runBenchmarkIteration(
       && checkpoint.passed && eventLoopMetric.passed;
 
     return {
+      ...(runtime.requestDiagnostics === undefined ? {} : { requestDiagnostics: runtime.requestDiagnostics.snapshot() }),
       run,
       environment: benchmarkEnvironment(),
       browserIncluded: false,
@@ -530,7 +535,7 @@ export async function runFullBenchmark(repeat: number): Promise<BenchmarkArtifac
   };
 }
 
-async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
+async function createBenchmarkRuntime(diagnosticsEnabled = false): Promise<BenchmarkRuntime> {
   const dataDir = await benchmarkDataDir("runtime-");
   const port = await availablePort();
   const nowMs = (): number => 1_700_000_000_000;
@@ -609,7 +614,9 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
       closeDatabase(database);
     },
   };
-  const startup = parseStartupConfig(["--data-dir", dataDir, "--port", String(port)], {});
+  const startup = parseStartupConfig([
+    "--data-dir", dataDir, "--port", String(port), ...(diagnosticsEnabled ? ["--diagnostics"] : []),
+  ], {});
   const identity: DaemonIdentity = {
     version: 1,
     managed: false,
@@ -622,8 +629,11 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
   };
   const logger: DaemonLogger = { write: () => undefined };
   let gateway: Awaited<ReturnType<typeof composeProductionDaemonGateway>> | undefined;
+  let requestDiagnostics: DiagnosticRecorder | undefined;
   try {
+    requestDiagnostics = diagnosticsEnabled ? createFileDiagnostics(path.join(dataDir, "logs")) : undefined;
     gateway = await composeProductionDaemonGateway({
+      ...(requestDiagnostics === undefined ? {} : { diagnostics: requestDiagnostics }),
       startup,
       env: {},
       identity,
@@ -632,6 +642,7 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
     }, { application, uptimeMs: () => 0 });
     await gateway.listen();
     return {
+      ...(requestDiagnostics === undefined ? {} : { requestDiagnostics }),
       gateway,
       backend,
       database,
@@ -641,10 +652,12 @@ async function createBenchmarkRuntime(): Promise<BenchmarkRuntime> {
       performance: performanceObserver,
       async close() {
         await gateway?.close();
+        await requestDiagnostics?.close();
         await rm(dataDir, { recursive: true, force: true, maxRetries: 3 });
       },
     };
   } catch (error: unknown) {
+    requestDiagnostics?.forceClose();
     await gateway?.close().catch(() => undefined);
     await application.close?.();
     await rm(dataDir, { recursive: true, force: true, maxRetries: 3 });

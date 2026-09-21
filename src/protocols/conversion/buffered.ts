@@ -25,8 +25,11 @@ import { managedConvertedResponseId } from "./ids.js";
 import { chatCompletionsUsageFromCounters } from "../openai_chat_completions/native.js";
 import { restoreResponsesExtendedTools } from "./responses_extended_tools.js";
 import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import { diagnosticShape } from "./diagnostics.js";
 
 export interface BufferedConversionContext {
+  readonly diagnostics?: RequestDiagnostics | undefined;
   readonly source: InferenceProtocol;
   readonly target: InferenceProtocol;
   readonly model: string;
@@ -45,6 +48,7 @@ const ZERO_USAGE: SemanticUsage = {
 };
 
 export interface PlannedBufferedConversionContext {
+  readonly diagnostics?: RequestDiagnostics | undefined;
   readonly maxBytes: number;
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
@@ -77,12 +81,14 @@ function convertBufferedResponseInternal(
   responseBindings?: ConvertedProtocolPlan["request"]["responseBindings"],
 ): ConvertedBufferedResponse {
   const payload = parseObject(bytes, context.maxBytes);
+  context.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
   const decoded = decodeBuffered(context.source, payload);
   const semantic = responseBindings === undefined
     ? decoded
     : restoreResponsesExtendedTools(decoded, responseBindings);
   validateUniqueCallIds(semantic.items);
   const envelope = responseEnvelope(semantic, context);
+  context.diagnostics?.shape("client_output", () => diagnosticShape(envelope));
   const checkpoint = context.target === "responses"
     ? responseCheckpoint(envelope)
     : undefined;

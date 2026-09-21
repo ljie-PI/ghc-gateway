@@ -7,6 +7,7 @@ import type { RuntimeConfigSnapshot } from "../config/schema.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import { DaemonIdentityFile, type DaemonIdentity } from "../daemon/identity_file.js";
 import { captureProcessStartIdentity } from "../daemon/process_identity.js";
+import { parseDiagnosticsStatus, type DiagnosticsStatus } from "../telemetry/diagnostics.js";
 
 export type CliErrorCode =
   | "internal_error"
@@ -87,6 +88,7 @@ export interface CliLifecycleContext {
 }
 
 export interface CliLifecycleResult {
+  readonly diagnostics?: DiagnosticsStatus;
   readonly state: "running" | "stopped" | "stale" | "conflict" | "unreachable";
   readonly managed: boolean | null;
   readonly pid: number | null;
@@ -493,7 +495,9 @@ function lifecycleFromControlStatus(data: unknown, dataDir: string, fallbackStat
   }
   const state = typeof data.state === "string" ? data.state : fallbackState;
   const instance = isObject(data.instance) ? data.instance : data;
+  const diagnostics = parseDiagnosticsStatus(data.diagnostics);
   return {
+    ...(diagnostics === undefined ? {} : { diagnostics }),
     state: isLifecycleState(state) ? state : fallbackState,
     managed: typeof instance.managed === "boolean" ? instance.managed : null,
     pid: Number.isInteger(instance.pid) ? numberValue(instance.pid) : null,

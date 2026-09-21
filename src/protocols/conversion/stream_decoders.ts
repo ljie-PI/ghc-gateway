@@ -19,6 +19,8 @@ import type {
   SemanticUsage,
 } from "./types.js";
 import { decodeSseRecords } from "./sse.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import { diagnosticShape } from "./diagnostics.js";
 import { mergeMessagesUsage } from "./usage.js";
 import {
   chatCompletionsUsageFromCounters,
@@ -46,14 +48,15 @@ export function decodeProtocolStream(
   eventLimitBytes: number,
   accumulatorBytes: number,
   measureEvent?: (<T>(work: () => T) => T) | undefined,
+  diagnostics?: RequestDiagnostics,
 ): AsyncIterable<SemanticStreamEvent> {
   if (source === "chat") {
-    return decodeChatStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
+    return decodeChatStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent, diagnostics);
   }
   if (source === "messages") {
-    return decodeMessagesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
+    return decodeMessagesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent, diagnostics);
   }
-  return decodeResponsesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent);
+  return decodeResponsesStream(bytes, eventLimitBytes, accumulatorBytes, measureEvent, diagnostics);
 }
 
 async function* decodeChatStream(
@@ -61,6 +64,7 @@ async function* decodeChatStream(
   eventLimitBytes: number,
   accumulatorBytes: number,
   measureEvent?: (<T>(work: () => T) => T) | undefined,
+  diagnostics?: RequestDiagnostics,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const tools = new Map<number, {
@@ -214,7 +218,7 @@ async function* decodeChatStream(
       }
     }
   };
-  for await (const frame of parseOpenaiChatCompletionsSse(bytes, eventLimitBytes, measureEvent)) {
+  for await (const frame of parseOpenaiChatCompletionsSse(bytes, eventLimitBytes, measureEvent, diagnostics)) {
     if (frame.kind === "error") {
       throw upstreamStreamEventFailure();
     }
@@ -633,6 +637,7 @@ async function* decodeMessagesStream(
   eventLimitBytes: number,
   accumulatorBytes: number,
   measureEvent?: (<T>(work: () => T) => T) | undefined,
+  diagnostics?: RequestDiagnostics,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const blocks = new Map<number, MessageBlockState>();
@@ -645,6 +650,8 @@ async function* decodeMessagesStream(
     }
     const payload = measuredDecode(measureEvent, () => parseEventObject(record.data, eventLimitBytes));
     const type = stringMember(payload, "type");
+    diagnostics?.event(type ?? "unknown");
+    diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
     if (type === undefined || (record.eventName !== undefined && record.eventName !== type)) {
       invalid();
     }
@@ -955,6 +962,7 @@ async function* decodeResponsesStream(
   eventLimitBytes: number,
   accumulatorBytes: number,
   measureEvent?: (<T>(work: () => T) => T) | undefined,
+  diagnostics?: RequestDiagnostics,
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const toolsByIndex = new Map<number, ResponseToolIdentity>();
@@ -988,6 +996,8 @@ async function* decodeResponsesStream(
     }
     const payload = measuredDecode(measureEvent, () => parseEventObject(record.data, eventLimitBytes));
     const type = stringMember(payload, "type");
+    diagnostics?.event(type ?? "unknown");
+    diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
     if (type === undefined || (record.eventName !== undefined && record.eventName !== type)) {
       invalid();
     }

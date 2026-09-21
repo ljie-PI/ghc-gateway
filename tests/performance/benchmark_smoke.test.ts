@@ -150,8 +150,9 @@ function expectDiagnosticContract(diagnostics: CheckpointDiagnostics): void {
 }
 
 describe("full-gateway benchmark smoke", () => {
-  it("measures production gateway, stream, and SQLite seams with scripted remotes", async () => {
+  it.each([false, true])("measures production seams with scripted remotes (diagnostics=%s)", async (diagnostics) => {
     const result = await runBenchmarkIteration(1, {
+      diagnostics,
       memoryStreams: 10,
       bufferedSamples: 20,
       eventSamples: 20,
@@ -160,6 +161,10 @@ describe("full-gateway benchmark smoke", () => {
     });
 
     expect(result.offlineScripted).toBe(true);
+    if (diagnostics) {
+      expect(result.requestDiagnostics?.enabled).toBe(true);
+      expect(result.requestDiagnostics?.state).not.toBe("failed");
+    } else expect(result.requestDiagnostics).toBeUndefined();
     expect(result.listener).toBe("loopback");
     expect(result.idle.limitBytes).toBe(80 * 1024 * 1024);
     expect(result.streams.limitBytes).toBe(16 * 1024 * 1024);

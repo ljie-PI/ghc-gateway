@@ -24,6 +24,8 @@ import {
 } from "../../serialization/wire_json.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import type { SemanticUsage } from "../conversion/types.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import { diagnosticShape } from "../conversion/diagnostics.js";
 import {
   encodeOpenaiChatCompletionsDone,
   encodeOpenaiChatCompletionsSseChunk,
@@ -117,8 +119,9 @@ export async function createNativeChatCompletionsStreamResponse(input: {
     input.scope.signal,
     input.scope.config.timeouts.firstByteMs,
     input.scope.config.timeouts.streamIdleMs,
-  ), input.scope.config.limits.sseEventBytes);
+  ), input.scope.config.limits.sseEventBytes, undefined, input.scope.diagnostics);
   return await createStreamExecutionResponse({
+    diagnostics: input.scope.diagnostics,
     upstream: input.upstream,
     emissions: nativeChatCompletionsEmissions(frames, input),
     signal: input.scope.signal,
@@ -144,6 +147,7 @@ export async function* parseOpenaiChatCompletionsSse(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes = DEFAULT_EVENT_LIMIT,
   measureEvent?: (<T>(work: () => T) => T) | undefined,
+  diagnostics?: RequestDiagnostics,
 ): AsyncGenerator<ChatCompletionsStreamFrame> {
   let lineBytes: number[] = [];
   let pendingCr = false;
@@ -161,6 +165,8 @@ export async function* parseOpenaiChatCompletionsSse(
       eventLines = [];
       eventBytes = 0;
       if (frame !== undefined) {
+        diagnostics?.event(frame.kind);
+        if (frame.kind === "chunk") diagnostics?.shape("upstream_output", () => diagnosticShape(frame.chunk.payload));
         yield frame;
         if (frame.kind === "done" || frame.kind === "error") {
           terminal = true;
@@ -249,6 +255,7 @@ async function* nativeChatCompletionsEmissions(
       }
       const frame = next.value;
       if (frame.kind === "chunk") {
+        input.scope.diagnostics?.shape("client_output", () => diagnosticShape(frame.chunk.payload));
         const bytes = measure(input.performanceObserver, () => {
           usage = mergeChatCompletionsUsageCounters(usage, usageObservationFromPayload(frame.chunk.payload));
           input.onUsage(chatCompletionsUsageFromCounters(usage));

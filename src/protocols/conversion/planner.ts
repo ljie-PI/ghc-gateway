@@ -7,6 +7,7 @@ import { GatewayFailureError } from "../../gateway/failures.js";
 import type { WireJsonObject } from "../../serialization/wire_json.js";
 import { PROTOCOL_REQUEST_CODECS } from "./request_codecs.js";
 import { protocolTargets } from "./routing.js";
+import { diagnosticShape } from "./diagnostics.js";
 import {
   ConversionContractError,
   type ConversionPlanningInput,
@@ -17,6 +18,7 @@ import {
 } from "./types.js";
 
 export function planProtocolExecution(input: Readonly<ConversionPlanningInput>): ProtocolExecutionPlan {
+  input.diagnostics?.stage("planning");
   const protocols = input.capability.protocols.value;
   if (protocols === null) {
     throw new GatewayFailureError({
@@ -26,20 +28,20 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
   }
 
   if (input.forcedTarget === undefined && protocols.includes(input.source)) {
-    return Object.freeze({
+    return observePlan(input, Object.freeze({
       kind: "native",
       source: input.source,
       target: input.source,
       stream: input.stream,
-    });
+    }));
   }
   if (input.forcedTarget === input.source && protocols.includes(input.source)) {
-    return Object.freeze({
+    return observePlan(input, Object.freeze({
       kind: "native",
       source: input.source,
       target: input.source,
       stream: input.stream,
-    });
+    }));
   }
 
   const candidates = input.forcedTarget === undefined
@@ -69,31 +71,33 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
   let lastUnsupported: ConversionContractError | undefined;
   for (const target of orderedCandidates) {
     if (target === input.source) {
-      return Object.freeze({
+      return observePlan(input, Object.freeze({
         kind: "native",
         source: input.source,
         target,
         stream: input.stream,
-      });
+      }));
     }
     try {
       const request = PROTOCOL_REQUEST_CODECS[target].encode(decoded, {
         resolvedModel: input.resolvedModel,
         capability: input.capability,
       });
-      return Object.freeze({
+      return observePlan(input, Object.freeze({
         kind: "converted",
         source: input.source,
         target,
         stream: input.stream,
         requestModel: input.resolvedModel,
         request,
-      });
+      }));
     } catch (error: unknown) {
       if (error instanceof ConversionContractError && error.kind === "unsupported_semantics") {
+        input.diagnostics?.stage("planning", { candidateProtocol: target, ruleId: error.ruleId });
         lastUnsupported = error;
         continue;
       }
+
       throw contractFailure(error);
     }
   }
@@ -103,6 +107,16 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
     phase: "convert",
     cause: lastUnsupported,
   });
+}
+
+function observePlan(input: Readonly<ConversionPlanningInput>, plan: ProtocolExecutionPlan): ProtocolExecutionPlan {
+  const diagnostics = input.diagnostics;
+  diagnostics?.set({ upstreamProtocol: plan.target, converted: plan.kind === "converted", stream: plan.stream });
+  diagnostics?.observe(() => diagnostics.stage("planning", {
+    shape: diagnosticShape(plan.kind === "converted" ? plan.request.body : input.body),
+    ...(plan.kind === "converted" ? { degradations: plan.request.degradations } : {}),
+  }));
+  return plan;
 }
 
 function reasoningTargetRank(

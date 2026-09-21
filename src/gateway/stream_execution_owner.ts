@@ -98,6 +98,8 @@ export async function createStreamExecutionResponseOwner<T>(
       return;
     }
     cause = terminalCause;
+    input.diagnostics?.terminal(terminalCause);
+    if (result.kind === "failure") input.diagnostics?.failure(result.error);
     state = "terminating";
     barrier = (async () => {
       try {
