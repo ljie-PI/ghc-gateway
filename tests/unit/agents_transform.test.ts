@@ -198,22 +198,22 @@ describe("agent configuration projection", () => {
       effective_context_window_percent: 100,
     });
   });
-  it("rejects stale Codex ownership evidence", () => {
+  it("replaces stale Codex ownership evidence after management begins", () => {
     const source = Buffer.from("[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\n");
-    const stale = Buffer.from("model = \"old\"\n");
-    expect(() => projectAgent("codex", source, mappings, origin, "models.json", models, stale))
-      .toThrow("agent conflict");
+    const managed = Buffer.from("model = \"old\"\n");
+    const projected = parse(projectAgent("codex", source, mappings, origin, "models.json", models, managed).config.toString());
+    expect(projected.model_providers).toMatchObject({ ghc_gateway: { base_url: `${origin}/v1` } });
   });
-  it("rejects an externally changed provider after Codex management begins", () => {
+  it("replaces an externally changed provider after Codex management begins", () => {
     const first = projectAgent("codex", null, mappings, origin, "models.json", models, null);
     const changed = Buffer.from(first.config.toString().replace(`${origin}/v1`, "https://external.example/v1"));
-    expect(() => projectAgent("codex", changed, mappings, origin, "models.json", models, first.config))
-      .toThrow("agent conflict");
+    const projected = parse(projectAgent("codex", changed, mappings, origin, "models.json", models, first.config).config.toString());
+    expect(projected.model_providers).toMatchObject({ ghc_gateway: { base_url: `${origin}/v1` } });
   });
-  it("rejects an externally removed provider after Codex management begins", () => {
+  it("restores an externally removed provider after Codex management begins", () => {
     const first = projectAgent("codex", null, mappings, origin, "models.json", models, null);
-    expect(() => projectAgent("codex", Buffer.from("model = \"external\"\n"), mappings, origin, "models.json", models, first.config))
-      .toThrow("agent conflict");
+    const projected = parse(projectAgent("codex", Buffer.from("model = \"external\"\n"), mappings, origin, "models.json", models, first.config).config.toString());
+    expect(projected).toMatchObject({ model_provider: "ghc_gateway", model_providers: { ghc_gateway: { base_url: `${origin}/v1` } } });
   });
   it.each(["profile=\"work\"", "[profiles.work]\nmodel=\"other\"", "[agents.worker]\nconfig_file=\"other.toml\"", "invalid=\"unterminated"])(
     "refuses unsupported Codex routing/configuration without parser diagnostics: %s",

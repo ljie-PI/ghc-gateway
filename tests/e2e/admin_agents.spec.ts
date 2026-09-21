@@ -715,7 +715,7 @@ for (const [change, state, revision, label] of [
     await expect(codex.locator(".badge")).toHaveText(label);
     await expect(codex.getByText(/Configuration installed\. Restart/)).toHaveCount(0);
     await codex.getByText("Configuration details", { exact: true }).click();
-    await expect(codex.getByText("Not created", { exact: true })).toBeVisible();
+    await expect(codex.getByText("None created yet", { exact: true })).toBeVisible();
   });
 }
 
@@ -1200,8 +1200,6 @@ test("Codex takeover uses an accessible confirmation dialog and revision token",
       revision: "d".repeat(64),
       configPath: "C:/Users/octo/.codex/config.toml",
       catalogPath: "C:/Users/octo/.codex/models.json",
-      configBackupPath: "C:/Users/octo/.codex/config.toml.ghcg.bak",
-      catalogBackupPath: "C:/Users/octo/.codex/models.json.ghcg.bak",
     },
   };
   await page.goto("/");
@@ -1218,8 +1216,6 @@ test("Codex takeover uses an accessible confirmation dialog and revision token",
   for (const target of fixture.state.agents.codex.takeover === null ? [] : [
     fixture.state.agents.codex.takeover.configPath,
     fixture.state.agents.codex.takeover.catalogPath,
-    fixture.state.agents.codex.takeover.configBackupPath,
-    fixture.state.agents.codex.takeover.catalogBackupPath,
   ]) await expect(dialog).toContainText(target);
 
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -1253,8 +1249,6 @@ test("stale Codex takeover preserves the draft and reports concise failure", asy
       revision: "d".repeat(64),
       configPath: "C:/Users/octo/.codex/config.toml",
       catalogPath: "C:/Users/octo/.codex/models.json",
-      configBackupPath: "C:/Users/octo/.codex/config.toml.ghcg.bak",
-      catalogBackupPath: "C:/Users/octo/.codex/models.json.ghcg.bak",
     },
   };
   fixture.state.agentsTakeoverConflict = true;
@@ -1277,8 +1271,6 @@ test("unmanaged Codex takeover evidence routes Apply to the HTML dialog without 
       revision: "d".repeat(64),
       configPath: "C:/Users/octo/.codex/config.toml",
       catalogPath: "C:/Users/octo/.codex/models.json",
-      configBackupPath: "C:/Users/octo/.codex/config.toml.ghcg.bak",
-      catalogBackupPath: "C:/Users/octo/.codex/models.json.ghcg.bak",
     },
   };
   let nativeConfirmation = false;

@@ -26,8 +26,6 @@ export interface AgentStatus {
     readonly revision: string;
     readonly configPath: string;
     readonly catalogPath: string;
-    readonly configBackupPath: string;
-    readonly catalogBackupPath: string;
   };
 }
 export interface AgentsView {
