@@ -252,6 +252,31 @@ describe("Responses continuation history", () => {
     }
   });
 
+  it("does not duplicate an explicitly supplied v2 carrier reasoning item", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint({
+        responseId: "resp_explicit_reasoning",
+        output: outputFromJson("[{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef\"},{\"type\":\"function_call\",\"call_id\":\"call_explicit\",\"name\":\"lookup\",\"arguments\":\"{}\"}]"),
+      }, ownership("github.com/1"), "complete", SIGNAL);
+      const request = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":[{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef\"},{\"type\":\"function_call_output\",\"call_id\":\"call_explicit\",\"output\":\"ok\"}]}",
+      ));
+      const enriched = await store.enrich(
+        request,
+        await owned(store, "resp_explicit_reasoning", "github.com/1"),
+        SIGNAL,
+      );
+      expect(inputJson(enriched.input)).toEqual([
+        { type: "reasoning", summary: [], encrypted_content: "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef" },
+        { type: "function_call", call_id: "call_explicit", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_explicit", output: "ok" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
   it("requires a complete durable checkpoint before replay", async () => {
     const { database, store } = history();
     try {

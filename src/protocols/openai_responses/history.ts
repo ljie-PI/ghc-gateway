@@ -382,6 +382,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       unavailableCheckpoint();
     }
     const originalCallsById = new Map<string, WireJsonObject>();
+    const originalReasoning = new Set<string>();
     for (const item of originalItems) {
       if (isDeclaredReplayItem(item) && !isCallItem(item) && !isReasoningItem(item)) {
         unavailableCheckpoint();
@@ -398,6 +399,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
           unavailableCheckpoint();
         }
         originalCallsById.set(callId, item);
+      } else if (isReasoningItem(item)) {
+        const encoded = JSON_DECODER.decode(serializeWireJson(item));
+        if (originalReasoning.has(encoded)) unavailableCheckpoint();
+        originalReasoning.add(encoded);
       }
     }
 
@@ -457,8 +462,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
           if (!scopedGroupInserted) {
             for (const replayItem of scoped.items) {
               if (replayItem.kind === "reasoning") {
-                enrichedItems.push(replayItem.item);
-                changed = true;
+                if (!originalReasoning.has(replayItem.itemJson)) {
+                  enrichedItems.push(replayItem.item);
+                  changed = true;
+                }
               } else if (!emittedCallIds.has(replayItem.callId)) {
                 enrichedItems.push(restoreCall(replayItem, originalCallsById.get(replayItem.callId)));
                 emittedCallIds.add(replayItem.callId);
