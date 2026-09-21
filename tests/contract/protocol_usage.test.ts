@@ -40,9 +40,9 @@ const snapshots: Record<InferenceProtocol, Counters[]> = {
     { completion_tokens: 9 },
   ],
   messages: [
-    { input_tokens: 23, output_tokens: 7, cache_read_input_tokens: 3 },
+    { input_tokens: 23, output_tokens: 7, cache_read_input_tokens: 3, output_tokens_details: { thinking_tokens: 3 } },
     { cache_creation_input_tokens: 5 },
-    { output_tokens: 22 },
+    { output_tokens: 22, output_tokens_details: { thinking_tokens: 13 } },
     { output_tokens: 22 },
   ],
   responses: [
@@ -54,7 +54,7 @@ const snapshots: Record<InferenceProtocol, Counters[]> = {
 };
 const completeUsage: Record<InferenceProtocol, Counters> = {
   chat: { prompt_tokens: 31, completion_tokens: 9, reasoning_tokens: 13, prompt_tokens_details: { cached_tokens: 3, cache_write_tokens: 5 } },
-  messages: { input_tokens: 23, output_tokens: 22, cache_read_input_tokens: 3, cache_creation_input_tokens: 5 },
+  messages: { input_tokens: 23, output_tokens: 22, cache_read_input_tokens: 3, cache_creation_input_tokens: 5, output_tokens_details: { thinking_tokens: 13 } },
   responses: { input_tokens: 31, output_tokens: 22, input_tokens_details: { cached_tokens: 3, cache_write_tokens: 5 }, output_tokens_details: { reasoning_tokens: 13 } },
 };
 const chatCases: Array<{ name: string; updates: Counters[]; outputs: number[]; reasoning: number[] }> = [
@@ -110,7 +110,7 @@ describe("content-free protocol usage accounting", () => {
   it.each(protocols)("maps buffered and streamed %s source usage independently of target wire", async (source) => {
     for (const target of protocols.filter((protocol) => protocol !== source)) {
       const result = convertBufferedResponse(buffered(source, completeUsage[source]), context(source, target));
-      const expected = { inputTokens: 31, outputTokens: 22, cacheReadTokens: 3, cacheWriteTokens: 5, reasoningTokens: source === "messages" ? 0 : 13 };
+      const expected = { inputTokens: 31, outputTokens: 22, cacheReadTokens: 3, cacheWriteTokens: 5, reasoningTokens: 13 };
       expect(result.observations.usage).toEqual(expected);
       const streamed = await convertStream(source, target, snapshots[source]);
       expect(streamed.usage.at(-1)).toEqual(expected);

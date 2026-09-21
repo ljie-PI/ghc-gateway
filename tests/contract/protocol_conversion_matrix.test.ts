@@ -51,6 +51,38 @@ describe("protocol conversion matrix", () => {
     },
   );
 
+  it.each([
+    ["chat", "messages"],
+    ["chat", "responses"],
+    ["messages", "chat"],
+    ["messages", "responses"],
+    ["responses", "chat"],
+    ["responses", "messages"],
+  ] as const)("preserves portable reasoning for converted %s upstream -> %s client", async (upstream, client) => {
+    for (const stream of [false, true]) {
+      const harness = await matrixGateway(true);
+      try {
+        const response = await harness.gw.fetch(protocolRequest(client, `native-${upstream}`, { stream }));
+        expect(response.status).toBe(200);
+        expect(response.headers.get("x-ghcg-upstream-protocol")).toBe(upstream);
+        const wire = await response.text();
+        expect(wire).toContain("ok");
+        const visible = client !== "messages";
+        if (client === "chat") {
+          expect(wire.includes("reasoning_content")).toBe(visible);
+        } else if (client === "responses") {
+          expect(wire.includes(stream ? "response.reasoning_summary_text.delta" : "\"type\":\"reasoning\"")).toBe(visible);
+        } else {
+          expect(wire).not.toContain("thinking_delta");
+          expect(wire).not.toContain("provider-signature");
+        }
+        expect(harness.upstream.requests).toHaveLength(1);
+      } finally {
+        await harness.close();
+      }
+    }
+  });
+
   it("keeps native Responses priority for extended tools", async () => {
     const harness = await matrixGateway();
     try {
@@ -833,7 +865,7 @@ interface MatrixHarness {
   close(): Promise<void>;
 }
 
-async function matrixGateway(): Promise<MatrixHarness> {
+async function matrixGateway(reasoning = false): Promise<MatrixHarness> {
   return await withSetupCleanup(async (own) => {
     const database = openDatabase({
       path: ":memory:",
@@ -868,12 +900,19 @@ async function matrixGateway(): Promise<MatrixHarness> {
       },
     }, () => new Date(nowMs()));
     const history = new SqliteResponsesHistory(database, { nowMs });
+    const responseReasoning = {
+      id: "rs_matrix_stream",
+      type: "reasoning",
+      status: "completed",
+      summary: [],
+      content: [{ type: "reasoning_text", text: "visible plan" }],
+    };
     const response = {
       id: "resp_matrix_stream",
       object: "response",
       created_at: 1_700_000_000,
       status: "completed",
-      output: [{
+      output: [...(reasoning ? [responseReasoning] : []), {
         id: "msg_matrix_stream",
         type: "message",
         status: "completed",
@@ -889,7 +928,7 @@ async function matrixGateway(): Promise<MatrixHarness> {
           method: "POST", path: "/chat/completions", body: jsonStream(false), times: 8,
           reply: {
             headers: { "content-type": "application/json" }, stream: async (exchange) => {
-              await exchange.end(matrixChatResponse(exchange.request.body));
+              await exchange.end(matrixChatResponse(exchange.request.body, reasoning));
             }
           }
         },
@@ -903,7 +942,10 @@ async function matrixGateway(): Promise<MatrixHarness> {
               type: "message",
               role: "assistant",
               model: "matrix",
-              content: [{ type: "text", text: "ok" }],
+              content: [
+                ...(reasoning ? [{ type: "thinking", thinking: "visible plan", signature: "provider-signature" }] : []),
+                { type: "text", text: "ok" },
+              ],
               stop_reason: "end_turn",
               stop_sequence: null,
               usage: { input_tokens: 2, output_tokens: 1 },
@@ -920,7 +962,13 @@ async function matrixGateway(): Promise<MatrixHarness> {
               object: "response",
               created_at: 1_700_000_000,
               status: "completed",
-              output: [{
+              output: [...(reasoning ? [{
+                id: "rs_matrix",
+                type: "reasoning",
+                status: "completed",
+                summary: [{ type: "summary_text", text: "visible plan" }],
+                content: [],
+              }] : []), {
                 id: "msg_matrix",
                 type: "message",
                 status: "completed",
@@ -935,6 +983,13 @@ async function matrixGateway(): Promise<MatrixHarness> {
           method: "POST", path: "/chat/completions", body: jsonStream(true), times: 8,
           reply: {
             headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+              ...(reasoning ? [encoder.encode(`data: ${JSON.stringify({
+                id: "chatcmpl_matrix_stream",
+                object: "chat.completion.chunk",
+                created: 1_700_000_000,
+                model: "matrix",
+                choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "visible plan" }, finish_reason: null }],
+              })}\n\n`)] : []),
               encoder.encode(`data: ${JSON.stringify({
                 id: "chatcmpl_matrix_stream",
                 object: "chat.completion.chunk",
@@ -964,17 +1019,35 @@ async function matrixGateway(): Promise<MatrixHarness> {
                   usage: { input_tokens: 2, output_tokens: 0 },
                 },
               }),
+              ...(reasoning ? [
+                messagesEvent("content_block_start", {
+                  type: "content_block_start",
+                  index: 0,
+                  content_block: { type: "thinking", thinking: "", signature: "" },
+                }),
+                messagesEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "thinking_delta", thinking: "visible plan" },
+                }),
+                messagesEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "signature_delta", signature: "provider-signature" },
+                }),
+                messagesEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+              ] : []),
               messagesEvent("content_block_start", {
                 type: "content_block_start",
-                index: 0,
+                index: reasoning ? 1 : 0,
                 content_block: { type: "text", text: "" },
               }),
               messagesEvent("content_block_delta", {
                 type: "content_block_delta",
-                index: 0,
+                index: reasoning ? 1 : 0,
                 delta: { type: "text_delta", text: "ok" },
               }),
-              messagesEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+              messagesEvent("content_block_stop", { type: "content_block_stop", index: reasoning ? 1 : 0 }),
               messagesEvent("message_delta", {
                 type: "message_delta",
                 delta: { stop_reason: "end_turn", stop_sequence: null },
@@ -989,27 +1062,40 @@ async function matrixGateway(): Promise<MatrixHarness> {
           reply: {
             headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
               responsesEvent(0, "response.created", { response: { ...response, status: "in_progress", output: [] } }),
-              responsesEvent(1, "response.output_item.added", {
-                output_index: 0,
-                item: { ...response.output[0], status: "in_progress", content: [] },
+              ...(reasoning ? [
+                responsesEvent(1, "response.output_item.added", {
+                  output_index: 0,
+                  item: { ...responseReasoning, status: "in_progress", content: [] },
+                }),
+                responsesEvent(2, "response.reasoning_text.delta", {
+                  item_id: "rs_matrix_stream", output_index: 0, content_index: 0, delta: "visible plan",
+                }),
+                responsesEvent(3, "response.reasoning_text.done", {
+                  item_id: "rs_matrix_stream", output_index: 0, content_index: 0, text: "visible plan",
+                }),
+                responsesEvent(4, "response.output_item.done", { output_index: 0, item: responseReasoning }),
+              ] : []),
+              responsesEvent(reasoning ? 5 : 1, "response.output_item.added", {
+                output_index: reasoning ? 1 : 0,
+                item: { ...response.output[reasoning ? 1 : 0], status: "in_progress", content: [] },
               }),
-              responsesEvent(2, "response.output_text.delta", {
+              responsesEvent(reasoning ? 6 : 2, "response.output_text.delta", {
                 item_id: "msg_matrix_stream",
-                output_index: 0,
+                output_index: reasoning ? 1 : 0,
                 content_index: 0,
                 delta: "ok",
               }),
-              responsesEvent(3, "response.output_text.done", {
+              responsesEvent(reasoning ? 7 : 3, "response.output_text.done", {
                 item_id: "msg_matrix_stream",
-                output_index: 0,
+                output_index: reasoning ? 1 : 0,
                 content_index: 0,
                 text: "ok",
               }),
-              responsesEvent(4, "response.output_item.done", {
-                output_index: 0,
-                item: response.output[0],
+              responsesEvent(reasoning ? 8 : 4, "response.output_item.done", {
+                output_index: reasoning ? 1 : 0,
+                item: response.output[reasoning ? 1 : 0],
               }),
-              responsesEvent(5, "response.completed", { response }),
+              responsesEvent(reasoning ? 9 : 5, "response.completed", { response }),
             ])
           }
         }
@@ -1049,7 +1135,7 @@ async function matrixGateway(): Promise<MatrixHarness> {
   });
 }
 
-function matrixChatResponse(raw: Uint8Array): Uint8Array {
+function matrixChatResponse(raw: Uint8Array, reasoning = false): Uint8Array {
   const captured = JSON.parse(decoder.decode(raw)) as {
     messages?: Array<{ role?: string }>;
     tools?: Array<{ function?: { name?: string } }>;
@@ -1095,7 +1181,11 @@ function matrixChatResponse(raw: Uint8Array): Uint8Array {
           content: null,
           tool_calls: [toolCall],
         }
-        : { role: "assistant", content: "ok" },
+        : {
+          role: "assistant",
+          ...(reasoning ? { reasoning_content: "visible plan" } : {}),
+          content: "ok",
+        },
       finish_reason: partialCustom
         ? "length"
         : (custom || namespace) && !hasToolResult ? "tool_calls" : "stop",

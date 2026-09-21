@@ -50,6 +50,7 @@ import {
 } from "./compatibility_markers.js";
 import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
+import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 
 const CHAT_TOP_LEVEL = new Set([
   "model",
@@ -216,9 +217,27 @@ function decodeChatMessage(
   if (role === "assistant") {
     assertAllowedKeys(
       message,
-      new Set(["role", "content", "tool_calls", "refusal", "reasoning_items"]),
+      new Set([
+        "role",
+        "content",
+        "tool_calls",
+        "refusal",
+        "reasoning_items",
+        "reasoning_content",
+        "reasoning_text",
+        "reasoning",
+        "reasoning_details",
+        "thinking_blocks",
+      ]),
       "REQ-C-ASSISTANT",
     );
+    const visibleReasoning = decodeChatReasoning(message, () => invalid("REQ-C-ASSISTANT-REASONING"));
+    if (visibleReasoning.text.length > 0) {
+      degradations.add("reasoning.presentation_omitted");
+    }
+    if (visibleReasoning.hasOpaqueState) {
+      degradations.add("reasoning.state_omitted");
+    }
     const reasoningItems = oneMember(message, "reasoning_items", "REQ-C-ASSISTANT-REASONING");
     let hasReasoningItems = false;
     if (reasoningItems !== undefined) {
@@ -255,7 +274,7 @@ function decodeChatMessage(
         output.push(decodeChatToolCall(call));
       }
     }
-    if (combined.length === 0 && calls === undefined && !hasReasoningItems) {
+    if (combined.length === 0 && calls === undefined && !hasReasoningItems && visibleReasoning.text.length === 0) {
       invalid("REQ-C-ASSISTANT-EMPTY");
     }
     return;
@@ -749,19 +768,17 @@ function decodeResponsesInput(
         new Set(["type", "id", "status", "summary", "content", "encrypted_content"]),
         "REQ-R-REASONING-ITEM",
       );
-      if (oneMember(object, "summary", "REQ-R-REASONING-SUMMARY") !== undefined) {
-        requiredArray(oneMember(object, "summary", "REQ-R-REASONING-SUMMARY"), "REQ-R-REASONING-SUMMARY");
+      const reasoning = decodeResponsesReasoningItem(
+        object,
+        () => invalid("REQ-R-REASONING-ITEM"),
+        false,
+      );
+      if (reasoning.parts.some((part) => part.text.length > 0)) {
+        degradations.add("reasoning.presentation_omitted");
       }
-      if (oneMember(object, "content", "REQ-R-REASONING-CONTENT") !== undefined) {
-        requiredArray(oneMember(object, "content", "REQ-R-REASONING-CONTENT"), "REQ-R-REASONING-CONTENT");
+      if (reasoning.hasOpaqueState) {
+        degradations.add("reasoning.state_omitted");
       }
-      if (oneMember(object, "encrypted_content", "REQ-R-REASONING-STATE") !== undefined) {
-        requiredString(
-          oneMember(object, "encrypted_content", "REQ-R-REASONING-STATE"),
-          "REQ-R-REASONING-STATE",
-        );
-      }
-      degradations.add("reasoning.presentation_omitted");
       continue;
     }
     unsupported("REQ-R-INPUT-TYPE");

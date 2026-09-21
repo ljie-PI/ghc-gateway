@@ -56,6 +56,27 @@
     "encoder": "shared conversion request codecs"
   },
   {
+    "caseId": "protocol-conversion.buffered-chat-to-messages-reasoning",
+    "family": "protocol-conversion",
+    "input": "buffered/chat-to-messages-reasoning.input.json",
+    "expected": "buffered/chat-to-messages-reasoning.expected.json",
+    "encoder": "shared conversion buffered response codecs"
+  },
+  {
+    "caseId": "protocol-conversion.buffered-chat-to-responses-reasoning",
+    "family": "protocol-conversion",
+    "input": "buffered/chat-to-responses-reasoning.input.json",
+    "expected": "buffered/chat-to-responses-reasoning.expected.json",
+    "encoder": "shared conversion buffered response codecs"
+  },
+  {
+    "caseId": "protocol-conversion.buffered-messages-to-chat-reasoning",
+    "family": "protocol-conversion",
+    "input": "buffered/messages-to-chat-reasoning.input.json",
+    "expected": "buffered/messages-to-chat-reasoning.expected.json",
+    "encoder": "shared conversion buffered response codecs"
+  },
+  {
     "caseId": "protocol-conversion.buffered-messages-to-responses",
     "family": "protocol-conversion",
     "input": "buffered/messages-to-responses.input.json",
@@ -63,10 +84,59 @@
     "encoder": "shared conversion buffered response codecs"
   },
   {
+    "caseId": "protocol-conversion.buffered-responses-to-chat-reasoning",
+    "family": "protocol-conversion",
+    "input": "buffered/responses-to-chat-reasoning.input.json",
+    "expected": "buffered/responses-to-chat-reasoning.expected.json",
+    "encoder": "shared conversion buffered response codecs"
+  },
+  {
+    "caseId": "protocol-conversion.buffered-responses-to-messages-reasoning",
+    "family": "protocol-conversion",
+    "input": "buffered/responses-to-messages-reasoning.input.json",
+    "expected": "buffered/responses-to-messages-reasoning.expected.json",
+    "encoder": "shared conversion buffered response codecs"
+  },
+  {
+    "caseId": "protocol-conversion.stream-chat-to-messages-reasoning",
+    "family": "protocol-conversion",
+    "input": "stream/chat-to-messages-reasoning.input.json",
+    "expected": "stream/chat-to-messages-reasoning.expected.txt",
+    "encoder": "shared conversion stream codecs and ledger"
+  },
+  {
+    "caseId": "protocol-conversion.stream-chat-to-responses-reasoning",
+    "family": "protocol-conversion",
+    "input": "stream/chat-to-responses-reasoning.input.json",
+    "expected": "stream/chat-to-responses-reasoning.expected.txt",
+    "encoder": "shared conversion stream codecs and ledger"
+  },
+  {
+    "caseId": "protocol-conversion.stream-messages-to-chat-reasoning",
+    "family": "protocol-conversion",
+    "input": "stream/messages-to-chat-reasoning.input.json",
+    "expected": "stream/messages-to-chat-reasoning.expected.txt",
+    "encoder": "shared conversion stream codecs and ledger"
+  },
+  {
     "caseId": "protocol-conversion.stream-messages-to-responses",
     "family": "protocol-conversion",
     "input": "stream/messages-to-responses.input.json",
     "expected": "stream/messages-to-responses.expected.txt",
+    "encoder": "shared conversion stream codecs and ledger"
+  },
+  {
+    "caseId": "protocol-conversion.stream-responses-to-chat-reasoning",
+    "family": "protocol-conversion",
+    "input": "stream/responses-to-chat-reasoning.input.json",
+    "expected": "stream/responses-to-chat-reasoning.expected.txt",
+    "encoder": "shared conversion stream codecs and ledger"
+  },
+  {
+    "caseId": "protocol-conversion.stream-responses-to-messages-reasoning",
+    "family": "protocol-conversion",
+    "input": "stream/responses-to-messages-reasoning.input.json",
+    "expected": "stream/responses-to-messages-reasoning.expected.txt",
     "encoder": "shared conversion stream codecs and ledger"
   }
 ]

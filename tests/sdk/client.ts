@@ -66,9 +66,15 @@ export async function executeChat(
   stream.on("content", (delta) => { text += delta; });
   stream.on("chunk", (chunk) => {
     if (chunk.choices[0]?.finish_reason != null) terminalCount += 1;
-    const delta = chunk.choices[0]?.delta as { reasoning_text?: unknown } | undefined;
-    if (typeof delta?.reasoning_text === "string") {
-      reasoningText = (reasoningText ?? "") + delta.reasoning_text;
+    const delta = chunk.choices[0]?.delta as {
+      reasoning_text?: unknown;
+      reasoning_content?: unknown;
+    } | undefined;
+    const reasoning = typeof delta?.reasoning_text === "string"
+      ? delta.reasoning_text
+      : typeof delta?.reasoning_content === "string" ? delta.reasoning_content : undefined;
+    if (reasoning !== undefined) {
+      reasoningText = (reasoningText ?? "") + reasoning;
       reasoningDeltaCount += 1;
     }
   });

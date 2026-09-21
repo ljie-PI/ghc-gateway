@@ -79,12 +79,13 @@ export function nativeMessagesUsage(bytes: Uint8Array, maxBytes: number): Semant
   }
   const read = integerMember(usage, "cache_read_input_tokens");
   const write = integerMember(usage, "cache_creation_input_tokens");
+  const outputDetails = objectMember(usage, "output_tokens_details");
   return {
     inputTokens: integerMember(usage, "input_tokens") + read + write,
     outputTokens: integerMember(usage, "output_tokens"),
     cacheReadTokens: read,
     cacheWriteTokens: write,
-    reasoningTokens: 0,
+    reasoningTokens: outputDetails === undefined ? 0 : integerMember(outputDetails, "thinking_tokens"),
   };
 }
 
@@ -434,11 +435,13 @@ class NativeMessagesObserver {
     if (value === undefined) {
       return;
     }
+    const outputDetails = objectMember(value, "output_tokens_details");
     this.usage = mergeMessagesUsage(this.usage, {
       inputTokens: optionalIntegerMember(value, "input_tokens"),
       outputTokens: optionalIntegerMember(value, "output_tokens"),
       cacheReadTokens: optionalIntegerMember(value, "cache_read_input_tokens"),
       cacheWriteTokens: optionalIntegerMember(value, "cache_creation_input_tokens"),
+      thinkingTokens: outputDetails === undefined ? undefined : optionalIntegerMember(outputDetails, "thinking_tokens"),
     });
   }
 }

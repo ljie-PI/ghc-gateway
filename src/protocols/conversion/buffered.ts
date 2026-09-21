@@ -24,6 +24,7 @@ import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
 import { chatCompletionsUsageFromCounters } from "../openai_chat_completions/native.js";
 import { restoreResponsesExtendedTools } from "./responses_extended_tools.js";
+import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 
 export interface BufferedConversionContext {
   readonly source: InferenceProtocol;
@@ -134,6 +135,7 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   const items: SemanticResponseItem[] = [];
   const finishReason = chatFinishReason(singleMember(choice, "finish_reason"));
   const completeTools = finishReason !== "length" && finishReason !== "content_filter";
+  const reasoning = decodeChatReasoning(message, upstreamInvalid);
   const content: Array<Extract<SemanticContent, { readonly type: "text" | "refusal" }>> = [];
   const audio = singleMember(message, "audio");
   if (audio !== undefined && audio !== null) {
@@ -148,10 +150,18 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   if (refusal !== undefined && refusal !== null) {
     content.push({ type: "refusal", text: refusal });
   }
+  const toolCalls = arrayMember(message, "tool_calls");
+  if (reasoning.text.length > 0) {
+    items.push({
+      type: "reasoning",
+      parts: [{ presentation: "summary", index: 0, text: reasoning.text }],
+      status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
+      hasOpaqueState: reasoning.hasOpaqueState,
+    });
+  }
   if (content.length > 0) {
     items.push({ type: "message", content });
   }
-  const toolCalls = arrayMember(message, "tool_calls");
   if (toolCalls !== undefined) {
     for (const value of toolCalls.items) {
       items.push(decodeChatToolCall(value, completeTools));
@@ -260,13 +270,43 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
       });
       continue;
     }
-    if (type === "thinking" || type === "redacted_thinking") {
+    if (type === "thinking") {
+      flushMessage();
+      const thinking = stringMember(value, "thinking");
+      const signatureValue = singleMember(value, "signature");
+      if (
+        thinking === undefined
+        || (signatureValue !== undefined && typeof signatureValue !== "string")
+      ) {
+        upstreamInvalid();
+      }
+      if (thinking.length > 0) {
+        items.push({
+          type: "reasoning",
+          parts: [{ presentation: "summary", index: 0, text: thinking }],
+          hasOpaqueState: typeof signatureValue === "string" && signatureValue.length > 0,
+        });
+      }
+      continue;
+    }
+    if (type === "redacted_thinking") {
+      const data = stringMember(value, "data");
+      if (data === undefined) {
+        upstreamInvalid();
+      }
       continue;
     }
     upstreamInvalid();
   }
   flushMessage();
   const finishReason = messagesFinishReason(singleMember(payload, "stop_reason"));
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item?.type === "reasoning") {
+      const hasFollower = items.slice(index + 1).some((candidate) => candidate.type === "message" || candidate.type === "tool_call");
+      items[index] = { ...item, status: hasFollower || finishReason === "stop" || finishReason === "tool_calls" ? "completed" : "incomplete" };
+    }
+  }
   const responseItems = finishReason === "refusal"
     ? items.map((item): SemanticResponseItem => item.type === "message"
       ? {
@@ -404,6 +444,13 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
       continue;
     }
     if (type === "reasoning") {
+      const reasoning = decodeResponsesReasoningItem(value, upstreamInvalid);
+      if (status === "completed" && reasoning.status !== undefined && reasoning.status !== "completed") {
+        upstreamInvalid();
+      }
+      if (reasoning.parts.some((part) => part.text.length > 0)) {
+        items.push(reasoning);
+      }
       continue;
     }
     upstreamInvalid();
@@ -448,6 +495,11 @@ function chatEnvelope(
     .flatMap((item) => item.content);
   const text = messageParts.filter((part) => part.type === "text").map((part) => part.text).join("");
   const refusal = messageParts.filter((part): part is SemanticRefusal => part.type === "refusal").map((part) => part.text).join("");
+  const reasoning = response.items
+    .filter((item) => item.type === "reasoning")
+    .flatMap((item) => item.parts)
+    .map((part) => part.text)
+    .join("");
   const calls = response.items
     .filter((item): item is SemanticToolCallItem => item.type === "tool_call")
     .map((item, index) => wireObject([
@@ -458,6 +510,7 @@ function chatEnvelope(
     ]));
   const message = wireObject([
     ["role", "assistant"],
+    ["reasoning_content", reasoning.length === 0 ? undefined : reasoning],
     ["content", text.length === 0 ? null : text],
     ["refusal", refusal.length === 0 ? undefined : refusal],
     ["tool_calls", calls.length === 0 ? undefined : wireArray(calls)],
@@ -482,6 +535,9 @@ function messagesEnvelope(
 ): WireJsonObject {
   const content: WireJsonObject[] = [];
   for (const item of response.items) {
+    if (item.type === "reasoning") {
+      continue;
+    }
     if (item.type === "message") {
       for (const part of item.content) {
         content.push(wireObject([["type", "text"], ["text", part.text]]));
@@ -513,7 +569,23 @@ function responsesEnvelope(
 ): WireJsonObject {
   const output: WireJsonObject[] = [];
   for (const item of response.items) {
-    if (item.type === "message") {
+    if (item.type === "reasoning") {
+      const summary = item.parts
+        .filter((part) => part.presentation === "summary")
+        .sort((left, right) => left.index - right.index)
+        .map((part) => wireObject([["type", "summary_text"], ["text", part.text]]));
+      const content = item.parts
+        .filter((part) => part.presentation === "content")
+        .sort((left, right) => left.index - right.index)
+        .map((part) => wireObject([["type", "reasoning_text"], ["text", part.text]]));
+      output.push(wireObject([
+        ["type", "reasoning"],
+        ["id", item.itemId ?? `rs_${context.createUuid()}`],
+        ["status", item.status ?? response.status],
+        ["summary", wireArray(summary)],
+        ["content", content.length === 0 ? undefined : wireArray(content)],
+      ]));
+    } else if (item.type === "message") {
       const content = item.content.map((part) => part.type === "text"
         ? wireObject([
           ["type", "output_text"],
@@ -629,12 +701,13 @@ function messagesUsage(value: WireJsonObject | undefined): SemanticUsage {
   }
   const cacheReadTokens = nonnegativeIntegerMember(value, "cache_read_input_tokens");
   const cacheWriteTokens = nonnegativeIntegerMember(value, "cache_creation_input_tokens");
+  const outputDetails = nullableObjectMember(value, "output_tokens_details");
   return {
     inputTokens: nonnegativeIntegerMember(value, "input_tokens") + cacheReadTokens + cacheWriteTokens,
     outputTokens: nonnegativeIntegerMember(value, "output_tokens"),
     cacheReadTokens,
     cacheWriteTokens,
-    reasoningTokens: 0,
+    reasoningTokens: nonnegativeIntegerMember(outputDetails, "thinking_tokens"),
   };
 }
 
@@ -674,6 +747,9 @@ function messagesUsageEnvelope(usage: Readonly<SemanticUsage>): WireJsonObject {
     ["output_tokens", wireNumber(usage.outputTokens)],
     ["cache_read_input_tokens", usage.cacheReadTokens === 0 ? undefined : wireNumber(usage.cacheReadTokens)],
     ["cache_creation_input_tokens", usage.cacheWriteTokens === 0 ? undefined : wireNumber(usage.cacheWriteTokens)],
+    ["output_tokens_details", usage.reasoningTokens === 0
+      ? null
+      : wireObject([["thinking_tokens", wireNumber(usage.reasoningTokens)]])],
   ]);
 }
 
@@ -796,6 +872,17 @@ function objectMember(object: WireJsonObject | undefined, key: string): WireJson
   }
   const value = singleMember(object, key);
   if (value === undefined) {
+    return undefined;
+  }
+  if (!isWireJsonObject(value)) {
+    upstreamInvalid();
+  }
+  return value;
+}
+
+function nullableObjectMember(object: WireJsonObject, key: string): WireJsonObject | undefined {
+  const value = singleMember(object, key);
+  if (value === undefined || value === null) {
     return undefined;
   }
   if (!isWireJsonObject(value)) {

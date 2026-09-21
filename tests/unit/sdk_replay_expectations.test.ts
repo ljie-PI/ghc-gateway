@@ -86,7 +86,7 @@ describe("independent SDK replay expectations (no SDK execution)", () => {
     expect(() => expectUsage(streamed, "messages", { ...chat, mode: "nonstream" })).toThrow();
   });
 
-  it("rejects lost or duplicated SDK-parsed reasoning fragments and converted reasoning leakage", () => {
+  it("rejects lost or duplicated SDK-parsed reasoning fragments and converted reasoning loss", () => {
     const expected: ExpectedResult = { ...messages, upstream: "chat", reasoning: [{ reasoning_text: "first " }, { reasoning_text: "second" }] };
     const result: SdkResult<OpenAI.ChatCompletion> = {
       response: { choices: [{ message: { role: "assistant", content: "answer" } }] } as OpenAI.ChatCompletion,
@@ -96,7 +96,17 @@ describe("independent SDK replay expectations (no SDK execution)", () => {
     for (const reasoningText of [undefined, "second", "first secondsecond"]) {
       expect(() => expectReasoningResult({ ...result, stream: { ...result.stream!, reasoningText } }, expected, "chat")).toThrow();
     }
-    expect(() => expectReasoningResult(result, { ...expected, upstream: "messages" }, "chat")).toThrow();
+    const convertedExpected = {
+      ...expected,
+      upstream: "messages" as const,
+      reasoning: [{ type: "thinking", thinking: "first second" }],
+    };
+    expectReasoningResult(result, convertedExpected, "chat");
+    expect(() => expectReasoningResult(
+      { ...result, stream: { ...result.stream!, reasoningText: undefined, reasoningDeltaCount: 0 } },
+      convertedExpected,
+      "chat",
+    )).toThrow();
   });
 
   it("does not add nested Chat reasoning subsets, even when separate reasoning is also present", () => {

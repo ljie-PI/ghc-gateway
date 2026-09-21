@@ -80,6 +80,31 @@ export async function* convertProtocolStream(
       if (event.kind === "semantic_progress") {
         continue;
       }
+      if (event.kind === "reasoning_start") {
+        measuredWork(context, () => ledger.startReasoning(event.key, event.itemId));
+        continue;
+      }
+      if (event.kind === "reasoning_delta") {
+        if (event.delta.length === 0) continue;
+        yield* measuredEvent(context, () => {
+          ledger.appendReasoning(event);
+          return started ? emitter.reasoningDelta(event) : [];
+        });
+        continue;
+      }
+      if (event.kind === "reasoning_snapshot") {
+        yield* measuredEvent(context, () => {
+          const suffix = reconcileSnapshot(ledger.reasoningValue(event.partKey), event.text);
+          if (suffix.length === 0) return [];
+          ledger.appendReasoning({ ...event, delta: suffix });
+          return started ? emitter.reasoningDelta({ ...event, kind: "reasoning_delta", delta: suffix }) : [];
+        });
+        continue;
+      }
+      if (event.kind === "reasoning_done") {
+        yield* measuredEvent(context, () => emitter.reasoningDone(ledger.finishReasoning(event.key, event.status)));
+        continue;
+      }
       if (event.kind === "text_delta") {
         yield* measuredEvent(context, () => {
           ledger.appendText(event.key, event.delta, event.orderKey);
@@ -185,6 +210,9 @@ export async function* convertProtocolStream(
             yield* measuredEvent(context, () => emitter.toolDone(key, ledger.tool(key).argumentsJson));
           }
         }
+        for (const reasoning of measuredWork(context, () => ledger.finishOpenReasoning(event.status))) {
+          yield* measuredEvent(context, () => emitter.reasoningDone(reasoning));
+        }
         const items = measuredWork(context, () => ledger.items(event.status));
         yield* measuredEvent(context, () => emitter.finish(event, usage, items));
         yield { kind: "terminal", terminal: event.status };
@@ -203,6 +231,12 @@ function startsSemanticOutput(event: SemanticStreamEvent): boolean {
   }
   if (event.kind === "text_delta" || event.kind === "tool_arguments_delta") {
     return event.delta.length > 0;
+  }
+  if (event.kind === "reasoning_delta") {
+    return event.delta.length > 0;
+  }
+  if (event.kind === "reasoning_snapshot") {
+    return event.text.length > 0;
   }
   if (event.kind === "text_done") {
     return event.text.length > 0;
@@ -234,6 +268,8 @@ interface StreamEmitter {
   reserveMessage(key: string, kind: "text" | "refusal"): Iterable<ConvertedStreamEmission>;
   contentDone(orderKey: string, contentIndex: number): Iterable<ConvertedStreamEmission>;
   itemDone(outputIndex: number): Iterable<ConvertedStreamEmission>;
+  reasoningDelta(event: Extract<SemanticStreamEvent, { readonly kind: "reasoning_delta" }>): Iterable<ConvertedStreamEmission>;
+  reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission>;
   textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
   refusalDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission>;
   toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission>;
@@ -269,6 +305,8 @@ class ChatEmitter implements StreamEmitter {
     argumentsJson: string;
   }>();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
+  private readonly streamedReasoning = new Map<string, string>();
+  private readonly pendingReasoning = new Map<string, Extract<SemanticResponseItem, { readonly type: "reasoning" }>>();
   private readonly pendingContent = new Map<string, {
     readonly orderKey: string;
     readonly kind: "text" | "refusal";
@@ -303,6 +341,21 @@ class ChatEmitter implements StreamEmitter {
   *itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
     this.responseFrontier.markItemDone(outputIndex);
     yield* this.drainReadyContent();
+  }
+
+  *reasoningDelta(event: Extract<SemanticStreamEvent, { readonly kind: "reasoning_delta" }>): Iterable<ConvertedStreamEmission> {
+    if (this.sourceResponses) {
+      return;
+    }
+    yield* this.emitReasoningDelta(event.partKey, event.delta);
+  }
+
+  reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {
+    if (this.sourceResponses) {
+      if (item.key === undefined || this.pendingReasoning.has(item.key)) invalid();
+      this.pendingReasoning.set(item.key, item);
+    }
+    return [];
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
@@ -402,6 +455,10 @@ class ChatEmitter implements StreamEmitter {
 
   private *emitBufferedResponseItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
+      if (item.type === "reasoning") {
+        yield* this.emitReasoningItem(item);
+        continue;
+      }
       if (item.type === "message") {
         for (let partIndex = 0; partIndex < item.content.length; partIndex += 1) {
           const part = item.content[partIndex];
@@ -480,6 +537,12 @@ class ChatEmitter implements StreamEmitter {
 
   private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
     for (;;) {
+      const reasoningKey = `responses:${this.responseFrontier.currentItemIndex()}:reasoning`;
+      const reasoning = this.pendingReasoning.get(reasoningKey);
+      if (reasoning !== undefined) {
+        this.pendingReasoning.delete(reasoningKey);
+        yield* this.emitReasoningItem(reasoning);
+      }
       const toolKey = `responses:${this.responseFrontier.currentItemIndex()}`;
       const readyTool = this.pendingTools.get(toolKey);
       if (readyTool !== undefined) {
@@ -536,6 +599,27 @@ class ChatEmitter implements StreamEmitter {
       ])])],
     ]));
     this.roleSent = true;
+  }
+
+  private *emitReasoningItem(
+    item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+  ): Iterable<ConvertedStreamEmission> {
+    for (const part of item.parts) {
+      const key = part.key ?? `${item.key ?? "reasoning"}:${part.presentation}:${part.index}`;
+      const streamed = this.streamedReasoning.get(key) ?? "";
+      if (!part.text.startsWith(streamed)) invalid();
+      const remaining = part.text.slice(streamed.length);
+      if (remaining.length > 0) yield* this.emitReasoningDelta(key, remaining);
+    }
+  }
+
+  private *emitReasoningDelta(partKey: string, delta: string): Iterable<ConvertedStreamEmission> {
+    yield this.chunk(wireObject([
+      ...(!this.roleSent ? [["role", "assistant"] as const] : []),
+      ["reasoning_content", delta],
+    ]));
+    this.roleSent = true;
+    this.streamedReasoning.set(partKey, `${this.streamedReasoning.get(partKey) ?? ""}${delta}`);
   }
 
   private chunk(delta: ReturnType<typeof wireObject>, finish?: string): ConvertedStreamEmission {
@@ -601,6 +685,7 @@ class MessagesEmitter implements StreamEmitter {
           output_tokens: 0,
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
+          output_tokens_details: null,
         },
       },
     });
@@ -635,6 +720,10 @@ class MessagesEmitter implements StreamEmitter {
     this.responseFrontier.markItemDone(outputIndex);
     yield* this.drainReadyContent();
   }
+
+  *reasoningDelta(_event: Extract<SemanticStreamEvent, { readonly kind: "reasoning_delta" }>): Iterable<ConvertedStreamEmission> {}
+
+  *reasoningDone(_item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {}
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const messageKey = orderKey ?? key;
@@ -751,6 +840,9 @@ class MessagesEmitter implements StreamEmitter {
 
   private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
+      if (item.type === "reasoning") {
+        continue;
+      }
       if (item.type === "message") {
         for (let partIndex = 0; partIndex < item.content.length; partIndex += 1) {
           const part = item.content[partIndex];
@@ -944,6 +1036,18 @@ class ResponsesEmitter implements StreamEmitter {
     readonly outputIndex: number;
     done: boolean;
   }>();
+  private readonly reasoning = new Map<string, {
+    readonly id: string;
+    readonly outputIndex: number;
+    itemAdded: boolean;
+    done: boolean;
+    readonly parts: Map<string, {
+      readonly presentation: "summary" | "content";
+      readonly index: number;
+      text: string;
+      started: boolean;
+    }>;
+  }>();
   private readonly completed = new Map<number, ReturnType<typeof wireObject>>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
@@ -995,6 +1099,117 @@ class ResponsesEmitter implements StreamEmitter {
   *contentDone(_orderKey: string, _contentIndex: number): Iterable<ConvertedStreamEmission> {}
 
   *itemDone(_outputIndex: number): Iterable<ConvertedStreamEmission> {}
+
+  *reasoningDelta(event: Extract<SemanticStreamEvent, { readonly kind: "reasoning_delta" }>): Iterable<ConvertedStreamEmission> {
+    const reasoning = this.ensureReasoning(event.key, event.itemId);
+    if (!reasoning.itemAdded) {
+      reasoning.itemAdded = true;
+      yield this.itemEvent(
+        "response.output_item.added",
+        reasoning.outputIndex,
+        responseReasoning(reasoning, "in_progress", []),
+      );
+    }
+    let part = reasoning.parts.get(event.partKey);
+    if (part === undefined) {
+      part = {
+        presentation: event.presentation,
+        index: event.partIndex,
+        text: "",
+        started: false,
+      };
+      reasoning.parts.set(event.partKey, part);
+    } else if (part.presentation !== event.presentation || part.index !== event.partIndex) {
+      invalid();
+    }
+    if (part.presentation === "summary" && !part.started) {
+      part.started = true;
+      yield this.event(wireObject([
+        ["type", "response.reasoning_summary_part.added"],
+        ["sequence_number", wireNumber(this.sequence++)],
+        ["item_id", reasoning.id],
+        ["output_index", wireNumber(reasoning.outputIndex)],
+        ["summary_index", wireNumber(part.index)],
+        ["part", summaryText("")],
+      ]));
+    } else if (part.presentation === "content" && !part.started) {
+      yield this.contentEvent(
+        "response.content_part.added",
+        reasoning,
+        part.index,
+        reasoningText(""),
+      );
+    }
+    part.started = true;
+    part.text += event.delta;
+    yield this.event(wireObject([
+      ["type", part.presentation === "summary"
+        ? "response.reasoning_summary_text.delta"
+        : "response.reasoning_text.delta"],
+      ["sequence_number", wireNumber(this.sequence++)],
+      ["item_id", reasoning.id],
+      ["output_index", wireNumber(reasoning.outputIndex)],
+      [part.presentation === "summary" ? "summary_index" : "content_index", wireNumber(part.index)],
+      ["delta", event.delta],
+    ]));
+  }
+
+  *reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {
+    if (item.key === undefined) invalid();
+    const reasoning = this.ensureReasoning(item.key, item.itemId);
+    if (reasoning.done) return;
+    if (!reasoning.itemAdded && item.parts.some((part) => part.text.length > 0)) {
+      reasoning.itemAdded = true;
+      yield this.itemEvent(
+        "response.output_item.added",
+        reasoning.outputIndex,
+        responseReasoning(reasoning, "in_progress", []),
+      );
+    }
+    if (!reasoning.itemAdded) return;
+    for (const semanticPart of item.parts) {
+      const partKey = semanticPart.key ?? `${item.key}:${semanticPart.presentation}:${semanticPart.index}`;
+      const part = reasoning.parts.get(partKey);
+      if (part === undefined || part.text !== semanticPart.text) invalid();
+      if (part.presentation === "summary") {
+        yield this.event(wireObject([
+          ["type", "response.reasoning_summary_text.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", reasoning.id],
+          ["output_index", wireNumber(reasoning.outputIndex)],
+          ["summary_index", wireNumber(part.index)],
+          ["text", part.text],
+        ]));
+        yield this.event(wireObject([
+          ["type", "response.reasoning_summary_part.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", reasoning.id],
+          ["output_index", wireNumber(reasoning.outputIndex)],
+          ["summary_index", wireNumber(part.index)],
+          ["part", summaryText(part.text)],
+        ]));
+      } else {
+        yield this.event(wireObject([
+          ["type", "response.reasoning_text.done"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", reasoning.id],
+          ["output_index", wireNumber(reasoning.outputIndex)],
+          ["content_index", wireNumber(part.index)],
+          ["text", part.text],
+        ]));
+        yield this.contentEvent(
+          "response.content_part.done",
+          reasoning,
+          part.index,
+          reasoningText(part.text),
+        );
+      }
+    }
+    reasoning.done = true;
+    const completed = responseReasoning(reasoning, item.status ?? "completed", item.parts);
+    this.completed.set(reasoning.outputIndex, completed);
+    yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
+  }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const message = this.ensureMessage(orderKey ?? key);
@@ -1126,7 +1341,7 @@ class ResponsesEmitter implements StreamEmitter {
         }
       }
     }
-    const output = responseOutput(items, terminal.status, this.messages, this.tools);
+    const output = responseOutput(items, terminal.status, this.messages, this.reasoning, this.tools);
     if (terminal.status === "completed") {
       yield {
         kind: "checkpoint",
@@ -1195,6 +1410,23 @@ class ResponsesEmitter implements StreamEmitter {
       this.messages.set(key, message);
     }
     return message;
+  }
+
+  private ensureReasoning(key: string, itemId?: string) {
+    let reasoning = this.reasoning.get(key);
+    if (reasoning === undefined) {
+      reasoning = {
+        id: itemId ?? `rs_${this.context.createUuid()}`,
+        outputIndex: this.nextOutputIndex++,
+        itemAdded: false,
+        done: false,
+        parts: new Map(),
+      };
+      this.reasoning.set(key, reasoning);
+    } else if (itemId !== undefined && reasoning.id !== itemId) {
+      invalid();
+    }
+    return reasoning;
   }
 
   private completedOutput(): readonly ReturnType<typeof wireObject>[] {
@@ -1279,7 +1511,7 @@ class ResponseEmissionFrontier {
   }
 
   allowsItem(key: string): boolean {
-    const match = /^responses:(\d+)$/u.exec(key);
+    const match = /^responses:(\d+)(?::reasoning)?$/u.exec(key);
     return match?.[1] !== undefined && Number.parseInt(match[1], 10) === this.item;
   }
 
@@ -1334,6 +1566,15 @@ function responseOutput(
     readonly textIndex?: number;
     readonly refusalIndex?: number;
   }>,
+  reasoning: ReadonlyMap<string, {
+    readonly id: string;
+    readonly outputIndex: number;
+    readonly parts: ReadonlyMap<string, {
+      readonly presentation: "summary" | "content";
+      readonly index: number;
+      readonly text: string;
+    }>;
+  }>,
   tools: ReadonlyMap<string, {
     readonly itemId: string;
     readonly callId: string;
@@ -1343,6 +1584,16 @@ function responseOutput(
 ): ReturnType<typeof wireObject>[] {
   const indexed: Array<{ readonly index: number; readonly item: ReturnType<typeof wireObject> }> = [];
   for (const item of items) {
+    if (item.type === "reasoning") {
+      const state = item.key === undefined ? undefined : reasoning.get(item.key);
+      if (state !== undefined) {
+        indexed.push({
+          index: state.outputIndex,
+          item: responseReasoning(state, item.status ?? status, item.parts),
+        });
+      }
+      continue;
+    }
     if (item.type === "message") {
       const message = item.key === undefined ? undefined : messages.get(item.key);
       if (message !== undefined) {
@@ -1442,6 +1693,36 @@ function responseTool(
   ]);
 }
 
+function responseReasoning(
+  reasoning: { readonly id: string },
+  status: "in_progress" | "completed" | "incomplete",
+  parts: readonly { readonly presentation: "summary" | "content"; readonly index: number; readonly text: string }[],
+) {
+  const summary = parts
+    .filter((part) => part.presentation === "summary")
+    .sort((left, right) => left.index - right.index)
+    .map((part) => summaryText(part.text));
+  const content = parts
+    .filter((part) => part.presentation === "content")
+    .sort((left, right) => left.index - right.index)
+    .map((part) => reasoningText(part.text));
+  return wireObject([
+    ["type", "reasoning"],
+    ["id", reasoning.id],
+    ["status", status],
+    ["summary", wireArray(summary)],
+    ["content", content.length === 0 ? undefined : wireArray(content)],
+  ]);
+}
+
+function summaryText(text: string) {
+  return wireObject([["type", "summary_text"], ["text", text]]);
+}
+
+function reasoningText(text: string) {
+  return wireObject([["type", "reasoning_text"], ["text", text]]);
+}
+
 function outputText(text: string) {
   return wireObject([["type", "output_text"], ["text", text], ["annotations", wireArray([])]]);
 }
@@ -1469,6 +1750,7 @@ function messagesUsage(usage: Readonly<SemanticUsage>) {
     output_tokens: usage.outputTokens,
     ...(usage.cacheReadTokens === 0 ? {} : { cache_read_input_tokens: usage.cacheReadTokens }),
     ...(usage.cacheWriteTokens === 0 ? {} : { cache_creation_input_tokens: usage.cacheWriteTokens }),
+    output_tokens_details: usage.reasoningTokens === 0 ? null : { thinking_tokens: usage.reasoningTokens },
   };
 }
 

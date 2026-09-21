@@ -222,20 +222,27 @@ export function expectReasoningResult(
   downstream: SdkProtocol,
 ): void {
   const native = downstream === expected.upstream;
+  const expectedVisible = visibleReasoningText(expected.reasoning, expected.upstream);
   if (downstream === "chat" && expected.mode === "stream") {
-    const fragments = native ? expected.reasoning.flatMap((value) => {
+    const nativeFragments = expected.reasoning.flatMap((value) => {
       const text = record(value)?.reasoning_text;
       return typeof text === "string" ? [text] : [];
-    }) : [];
-    expect(result.stream?.reasoningText === (fragments.length === 0 ? undefined : fragments.join("")), "complete SDK-parsed reasoning deltas, or approved converted absence").toBe(true);
-    expect(result.stream?.reasoningDeltaCount).toBe(fragments.length);
-    if (!native) expect(chatReasoning((result.response as OpenAI.ChatCompletion).choices[0]?.message).length).toBe(0);
+    });
+    const expectedText = native ? nativeFragments.join("") : expectedVisible;
+    expect(result.stream?.reasoningText === (expectedText.length === 0 ? undefined : expectedText), "complete SDK-parsed visible reasoning deltas").toBe(true);
+    if (native) expect(result.stream?.reasoningDeltaCount).toBe(nativeFragments.length);
+    else expect((result.stream?.reasoningDeltaCount ?? 0) > 0).toBe(expectedVisible.length > 0);
     return;
   }
   const actual = downstream === "chat" ? chatReasoning((result.response as OpenAI.ChatCompletion).choices[0]?.message)
     : downstream === "messages" ? (result.response as Anthropic.Message).content.filter((block) => block.type === "thinking" || block.type === "redacted_thinking")
       : (result.response as OpenAI.Responses.Response).output.filter((item) => item.type === "reasoning");
-  expect(JSON.stringify(actual) === JSON.stringify(native ? expected.reasoning : []), "SDK-parsed native reasoning/opaque state is preserved; converted nonportable content is omitted").toBe(true);
+  if (native) {
+    expect(JSON.stringify(actual) === JSON.stringify(expected.reasoning), "SDK-parsed native reasoning and opaque state are preserved").toBe(true);
+    return;
+  }
+  const actualVisible = downstream === "messages" ? "" : visibleReasoningText(actual, downstream);
+  expect(actualVisible === (downstream === "messages" ? "" : expectedVisible), "converted visible reasoning is preserved only in protocol-valid targets").toBe(true);
 }
 
 function chatReasoning(value: unknown): Record<string, unknown>[] {
@@ -266,8 +273,9 @@ export function expectUsage(usage: unknown, downstream: SdkProtocol, expected: E
   // those zeros when message_delta omits them; buffered Messages has no such initial snapshot.
   expect(actual.cacheRead).toBe(native ? source.cacheRead : downstream === "messages" && !messagesStream ? nonzero(captured.cacheReadTokens) : captured.cacheReadTokens);
   expect(actual.cacheWrite).toBe(native ? source.cacheWrite : messagesStream ? captured.cacheWriteTokens : nonzero(captured.cacheWriteTokens));
-  expect(actual.reasoning).toBe(native ? source.reasoning : downstream === "messages" ? undefined
-    : downstream === "chat" && expected.mode === "nonstream" ? nonzero(captured.reasoningTokens) : captured.reasoningTokens);
+  expect(actual.reasoning).toBe(native ? source.reasoning
+    : downstream === "chat" && expected.mode === "nonstream" ? nonzero(captured.reasoningTokens)
+      : downstream === "messages" ? nonzero(captured.reasoningTokens) : captured.reasoningTokens);
 
   if (source.cacheRead !== undefined) {
     const actualInput = actual.input + (downstream === "messages" ? (actual.cacheRead ?? 0) + (actual.cacheWrite ?? 0) : 0);
@@ -293,13 +301,35 @@ function usageFields(value: unknown, protocol: SdkProtocol) {
     output: usage[protocol === "chat" ? "completion_tokens" : "output_tokens"] as number,
     cacheRead: (protocol === "messages" ? usage.cache_read_input_tokens : inputDetails?.cached_tokens) as number | undefined,
     cacheWrite: (protocol === "messages" ? usage.cache_creation_input_tokens : inputDetails?.cache_write_tokens) as number | undefined,
-    reasoning: (protocol === "messages" ? undefined : outputDetails?.reasoning_tokens ?? (protocol === "chat" ? usage.reasoning_tokens : undefined)) as number | undefined,
+    reasoning: (protocol === "messages"
+      ? outputDetails?.thinking_tokens
+      : outputDetails?.reasoning_tokens ?? (protocol === "chat" ? usage.reasoning_tokens : undefined)) as number | undefined,
   };
   if (fields.input === undefined || fields.output === undefined
     || Object.values(fields).some((value) => value !== undefined && (!Number.isSafeInteger(value) || value < 0))) {
     throw new Error("Invalid SDK usage counter");
   }
   return fields;
+}
+
+function visibleReasoningText(values: readonly unknown[], protocol: SdkProtocol): string {
+  return values.flatMap((value) => {
+    const object = record(value);
+    if (object === undefined) return [];
+    if (protocol === "messages") {
+      return object.type === "thinking" && typeof object.thinking === "string" ? [object.thinking] : [];
+    }
+    if (protocol === "responses") {
+      return [object.summary, object.content].flatMap((parts) => Array.isArray(parts)
+        ? parts.flatMap((part) => typeof record(part)?.text === "string" ? [record(part)?.text as string] : [])
+        : []);
+    }
+    for (const key of ["reasoning_text", "reasoning_content"] as const) {
+      if (typeof object[key] === "string") return [object[key] as string];
+    }
+    const blocks = Array.isArray(object.thinking_blocks) ? object.thinking_blocks : [];
+    return blocks.flatMap((block) => typeof record(block)?.thinking === "string" ? [record(block)?.thinking as string] : []);
+  }).join("");
 }
 
 export function expectNoVisualUsage(usage: unknown): void {

@@ -1,0 +1,1 @@
+{"kind":"buffered","source":"chat","target":"messages","payload":{"id":"chat_source","object":"chat.completion","model":"source","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":"visible plan","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":4,"completion_tokens_details":{"reasoning_tokens":3},"total_tokens":6}}}

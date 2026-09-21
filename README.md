@@ -167,9 +167,13 @@ File, audio, and server-hosted tools require an explicit adapter and are otherwi
 Native routes preserve declared reasoning effort values exactly. Converted routes preserve `max`
 when the target declares it; an `xhigh`-only target can coarsen `max` to `xhigh`. Unrecognized future
 efforts are rejected when conversion is required. Other optional reasoning effort or budget can be
-coarsened, and nonportable reasoning presentation or opaque state can be omitted on converted
-routes. These finite, content-free degradations do not change success accounting, add warning text,
-or trigger a retry. Native routes do not apply conversion-only degradation.
+coarsened. Converted Chat and Responses outputs preserve visible reasoning separately from answer
+text. Chat uses the untyped `reasoning_content` compatibility extension; Chat or Messages reasoning
+converted to Responses is represented as a reasoning summary. Converted Messages outputs omit
+reasoning because the gateway does not fabricate an Anthropic signature. Opaque reasoning state can
+still be omitted. Reported reasoning or thinking token details are normalized without estimating
+them from text. These finite, content-free degradations do not change success accounting, add
+warning text, or trigger a retry. Native routes do not apply conversion-only degradation.
 
 Responses continuations stay on their recorded account, model, origin, and upstream protocol.
 For Responses-to-Messages conversion, `previous_response_id` is consumed locally and is never sent
