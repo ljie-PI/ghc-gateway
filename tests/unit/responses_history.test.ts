@@ -328,6 +328,21 @@ describe("Responses continuation history", () => {
     }
   });
 
+  it("rejects one carrier identity in multiple v2 replay slots", async () => {
+    const { database, store } = history();
+    try {
+      const token = "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef";
+      await expect(store.recordCheckpoint({
+        responseId: "resp_duplicate_carrier_slots",
+        output: outputFromJson(`[{"type":"reasoning","summary":[],"encrypted_content":"${token}"},{"type":"function_call","call_id":"call_1","name":"one","arguments":"{}"},{"type":"reasoning","summary":[],"encrypted_content":"${token}"},{"type":"function_call","call_id":"call_2","name":"two","arguments":"{}"}]`),
+      }, ownership("github.com/1"), "complete", SIGNAL)).rejects.toMatchObject({
+        code: "checkpoint_unavailable",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it("requires a complete durable checkpoint before replay", async () => {
     const { database, store } = history();
     try {

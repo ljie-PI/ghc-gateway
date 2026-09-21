@@ -1316,6 +1316,7 @@ function extractRecordableReplay(
 ): StoredReplay {
   const items: StoredReplayItem[] = [];
   const callIds = new Set<string>();
+  const reasoningCarriers = new Set<string>();
   let group: Array<{
     readonly kind: ReplayItemKind;
     readonly callId: string | null;
@@ -1355,6 +1356,11 @@ function extractRecordableReplay(
       }
       if (formatVersion === 1) {
         continue;
+      }
+      const carrier = reasoningCarrier(outputItem);
+      if (carrier !== undefined) {
+        if (reasoningCarriers.has(carrier)) unavailableCheckpoint();
+        reasoningCarriers.add(carrier);
       }
       if (group.some((item) => item.kind !== "reasoning")) {
         finishGroup();
@@ -1629,6 +1635,7 @@ function validateStoredReplay(
   items: readonly StoredReplayItem[],
 ): void {
   const callIds = new Set<string>();
+  const reasoningCarriers = new Set<string>();
   let expectedGroup = 0;
   let expectedItem = 0;
   let groupHasCall = false;
@@ -1651,6 +1658,11 @@ function validateStoredReplay(
         unavailableCheckpoint();
       }
       if (item.kind === "reasoning") {
+        const carrier = reasoningCarrier(item.item);
+        if (carrier !== undefined) {
+          if (reasoningCarriers.has(carrier)) unavailableCheckpoint();
+          reasoningCarriers.add(carrier);
+        }
         if (groupHasCall) {
           unavailableCheckpoint();
         }
