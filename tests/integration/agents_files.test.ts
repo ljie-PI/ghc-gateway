@@ -111,6 +111,13 @@ function seed(home: string, target: string, bytes: Buffer | string): string {
   fs.writeFileSync(file, bytes, { mode: 0o600 });
   return file;
 }
+async function waitForFile(file: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!fs.existsSync(file)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path.basename(file)}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 async function stableSeed(home: string, target: string, bytes: Buffer | string): Promise<string> {
   const file = seed(home, target, bytes);
   protect(file);
@@ -1068,17 +1075,85 @@ describe("private repeatable agent configuration", () => {
     const h = harness();
     seed(h.home, ".codex/config.toml", "model = \"external\"\n");
     seed(h.home, ".codex/models.json", "external catalog\n");
-    const run = (modelId: string) => execFileAsync(process.execPath, [
+    const synchronizationDirectory = path.join(h.home, "takeover-synchronization");
+    fs.mkdirSync(synchronizationDirectory, { mode: 0o700 });
+    const runTakeoverFixture = (fixture: string, modelId: string, synchronization?: string, persistentLink = false) => execFileAsync(process.execPath, [
+      "scripts/tooling/bootstrap.mjs",
+      fixture,
+      h.home,
+      origin,
+      modelId,
+      "--concurrent",
+      ...(synchronization === undefined ? [] : [synchronization]),
+      ...(persistentLink ? ["--persistent-link"] : []),
+    ], { cwd: path.resolve(import.meta.dirname, "../.."), windowsHide: true, timeout: 120_000 });
+    const owner = runTakeoverFixture("tests/fixtures/agent_takeover_owner.ts", "model-a", synchronizationDirectory).then(
+      (result) => ({ result, error: undefined }),
+      (error: unknown) => ({ result: undefined, error }),
+    );
+    await waitForFile(path.join(synchronizationDirectory, "owner-ready"));
+    let contenderResult: Awaited<ReturnType<typeof runTakeoverFixture>> | undefined;
+    let contenderError: unknown;
+    try {
+      contenderResult = await runTakeoverFixture("tests/fixtures/agent_takeover_contender.ts", "model-b", synchronizationDirectory);
+    } catch (error: unknown) {
+      contenderError = error;
+    } finally {
+      fs.writeFileSync(path.join(synchronizationDirectory, "release-owner"), "");
+    }
+    const ownerOutcome = await owner;
+    if (ownerOutcome.error !== undefined) throw ownerOutcome.error;
+    if (contenderError !== undefined) throw contenderError;
+    expect([ownerOutcome.result!.stdout.trim(), contenderResult!.stdout.trim()].sort()).toEqual(["busy", "installed"]);
+    expect((await h.status("codex")).state).toBe("installed");
+    expect(fs.readFileSync(path.join(h.home, ".codex/config.toml.ghcg.bak"), "utf8")).toBe("model = \"external\"\n");
+    expect(fs.readFileSync(path.join(h.home, ".codex/models.json.ghcg.bak"), "utf8")).toBe("external catalog\n");
+    const statePath = path.join(stateRoot(h.home), "codex", "state.db");
+    expect(fs.lstatSync(statePath).nlink).toBe(1);
+    expect(["-journal", "-wal", "-shm"].some((suffix) => fs.existsSync(statePath + suffix))).toBe(false);
+  }, 300_000);
+
+  it("does not settle a contender against a persistently hard-linked state database", async () => {
+    const h = harness();
+    await apply(h.manager, "codex");
+    const statePath = path.join(stateRoot(h.home), "codex", "state.db");
+    fs.linkSync(statePath, path.join(h.home, "state-alias.db"));
+    await expect(execFileAsync(process.execPath, [
       "scripts/tooling/bootstrap.mjs",
       "tests/fixtures/agent_takeover_contender.ts",
       h.home,
       origin,
+      "model-a",
+    ], { cwd: path.resolve(import.meta.dirname, "../.."), windowsHide: true, timeout: 120_000 }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("agent_unsafe_path") });
+    expect((await h.status("codex")).state).toBe("unsafe_path");
+    expect(fs.lstatSync(statePath).nlink).toBe(2);
+  }, 180_000);
+
+  it("fails closed when the fixture-owned concurrent state link persists", async () => {
+    const h = harness();
+    seed(h.home, ".codex/config.toml", "model = \"external\"\n");
+    seed(h.home, ".codex/models.json", "external catalog\n");
+    const synchronizationDirectory = path.join(h.home, "persistent-link-synchronization");
+    fs.mkdirSync(synchronizationDirectory, { mode: 0o700 });
+    const runTakeoverFixture = (fixture: string, modelId: string, persistentLink = false) => execFileAsync(process.execPath, [
+      "scripts/tooling/bootstrap.mjs",
+      fixture,
+      h.home,
+      origin,
       modelId,
+      "--concurrent",
+      synchronizationDirectory,
+      ...(persistentLink ? ["--persistent-link"] : []),
     ], { cwd: path.resolve(import.meta.dirname, "../.."), windowsHide: true, timeout: 120_000 });
-    const results = await Promise.all([run("model-a"), run("model-b")]);
-    expect(results.map((result) => result.stdout.trim()).sort()).toEqual(["busy", "installed"]);
-    expect((await h.status("codex")).state).toBe("installed");
-    expect(fs.existsSync(path.join(h.home, ".codex/models.json.ghcg.bak"))).toBe(true);
+    const owner = runTakeoverFixture("tests/fixtures/agent_takeover_owner.ts", "model-a", true).catch((error: unknown) => error);
+    await waitForFile(path.join(synchronizationDirectory, "owner-ready"));
+    await expect(runTakeoverFixture("tests/fixtures/agent_takeover_contender.ts", "model-b"))
+      .rejects.toMatchObject({ stderr: expect.stringContaining("agent_unsafe_path") });
+    await expect(owner).resolves.toMatchObject({ stderr: expect.stringContaining("agent_unsafe_path") });
+    const statePath = path.join(stateRoot(h.home), "codex", "state.db");
+    expect((await h.status("codex")).state).toBe("unsafe_path");
+    expect(fs.lstatSync(statePath).nlink).toBe(2);
   }, 300_000);
 
   it("rejects pre-v3 Codex durable state before client mutation", async () => {
