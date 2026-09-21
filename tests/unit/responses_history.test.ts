@@ -260,7 +260,7 @@ describe("Responses continuation history", () => {
         output: outputFromJson("[{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef\"},{\"type\":\"function_call\",\"call_id\":\"call_explicit\",\"name\":\"lookup\",\"arguments\":\"{}\"}]"),
       }, ownership("github.com/1"), "complete", SIGNAL);
       const request = decodeResponsesRequest(objectFromJson(
-        "{\"model\":\"gpt\",\"input\":[{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef\"},{\"type\":\"function_call_output\",\"call_id\":\"call_explicit\",\"output\":\"ok\"}]}",
+        "{\"model\":\"gpt\",\"input\":[{\"encrypted_content\":\"ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef\",\"summary\":[],\"status\":\"completed\",\"type\":\"reasoning\"},{\"type\":\"function_call_output\",\"call_id\":\"call_explicit\",\"output\":\"ok\"}]}",
       ));
       const enriched = await store.enrich(
         request,
@@ -268,9 +268,38 @@ describe("Responses continuation history", () => {
         SIGNAL,
       );
       expect(inputJson(enriched.input)).toEqual([
-        { type: "reasoning", summary: [], encrypted_content: "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef" },
+        { encrypted_content: "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef", summary: [], status: "completed", type: "reasoning" },
         { type: "function_call", call_id: "call_explicit", name: "lookup", arguments: "{}" },
         { type: "function_call_output", call_id: "call_explicit", output: "ok" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("relocates explicit carriers into their persisted v2 replay groups", async () => {
+    const { database, store } = history();
+    try {
+      const first = "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef";
+      const second = "ghcg-rsn-v1:chat_state:responses:11234567-89ab-4def-8123-456789abcdef";
+      await store.recordCheckpoint({
+        responseId: "resp_group_order",
+        output: outputFromJson(`[{"type":"reasoning","summary":[],"encrypted_content":"${first}"},{"type":"function_call","call_id":"call_1","name":"one","arguments":"{}"},{"type":"reasoning","summary":[],"encrypted_content":"${second}"},{"type":"function_call","call_id":"call_2","name":"two","arguments":"{}"}]`),
+      }, ownership("github.com/1"), "complete", SIGNAL);
+      const request = decodeResponsesRequest(objectFromJson(
+        `{"model":"gpt","input":[{"encrypted_content":"${second}","summary":[],"type":"reasoning"},{"encrypted_content":"${first}","summary":[],"type":"reasoning"},{"type":"function_call_output","call_id":"call_1","output":"one"},{"type":"function_call_output","call_id":"call_2","output":"two"}]}`,
+      ));
+      expect(inputJson((await store.enrich(
+        request,
+        await owned(store, "resp_group_order", "github.com/1"),
+        SIGNAL,
+      )).input)).toEqual([
+        { encrypted_content: first, summary: [], type: "reasoning" },
+        { type: "function_call", call_id: "call_1", name: "one", arguments: "{}" },
+        { encrypted_content: second, summary: [], type: "reasoning" },
+        { type: "function_call", call_id: "call_2", name: "two", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_1", output: "one" },
+        { type: "function_call_output", call_id: "call_2", output: "two" },
       ]);
     } finally {
       database.close();

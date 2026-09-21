@@ -382,7 +382,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       unavailableCheckpoint();
     }
     const originalCallsById = new Map<string, WireJsonObject>();
-    const originalReasoning = new Set<string>();
+    const originalReasoningByCarrier = new Map<string, WireJsonObject>();
     for (const item of originalItems) {
       if (isDeclaredReplayItem(item) && !isCallItem(item) && !isReasoningItem(item)) {
         unavailableCheckpoint();
@@ -400,9 +400,11 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         }
         originalCallsById.set(callId, item);
       } else if (isReasoningItem(item)) {
-        const encoded = JSON_DECODER.decode(serializeWireJson(item));
-        if (originalReasoning.has(encoded)) unavailableCheckpoint();
-        originalReasoning.add(encoded);
+        const carrier = reasoningCarrier(item);
+        if (carrier !== undefined) {
+          if (originalReasoningByCarrier.has(carrier)) unavailableCheckpoint();
+          originalReasoningByCarrier.set(carrier, item);
+        }
       }
     }
 
@@ -413,6 +415,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     const enrichedItems: WireJson[] = [];
 
     for (const item of originalItems) {
+      if (isReasoningItem(item) && reasoningCarrier(item) !== undefined) {
+        changed = true;
+        continue;
+      }
       if (isCallItem(item)) {
         const callId = strictCallIdFromItem(item);
         if (scoped.formatVersion === 2 && callId !== undefined && scoped.byCallId.has(callId)) {
@@ -462,10 +468,13 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
           if (!scopedGroupInserted) {
             for (const replayItem of scoped.items) {
               if (replayItem.kind === "reasoning") {
-                if (!originalReasoning.has(replayItem.itemJson)) {
-                  enrichedItems.push(replayItem.item);
-                  changed = true;
-                }
+                const carrier = reasoningCarrier(replayItem.item);
+                enrichedItems.push(
+                  carrier === undefined
+                    ? replayItem.item
+                    : originalReasoningByCarrier.get(carrier) ?? replayItem.item,
+                );
+                changed = true;
               } else if (!emittedCallIds.has(replayItem.callId)) {
                 enrichedItems.push(restoreCall(replayItem, originalCallsById.get(replayItem.callId)));
                 emittedCallIds.add(replayItem.callId);
@@ -1441,6 +1450,13 @@ function isReasoningItem(item: WireJson): item is WireJsonObject {
   }
   const types = memberValues(item, "type");
   return types.length === 1 && types[0] === "reasoning";
+}
+
+function reasoningCarrier(item: WireJsonObject): string | undefined {
+  const values = memberValues(item, "encrypted_content");
+  return values.length === 1 && typeof values[0] === "string" && values[0].length > 0
+    ? values[0]
+    : undefined;
 }
 
 function isDeclaredReplayItem(item: WireJson): boolean {
