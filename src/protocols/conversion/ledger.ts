@@ -1,6 +1,8 @@
 import { GatewayFailureError } from "../../gateway/failures.js";
 import { isWireJsonObject, parseWireJson, type WireJsonObject } from "../../serialization/wire_json.js";
+import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
 import type {
+  SemanticOpaqueReasoningState,
   SemanticReasoningItem,
   SemanticMessagesReasoningState,
   SemanticReasoningPresentation,
@@ -40,6 +42,7 @@ interface ReasoningState {
   status?: "completed" | "incomplete" | "in_progress" | undefined;
   frozen: boolean;
   messagesState?: SemanticMessagesReasoningState | undefined;
+  opaqueState?: SemanticOpaqueReasoningState | undefined;
 }
 
 interface ReasoningPartState {
@@ -128,8 +131,13 @@ export class SemanticItemLedger {
     }
   }
 
-  startReasoning(key: string, itemId?: string, messagesState?: SemanticMessagesReasoningState): void {
-    this.reasoningState(key, itemId, messagesState);
+  startReasoning(
+    key: string,
+    itemId?: string,
+    messagesState?: SemanticMessagesReasoningState,
+    opaqueState?: SemanticOpaqueReasoningState,
+  ): void {
+    this.reasoningState(key, itemId, messagesState, opaqueState);
   }
 
   appendReasoning(input: {
@@ -403,8 +411,9 @@ export class SemanticItemLedger {
       ...(reasoning.itemId === undefined ? {} : { itemId: reasoning.itemId }),
       parts,
       ...(reasoning.status === undefined ? {} : { status: reasoning.status }),
-      hasOpaqueState: false,
+      hasOpaqueState: reasoning.opaqueState !== undefined,
       ...(reasoning.messagesState === undefined ? {} : { messagesState: reasoning.messagesState }),
+      ...(reasoning.opaqueState === undefined ? {} : { opaqueState: reasoning.opaqueState }),
     };
   }
 
@@ -445,6 +454,7 @@ export class SemanticItemLedger {
     key: string,
     itemId?: string,
     messagesState?: SemanticMessagesReasoningState,
+    opaqueState?: SemanticOpaqueReasoningState,
   ): ReasoningState {
     let reasoning = this.reasoning.get(key);
     if (reasoning === undefined) {
@@ -455,12 +465,14 @@ export class SemanticItemLedger {
         this.reserve(messagesState.signature);
       }
       if (messagesState?.type === "redacted_thinking") this.reserve(messagesState.data);
+      if (opaqueState !== undefined) this.reserveOpaqueState(opaqueState);
       reasoning = {
         key,
         ...(itemId === undefined ? {} : { itemId }),
         partKeys: [],
         frozen: false,
         ...(messagesState === undefined ? {} : { messagesState }),
+        ...(opaqueState === undefined ? {} : { opaqueState }),
       };
       this.reasoning.set(key, reasoning);
       this.order.push({ kind: "reasoning", key });
@@ -478,7 +490,25 @@ export class SemanticItemLedger {
       }
       reasoning.messagesState = messagesState;
     }
+    if (opaqueState !== undefined) {
+      if (reasoning.opaqueState !== undefined && !sameOpaqueState(reasoning.opaqueState, opaqueState)) invalid();
+      if (reasoning.opaqueState === undefined) this.reserveOpaqueState(opaqueState);
+      reasoning.opaqueState = opaqueState;
+    }
     return reasoning;
+  }
+
+  private reserveOpaqueState(state: SemanticOpaqueReasoningState): void {
+    const value = state.kind === "responses_item" ? state.item
+      : state.kind === "messages_block" ? state.block : state.state;
+    this.usedBytes += canonicalizeWireJson(value).byteLength;
+    if (this.usedBytes > this.maxBytes) {
+      throw new GatewayFailureError({
+        kind: "invalid_upstream_response",
+        source: "converter",
+        phase: "stream",
+      });
+    }
   }
 }
 
@@ -487,6 +517,25 @@ function sameMessagesState(left: SemanticMessagesReasoningState, right: Semantic
     && (left.type === "thinking"
       ? left.thinking === (right as typeof left).thinking && left.signature === (right as typeof left).signature
       : left.data === (right as typeof left).data);
+}
+
+function sameOpaqueState(left: SemanticOpaqueReasoningState, right: SemanticOpaqueReasoningState): boolean {
+  if (left.kind !== right.kind) return false;
+  const leftValue = left.kind === "responses_item" ? normalizedResponseOpaqueItem(left.item)
+    : left.kind === "messages_block" ? left.block : left.state;
+  const rightValue = right.kind === "responses_item" ? normalizedResponseOpaqueItem(right.item)
+    : right.kind === "messages_block" ? right.block : right.state;
+  const leftBytes = canonicalizeWireJson(leftValue);
+  const rightBytes = canonicalizeWireJson(rightValue);
+  return leftBytes.byteLength === rightBytes.byteLength
+    && leftBytes.every((value, index) => value === rightBytes[index]);
+}
+
+function normalizedResponseOpaqueItem(item: WireJsonObject): WireJsonObject {
+  return {
+    kind: "object",
+    members: item.members.filter((member) => member.key !== "id" && member.key !== "status"),
+  };
 }
 
 function compareResponseItemKeys(

@@ -14,9 +14,11 @@ import type {
   SemanticResponseItem,
   SemanticStreamEvent,
   SemanticUsage,
+  ReasoningCarrierConversionContext,
 } from "./types.js";
 import { wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
+import type { SemanticReasoningItem } from "./types.js";
 import {
   responseMessageKey,
   responseMessagePartKey,
@@ -38,6 +40,7 @@ export interface StreamConversionContext {
   readonly degradations?: readonly ConversionDegradationRule[];
   readonly measureEvent?: (<T>(work: () => T) => T) | undefined;
   readonly flushEventMeasurement?: (() => void) | undefined;
+  readonly carrier?: ReasoningCarrierConversionContext | undefined;
 }
 
 const ZERO_USAGE: SemanticUsage = {
@@ -93,7 +96,12 @@ export async function* convertProtocolStream(
         continue;
       }
       if (event.kind === "reasoning_start") {
-        measuredWork(context, () => ledger.startReasoning(event.key, event.itemId, event.messagesState));
+        measuredWork(context, () => ledger.startReasoning(
+          event.key,
+          event.itemId,
+          event.messagesState,
+          event.opaqueState,
+        ));
         continue;
       }
       if (event.kind === "reasoning_delta") {
@@ -325,6 +333,7 @@ class ChatEmitter implements StreamEmitter {
     delta: string;
   }>();
   private readonly responseFrontier = new ResponseEmissionFrontier();
+  private readonly carrierTokens = new Map<string, string>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `chatcmpl_${context.createUuid()}`;
@@ -623,6 +632,24 @@ class ChatEmitter implements StreamEmitter {
       const remaining = part.text.slice(streamed.length);
       if (remaining.length > 0) yield* this.emitReasoningDelta(key, remaining);
     }
+    if (this.context.carrier !== undefined && item.opaqueState?.kind === "responses_item") {
+      const token = this.carrierToken(item, "chat");
+      const state = replaceEncryptedContent(item.opaqueState.item, token);
+      yield this.chunk(wireObject([["reasoning_items", wireArray([state])]]));
+    }
+  }
+
+  private carrierToken(
+    item: SemanticReasoningItem,
+    wireProtocol: "chat",
+  ): string {
+    const key = item.key ?? item.itemId;
+    if (key === undefined) invalid();
+    const existing = this.carrierTokens.get(key);
+    if (existing !== undefined) return existing;
+    const created = createStreamCarrier(item, this.context, wireProtocol);
+    this.carrierTokens.set(key, created);
+    return created;
   }
 
   private *emitReasoningDelta(partKey: string, delta: string): Iterable<ConvertedStreamEmission> {
@@ -671,6 +698,7 @@ class MessagesEmitter implements StreamEmitter {
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
   private readonly pendingReasoning = new Map<string, Extract<SemanticResponseItem, { readonly type: "reasoning" }>>();
   private readonly emittedReasoning = new Set<string>();
+  private readonly carrierTokens = new Map<string, string>();
   private readonly tools = new Map<string, {
     readonly callId: string;
     readonly name: string;
@@ -740,11 +768,12 @@ class MessagesEmitter implements StreamEmitter {
   *reasoningDelta(_event: Extract<SemanticStreamEvent, { readonly kind: "reasoning_delta" }>): Iterable<ConvertedStreamEmission> {}
 
   *reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {
-    if (item.messagesState === undefined || item.key === undefined) return;
+    if (item.key === undefined) return;
     if (this.context.source === "responses") {
       this.pendingReasoning.set(item.key, item);
       return;
     }
+    if (item.messagesState === undefined) return;
     yield* this.emitReasoning(item);
   }
 
@@ -864,7 +893,7 @@ class MessagesEmitter implements StreamEmitter {
   private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
       if (item.type === "reasoning") {
-        if (item.messagesState !== undefined) yield* this.emitReasoning(item);
+        if (item.messagesState !== undefined || item.opaqueState?.kind === "responses_item") yield* this.emitReasoning(item);
         continue;
       }
       if (item.type === "message") {
@@ -931,9 +960,32 @@ class MessagesEmitter implements StreamEmitter {
   private *emitReasoning(
     item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
   ): Iterable<ConvertedStreamEmission> {
-    if (item.key === undefined || item.messagesState === undefined || this.emittedReasoning.has(item.key)) return;
+    if (item.key === undefined || this.emittedReasoning.has(item.key)) return;
+    if (
+      item.messagesState === undefined
+      && (this.context.carrier === undefined || item.opaqueState?.kind !== "responses_item")
+    ) return;
     yield* this.closeActiveText();
     const index = this.nextIndex++;
+    if (this.context.carrier !== undefined && item.opaqueState?.kind === "responses_item") {
+      let token = this.carrierTokens.get(item.key);
+      if (token === undefined) {
+        token = createStreamCarrier(item, this.context, "messages");
+        this.carrierTokens.set(item.key, token);
+      }
+      const visible = item.parts.map((part) => part.text).join("");
+      yield this.event({
+        type: "content_block_start",
+        index,
+        content_block: visible.length === 0
+          ? { type: "redacted_thinking", data: token }
+          : { type: "thinking", thinking: visible, signature: token },
+      });
+      yield this.event({ type: "content_block_stop", index });
+      this.emittedReasoning.add(item.key);
+      return;
+    }
+    if (item.messagesState === undefined) return;
     if (item.messagesState.type === "redacted_thinking") {
       yield this.event({
         type: "content_block_start",
@@ -1118,6 +1170,7 @@ class ResponsesEmitter implements StreamEmitter {
       text: string;
       started: boolean;
     }>;
+    carrierToken?: string | undefined;
   }>();
   private readonly completed = new Map<number, ReturnType<typeof wireObject>>();
 
@@ -1226,7 +1279,7 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {
-    if (!item.parts.some((part) => part.text.length > 0)) return;
+    if (!item.parts.some((part) => part.text.length > 0) && item.opaqueState === undefined) return;
     if (item.key === undefined) invalid();
     const reasoning = this.ensureReasoning(item.key, item.itemId);
     if (reasoning.done) return;
@@ -1278,9 +1331,22 @@ class ResponsesEmitter implements StreamEmitter {
       }
     }
     reasoning.done = true;
-    const completed = responseReasoning(reasoning, item.status ?? "completed", item.parts);
+    const completed = responseReasoning(reasoning, item.status ?? "completed", item.parts, reasoning.carrierToken);
     this.completed.set(reasoning.outputIndex, completed);
-    yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
+    if (reasoning.carrierToken !== undefined) {
+      yield {
+        kind: "checkpoint",
+        intent: {
+          responseId: this.responseId,
+          output: this.completedOutput(),
+          state: "partial",
+          carrierTokens: this.carrierTokens(),
+        },
+      };
+    }
+    if (this.context.carrier === undefined || item.opaqueState === undefined) {
+      yield this.itemEvent("response.output_item.done", reasoning.outputIndex, completed);
+    }
   }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
@@ -1367,6 +1433,7 @@ class ResponsesEmitter implements StreamEmitter {
         responseId: this.responseId,
         output: this.completedOutput(),
         state: "partial",
+        ...(this.carrierTokens().length === 0 ? {} : { carrierTokens: this.carrierTokens() }),
       },
     };
     yield this.event(wireObject([
@@ -1389,6 +1456,34 @@ class ResponsesEmitter implements StreamEmitter {
     usage: Readonly<SemanticUsage>,
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
+    if (terminal.status === "completed" && this.context.carrier !== undefined) {
+      const hasTool = items.some((item) => item.type === "tool_call");
+      if (hasTool) {
+        for (const item of items) {
+          if (item.type !== "reasoning" || item.opaqueState === undefined || item.key === undefined) continue;
+          const reasoning = this.ensureReasoning(item.key, item.itemId);
+          reasoning.carrierToken ??= createStreamCarrier(item, this.context, "responses", this.responseId);
+          const completed = responseReasoning(
+            reasoning,
+            item.status ?? terminal.status,
+            item.parts,
+            reasoning.carrierToken,
+          );
+          this.completed.set(reasoning.outputIndex, completed);
+        }
+        if (this.carrierTokens().length > 0) {
+          yield {
+            kind: "checkpoint",
+            intent: {
+              responseId: this.responseId,
+              output: responseOutput(items, terminal.status, this.messages, this.reasoning, this.tools),
+              state: "partial",
+              carrierTokens: this.carrierTokens(),
+            },
+          };
+        }
+      }
+    }
     for (const item of items) {
       if (item.type !== "message" || item.key === undefined) {
         continue;
@@ -1421,8 +1516,21 @@ class ResponsesEmitter implements StreamEmitter {
           responseId: this.responseId,
           output,
           state: "complete",
+          ...(this.carrierTokens().length === 0 ? {} : { carrierTokens: this.carrierTokens() }),
         },
       };
+    }
+    if (this.context.carrier !== undefined) {
+      for (const item of items) {
+        if (item.type !== "reasoning" || item.key === undefined) continue;
+        const reasoning = this.reasoning.get(item.key);
+        if (reasoning === undefined || item.opaqueState === undefined) continue;
+        yield this.itemEvent(
+          "response.output_item.done",
+          reasoning.outputIndex,
+          responseReasoning(reasoning, item.status ?? terminal.status, item.parts, reasoning.carrierToken),
+        );
+      }
     }
     for (const item of items) {
       if (item.type !== "message" || item.key === undefined) {
@@ -1505,6 +1613,12 @@ class ResponsesEmitter implements StreamEmitter {
     return [...this.completed.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, item]) => item);
+  }
+
+  private carrierTokens(): readonly string[] {
+    return [...this.reasoning.values()]
+      .map((item) => item.carrierToken)
+      .filter((token): token is string => token !== undefined);
   }
 
   private responseEvent(
@@ -1648,6 +1762,7 @@ function responseOutput(
       readonly index: number;
       readonly text: string;
     }>;
+    readonly carrierToken?: string | undefined;
   }>,
   tools: ReadonlyMap<string, {
     readonly itemId: string;
@@ -1659,12 +1774,12 @@ function responseOutput(
   const indexed: Array<{ readonly index: number; readonly item: ReturnType<typeof wireObject> }> = [];
   for (const item of items) {
     if (item.type === "reasoning") {
-      if (!item.parts.some((part) => part.text.length > 0)) continue;
+      if (!item.parts.some((part) => part.text.length > 0) && item.opaqueState === undefined) continue;
       const state = item.key === undefined ? undefined : reasoning.get(item.key);
       if (state !== undefined) {
         indexed.push({
           index: state.outputIndex,
-          item: responseReasoning(state, item.status ?? status, item.parts),
+          item: responseReasoning(state, item.status ?? status, item.parts, state.carrierToken),
         });
       }
       continue;
@@ -1772,6 +1887,7 @@ function responseReasoning(
   reasoning: { readonly id: string },
   status: "in_progress" | "completed" | "incomplete",
   parts: readonly { readonly presentation: "summary" | "content"; readonly index: number; readonly text: string }[],
+  carrierToken?: string,
 ) {
   const summary = parts
     .filter((part) => part.presentation === "summary")
@@ -1787,7 +1903,43 @@ function responseReasoning(
     ["status", status],
     ["summary", wireArray(summary)],
     ["content", content.length === 0 ? undefined : wireArray(content)],
+    ["encrypted_content", carrierToken],
   ]);
+}
+
+function createStreamCarrier(
+  item: SemanticReasoningItem,
+  context: Readonly<StreamConversionContext>,
+  wireProtocol: "chat" | "messages" | "responses",
+  responseId?: string,
+): string {
+  const carrier = context.carrier;
+  if (carrier === undefined || carrier.binding.wireProtocol !== wireProtocol || item.opaqueState === undefined) invalid();
+  const opaque = item.opaqueState;
+  const state = opaque.kind === "responses_item" ? opaque.item
+    : opaque.kind === "messages_block" ? opaque.block : opaque.state;
+  const carrierResponseId = responseId ?? carrier.responseId;
+  const created = carrier.store.create({
+    binding: carrier.binding,
+    sourceKind: opaque.kind,
+    state: "partial",
+    ...(carrierResponseId === undefined ? {} : { responseId: carrierResponseId }),
+    payload: wireObject([["kind", opaque.kind], ["state", state]]),
+    projection: wireObject([["type", "reasoning"], ["text", item.parts.map((part) => part.text).join("")]]),
+  });
+  carrier.onCreated?.(created.token);
+  return created.token;
+}
+
+function replaceEncryptedContent(item: ReturnType<typeof wireObject>, token: string): ReturnType<typeof wireObject> {
+  let replaced = false;
+  const members = item.members.map((member) => {
+    if (member.key !== "encrypted_content") return member;
+    replaced = true;
+    return { key: member.key, value: token };
+  });
+  if (!replaced) members.push({ key: "encrypted_content", value: token });
+  return { kind: "object", members };
 }
 
 function summaryText(text: string) {

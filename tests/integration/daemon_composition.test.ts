@@ -27,9 +27,11 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 import { DiagnosticRecorder } from "../../src/telemetry/diagnostics.js";
+import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 
 const NOW = Date.parse("2026-09-03T12:00:00.000Z");
 const PORT = 31_419;
@@ -489,6 +491,7 @@ async function compositionHarness(
         embedMigration(telemetryMigration),
         embedMigration(historyMigration),
         embedMigration(continuationMigration),
+        embedMigration(reasoningCarriersMigration),
       ],
       nowMs: () => NOW,
     });
@@ -536,6 +539,7 @@ async function compositionHarness(
       registry,
       copilot: new HttpCopilotBackend({ credentials, accountCoordinator, nowMs: () => NOW, endpointDiscovery, refreshCopilotToken: async (token) => ({ token: `http-test-${token}`, expiresAtMs: NOW + 3_600_000 }) }),
       history,
+      reasoningCarriers: new SqliteReasoningCarrierStore(database, { nowMs: () => NOW }),
       telemetry,
       endpointDiscovery,
       runtime,

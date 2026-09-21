@@ -15,6 +15,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_messages/endpoint.js";
 import { createModelCatalogRoutes } from "../../src/protocols/model_catalog/routes.js";
 import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_chat_completions/endpoint.js";
@@ -34,6 +35,7 @@ describe("effective capability authority", () => {
           embedMigration(accountsMigration),
           embedMigration(historyMigration),
           embedMigration(continuationMigration),
+          embedMigration(reasoningCarriersMigration),
         ],
         nowMs,
       });

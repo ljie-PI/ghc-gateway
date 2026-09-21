@@ -43,6 +43,7 @@ import { consumeResponsesPreviousResponseId, type ResponsesRequest } from "./dto
 import {
   type ResponsesContinuationOwnership,
   type ResponsesHistory,
+  type ResponsesRouteReceipt,
 } from "./history.js";
 import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
 import { OPENAI_RESPONSES_JSON_HEADERS, OPENAI_RESPONSES_STREAM_HEADERS } from "./wire.js";
@@ -59,6 +60,13 @@ import type {
   ConvertedProtocolPlan,
   SemanticUsage,
 } from "../conversion/types.js";
+import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
+import {
+  carrierBinding,
+  claimReasoningCarriers,
+  resolveReasoningCarriers,
+  type ReasoningCarrierClaim,
+} from "../conversion/reasoning_carrier_preflight.js";
 
 export interface OpenaiResponsesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -71,6 +79,7 @@ export interface OpenaiResponsesRouteDependencies {
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
   readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly nowMs?: () => number;
+  readonly reasoningCarriers?: ReasoningCarrierStore;
 }
 
 export function createOpenaiResponsesRoute(dependencies: OpenaiResponsesRouteDependencies): RouteRegistration {
@@ -112,6 +121,16 @@ async function executeOpenaiResponses(
   const account = await bindAccount(dependencies.directory, scope.signal);
   usage.setAccount(account.accountId);
   scope.diagnostics?.stage("continuation");
+  const initialCarrierClaim = dependencies.reasoningCarriers === undefined
+    ? undefined
+    : claimReasoningCarriers(request.body, "responses", account.accountId, dependencies.reasoningCarriers);
+  if (
+    decoded.model !== undefined
+    && initialCarrierClaim !== undefined
+    && decoded.model !== initialCarrierClaim.binding.modelId
+  ) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
   const continuation = await resolveResponsesContinuation(
     dependencies.history,
     decoded.previousResponseId,
@@ -119,7 +138,7 @@ async function executeOpenaiResponses(
     scope.signal,
   );
   const continuationReceipt = ownedContinuationReceipt(continuation);
-  const requestedModel = continuationModel(decoded.model, continuationReceipt);
+  const requestedModel = continuationModel(initialCarrierClaim?.binding.modelId ?? decoded.model, continuationReceipt);
   const preference = dependencies.preferences.get(account.accountId);
   scope.diagnostics?.stage("model_resolution");
   const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
@@ -172,7 +191,21 @@ async function executeOpenaiResponses(
       });
     }
   }
-  const forcedTarget = continuationReceipt?.upstreamProtocol;
+  const carrierClaim = dependencies.reasoningCarriers === undefined
+    ? undefined
+    : claimReasoningCarriers(planningRequest.body, "responses", account.accountId, dependencies.reasoningCarriers);
+  validateCarrierContinuation(initialCarrierClaim, carrierClaim, continuationReceipt);
+  const forcedTarget = continuationReceipt?.upstreamProtocol ?? carrierClaim?.binding.sourceProtocol;
+  const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
+    accountId: account.accountId,
+    modelId: resolved.upstreamModel,
+    endpoint: bound.target.endpoint,
+    sourceProtocol: carrierClaim.binding.sourceProtocol,
+    wireProtocol: "responses",
+  });
+  const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
+    ? undefined
+    : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
   const plan = planProtocolExecution({
     diagnostics: scope.diagnostics,
     source: "responses",
@@ -181,6 +214,7 @@ async function executeOpenaiResponses(
     capability: resolved.capability,
     resolvedModel: resolved.upstreamModel,
     ...(forcedTarget === undefined ? {} : { forcedTarget }),
+    ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
   validateExternalContinuation(
     decoded.previousResponseId,
@@ -214,9 +248,16 @@ async function executeOpenaiResponses(
       )
       : await nativeNonstreamResponse(dependencies.history, ownership, bound, nativePlan, scope, usage), "responses");
   }
+  const outputCarrierBinding = dependencies.reasoningCarriers === undefined ? undefined : carrierBinding({
+    accountId: account.accountId,
+    modelId: resolved.upstreamModel,
+    endpoint: bound.target.endpoint,
+    sourceProtocol: plan.target,
+    wireProtocol: "responses",
+  });
   return withUpstreamProtocol(decoded.stream
-    ? await convertedStreamResponse(dependencies, ownership, bound, plan, scope, usage)
-    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, scope, usage), plan.target);
+    ? await convertedStreamResponse(dependencies, ownership, bound, plan, scope, usage, outputCarrierBinding)
+    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, scope, usage, outputCarrierBinding), plan.target);
 }
 
 function decodeRequest(body: WireJsonObject) {
@@ -329,32 +370,58 @@ async function convertedNonstreamResponse(
   plan: Readonly<ConvertedProtocolPlan>,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
+  carrierBindingValue?: ReasoningCarrierBinding,
 ): Promise<Response> {
   const upstream = await completeConvertedOperation(bound, plan, scope);
   assertUpstreamSuccess(upstream);
-  const converted = measure(dependencies.performanceObserver, "buffered", () => convertBufferedPlannedResponse(
-    upstream.body,
-    plan,
-    {
-      diagnostics: scope.diagnostics,
-      maxBytes: scope.config.limits.nonstreamBodyBytes,
-      createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
-      nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
-    },
-  ));
-  if (converted.checkpoint !== undefined) {
-    await persistConvertedCheckpoint(
-      dependencies,
-      ownership,
-      converted.checkpoint,
-      scope,
-    );
+  const createdTokens: string[] = [];
+  try {
+    const converted = measure(dependencies.performanceObserver, "buffered", () => convertBufferedPlannedResponse(
+      upstream.body,
+      plan,
+      {
+        diagnostics: scope.diagnostics,
+        maxBytes: scope.config.limits.nonstreamBodyBytes,
+        createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+        nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+        ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
+          carrier: {
+            store: dependencies.reasoningCarriers,
+            binding: carrierBindingValue,
+            stream: false,
+            onCreated: (token: string) => createdTokens.push(token),
+          },
+        }),
+      },
+    ));
+    if (converted.checkpoint !== undefined) {
+      await persistConvertedCheckpoint(
+        dependencies,
+        ownership,
+        converted.checkpoint,
+        scope,
+        carrierBindingValue,
+      );
+    }
+    if (
+      dependencies.reasoningCarriers !== undefined
+      && carrierBindingValue !== undefined
+      && createdTokens.length > 0
+      && converted.checkpoint?.state !== "complete"
+    ) {
+      dependencies.reasoningCarriers.discard(createdTokens, carrierBindingValue);
+    }
+    usage.success(attemptUsage(converted.observations.usage));
+    return new Response(Buffer.from(converted.bytes), {
+      status: plan.request.responseBindings === undefined ? upstream.status : 200,
+      headers: { ...OPENAI_RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
+    });
+  } catch (error: unknown) {
+    if (dependencies.reasoningCarriers !== undefined && carrierBindingValue !== undefined) {
+      dependencies.reasoningCarriers.discard(createdTokens, carrierBindingValue);
+    }
+    throw error;
   }
-  usage.success(attemptUsage(converted.observations.usage));
-  return new Response(Buffer.from(converted.bytes), {
-    status: plan.request.responseBindings === undefined ? upstream.status : 200,
-    headers: { ...OPENAI_RESPONSES_JSON_HEADERS, "x-request-id": scope.requestId },
-  });
 }
 
 async function convertedStreamResponse(
@@ -364,6 +431,7 @@ async function convertedStreamResponse(
   plan: Readonly<ConvertedProtocolPlan>,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
+  carrierBindingValue?: ReasoningCarrierBinding,
 ): Promise<Response> {
   const upstream = await openConvertedOperation(bound, plan, scope);
   if (upstream.status < 200 || upstream.status >= 300) {
@@ -378,12 +446,17 @@ async function convertedStreamResponse(
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
     performanceObserver: dependencies.performanceObserver,
+    ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
+      carrier: { store: dependencies.reasoningCarriers, binding: carrierBindingValue },
+      carrierFinalization: "checkpoint",
+    }),
     headers: { ...OPENAI_RESPONSES_STREAM_HEADERS, "x-request-id": scope.requestId },
     persistCheckpoint: async (intent) => await persistConvertedCheckpoint(
       dependencies,
       ownership,
       intent,
       scope,
+      carrierBindingValue,
     ),
     onTerminal: (result) => result.kind === "success"
       ? usage.success(attemptUsage(result.usage))
@@ -396,6 +469,7 @@ async function persistConvertedCheckpoint(
   ownership: Readonly<ResponsesContinuationOwnership>,
   intent: Readonly<ConversionCheckpointIntent>,
   scope: Readonly<RequestScope>,
+  carrierBindingValue?: ReasoningCarrierBinding,
 ): Promise<void> {
   await measureAsync(
     dependencies.performanceObserver,
@@ -415,11 +489,61 @@ async function persistConvertedCheckpoint(
           ownership,
           intent.state,
           scope.signal,
+          intent.state !== "complete"
+            || intent.carrierTokens === undefined
+            || intent.carrierTokens.length === 0
+            || !intent.output.some((item) => isToolCallOutput(item))
+            || dependencies.reasoningCarriers === undefined
+            || carrierBindingValue === undefined
+            ? undefined
+            : () => dependencies.reasoningCarriers?.promote(intent.carrierTokens ?? [], carrierBindingValue),
         );
       },
       scope.signal,
     ),
   );
+}
+
+function isToolCallOutput(value: WireJson): boolean {
+  if (!isWireJsonObject(value)) return false;
+  const types = memberValues(value, "type");
+  return types.length === 1 && (
+    types[0] === "function_call"
+    || types[0] === "custom_tool_call"
+    || types[0] === "tool_search_call"
+  );
+}
+
+function validateCarrierContinuation(
+  initial: Readonly<ReasoningCarrierClaim> | undefined,
+  resolved: Readonly<ReasoningCarrierClaim> | undefined,
+  continuation: Readonly<ResponsesRouteReceipt> | undefined,
+): void {
+  const claim = resolved ?? initial;
+  if (claim === undefined) return;
+  if (
+    (initial !== undefined && resolved !== undefined && !sameCarrierBinding(initial.binding, resolved.binding))
+    || (continuation !== undefined && (
+      continuation.modelId !== claim.binding.modelId
+      || continuation.upstreamOrigin !== claim.binding.upstreamOrigin
+      || continuation.upstreamProtocol !== claim.binding.sourceProtocol
+      || continuation.conversionVersion !== claim.binding.conversionVersion
+    ))
+  ) {
+    throw new GatewayFailureError({ kind: "continuation_conflict", source: "continuation", phase: "resume" });
+  }
+}
+
+function sameCarrierBinding(
+  left: Readonly<ReasoningCarrierBinding>,
+  right: Readonly<ReasoningCarrierBinding>,
+): boolean {
+  return left.accountId === right.accountId
+    && left.modelId === right.modelId
+    && left.upstreamOrigin === right.upstreamOrigin
+    && left.sourceProtocol === right.sourceProtocol
+    && left.wireProtocol === right.wireProtocol
+    && left.conversionVersion === right.conversionVersion;
 }
 
 function measure<T>(

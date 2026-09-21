@@ -13,6 +13,7 @@ import {
   RESPONSES_CHAT_CONVERSION_VERSION,
   RESPONSES_MESSAGES_CONVERSION_VERSION,
   ResponsesContinuationError,
+  isKnownResponsesConversionVersion,
   type ResponsesContinuationOwnership,
   type ResponsesContinuationResolution,
   type ResponsesHistory,
@@ -77,12 +78,10 @@ export function validateContinuationTarget(
   if (receipt.upstreamOrigin !== trustedUpstreamOrigin(endpoint)) {
     throw conflict();
   }
-  if (
-    receipt.owner === "converted"
-    && receipt.upstreamProtocol === "chat"
-    && receipt.conversionVersion !== RESPONSES_CHAT_CONVERSION_VERSION
-  ) {
-    throw conflict();
+  if (receipt.owner === "converted") {
+    if (!isKnownResponsesConversionVersion(receipt.upstreamProtocol, receipt.conversionVersion)) {
+      throw conflict();
+    }
   }
 }
 

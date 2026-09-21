@@ -98,7 +98,20 @@ export function decodeResponsesReasoningItem(
     parts,
     ...(status === undefined ? {} : { status }),
     hasOpaqueState: typeof encryptedContent === "string" && encryptedContent.length > 0,
+    ...(typeof encryptedContent === "string" && encryptedContent.length > 0
+      ? { opaqueState: { kind: "responses_item" as const, item } }
+      : {}),
   };
+}
+
+export function chatReasoningState(object: WireJsonObject, invalid: Invalid): WireJsonObject | undefined {
+  const keep = new Set(["reasoning_text", "reasoning_content", "reasoning", "reasoning_details", "reasoning_opaque"]);
+  const members = object.members.filter((member) => keep.has(member.key));
+  if (members.length === 0) return undefined;
+  for (const member of members) {
+    if (member.key === "reasoning_opaque" && typeof member.value !== "string") invalid();
+  }
+  return { kind: "object", members };
 }
 
 function decodeReasoningParts(

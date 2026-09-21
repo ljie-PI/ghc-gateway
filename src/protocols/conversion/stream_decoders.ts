@@ -30,6 +30,7 @@ import {
 } from "../openai_chat_completions/native.js";
 import {
   decodeChatReasoning,
+  chatReasoningState,
   decodeResponsesReasoningItem,
   type ChatThinkingBlock,
 } from "./reasoning.js";
@@ -41,6 +42,7 @@ import {
   responseReasoningPartKey,
   responseToolKey,
 } from "./stream_keys.js";
+import { wireObject } from "./wire.js";
 
 export function decodeProtocolStream(
   source: InferenceProtocol,
@@ -84,6 +86,7 @@ async function* decodeChatStream(
   let scalarReasoning = "";
   let reasoningOpen = false;
   let reasoningClosed = false;
+  let opaqueChatValue: string | undefined;
   const observedThinkingBlocks = new Map<number, ChatThinkingBlock>();
   const pendingThinkingKeys: string[] = [];
   let toolObserved = false;
@@ -149,12 +152,34 @@ async function* decodeChatStream(
       delta: suffix,
     };
   };
+  const observeOpaqueChatState = (value: WireJsonObject): void => {
+    const observed = chatReasoningState(value, invalid);
+    if (observed === undefined) return;
+    const values = memberValues(observed, "reasoning_opaque");
+    if (values.length === 0) return;
+    const next = values[0];
+    if (typeof next !== "string" || next.length === 0) invalid();
+    if (opaqueChatValue !== undefined && opaqueChatValue !== next) invalid();
+    if (opaqueChatValue === undefined) budget.reserve(next);
+    opaqueChatValue = next;
+  };
   const closeReasoning = function* (
     status: "completed" | "incomplete" = "completed",
   ): Iterable<SemanticStreamEvent> {
-    if (!reasoningOpen && pendingThinkingKeys.length === 0) return;
+    if (!reasoningOpen && pendingThinkingKeys.length === 0 && opaqueChatValue === undefined) return;
     let closed = false;
-    if (reasoningOpen) {
+    if (reasoningOpen || opaqueChatValue !== undefined) {
+      yield {
+        kind: "reasoning_start",
+        key: reasoningKey,
+        opaqueState: {
+          kind: "chat_state",
+          state: wireObject([
+            ["reasoning_content", chatReasoning.length === 0 ? undefined : chatReasoning],
+            ["reasoning_opaque", opaqueChatValue],
+          ]),
+        },
+      };
       reasoningOpen = false;
       yield { kind: "reasoning_done", key: reasoningKey, status };
       closed = true;
@@ -295,13 +320,20 @@ async function* decodeChatStream(
         invalid();
       }
       const reasoning = decodeChatReasoning(delta, invalid);
+      observeOpaqueChatState(delta);
       yield* observeThinkingBlocks(reasoning.thinkingBlocks);
       if (reasoning.scalarText.length > 0) {
         if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
         budget.reserve(reasoning.scalarText);
         scalarReasoning += reasoning.scalarText;
       }
+      const callsValue = singleMember(delta, "tool_calls");
+      if (callsValue !== undefined && callsValue !== null && !isWireJsonArray(callsValue)) {
+        invalid();
+      }
+      const calls = isWireJsonArray(callsValue) ? callsValue : undefined;
       yield* updateVisibleReasoning();
+      if ((calls?.items.length ?? 0) > 0) yield* closeReasoning();
       const contentValue = singleMember(delta, "content");
       if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
         invalid();
@@ -334,13 +366,7 @@ async function* decodeChatStream(
           yield event;
         }
       }
-      const callsValue = singleMember(delta, "tool_calls");
-      if (callsValue !== undefined && callsValue !== null && !isWireJsonArray(callsValue)) {
-        invalid();
-      }
-      const calls = isWireJsonArray(callsValue) ? callsValue : undefined;
       if (calls !== undefined) {
-        if (calls.items.length > 0) yield* closeReasoning();
         for (let position = 0; position < calls.items.length; position += 1) {
           const value = calls.items[position];
           if (!isWireJsonObject(value)) {
@@ -440,6 +466,7 @@ async function* decodeChatStream(
         invalid();
       }
       const reasoning = decodeChatReasoning(finalMessage, invalid);
+      observeOpaqueChatState(finalMessage);
       yield* observeThinkingBlocks(reasoning.thinkingBlocks);
       if (reasoning.scalarText.length > 0) {
         if (!reasoning.scalarText.startsWith(scalarReasoning)) invalid();
@@ -642,7 +669,7 @@ async function* decodeMessagesStream(
   const budget = new DecoderBudget(accumulatorBytes);
   const blocks = new Map<number, MessageBlockState>();
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
-  let pendingReasoningKey: string | undefined;
+  const pendingReasoningKeys: string[] = [];
   let observedUsage = emptyUsage();
   for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
     if (record.data === "[DONE]") {
@@ -672,9 +699,8 @@ async function* decodeMessagesStream(
       continue;
     }
     if (type === "content_block_start") {
-      if (pendingReasoningKey !== undefined) {
-        yield { kind: "reasoning_done", key: pendingReasoningKey, status: "completed" };
-        pendingReasoningKey = undefined;
+      for (const key of pendingReasoningKeys.splice(0)) {
+        yield { kind: "reasoning_done", key, status: "completed" };
       }
       const index = integerMember(payload, "index");
       const block = objectMember(payload, "content_block");
@@ -738,7 +764,17 @@ async function* decodeMessagesStream(
         }
         const key = `messages:${index}:reasoning`;
         const partKey = `${key}:summary:0`;
-        blocks.set(index, { kind: "reasoning", key, partKey, closed: false, sawContent: thinking.length > 0 });
+        budget.reserve(thinking);
+        if (typeof signature === "string") budget.reserve(signature);
+        blocks.set(index, {
+          kind: "reasoning",
+          key,
+          partKey,
+          closed: false,
+          sawContent: thinking.length > 0,
+          thinking,
+          signature: typeof signature === "string" ? signature : "",
+        });
         if (thinking.length > 0) {
           yield { kind: "reasoning_delta", key, partKey, presentation: "summary", partIndex: 0, delta: thinking };
         }
@@ -748,8 +784,18 @@ async function* decodeMessagesStream(
       } else if (blockType === "redacted_thinking") {
         const data = singleMember(block, "data");
         if (typeof data !== "string") invalid();
-        blocks.set(index, { kind: "opaque_reasoning", closed: false });
-        if (data.length > 0) yield { kind: "semantic_progress" };
+        const key = `messages:${index}:reasoning`;
+        const sourceBlock = wireObject([["type", "redacted_thinking"], ["data", data]]);
+        budget.reserve(data);
+        blocks.set(index, { kind: "opaque_reasoning", key, block: sourceBlock, closed: false });
+        if (data.length > 0) {
+          yield {
+            kind: "reasoning_start",
+            key,
+            opaqueState: { kind: "messages_block", block: sourceBlock },
+          };
+          yield { kind: "semantic_progress" };
+        }
       } else {
         invalid();
       }
@@ -815,6 +861,7 @@ async function* decodeMessagesStream(
         const thinking = singleMember(delta, "thinking");
         if (typeof thinking !== "string") invalid();
         block.sawContent ||= thinking.length > 0;
+        block.thinking += thinking;
         if (thinking.length > 0) {
           yield {
             kind: "reasoning_delta",
@@ -828,6 +875,8 @@ async function* decodeMessagesStream(
       } else if (block.kind === "reasoning" && deltaType === "signature_delta") {
         const signature = singleMember(delta, "signature");
         if (typeof signature !== "string") invalid();
+        budget.reserve(signature);
+        block.signature += signature;
         if (signature.length > 0) yield { kind: "semantic_progress" };
       } else invalid();
       continue;
@@ -893,10 +942,23 @@ async function* decodeMessagesStream(
           contentIndex: 0,
         };
       } else if (block.kind === "reasoning") {
-        if (block.sawContent) {
-          if (pendingReasoningKey !== undefined) invalid();
-          pendingReasoningKey = block.key;
+        if (block.sawContent || block.signature.length > 0) {
+          const sourceBlock = wireObject([
+            ["type", "thinking"],
+            ["thinking", block.thinking],
+            ["signature", block.signature],
+          ]);
+          if (block.signature.length > 0) {
+            yield {
+              kind: "reasoning_start",
+              key: block.key,
+              opaqueState: { kind: "messages_block", block: sourceBlock },
+            };
+          }
+          pendingReasoningKeys.push(block.key);
         }
+      } else if (block.kind === "opaque_reasoning") {
+        pendingReasoningKeys.push(block.key);
       }
       continue;
     }
@@ -932,13 +994,12 @@ async function* decodeMessagesStream(
           yield { kind: "tool_done", key: block.key, completed };
         }
       }
-      if (pendingReasoningKey !== undefined) {
+      for (const key of pendingReasoningKeys.splice(0)) {
         yield {
           kind: "reasoning_done",
-          key: pendingReasoningKey,
+          key,
           status: completed ? "completed" : "incomplete",
         };
-        pendingReasoningKey = undefined;
       }
       yield {
         kind: "terminal",
@@ -955,6 +1016,13 @@ async function* decodeMessagesStream(
     invalid();
   }
   invalidTruncated();
+}
+
+function sameWireObject(left: WireJsonObject, right: WireJsonObject): boolean {
+  const leftBytes = serializeWireJson(left);
+  const rightBytes = serializeWireJson(right);
+  return leftBytes.byteLength === rightBytes.byteLength
+    && leftBytes.every((value, index) => value === rightBytes[index]);
 }
 
 async function* decodeResponsesStream(
@@ -1981,6 +2049,7 @@ interface ResponseReasoningIdentity {
   readonly parts: Set<string>;
   readonly completedText: Map<string, string>;
   finalItem?: SemanticReasoningItem | undefined;
+  doneItem?: SemanticReasoningItem | undefined;
 }
 
 function observeResponseReasoningIdentity(
@@ -2063,6 +2132,19 @@ function* responseReasoningItemEvents(
   alreadyDone = false,
 ): Iterable<SemanticStreamEvent> {
   const reasoning = decodeResponsesReasoningItem(item, invalid);
+  if (alreadyDone) {
+    const observed = identity.finalItem ?? identity.doneItem;
+    if (observed === undefined || !sameSemanticReasoning(observed, reasoning)) invalid();
+    return;
+  }
+  if (complete && reasoning.opaqueState !== undefined) {
+    yield {
+      kind: "reasoning_start",
+      key: identity.key,
+      itemId: identity.itemId,
+      opaqueState: reasoning.opaqueState,
+    };
+  }
   const finalParts = new Set(reasoning.parts.map((part) => (
     responseReasoningPartKey(identity.key, part.presentation, part.index)
   )));
@@ -2073,10 +2155,6 @@ function* responseReasoningItemEvents(
       part.text,
     ]));
     if ([...identity.completedText].some(([partKey, text]) => finalText.get(partKey) !== text)) invalid();
-  }
-  if (alreadyDone) {
-    if (identity.finalItem === undefined || !sameSemanticReasoning(identity.finalItem, reasoning)) invalid();
-    return;
   }
   yield { kind: "reasoning_start", key: identity.key, itemId: identity.itemId };
   for (const part of reasoning.parts) {
@@ -2105,6 +2183,7 @@ function* responseReasoningItemEvents(
     }
   }
   if (complete) {
+    identity.doneItem = reasoning;
     identity.finalItem = reasoning;
     if (reasoning.parts.every((part) => part.text.length === 0) && reasoning.status !== undefined) {
       yield {
@@ -2125,18 +2204,71 @@ function sameSemanticReasoning(left: SemanticReasoningItem, right: SemanticReaso
         && part.presentation === candidate.presentation
         && part.index === candidate.index
         && part.text === candidate.text;
-    });
+    })
+    && sameRotatingOpaqueState(left.opaqueState, right.opaqueState);
+}
+
+function sameRotatingOpaqueState(
+  left: SemanticReasoningItem["opaqueState"],
+  right: SemanticReasoningItem["opaqueState"],
+): boolean {
+  if (left?.kind !== "responses_item" || right?.kind !== "responses_item") {
+    return sameOptionalOpaqueState(left, right);
+  }
+  const leftEncrypted = memberValues(left.item, "encrypted_content");
+  const rightEncrypted = memberValues(right.item, "encrypted_content");
+  if (leftEncrypted.length !== 1 || rightEncrypted.length !== 1) return false;
+  if (typeof leftEncrypted[0] !== "string" || typeof rightEncrypted[0] !== "string") return false;
+  return sameResponseReasoningProjection(left.item, right.item);
+}
+
+function sameResponseReasoningProjection(left: WireJsonObject, right: WireJsonObject): boolean {
+  const leftValue = {
+    kind: "object" as const,
+    members: left.members.filter((member) => (
+      member.key !== "id" && member.key !== "status" && member.key !== "encrypted_content"
+    )),
+  };
+  const rightValue = {
+    kind: "object" as const,
+    members: right.members.filter((member) => (
+      member.key !== "id" && member.key !== "status" && member.key !== "encrypted_content"
+    )),
+  };
+  return sameWireObject(leftValue, rightValue);
+}
+
+function sameOptionalOpaqueState(
+  left: SemanticReasoningItem["opaqueState"],
+  right: SemanticReasoningItem["opaqueState"],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left.kind !== right.kind) return false;
+  const leftValue = left.kind === "responses_item" ? normalizedResponseOpaqueItem(left.item)
+    : left.kind === "messages_block" ? left.block : left.state;
+  const rightValue = right.kind === "responses_item" ? normalizedResponseOpaqueItem(right.item)
+    : right.kind === "messages_block" ? right.block : right.state;
+  return sameWireObject(leftValue, rightValue);
+}
+
+function normalizedResponseOpaqueItem(item: WireJsonObject): WireJsonObject {
+  return {
+    kind: "object",
+    members: item.members.filter((member) => member.key !== "id" && member.key !== "status"),
+  };
 }
 
 type MessageBlockState =
   | { readonly kind: "text" | "refusal"; closed: boolean; sawContent: boolean }
-  | { readonly kind: "opaque_reasoning"; closed: boolean }
+  | { readonly kind: "opaque_reasoning"; readonly key: string; readonly block: WireJsonObject; closed: boolean }
   | {
     readonly kind: "reasoning";
     readonly key: string;
     readonly partKey: string;
     closed: boolean;
     sawContent: boolean;
+    thinking: string;
+    signature: string;
   }
   | {
     readonly kind: "tool";

@@ -27,6 +27,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { serializeAnthropicMessagesErrorBody } from "../../src/protocols/anthropic_messages/wire.js";
 import { decodeOpenaiChatCompletionsRequest, prepareOpenaiChatCompletionsRequest } from "../../src/protocols/openai_chat_completions/endpoint.js";
 import { encodeOpenaiChatCompletionsDone, encodeOpenaiChatCompletionsSseChunk, serializeOpenaiChatCompletionsErrorBody } from "../../src/protocols/openai_chat_completions/wire.js";
@@ -340,6 +341,7 @@ async function expectedResponsesHistoryFixture(entry: FixtureManifestEntry): Pro
       embedMigration(runtimeConfigMigration),
       embedMigration(responsesHistoryMigration),
       embedMigration(responsesContinuationMigration),
+      embedMigration(reasoningCarriersMigration),
     ],
     nowMs: () => 1_700_000_000_000,
   });
@@ -919,6 +921,7 @@ async function createResponsesFixtureGateway(expectations: readonly HttpExpectat
         embedMigration(accountsMigration),
         embedMigration(responsesHistoryMigration),
         embedMigration(responsesContinuationMigration),
+        embedMigration(reasoningCarriersMigration),
       ],
       nowMs: () => 1_700_000_000_000,
     });

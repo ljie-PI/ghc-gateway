@@ -41,6 +41,12 @@ import { convertBufferedResponse } from "../conversion/buffered.js";
 import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
 import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
+import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
+import {
+  carrierBinding,
+  claimReasoningCarriers,
+  resolveReasoningCarriers,
+} from "../conversion/reasoning_carrier_preflight.js";
 import {
   createNativeChatCompletionsStreamResponse,
   nativeChatCompletionsUsage,
@@ -56,6 +62,7 @@ export interface OpenaiChatCompletionsRouteDependencies {
   readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly nowMs?: () => number;
   readonly createUuid?: () => string;
+  readonly reasoningCarriers?: ReasoningCarrierStore;
 }
 
 interface DecodedOpenaiChatCompletionsRequest {
@@ -103,13 +110,38 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
       scope.diagnostics?.stage("account_binding");
       const account = await bindAccount(dependencies.directory, scope.signal);
       usage.setAccount(account.accountId);
-      const preference = decoded.requestedModel === undefined
+      const carrierClaim = dependencies.reasoningCarriers === undefined
+        ? undefined
+        : claimReasoningCarriers(decoded.body, "chat", account.accountId, dependencies.reasoningCarriers);
+      if (
+        decoded.requestedModel !== undefined
+        && carrierClaim !== undefined
+        && decoded.requestedModel !== carrierClaim.binding.modelId
+      ) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+      }
+      const requestedModel = carrierClaim?.binding.modelId ?? decoded.requestedModel;
+      const preference = requestedModel === undefined
         ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
         : null;
       scope.diagnostics?.stage("model_resolution");
       const catalog = await loadCatalog(dependencies, account, scope.signal);
-      const resolved = resolveOpenaiChatCompletionsModel(decoded, catalog, preference);
+      const resolved = resolveOpenaiChatCompletionsModel({
+        ...decoded,
+        ...(requestedModel === undefined ? {} : { requestedModel }),
+      }, catalog, preference);
       usage.setResolvedModel(resolved.upstreamModel);
+      const copilot = await bindCopilot(dependencies.copilot, account, scope);
+      const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
+        accountId: account.accountId,
+        modelId: resolved.upstreamModel,
+        endpoint: copilot.target.endpoint,
+        sourceProtocol: carrierClaim.binding.sourceProtocol,
+        wireProtocol: "chat",
+      });
+      const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
+        ? undefined
+        : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
       const plan = planProtocolExecution({
         diagnostics: scope.diagnostics,
         source: "chat",
@@ -117,12 +149,19 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         stream: decoded.stream,
         capability: resolved.capability,
         resolvedModel: resolved.upstreamModel,
+        ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
+        ...(carrierRecords === undefined ? {} : { carrierRecords }),
       });
-      scope.diagnostics?.stage("account_binding");
-      const copilot = await bindCopilot(dependencies.copilot, account, scope);
       if (plan.kind === "converted") {
+        const outputBinding = dependencies.reasoningCarriers === undefined || plan.target !== "responses" ? undefined : carrierBinding({
+          accountId: account.accountId,
+          modelId: resolved.upstreamModel,
+          endpoint: copilot.target.endpoint,
+          sourceProtocol: plan.target,
+          wireProtocol: "chat",
+        });
         return withUpstreamProtocol(
-          await executeConvertedChat(dependencies, copilot, plan, scope, usage),
+          await executeConvertedChat(dependencies, copilot, plan, scope, usage, outputBinding),
           plan.target,
         );
       }
@@ -199,32 +238,56 @@ async function executeConvertedChat(
   plan: Readonly<ConvertedProtocolPlan>,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
+  carrierBindingValue?: ReasoningCarrierBinding,
 ): Promise<Response> {
   if (!plan.stream) {
     const upstream = await completeConvertedOperation(copilot, plan, scope);
     assertUpstreamSuccess(upstream.status, upstream.headers);
-    const converted = measure(dependencies.performanceObserver, "buffered", () => convertBufferedResponse(
-      upstream.body,
-      {
-        diagnostics: scope.diagnostics,
-        source: plan.target,
-        target: "chat",
-        model: plan.requestModel,
-        maxBytes: scope.config.limits.nonstreamBodyBytes,
-        createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
-        nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
-        degradations: plan.request.degradations,
-      },
-    ));
-    usage.success(attemptUsage(converted.observations.usage));
-    return new Response(Buffer.from(converted.bytes), {
-      status: upstream.status,
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-        "x-request-id": scope.requestId,
-      },
-    });
+    const createdTokens: string[] = [];
+    try {
+      const converted = measure(dependencies.performanceObserver, "buffered", () => convertBufferedResponse(
+        upstream.body,
+        {
+          diagnostics: scope.diagnostics,
+          source: plan.target,
+          target: "chat",
+          model: plan.requestModel,
+          maxBytes: scope.config.limits.nonstreamBodyBytes,
+          createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+          nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
+          degradations: plan.request.degradations,
+          ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
+            carrier: {
+              store: dependencies.reasoningCarriers,
+              binding: carrierBindingValue,
+              stream: false,
+              onCreated: (token: string) => createdTokens.push(token),
+            },
+          }),
+        },
+      ));
+      if (dependencies.reasoningCarriers !== undefined && carrierBindingValue !== undefined && createdTokens.length > 0) {
+        if (converted.observations.terminal === "completed") {
+          dependencies.reasoningCarriers.promote(createdTokens, carrierBindingValue);
+        } else {
+          dependencies.reasoningCarriers.discard(createdTokens, carrierBindingValue);
+        }
+      }
+      usage.success(attemptUsage(converted.observations.usage));
+      return new Response(Buffer.from(converted.bytes), {
+        status: upstream.status,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+          "x-request-id": scope.requestId,
+        },
+      });
+    } catch (error: unknown) {
+      if (dependencies.reasoningCarriers !== undefined && carrierBindingValue !== undefined) {
+        dependencies.reasoningCarriers.discard(createdTokens, carrierBindingValue);
+      }
+      throw error;
+    }
   }
 
   const upstream = await openConvertedOperation(copilot, plan, scope);
@@ -240,6 +303,9 @@ async function executeConvertedChat(
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
     performanceObserver: dependencies.performanceObserver,
+    ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
+      carrier: { store: dependencies.reasoningCarriers, binding: carrierBindingValue },
+    }),
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",

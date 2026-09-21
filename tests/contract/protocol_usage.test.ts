@@ -14,6 +14,7 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as ownershipMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_messages/endpoint.js";
 import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_chat_completions/endpoint.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
@@ -245,7 +246,7 @@ function request(target: InferenceProtocol, stream: boolean): Request {
 }
 async function usageGateway(source: InferenceProtocol, updates: Counters[], usage: Counters, status = 200) {
   return await withSetupCleanup(async (own) => {
-    const database = openDatabase({ path: ":memory:", migrations: [configMigration, accountsMigration, telemetryMigration, historyMigration, ownershipMigration].map(embedMigration), nowMs });
+    const database = openDatabase({ path: ":memory:", migrations: [configMigration, accountsMigration, telemetryMigration, historyMigration, ownershipMigration, reasoningCarriersMigration].map(embedMigration), nowMs });
     own(() => closeDatabase(database));
     const credentials = new MemoryCredentialStore();
     const accountCoordinator = new AccountCoordinator();

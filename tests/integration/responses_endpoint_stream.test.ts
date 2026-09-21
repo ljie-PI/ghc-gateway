@@ -58,6 +58,8 @@ class RecordingHistory implements ResponsesHistory {
     record: Readonly<ResponsesHistoryRecord>,
     _ownership: Parameters<ResponsesHistory["recordCheckpoint"]>[1],
     checkpointState: "partial" | "complete",
+    _signal?: AbortSignal,
+    finalize?: (() => void) | undefined,
   ): Promise<void> {
     await this.beforeCheckpoint?.();
     if (this.failAt === "checkpoint") {
@@ -65,6 +67,7 @@ class RecordingHistory implements ResponsesHistory {
     }
     this.records.push(record);
     this.checkpointStates.push(checkpointState);
+    finalize?.();
   }
 }
 
@@ -157,8 +160,8 @@ describe("Responses endpoint stream integration", () => {
       releaseCheckpoint.resolve();
       await consumption;
       expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["complete"]);
-      expect(history.records).toHaveLength(1);
+      expect(history.checkpointStates).toEqual(["partial", "complete"]);
+      expect(history.records).toHaveLength(2);
       expect(delivered).toContain("response.output_item.done");
       expect(delivered).toContain("response.completed");
     } finally {
@@ -357,10 +360,11 @@ describe("Responses endpoint stream integration", () => {
       expect(response.status).toBe(200);
       await response.arrayBuffer();
       expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["partial", "complete"]);
-      expect(history.records).toHaveLength(2);
+      expect(history.checkpointStates).toEqual(["partial", "partial", "complete"]);
+      expect(history.records).toHaveLength(3);
       expect(history.records[0]?.output).toHaveLength(1);
       expect(history.records[1]?.output).toEqual(history.records[0]?.output);
+      expect(history.records[2]?.output).toEqual(history.records[0]?.output);
     } finally {
       await opened.close();
     }

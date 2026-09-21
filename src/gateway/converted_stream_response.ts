@@ -14,6 +14,7 @@ import type {
   ConvertedProtocolPlan,
   ConvertedStreamEmission,
   SemanticUsage,
+  ReasoningCarrierConversionContext,
 } from "../protocols/conversion/types.js";
 import type { ProtocolPerformanceObserver } from "../telemetry/runtime.js";
 
@@ -26,6 +27,8 @@ export async function createConvertedStreamResponse(input: {
   readonly nowUnixSeconds: () => number;
   readonly headers: HeadersInit;
   readonly performanceObserver?: ProtocolPerformanceObserver | undefined;
+  readonly carrier?: Omit<ReasoningCarrierConversionContext, "stream" | "onCreated"> | undefined;
+  readonly carrierFinalization?: "store" | "checkpoint" | undefined;
   readonly persistCheckpoint?: (intent: Readonly<ConversionCheckpointIntent>) => Promise<void>;
   readonly onTerminal: (result: Readonly<
     | { readonly kind: "success"; readonly usage: SemanticUsage }
@@ -35,6 +38,12 @@ export async function createConvertedStreamResponse(input: {
   const performanceObserver = input.performanceObserver;
   let eventElapsedMs = 0;
   const aggregateEventMeasurements = performanceObserver?.observe !== undefined;
+  const createdCarrierTokens = new Set<string>();
+  const lifecycle: {
+    completeIntent?: ConversionCheckpointIntent | undefined;
+    finalWire: Uint8Array[];
+    completed: boolean;
+  } = { finalWire: [], completed: false };
   const converted = convertProtocolStream(
     withByteIdleDeadlines(
       input.upstream.bytes,
@@ -72,18 +81,39 @@ export async function createConvertedStreamResponse(input: {
             eventElapsedMs = 0;
           }
         },
+      ...(input.carrier === undefined ? {} : {
+        carrier: {
+          ...input.carrier,
+          stream: true,
+          onCreated: (token: string) => createdCarrierTokens.add(token),
+        },
+      }),
     },
   );
 
   return await createStreamExecutionResponse({
     diagnostics: input.scope.diagnostics,
     upstream: input.upstream,
-    emissions: convertedEmissions(converted, input),
+    emissions: convertedEmissions(converted, input, createdCarrierTokens, lifecycle),
     signal: input.scope.signal,
     deliverySignal: input.scope.deliverySignal,
     headers: input.headers,
     firstEmissionTimeoutMs: input.scope.config.timeouts.firstByteMs,
     normalizeFailure: (error) => normalizeStreamFailure(error, input),
+    finalizeSuccess: async () => {
+      if (lifecycle.completeIntent !== undefined) {
+        await input.persistCheckpoint?.(lifecycle.completeIntent);
+      }
+      if (
+        input.carrier !== undefined
+        && input.carrierFinalization !== "checkpoint"
+        && createdCarrierTokens.size > 0
+      ) {
+        input.carrier.store.promote([...createdCarrierTokens], input.carrier.binding);
+      }
+      lifecycle.completed = true;
+      return lifecycle.finalWire;
+    },
     onTerminal: (result) => result.kind === "success"
       ? observeTerminal(input.onTerminal, { kind: "success", usage: result.value })
       : observeTerminal(input.onTerminal, { kind: "failure", error: result.error }),
@@ -93,6 +123,8 @@ export async function createConvertedStreamResponse(input: {
 async function* convertedEmissions(
   converted: AsyncIterable<ConvertedStreamEmission>,
   input: Parameters<typeof createConvertedStreamResponse>[0],
+  createdCarrierTokens: Set<string>,
+  lifecycle: { completeIntent?: ConversionCheckpointIntent | undefined; finalWire: Uint8Array[]; completed: boolean },
 ): AsyncIterable<StreamExecutionEmission<SemanticUsage>> {
   const iterator = converted[Symbol.asyncIterator]();
   let observedUsage: SemanticUsage = {
@@ -129,13 +161,27 @@ async function* convertedEmissions(
         input.scope.diagnostics?.stage("stream");
         firstSemanticObserved = true;
       } else if (emission.kind === "checkpoint") {
-        await input.persistCheckpoint?.(emission.intent);
+        if (emission.intent.state === "complete") {
+          lifecycle.completeIntent = emission.intent;
+          await input.persistCheckpoint?.({ ...emission.intent, state: "partial" });
+        } else {
+          await input.persistCheckpoint?.(emission.intent);
+        }
       } else if (emission.kind === "usage") {
         observedUsage = emission.usage;
       } else if (emission.kind === "wire") {
-        yield { kind: "wire", bytes: emission.bytes };
+        if (createdCarrierTokens.size > 0) {
+          lifecycle.finalWire.push(emission.bytes);
+        } else {
+          yield { kind: "wire", bytes: emission.bytes };
+        }
       } else if (emission.kind === "terminal") {
         input.scope.diagnostics?.set({ protocolStatus: emission.terminal });
+        if (emission.terminal !== "completed") {
+          if (input.carrier !== undefined && createdCarrierTokens.size > 0) {
+            input.carrier.store.discard([...createdCarrierTokens], input.carrier.binding);
+          }
+        }
         yield {
           kind: "terminal",
           outcome: { kind: "success", value: observedUsage },
@@ -145,6 +191,9 @@ async function* convertedEmissions(
       }
     }
   } finally {
+    if (!lifecycle.completed && input.carrier !== undefined && createdCarrierTokens.size > 0) {
+      input.carrier.store.discard([...createdCarrierTokens], input.carrier.binding);
+    }
     if (iterator.return !== undefined) {
       await iterator.return();
     }
