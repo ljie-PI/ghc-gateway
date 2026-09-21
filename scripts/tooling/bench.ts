@@ -1149,12 +1149,12 @@ function eventStreamParts(count: number): readonly Uint8Array[] {
   for (let index = 0; index < count; index += 1) {
     parts.push(chatSse({
       id: "chatcmpl_events",
-      choices: [{ index: 0, delta: { content: "x" }, finish_reason: null }],
+      choices: [{ index: 0, delta: { reasoning_content: "x" }, finish_reason: null }],
     }));
   }
   parts.push(chatSse({
     id: "chatcmpl_events",
-    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }],
   }));
   parts.push(encoder.encode("data: [DONE]\n\n"));
   return parts;

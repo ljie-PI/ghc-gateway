@@ -169,11 +169,13 @@ when the target declares it; an `xhigh`-only target can coarsen `max` to `xhigh`
 efforts are rejected when conversion is required. Other optional reasoning effort or budget can be
 coarsened. Converted Chat and Responses outputs preserve visible reasoning separately from answer
 text. Chat uses the untyped `reasoning_content` compatibility extension; Chat or Messages reasoning
-converted to Responses is represented as a reasoning summary. Converted Messages outputs omit
-reasoning because the gateway does not fabricate an Anthropic signature. Opaque reasoning state can
-still be omitted. Reported reasoning or thinking token details are normalized without estimating
-them from text. These finite, content-free degradations do not change success accounting, add
-warning text, or trigger a retry. Native routes do not apply conversion-only degradation.
+converted to Responses is represented as a reasoning summary. Converted Messages outputs preserve
+Chat thinking blocks only when the source supplies the exact Anthropic signature or redacted data;
+other reasoning is omitted because the gateway does not fabricate a signature. Other opaque
+reasoning state can still be omitted. Reported reasoning or thinking token details are normalized
+without estimating them from text. These finite, content-free degradations do not change success
+accounting, add warning text, or trigger a retry. Native routes do not apply conversion-only
+degradation.
 
 Responses continuations stay on their recorded account, model, origin, and upstream protocol.
 For Responses-to-Messages conversion, `previous_response_id` is consumed locally and is never sent

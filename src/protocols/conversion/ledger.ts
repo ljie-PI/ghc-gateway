@@ -2,10 +2,12 @@ import { GatewayFailureError } from "../../gateway/failures.js";
 import { isWireJsonObject, parseWireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import type {
   SemanticReasoningItem,
+  SemanticMessagesReasoningState,
   SemanticReasoningPresentation,
   SemanticResponseItem,
   SemanticToolCallItem,
 } from "./types.js";
+import { responseMessagePartPosition, responseOutputIndex } from "./stream_keys.js";
 
 interface ToolState {
   readonly key: string;
@@ -37,6 +39,7 @@ interface ReasoningState {
   readonly partKeys: string[];
   status?: "completed" | "incomplete" | "in_progress" | undefined;
   frozen: boolean;
+  messagesState?: SemanticMessagesReasoningState | undefined;
 }
 
 interface ReasoningPartState {
@@ -125,8 +128,8 @@ export class SemanticItemLedger {
     }
   }
 
-  startReasoning(key: string, itemId?: string): void {
-    this.reasoningState(key, itemId);
+  startReasoning(key: string, itemId?: string, messagesState?: SemanticMessagesReasoningState): void {
+    this.reasoningState(key, itemId, messagesState);
   }
 
   appendReasoning(input: {
@@ -401,6 +404,7 @@ export class SemanticItemLedger {
       parts,
       ...(reasoning.status === undefined ? {} : { status: reasoning.status }),
       hasOpaqueState: false,
+      ...(reasoning.messagesState === undefined ? {} : { messagesState: reasoning.messagesState }),
     };
   }
 
@@ -437,45 +441,63 @@ export class SemanticItemLedger {
     return part;
   }
 
-  private reasoningState(key: string, itemId?: string): ReasoningState {
+  private reasoningState(
+    key: string,
+    itemId?: string,
+    messagesState?: SemanticMessagesReasoningState,
+  ): ReasoningState {
     let reasoning = this.reasoning.get(key);
     if (reasoning === undefined) {
       this.reserve(key);
       if (itemId !== undefined) this.reserve(itemId);
+      if (messagesState?.type === "thinking") this.reserve(messagesState.signature);
+      if (messagesState?.type === "redacted_thinking") this.reserve(messagesState.data);
       reasoning = {
         key,
         ...(itemId === undefined ? {} : { itemId }),
         partKeys: [],
         frozen: false,
+        ...(messagesState === undefined ? {} : { messagesState }),
       };
       this.reasoning.set(key, reasoning);
       this.order.push({ kind: "reasoning", key });
     } else if (reasoning.itemId !== itemId) {
       invalid();
+    } else if (messagesState !== undefined) {
+      if (reasoning.messagesState !== undefined && !sameMessagesState(reasoning.messagesState, messagesState)) invalid();
+      if (reasoning.messagesState === undefined) {
+        this.reserve(messagesState.type === "thinking" ? messagesState.signature : messagesState.data);
+      }
+      reasoning.messagesState = messagesState;
     }
     return reasoning;
   }
+}
+
+function sameMessagesState(left: SemanticMessagesReasoningState, right: SemanticMessagesReasoningState): boolean {
+  return left.type === right.type
+    && (left.type === "thinking" ? left.signature === (right as typeof left).signature : left.data === (right as typeof left).data);
 }
 
 function compareResponseItemKeys(
   left: { readonly key: string },
   right: { readonly key: string },
 ): number {
-  const leftMatch = /^responses:(\d+)(?::|$)/u.exec(left.key);
-  const rightMatch = /^responses:(\d+)(?::|$)/u.exec(right.key);
-  if (leftMatch?.[1] === undefined || rightMatch?.[1] === undefined) {
+  const leftIndex = responseOutputIndex(left.key);
+  const rightIndex = responseOutputIndex(right.key);
+  if (leftIndex === undefined || rightIndex === undefined) {
     return 0;
   }
-  return Number.parseInt(leftMatch[1], 10) - Number.parseInt(rightMatch[1], 10);
+  return leftIndex - rightIndex;
 }
 
 function compareMessagePartKeys(left: string, right: string): number {
-  const leftMatch = /^responses:\d+:(\d+):/u.exec(left);
-  const rightMatch = /^responses:\d+:(\d+):/u.exec(right);
-  if (leftMatch?.[1] === undefined || rightMatch?.[1] === undefined) {
+  const leftPosition = responseMessagePartPosition(left);
+  const rightPosition = responseMessagePartPosition(right);
+  if (leftPosition === undefined || rightPosition === undefined) {
     return 0;
   }
-  return Number.parseInt(leftMatch[1], 10) - Number.parseInt(rightMatch[1], 10);
+  return leftPosition.contentIndex - rightPosition.contentIndex;
 }
 
 function compareReasoningParts(

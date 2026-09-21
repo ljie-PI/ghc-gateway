@@ -151,7 +151,34 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
     content.push({ type: "refusal", text: refusal });
   }
   const toolCalls = arrayMember(message, "tool_calls");
-  if (reasoning.text.length > 0) {
+  if (reasoning.thinkingBlocks.length > 0) {
+    for (const block of reasoning.thinkingBlocks) {
+      if (block.type === "thinking" && block.signature !== undefined && block.signature.length > 0) {
+        items.push({
+          type: "reasoning",
+          parts: block.thinking.length === 0 ? [] : [{ presentation: "summary", index: 0, text: block.thinking }],
+          status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
+          hasOpaqueState: true,
+          messagesState: { type: "thinking", signature: block.signature },
+        });
+      } else if (block.type === "thinking" && block.thinking.length > 0) {
+        items.push({
+          type: "reasoning",
+          parts: [{ presentation: "summary", index: 0, text: block.thinking }],
+          status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
+          hasOpaqueState: false,
+        });
+      } else if (block.type === "redacted_thinking" && block.data.length > 0) {
+        items.push({
+          type: "reasoning",
+          parts: [],
+          status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
+          hasOpaqueState: true,
+          messagesState: { type: "redacted_thinking", data: block.data },
+        });
+      }
+    }
+  } else if (reasoning.text.length > 0) {
     items.push({
       type: "reasoning",
       parts: [{ presentation: "summary", index: 0, text: reasoning.text }],
@@ -490,6 +517,14 @@ function chatEnvelope(
   response: Readonly<SemanticResponse>,
   context: Readonly<BufferedConversionContext>,
 ): WireJsonObject {
+  let ordinaryObserved = false;
+  for (const item of response.items) {
+    if (item.type === "reasoning") {
+      if (ordinaryObserved) upstreamInvalid();
+    } else {
+      ordinaryObserved = true;
+    }
+  }
   const messageParts = response.items
     .filter((item): item is Extract<SemanticResponseItem, { readonly type: "message" }> => item.type === "message")
     .flatMap((item) => item.content);
@@ -536,6 +571,19 @@ function messagesEnvelope(
   const content: WireJsonObject[] = [];
   for (const item of response.items) {
     if (item.type === "reasoning") {
+      if (item.messagesState?.type === "thinking") {
+        const thinking = item.parts.map((part) => part.text).join("");
+        content.push(wireObject([
+          ["type", "thinking"],
+          ["thinking", thinking],
+          ["signature", item.messagesState.signature],
+        ]));
+      } else if (item.messagesState?.type === "redacted_thinking") {
+        content.push(wireObject([
+          ["type", "redacted_thinking"],
+          ["data", item.messagesState.data],
+        ]));
+      }
       continue;
     }
     if (item.type === "message") {
@@ -570,6 +618,7 @@ function responsesEnvelope(
   const output: WireJsonObject[] = [];
   for (const item of response.items) {
     if (item.type === "reasoning") {
+      if (item.parts.length === 0) continue;
       const summary = item.parts
         .filter((part) => part.presentation === "summary")
         .sort((left, right) => left.index - right.index)

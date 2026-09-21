@@ -13,6 +13,7 @@ import {
 } from "../../serialization/wire_json.js";
 import type {
   InferenceProtocol,
+  SemanticMessagesReasoningState,
   SemanticReasoningItem,
   SemanticResponse,
   SemanticStreamEvent,
@@ -26,7 +27,19 @@ import {
   parseOpenaiChatCompletionsSse,
   type ChatCompletionsUsageCounters,
 } from "../openai_chat_completions/native.js";
-import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
+import {
+  decodeChatReasoning,
+  decodeResponsesReasoningItem,
+  type ChatThinkingBlock,
+} from "./reasoning.js";
+import {
+  responseMessageKey,
+  responseMessagePartKey,
+  responseMessagePartPosition,
+  responseReasoningKey,
+  responseReasoningPartKey,
+  responseToolKey,
+} from "./stream_keys.js";
 
 export function decodeProtocolStream(
   source: InferenceProtocol,
@@ -67,6 +80,7 @@ async function* decodeChatStream(
   let chatReasoning = "";
   let reasoningOpen = false;
   let reasoningClosed = false;
+  let reasoningMessagesState: SemanticMessagesReasoningState | undefined;
   let toolObserved = false;
   const pendingPostTool: SemanticStreamEvent[] = [];
   const reasoningKey = "chat:reasoning:0";
@@ -209,19 +223,40 @@ async function* decodeChatStream(
         invalid();
       }
       const reasoning = decodeChatReasoning(delta, invalid);
-      if (reasoning.text.length > 0) {
+      const messagesState = signedThinkingState(reasoning.thinkingBlocks);
+      if (reasoning.text.length > 0 || messagesState !== undefined) {
         if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
-        budget.reserve(reasoning.text);
-        chatReasoning += reasoning.text;
-        reasoningOpen = true;
-        yield {
-          kind: "reasoning_delta",
-          key: reasoningKey,
-          partKey: reasoningPartKey,
-          presentation: "summary",
-          partIndex: 0,
-          delta: reasoning.text,
-        };
+        if (messagesState !== undefined) {
+          if (reasoningMessagesState !== undefined && !sameMessagesState(reasoningMessagesState, messagesState)) invalid();
+          reasoningMessagesState = messagesState;
+          reasoningOpen = true;
+          yield { kind: "reasoning_start", key: reasoningKey, messagesState };
+          if (reasoning.text.length > 0) {
+            yield {
+              kind: "reasoning_snapshot",
+              key: reasoningKey,
+              partKey: reasoningPartKey,
+              presentation: "summary",
+              partIndex: 0,
+              text: reasoning.text,
+            };
+          } else {
+            yield { kind: "semantic_progress" };
+          }
+          chatReasoning = reasoning.text;
+        } else {
+          budget.reserve(reasoning.text);
+          chatReasoning += reasoning.text;
+          reasoningOpen = true;
+          yield {
+            kind: "reasoning_delta",
+            key: reasoningKey,
+            partKey: reasoningPartKey,
+            presentation: "summary",
+            partIndex: 0,
+            delta: reasoning.text,
+          };
+        }
       } else if (reasoning.hasOpaqueState) {
         yield { kind: "semantic_progress" };
       }
@@ -363,6 +398,13 @@ async function* decodeChatStream(
         invalid();
       }
       const reasoning = decodeChatReasoning(finalMessage, invalid);
+      const messagesState = signedThinkingState(reasoning.thinkingBlocks);
+      if (messagesState !== undefined) {
+        if (reasoningMessagesState !== undefined && !sameMessagesState(reasoningMessagesState, messagesState)) invalid();
+        reasoningMessagesState = messagesState;
+        reasoningOpen = true;
+        yield { kind: "reasoning_start", key: reasoningKey, messagesState };
+      }
       if (reasoning.text.length > 0 && !reasoning.text.startsWith(chatReasoning)) invalid();
       const reasoningSuffix = reasoning.text.length === 0 ? "" : reasoning.text.slice(chatReasoning.length);
       if (reasoningSuffix.length > 0) {
@@ -370,14 +412,25 @@ async function* decodeChatStream(
         budget.reserve(reasoningSuffix);
         chatReasoning = reasoning.text;
         reasoningOpen = true;
-        yield {
-          kind: "reasoning_delta",
-          key: reasoningKey,
-          partKey: reasoningPartKey,
-          presentation: "summary",
-          partIndex: 0,
-          delta: reasoningSuffix,
-        };
+        if (messagesState !== undefined) {
+          yield {
+            kind: "reasoning_snapshot",
+            key: reasoningKey,
+            partKey: reasoningPartKey,
+            presentation: "summary",
+            partIndex: 0,
+            text: reasoning.text,
+          };
+        } else {
+          yield {
+            kind: "reasoning_delta",
+            key: reasoningKey,
+            partKey: reasoningPartKey,
+            presentation: "summary",
+            partIndex: 0,
+            delta: reasoningSuffix,
+          };
+        }
       } else if (reasoning.hasOpaqueState && chatReasoning.length === 0) {
         yield { kind: "semantic_progress" };
       }
@@ -545,6 +598,28 @@ async function* decodeChatStream(
   invalidTruncated();
 }
 
+function signedThinkingState(
+  blocks: readonly ChatThinkingBlock[],
+): SemanticMessagesReasoningState | undefined {
+  const states = blocks.flatMap((block): SemanticMessagesReasoningState[] => {
+    if (block.type === "thinking") {
+      return block.signature === undefined || block.signature.length === 0
+        ? []
+        : [{ type: "thinking", signature: block.signature }];
+    }
+    return block.data.length === 0 ? [] : [{ type: "redacted_thinking", data: block.data }];
+  });
+  if (states.length > 1) invalid();
+  return states[0];
+}
+
+function sameMessagesState(left: SemanticMessagesReasoningState, right: SemanticMessagesReasoningState): boolean {
+  if (left.type !== right.type) return false;
+  return left.type === "thinking"
+    ? left.signature === (right as typeof left).signature
+    : left.data === (right as typeof left).data;
+}
+
 async function* decodeMessagesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
@@ -554,6 +629,7 @@ async function* decodeMessagesStream(
   const budget = new DecoderBudget(accumulatorBytes);
   const blocks = new Map<number, MessageBlockState>();
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
+  let pendingReasoningKey: string | undefined;
   let observedUsage = emptyUsage();
   for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
     if (record.data === "[DONE]") {
@@ -581,6 +657,10 @@ async function* decodeMessagesStream(
       continue;
     }
     if (type === "content_block_start") {
+      if (pendingReasoningKey !== undefined) {
+        yield { kind: "reasoning_done", key: pendingReasoningKey, status: "completed" };
+        pendingReasoningKey = undefined;
+      }
       const index = integerMember(payload, "index");
       const block = objectMember(payload, "content_block");
       if (index === undefined || block === undefined || blocks.has(index)) {
@@ -799,7 +879,8 @@ async function* decodeMessagesStream(
         };
       } else if (block.kind === "reasoning") {
         if (block.sawContent) {
-          yield { kind: "reasoning_done", key: block.key, status: "completed" };
+          if (pendingReasoningKey !== undefined) invalid();
+          pendingReasoningKey = block.key;
         }
       }
       continue;
@@ -835,6 +916,14 @@ async function* decodeMessagesStream(
         if (block.kind === "tool") {
           yield { kind: "tool_done", key: block.key, completed };
         }
+      }
+      if (pendingReasoningKey !== undefined) {
+        yield {
+          kind: "reasoning_done",
+          key: pendingReasoningKey,
+          status: completed ? "completed" : "incomplete",
+        };
+        pendingReasoningKey = undefined;
       }
       yield {
         kind: "terminal",
@@ -873,6 +962,15 @@ async function* decodeResponsesStream(
   const observedContent = new Map<string, "output_text" | "refusal">();
   const addedOutputIndexes = new Set<number>();
   const doneOutputIndexes = new Set<number>();
+  let pendingStatuslessReasoning: { readonly outputIndex: number; readonly key: string } | undefined;
+  const finishPendingStatuslessReasoning = function* (
+    status: "completed" | "incomplete",
+  ): Iterable<SemanticStreamEvent> {
+    if (pendingStatuslessReasoning === undefined) return;
+    yield { kind: "reasoning_done", key: pendingStatuslessReasoning.key, status };
+    yield { kind: "item_done", outputIndex: pendingStatuslessReasoning.outputIndex, itemType: "reasoning" };
+    pendingStatuslessReasoning = undefined;
+  };
   let observedUsage = emptyUsage();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
@@ -890,6 +988,14 @@ async function* decodeResponsesStream(
         invalid();
       }
       lastSequence = sequence;
+    }
+    const eventOutputIndex = integerMember(payload, "output_index");
+    if (
+      pendingStatuslessReasoning !== undefined
+      && eventOutputIndex !== undefined
+      && eventOutputIndex !== pendingStatuslessReasoning.outputIndex
+    ) {
+      yield* finishPendingStatuslessReasoning("completed");
     }
     if (type === "response.output_item.added") {
       const outputIndex = integerMember(payload, "output_index");
@@ -911,11 +1017,11 @@ async function* decodeResponsesStream(
       observeOutputType(observedOutputTypes, outputIndex, itemType);
       if (itemType === "message") {
         observeFinalItemContent(item, outputIndex, observedContent, budget);
-        yield { kind: "message_start", key: `responses:${outputIndex}:message` };
+        yield { kind: "message_start", key: responseMessageKey(outputIndex) };
         yield* messageContentEvents(item, outputIndex, false);
       }
       if (itemType === "function_call") {
-        const key = `responses:${outputIndex}`;
+        const key = responseToolKey(outputIndex);
         const callId = stringMember(item, "call_id");
         const name = stringMember(item, "name");
         if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0) {
@@ -1111,7 +1217,13 @@ async function* decodeResponsesStream(
         budget,
       );
       doneOutputIndexes.add(outputIndex);
-      yield { kind: "item_done", outputIndex, itemType };
+      if (itemType === "reasoning" && itemStatus === undefined) {
+        const identity = reasoningByIndex.get(outputIndex);
+        if (identity === undefined || pendingStatuslessReasoning !== undefined) invalid();
+        pendingStatuslessReasoning = { outputIndex, key: identity.key };
+      } else {
+        yield { kind: "item_done", outputIndex, itemType };
+      }
       continue;
     }
     if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
@@ -1144,6 +1256,7 @@ async function* decodeResponsesStream(
         observeToolItemId,
         budget,
       );
+      yield* finishPendingStatuslessReasoning(type === "response.incomplete" ? "incomplete" : "completed");
       const usage = objectMember(response, "usage");
       if (usage !== undefined) {
         observedUsage = responsesUsage(usage, observedUsage);
@@ -1178,12 +1291,12 @@ async function* decodeResponsesStream(
         if (text === undefined) {
           invalid();
         }
-        const key = `responses:${outputIndex}:${contentIndex}:text`;
+        const key = responseMessagePartKey(outputIndex, contentIndex, "text");
         observeContent(observedContent, budget, key, "output_text");
         yield {
           kind: "text_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           text,
         };
       } else if (partType === "refusal") {
@@ -1191,12 +1304,12 @@ async function* decodeResponsesStream(
         if (refusal === undefined) {
           invalid();
         }
-        const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+        const key = responseMessagePartKey(outputIndex, contentIndex, "refusal");
         observeContent(observedContent, budget, key, "refusal");
         yield {
           kind: "refusal_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           refusal,
         };
       } else if (partType === "reasoning_text") {
@@ -1229,9 +1342,9 @@ async function* decodeResponsesStream(
         yield {
           kind: "content_done",
           key: partType === "output_text"
-            ? `responses:${outputIndex}:${contentIndex}:text`
-            : `responses:${outputIndex}:${contentIndex}:refusal`,
-          orderKey: `responses:${outputIndex}:message`,
+            ? responseMessagePartKey(outputIndex, contentIndex, "text")
+            : responseMessagePartKey(outputIndex, contentIndex, "refusal"),
+          orderKey: responseMessageKey(outputIndex),
           contentIndex,
         };
       }
@@ -1380,12 +1493,9 @@ function validateTerminalResponse(
     }
   }
   for (const [key, expectedType] of observedContent) {
-    const match = /^responses:(\d+):(\d+):(text|refusal)$/u.exec(key);
-    if (match?.[1] === undefined || match[2] === undefined) {
-      invalid();
-    }
-    const outputIndex = Number.parseInt(match[1], 10);
-    const contentIndex = Number.parseInt(match[2], 10);
+    const position = responseMessagePartPosition(key);
+    if (position === undefined) invalid();
+    const { outputIndex, contentIndex } = position;
     const item = output.items[outputIndex];
     const content = isWireJsonObject(item) ? arrayMember(item, "content") : undefined;
     const part = content?.items[contentIndex];
@@ -1472,7 +1582,7 @@ function observeFinalItemContent(
     observeContent(
       observedContent,
       budget,
-      `responses:${outputIndex}:${contentIndex}:${type === "output_text" ? "text" : "refusal"}`,
+      responseMessagePartKey(outputIndex, contentIndex, type === "output_text" ? "text" : "refusal"),
       type,
     );
   }
@@ -1694,7 +1804,7 @@ function* finalItemEvents(
     let identity = toolsByIndex.get(outputIndex);
     if (identity === undefined) {
       identity = {
-        key: `responses:${outputIndex}`,
+        key: responseToolKey(outputIndex),
         itemId: finalItemId,
         callId: finalCallId,
         name: finalName,
@@ -1759,18 +1869,18 @@ function* messageContentEvents(
       if (text === undefined) {
         invalid();
       }
-      const key = `responses:${outputIndex}:${contentIndex}:text`;
+      const key = responseMessagePartKey(outputIndex, contentIndex, "text");
       yield {
         kind: "text_done",
         key,
-        orderKey: `responses:${outputIndex}:message`,
+        orderKey: responseMessageKey(outputIndex),
         text,
       };
       if (complete) {
         yield {
           kind: "content_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           contentIndex,
         };
       }
@@ -1779,18 +1889,18 @@ function* messageContentEvents(
       if (refusal === undefined) {
         invalid();
       }
-      const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+      const key = responseMessagePartKey(outputIndex, contentIndex, "refusal");
       yield {
         kind: "refusal_done",
         key,
-        orderKey: `responses:${outputIndex}:message`,
+        orderKey: responseMessageKey(outputIndex),
         refusal,
       };
       if (complete) {
         yield {
           kind: "content_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           contentIndex,
         };
       }
@@ -1839,7 +1949,7 @@ function observeResponseReasoningIdentity(
   }
   observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
   budget.reserveEntry();
-  const identity = { key: `responses:${outputIndex}:reasoning`, itemId, parts: new Set<string>() };
+  const identity = { key: responseReasoningKey(outputIndex), itemId, parts: new Set<string>() };
   identities.set(outputIndex, identity);
   return identity;
 }
@@ -1863,7 +1973,7 @@ function requiredResponseReasoningIdentity(
     observeOutputType(observedOutputTypes, outputIndex, "reasoning");
     observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
     budget.reserveEntry();
-    identity = { key: `responses:${outputIndex}:reasoning`, itemId, parts: new Set<string>() };
+    identity = { key: responseReasoningKey(outputIndex), itemId, parts: new Set<string>() };
     identities.set(outputIndex, identity);
   } else observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
   return identity;
@@ -1873,14 +1983,6 @@ function requiredReasoningPartIndex(payload: WireJsonObject, key: "summary_index
   const index = integerMember(payload, key);
   if (index === undefined || index < 0) invalid();
   return index;
-}
-
-function responseReasoningPartKey(
-  itemKey: string,
-  presentation: "summary" | "content",
-  index: number,
-): string {
-  return `${itemKey}:${presentation}:${index}`;
 }
 
 function observeResponseReasoningPart(
@@ -1927,19 +2029,21 @@ function* responseReasoningItemEvents(
     yield { kind: "semantic_progress" };
   }
   if (complete && reasoning.parts.some((part) => part.text.length > 0)) {
-    yield {
-      kind: "reasoning_done",
-      key: identity.key,
-      status: reasoning.status ?? "completed",
-    };
-  }
-  if (complete) {
-    identity.finalItem = reasoning;
-    if (reasoning.parts.every((part) => part.text.length === 0)) {
+    if (reasoning.status !== undefined) {
       yield {
         kind: "reasoning_done",
         key: identity.key,
-        status: reasoning.status ?? "completed",
+        status: reasoning.status,
+      };
+    }
+  }
+  if (complete) {
+    identity.finalItem = reasoning;
+    if (reasoning.parts.every((part) => part.text.length === 0) && reasoning.status !== undefined) {
+      yield {
+        kind: "reasoning_done",
+        key: identity.key,
+        status: reasoning.status,
       };
     }
   }
@@ -2086,11 +2190,11 @@ function responseContentKey(object: WireJsonObject, kind: "text" | "refusal"): s
   if (outputIndex === undefined || contentIndex === undefined) {
     invalid();
   }
-  return `responses:${outputIndex}:${contentIndex}:${kind}`;
+  return responseMessagePartKey(outputIndex, contentIndex, kind);
 }
 
 function responseStreamMessageKey(object: WireJsonObject): string {
-  return `responses:${requiredOutputIndex(object)}:message`;
+  return responseMessageKey(requiredOutputIndex(object));
 }
 
 function singleMember(object: WireJsonObject, key: string): WireJson | undefined {

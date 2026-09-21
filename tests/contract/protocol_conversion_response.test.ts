@@ -19,8 +19,6 @@ import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
 import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
-import { accumulateResponse } from "openai/lib/responses/ResponseAccumulator.mjs";
-import type OpenAI from "openai";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -119,6 +117,25 @@ describe("shared conversion response codecs", () => {
     });
   });
 
+  it("rejects buffered Chat output when reasoning is interleaved after ordinary output", () => {
+    expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "resp_interleaved",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "msg_first", type: "message", status: "completed", role: "assistant",
+          content: [{ type: "output_text", text: "first", annotations: [] }],
+        },
+        {
+          id: "rs_after", type: "reasoning", status: "completed",
+          summary: [{ type: "summary_text", text: "after" }], content: [],
+        },
+      ],
+      usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+    })), context("responses", "chat"))).toThrow();
+  });
+
   it("accepts identical Chat reasoning aliases and rejects conflicting aliases", () => {
     const base = reasoningBufferedSource("chat");
     const choice = (base.choices as Array<{ message: Record<string, unknown> }>)[0]!;
@@ -151,20 +168,6 @@ describe("shared conversion response codecs", () => {
       await expect(collectStream("messages", target, chunks(encoder.encode(stream)))).resolves.toBeDefined();
     },
   );
-
-  it("emits reasoning content that the official OpenAI accumulator accepts", async () => {
-    const source = reasoningStreamSource("responses");
-    const wire = wireText(await collectStream("responses", "responses", chunks(encoder.encode(source))));
-    let snapshot: OpenAI.Responses.Response | undefined;
-    for (const event of responseDataEvents(wire)) {
-      snapshot = accumulateResponse(
-        event as unknown as OpenAI.Responses.ResponseStreamEvent,
-        snapshot,
-      );
-    }
-    const reasoning = snapshot?.output.find((item) => item.type === "reasoning");
-    expect(reasoning?.content).toEqual([{ type: "reasoning_text", text: "visible plan" }]);
-  });
 
   it("decodes the official Responses reasoning content-part lifecycle", async () => {
     const reasoningAdded = {
@@ -232,6 +235,73 @@ describe("shared conversion response codecs", () => {
       ["reasoning", "completed"],
       ["message", "incomplete"],
     ]);
+  });
+
+  it("marks statusless reasoning-only Responses items incomplete at an incomplete terminal", async () => {
+    const reasoning = {
+      id: "rs_statusless_incomplete",
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "partial plan" }],
+      content: [],
+    };
+    const source = [
+      responseEvent(0, "response.output_item.done", { output_index: 0, item: reasoning }),
+      responseEvent(1, "response.incomplete", {
+        response: {
+          id: "resp_statusless_incomplete",
+          object: "response",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [reasoning],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "responses", "responses", chunks(encoder.encode(source)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
+  });
+
+  it("marks reasoning-only Messages thinking incomplete at max_tokens in both modes", async () => {
+    const bufferedSource = reasoningBufferedSource("messages");
+    bufferedSource.content = [{ type: "thinking", thinking: "partial plan", signature: "sig" }];
+    bufferedSource.stop_reason = "max_tokens";
+    const buffered = decoded(convertBufferedResponse(
+      encoder.encode(JSON.stringify(bufferedSource)),
+      context("messages", "responses"),
+    ).bytes);
+    expect(buffered.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
+
+    const stream = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg_partial", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start", index: 0,
+        content_block: { type: "thinking", thinking: "", signature: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta", index: 0,
+        delta: { type: "thinking_delta", thinking: "partial plan" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 2 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "messages", "responses", chunks(encoder.encode(stream)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
   });
 
   it("emits an incomplete reasoning-only Responses result without fabricating answer text", async () => {

@@ -12,7 +12,12 @@ type Invalid = () => never;
 export interface ChatReasoning {
   readonly text: string;
   readonly hasOpaqueState: boolean;
+  readonly thinkingBlocks: readonly ChatThinkingBlock[];
 }
+
+export type ChatThinkingBlock =
+  | { readonly type: "thinking"; readonly thinking: string; readonly signature?: string | undefined }
+  | { readonly type: "redacted_thinking"; readonly data: string };
 
 export function decodeChatReasoning(object: WireJsonObject, invalid: Invalid): ChatReasoning {
   const reasoningText = nullableStringMember(object, "reasoning_text", invalid);
@@ -26,6 +31,7 @@ export function decodeChatReasoning(object: WireJsonObject, invalid: Invalid): C
       invalid,
     ),
     hasOpaqueState: thinking.hasOpaqueState,
+    thinkingBlocks: thinking.blocks,
   };
 }
 
@@ -173,14 +179,15 @@ function decodeReasoningDetails(
 function decodeThinkingBlocks(
   value: WireJson | undefined,
   invalid: Invalid,
-): { readonly text: string; readonly hasOpaqueState: boolean } {
+): { readonly text: string; readonly hasOpaqueState: boolean; readonly blocks: readonly ChatThinkingBlock[] } {
   if (value === undefined || value === null) {
-    return { text: "", hasOpaqueState: false };
+    return { text: "", hasOpaqueState: false, blocks: [] };
   }
   if (!isWireJsonArray(value)) {
     invalid();
   }
   const text: string[] = [];
+  const blocks: ChatThinkingBlock[] = [];
   let hasOpaqueState = false;
   for (const block of value.items) {
     if (!isWireJsonObject(block)) {
@@ -196,6 +203,7 @@ function decodeThinkingBlocks(
       text.push(thinking);
       const signature = nullableStringMember(block, "signature", invalid);
       hasOpaqueState ||= signature !== undefined && signature.length > 0;
+      blocks.push({ type: "thinking", thinking, ...(signature === undefined ? {} : { signature }) });
       continue;
     }
     if (type === "redacted_thinking") {
@@ -205,11 +213,12 @@ function decodeThinkingBlocks(
         invalid();
       }
       hasOpaqueState ||= data.length > 0;
+      blocks.push({ type: "redacted_thinking", data });
       continue;
     }
     invalid();
   }
-  return { text: text.join(""), hasOpaqueState };
+  return { text: text.join(""), hasOpaqueState, blocks };
 }
 
 function consistentSubstantive(values: readonly (string | undefined)[], invalid: Invalid): string {

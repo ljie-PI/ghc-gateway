@@ -205,6 +205,10 @@ export interface SemanticUsage {
 
 export type SemanticReasoningPresentation = "summary" | "content";
 
+export type SemanticMessagesReasoningState =
+  | { readonly type: "thinking"; readonly signature: string }
+  | { readonly type: "redacted_thinking"; readonly data: string };
+
 export interface SemanticReasoningPart {
   readonly key?: string | undefined;
   readonly presentation: SemanticReasoningPresentation;
@@ -219,6 +223,7 @@ export interface SemanticReasoningItem {
   readonly parts: readonly SemanticReasoningPart[];
   readonly status?: "completed" | "incomplete" | "in_progress" | undefined;
   readonly hasOpaqueState: boolean;
+  readonly messagesState?: SemanticMessagesReasoningState | undefined;
 }
 
 export type SemanticResponseItem =
@@ -265,6 +270,7 @@ export type SemanticStreamEvent =
     readonly kind: "reasoning_start";
     readonly key: string;
     readonly itemId?: string | undefined;
+    readonly messagesState?: SemanticMessagesReasoningState | undefined;
   }
   | {
     readonly kind: "reasoning_delta";

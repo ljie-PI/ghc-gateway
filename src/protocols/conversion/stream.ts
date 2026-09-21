@@ -15,6 +15,14 @@ import type {
 } from "./types.js";
 import { wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
+import {
+  responseMessageKey,
+  responseMessagePartKey,
+  responseMessagePartPosition,
+  responseOutputIndex,
+  responseReasoningKey,
+  responseToolKey,
+} from "./stream_keys.js";
 
 export interface StreamConversionContext {
   readonly source: InferenceProtocol;
@@ -81,7 +89,7 @@ export async function* convertProtocolStream(
         continue;
       }
       if (event.kind === "reasoning_start") {
-        measuredWork(context, () => ledger.startReasoning(event.key, event.itemId));
+        measuredWork(context, () => ledger.startReasoning(event.key, event.itemId, event.messagesState));
         continue;
       }
       if (event.kind === "reasoning_delta") {
@@ -167,7 +175,7 @@ export async function* convertProtocolStream(
       if (event.kind === "item_done") {
         yield* measuredEvent(context, () => {
           if (event.itemType === "message") {
-            ledger.finishMessage(`responses:${event.outputIndex}:message`);
+            ledger.finishMessage(responseMessageKey(event.outputIndex));
           }
           return emitter.itemDone(event.outputIndex);
         });
@@ -537,13 +545,13 @@ class ChatEmitter implements StreamEmitter {
 
   private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
     for (;;) {
-      const reasoningKey = `responses:${this.responseFrontier.currentItemIndex()}:reasoning`;
+      const reasoningKey = responseReasoningKey(this.responseFrontier.currentItemIndex());
       const reasoning = this.pendingReasoning.get(reasoningKey);
       if (reasoning !== undefined) {
         this.pendingReasoning.delete(reasoningKey);
         yield* this.emitReasoningItem(reasoning);
       }
-      const toolKey = `responses:${this.responseFrontier.currentItemIndex()}`;
+      const toolKey = responseToolKey(this.responseFrontier.currentItemIndex());
       const readyTool = this.pendingTools.get(toolKey);
       if (readyTool !== undefined) {
         this.pendingTools.delete(toolKey);
@@ -553,8 +561,8 @@ class ChatEmitter implements StreamEmitter {
         }
       }
       const contentIndex = this.responseFrontier.currentContentIndex();
-      const textKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:text`;
-      const refusalKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:refusal`;
+      const textKey = responseMessagePartKey(this.responseFrontier.currentItemIndex(), contentIndex, "text");
+      const refusalKey = responseMessagePartKey(this.responseFrontier.currentItemIndex(), contentIndex, "refusal");
       const key = this.pendingContent.has(textKey) ? textKey : this.pendingContent.has(refusalKey) ? refusalKey : undefined;
       if (key !== undefined) {
         const pending = this.pendingContent.get(key) as {
@@ -655,6 +663,8 @@ class MessagesEmitter implements StreamEmitter {
     delta: string;
   }>();
   private readonly streamedContent = new Map<string, { text: string; refusal: string }>();
+  private readonly pendingReasoning = new Map<string, Extract<SemanticResponseItem, { readonly type: "reasoning" }>>();
+  private readonly emittedReasoning = new Set<string>();
   private readonly tools = new Map<string, {
     readonly callId: string;
     readonly name: string;
@@ -709,7 +719,7 @@ class MessagesEmitter implements StreamEmitter {
   }
 
   *itemDone(outputIndex: number): Iterable<ConvertedStreamEmission> {
-    const tool = this.tools.get(`responses:${outputIndex}`);
+    const tool = this.tools.get(responseToolKey(outputIndex));
     if (tool !== undefined) {
       tool.itemEnded = true;
       if (tool.streamIndex !== undefined && !tool.closed) {
@@ -723,7 +733,14 @@ class MessagesEmitter implements StreamEmitter {
 
   *reasoningDelta(_event: Extract<SemanticStreamEvent, { readonly kind: "reasoning_delta" }>): Iterable<ConvertedStreamEmission> {}
 
-  *reasoningDone(_item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {}
+  *reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {
+    if (item.messagesState === undefined || item.key === undefined) return;
+    if (this.context.source === "responses") {
+      this.pendingReasoning.set(item.key, item);
+      return;
+    }
+    yield* this.emitReasoning(item);
+  }
 
   *textDelta(key: string, delta: string, orderKey?: string): Iterable<ConvertedStreamEmission> {
     const messageKey = orderKey ?? key;
@@ -841,6 +858,7 @@ class MessagesEmitter implements StreamEmitter {
   private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
       if (item.type === "reasoning") {
+        if (item.messagesState !== undefined) yield* this.emitReasoning(item);
         continue;
       }
       if (item.type === "message") {
@@ -904,6 +922,44 @@ class MessagesEmitter implements StreamEmitter {
     });
   }
 
+  private *emitReasoning(
+    item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+  ): Iterable<ConvertedStreamEmission> {
+    if (item.key === undefined || item.messagesState === undefined || this.emittedReasoning.has(item.key)) return;
+    yield* this.closeActiveText();
+    const index = this.nextIndex++;
+    if (item.messagesState.type === "redacted_thinking") {
+      yield this.event({
+        type: "content_block_start",
+        index,
+        content_block: { type: "redacted_thinking", data: item.messagesState.data },
+      });
+      yield this.event({ type: "content_block_stop", index });
+      this.emittedReasoning.add(item.key);
+      return;
+    }
+    const thinking = item.parts.map((part) => part.text).join("");
+    yield this.event({
+      type: "content_block_start",
+      index,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+    if (thinking.length > 0) {
+      yield this.event({
+        type: "content_block_delta",
+        index,
+        delta: { type: "thinking_delta", thinking },
+      });
+    }
+    yield this.event({
+      type: "content_block_delta",
+      index,
+      delta: { type: "signature_delta", signature: item.messagesState.signature },
+    });
+    yield this.event({ type: "content_block_stop", index });
+    this.emittedReasoning.add(item.key);
+  }
+
   private recordStreamed(key: string, kind: "text" | "refusal", delta: string): void {
     const current = this.streamedContent.get(key) ?? { text: "", refusal: "" };
     current[kind] += delta;
@@ -932,14 +988,20 @@ class MessagesEmitter implements StreamEmitter {
 
   private *drainReadyContent(): Iterable<ConvertedStreamEmission> {
     for (;;) {
-      const toolKey = `responses:${this.responseFrontier.currentItemIndex()}`;
+      const reasoningKey = responseReasoningKey(this.responseFrontier.currentItemIndex());
+      const reasoning = this.pendingReasoning.get(reasoningKey);
+      if (reasoning !== undefined) {
+        this.pendingReasoning.delete(reasoningKey);
+        yield* this.emitReasoning(reasoning);
+      }
+      const toolKey = responseToolKey(this.responseFrontier.currentItemIndex());
       const tool = this.tools.get(toolKey);
       if (tool !== undefined && !this.emittedResponseTools.has(toolKey)) {
         yield* this.emitTool(toolKey, tool);
       }
       const contentIndex = this.responseFrontier.currentContentIndex();
-      const textKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:text`;
-      const refusalKey = `responses:${this.responseFrontier.currentItemIndex()}:${contentIndex}:refusal`;
+      const textKey = responseMessagePartKey(this.responseFrontier.currentItemIndex(), contentIndex, "text");
+      const refusalKey = responseMessagePartKey(this.responseFrontier.currentItemIndex(), contentIndex, "refusal");
       const key = this.pendingContent.has(textKey) ? textKey : this.pendingContent.has(refusalKey) ? refusalKey : undefined;
       if (key !== undefined) {
         const pending = this.pendingContent.get(key) as {
@@ -1155,6 +1217,7 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *reasoningDone(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): Iterable<ConvertedStreamEmission> {
+    if (!item.parts.some((part) => part.text.length > 0)) return;
     if (item.key === undefined) invalid();
     const reasoning = this.ensureReasoning(item.key, item.itemId);
     if (reasoning.done) return;
@@ -1501,18 +1564,19 @@ class ResponseEmissionFrontier {
     if (orderKey === undefined) {
       return false;
     }
-    const itemMatch = /^responses:(\d+):message$/u.exec(orderKey);
-    const contentMatch = /^responses:\d+:(\d+):/u.exec(key);
-    if (itemMatch?.[1] === undefined || contentMatch?.[1] === undefined) {
+    const itemIndex = responseOutputIndex(orderKey);
+    const contentPosition = responseMessagePartPosition(key);
+    if (itemIndex === undefined || orderKey !== responseMessageKey(itemIndex) || contentPosition === undefined) {
       return false;
     }
-    return Number.parseInt(itemMatch[1], 10) === this.item
-      && Number.parseInt(contentMatch[1], 10) === (this.content.get(orderKey) ?? 0);
+    return itemIndex === this.item
+      && contentPosition.outputIndex === itemIndex
+      && contentPosition.contentIndex === (this.content.get(orderKey) ?? 0);
   }
 
   allowsItem(key: string): boolean {
-    const match = /^responses:(\d+)(?::reasoning)?$/u.exec(key);
-    return match?.[1] !== undefined && Number.parseInt(match[1], 10) === this.item;
+    const outputIndex = responseOutputIndex(key);
+    return outputIndex !== undefined && outputIndex === this.item;
   }
 
   markContentDone(orderKey: string, contentIndex: number): void {
@@ -1545,7 +1609,7 @@ class ResponseEmissionFrontier {
   }
 
   currentItemOrderKey(): string {
-    return `responses:${this.item}:message`;
+    return responseMessageKey(this.item);
   }
 
   currentItemIndex(): number {
@@ -1585,6 +1649,7 @@ function responseOutput(
   const indexed: Array<{ readonly index: number; readonly item: ReturnType<typeof wireObject> }> = [];
   for (const item of items) {
     if (item.type === "reasoning") {
+      if (!item.parts.some((part) => part.text.length > 0)) continue;
       const state = item.key === undefined ? undefined : reasoning.get(item.key);
       if (state !== undefined) {
         indexed.push({
