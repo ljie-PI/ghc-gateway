@@ -16,6 +16,12 @@ export function isCanonicalProcessStartIdentity(value: unknown): value is Proces
 
 export interface ProcessIdentityContext {
   readonly signal?: AbortSignal;
+  readonly deadlineMs?: number;
+}
+
+interface ProcessCommandContext {
+  readonly signal?: AbortSignal;
+  readonly timeoutMs: number;
 }
 
 export interface ProcessIdentityDependencies {
@@ -25,8 +31,9 @@ export interface ProcessIdentityDependencies {
     file: string,
     args: readonly string[],
     env: Readonly<Record<string, string>>,
-    context?: Readonly<ProcessIdentityContext>,
+    context?: Readonly<ProcessCommandContext>,
   ) => Promise<string>;
+  readonly nowMs?: () => number;
 }
 
 export class ProcessIdentityError extends Error {
@@ -43,8 +50,10 @@ const DEFAULT_DEPENDENCIES: ProcessIdentityDependencies = {
     ...(context?.signal === undefined ? {} : { signal: context.signal }),
   }),
   runCommand: runCommand,
+  nowMs: Date.now,
 };
-const PROCESS_IDENTITY_TIMEOUT_MS = 5_000;
+const PROCESS_COMMAND_TIMEOUT_MS = 5_000;
+const WINDOWS_IDENTITY_TIMEOUT_MS = 10_000;
 
 export async function captureProcessStartIdentity(
   pid: number,
@@ -52,6 +61,7 @@ export async function captureProcessStartIdentity(
   context: Readonly<ProcessIdentityContext> = {},
 ): Promise<ProcessStartIdentity | null> {
   assertPid(pid);
+  context.signal?.throwIfAborted();
   switch (dependencies.platform) {
   case "linux":
     return await captureLinuxIdentity(pid, dependencies, context);
@@ -80,6 +90,7 @@ export async function terminateProcessIfMatching(
   context: Readonly<ProcessIdentityContext> = {},
 ): Promise<boolean> {
   assertPid(pid);
+  context.signal?.throwIfAborted();
   if (!isCanonicalProcessStartIdentity(expected)) return false;
   if (dependencies.platform === "win32") {
     const filetime = /^windows:(\d{1,20})$/u.exec(expected)?.[1];
@@ -99,7 +110,7 @@ export async function terminateProcessIfMatching(
         "powershell.exe",
         ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
         {},
-        context,
+        fixedCommandContext(context),
       );
       return true;
     } catch (error: unknown) {
@@ -152,7 +163,12 @@ async function runVerifiedTermination(
   context: Readonly<ProcessIdentityContext>,
 ): Promise<boolean> {
   try {
-    await dependencies.runCommand(file, args, {}, context);
+    await dependencies.runCommand(
+      file,
+      args,
+      {},
+      fixedCommandContext(context),
+    );
     return true;
   } catch (error: unknown) {
     if (commandExitCode(error) === 3 || commandExitCode(error) === 4) {
@@ -226,7 +242,7 @@ async function captureWindowsIdentity(
       "powershell.exe",
       ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
       {},
-      context,
+      windowsIdentityCommandContext(dependencies, context),
     );
   } catch (error: unknown) {
     if (commandExitCode(error) === 3) {
@@ -252,7 +268,7 @@ async function captureMacOsIdentity(
       "ps",
       ["-o", "lstart=", "-p", String(pid)],
       { LC_ALL: "C", TZ: "UTC" },
-      context,
+      fixedCommandContext(context),
     );
   } catch (error: unknown) {
     if (commandExitCode(error) === 1) {
@@ -293,14 +309,14 @@ async function runCommand(
   file: string,
   args: readonly string[],
   env: Readonly<Record<string, string>>,
-  context: Readonly<ProcessIdentityContext> = {},
+  context: Readonly<ProcessCommandContext> = { timeoutMs: PROCESS_COMMAND_TIMEOUT_MS },
 ): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     execFile(file, [...args], {
       encoding: "utf8",
       env: { ...process.env, ...env },
       windowsHide: true,
-      timeout: PROCESS_IDENTITY_TIMEOUT_MS,
+      timeout: context.timeoutMs ?? PROCESS_COMMAND_TIMEOUT_MS,
       ...(context.signal === undefined ? {} : { signal: context.signal }),
     }, (error, stdout) => {
       if (error !== null) {
@@ -310,6 +326,31 @@ async function runCommand(
       resolve(stdout);
     });
   });
+}
+
+function windowsIdentityCommandContext(
+  dependencies: ProcessIdentityDependencies,
+  context: Readonly<ProcessIdentityContext>,
+): Readonly<ProcessCommandContext> {
+  context.signal?.throwIfAborted();
+  const remainingMs = context.deadlineMs === undefined
+    ? WINDOWS_IDENTITY_TIMEOUT_MS
+    : Math.max(0, context.deadlineMs - (dependencies.nowMs ?? Date.now)());
+  if (remainingMs === 0) throw new DOMException("deadline exceeded", "TimeoutError");
+  return {
+    ...(context.signal === undefined ? {} : { signal: context.signal }),
+    timeoutMs: Math.min(WINDOWS_IDENTITY_TIMEOUT_MS, remainingMs),
+  };
+}
+
+function fixedCommandContext(
+  context: Readonly<ProcessIdentityContext>,
+): Readonly<ProcessCommandContext> {
+  context.signal?.throwIfAborted();
+  return {
+    ...(context.signal === undefined ? {} : { signal: context.signal }),
+    timeoutMs: PROCESS_COMMAND_TIMEOUT_MS,
+  };
 }
 
 function canonicalUnsignedInteger(value: string, message: string): string {

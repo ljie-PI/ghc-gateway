@@ -1,5 +1,6 @@
 import { writeSync } from "node:fs";
 import { DaemonOperationLeaseFile } from "../../src/daemon/operation_lease.js";
+import { deterministicProcessIdentity, identityForPid } from "../support/deterministic_process_identity.js";
 
 const dataDir = process.argv[2];
 const crashPhase = process.argv[3];
@@ -18,6 +19,8 @@ if (dataDir === undefined || ![
     }
   };
   const lease = await new DaemonOperationLeaseFile({
+    processStartIdentity: async () => identityForPid(process.pid),
+    processIdentity: async (pid) => deterministicProcessIdentity(pid),
     onInitializationPhase: crash,
     onPhase: crash,
   }).acquire(dataDir);

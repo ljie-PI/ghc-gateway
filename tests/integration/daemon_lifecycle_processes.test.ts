@@ -6,7 +6,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonIdentityFile, type DaemonIdentityLease } from "../../src/daemon/identity_file.js";
-import { ProcessIdentityError, captureProcessStartIdentity } from "../../src/daemon/process_identity.js";
+import { captureProcessStartIdentity } from "../../src/daemon/process_identity.js";
+import { deterministicProcessIdentity, identityForPid } from "../support/deterministic_process_identity.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 const children = new Set<ChildProcess>();
@@ -66,7 +67,12 @@ describe("daemon lifecycle coordination across CLI processes", () => {
       const first = runStatus(fixture.dataDir);
       await vi.waitFor(() => expect(fixture.requests()).toBe(1), { timeout: 60_000 });
       expect(JSON.parse(await readFile(path.join(fixture.dataDir, "daemon.operation.owner.json"), "utf8")))
-        .toMatchObject({ version: 1, state: "held", pid: first.child.pid });
+        .toMatchObject({
+          version: 1,
+          state: "held",
+          pid: first.child.pid,
+          processStartIdentity: identityForPid(first.child.pid!),
+        });
 
       const second = runStatus(fixture.dataDir);
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -96,6 +102,7 @@ describe("daemon lifecycle coordination across CLI processes", () => {
       expect(crashedPid).toBeTypeOf("number");
       crashed.child.kill();
       await crashed.result;
+      await vi.waitFor(() => expect(deterministicProcessIdentity(crashedPid!)).toBeNull(), { timeout: 30_000 });
       await vi.waitFor(async () => {
         await expect(captureProcessStartIdentity(crashedPid!)).resolves.toBeNull();
       }, { timeout: 30_000 });
@@ -161,8 +168,7 @@ describe("daemon lifecycle coordination across CLI processes", () => {
 async function processFixture() {
   const root = await mkdtemp(path.join(tmpdir(), "ghcg-lifecycle-processes-"));
   const dataDir = path.join(root, "data");
-  const processStartIdentity = await captureFixtureProcessIdentity();
-  if (processStartIdentity === null) throw new Error("test process identity unavailable");
+  const processStartIdentity = identityForPid(process.pid);
   let requestCount = 0;
   let blockedResponse: ServerResponse | undefined;
   let releaseFirst = false;
@@ -214,25 +220,6 @@ async function processFixture() {
   };
 }
 
-async function captureFixtureProcessIdentity(): Promise<string | null> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      return await captureProcessStartIdentity(process.pid);
-    } catch (error: unknown) {
-      if (!isWindowsProcessIdentityTimeout(error) || attempt === 2) throw error;
-    }
-  }
-  throw new Error("unreachable process identity retry state");
-}
-
-function isWindowsProcessIdentityTimeout(error: unknown): boolean {
-  if (process.platform !== "win32" || !(error instanceof ProcessIdentityError)) return false;
-  const cause = error.cause;
-  return typeof cause === "object" && cause !== null
-    && "killed" in cause && cause.killed === true
-    && "signal" in cause && cause.signal === "SIGTERM";
-}
-
 function writeStatus(response: ServerResponse, processStartIdentity: string): void {
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify({ data: { state: "running", instance: {
@@ -245,7 +232,7 @@ function writeStatus(response: ServerResponse, processStartIdentity: string): vo
 function runStatus(dataDir: string) {
   const child = spawn(process.execPath, [
     "scripts/tooling/bootstrap.mjs",
-    "src/cli/main.ts",
+    "tests/fixtures/daemon_status_contender.ts",
     "--json",
     "--data-dir", dataDir,
     "status",
