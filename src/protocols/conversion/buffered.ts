@@ -251,6 +251,7 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
   }
   const items: SemanticResponseItem[] = [];
   let messageContent: Array<Extract<SemanticContent, { readonly type: "text" | "refusal" }>> = [];
+  let pendingReasoningIndex: number | undefined;
   const flushMessage = (): void => {
     if (messageContent.length > 0) {
       items.push({ type: "message", content: messageContent });
@@ -258,6 +259,12 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
     }
   };
   for (const value of content.items) {
+    if (pendingReasoningIndex !== undefined) {
+      const pending = items[pendingReasoningIndex];
+      if (pending?.type !== "reasoning") upstreamInvalid();
+      items[pendingReasoningIndex] = { ...pending, status: "completed" };
+      pendingReasoningIndex = undefined;
+    }
     if (!isWireJsonObject(value)) {
       upstreamInvalid();
     }
@@ -310,6 +317,7 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
           parts: [{ presentation: "summary", index: 0, text: thinking }],
           hasOpaqueState: typeof signatureValue === "string" && signatureValue.length > 0,
         });
+        pendingReasoningIndex = items.length - 1;
       }
       continue;
     }
@@ -324,14 +332,13 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
   }
   flushMessage();
   const finishReason = messagesFinishReason(singleMember(payload, "stop_reason"));
-  let hasFollower = false;
-  for (let index = items.length - 1; index >= 0; index -= 1) {
-    const item = items[index];
-    if (item?.type === "reasoning") {
-      items[index] = { ...item, status: hasFollower || finishReason === "stop" || finishReason === "tool_calls" ? "completed" : "incomplete" };
-    } else if (item?.type === "message" || item?.type === "tool_call") {
-      hasFollower = true;
-    }
+  if (pendingReasoningIndex !== undefined) {
+    const pending = items[pendingReasoningIndex];
+    if (pending?.type !== "reasoning") upstreamInvalid();
+    items[pendingReasoningIndex] = {
+      ...pending,
+      status: finishReason === "stop" || finishReason === "tool_calls" ? "completed" : "incomplete",
+    };
   }
   const responseItems = finishReason === "refusal"
     ? items.map((item): SemanticResponseItem => item.type === "message"

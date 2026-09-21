@@ -563,6 +563,51 @@ describe("shared conversion response codecs", () => {
     expect(terminal.response?.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
   });
 
+  it("matches buffered and streamed status for consecutive Messages thinking blocks", async () => {
+    const bufferedSource = reasoningBufferedSource("messages");
+    bufferedSource.content = [
+      { type: "thinking", thinking: "first", signature: "sig1" },
+      { type: "thinking", thinking: "second", signature: "sig2" },
+    ];
+    bufferedSource.stop_reason = "max_tokens";
+    const buffered = decoded(convertBufferedResponse(
+      encoder.encode(JSON.stringify(bufferedSource)), context("messages", "responses"),
+    ).bytes);
+    expect((buffered.output as Array<Record<string, unknown>>).map((item) => item.status)).toEqual([
+      "completed",
+      "incomplete",
+    ]);
+
+    const stream = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg_two_thoughts", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+      }),
+      ...["first", "second"].flatMap((thinking, index) => [
+        messageEvent("content_block_start", {
+          type: "content_block_start", index,
+          content_block: { type: "thinking", thinking: "", signature: "" },
+        }),
+        messageEvent("content_block_delta", {
+          type: "content_block_delta", index,
+          delta: { type: "thinking_delta", thinking },
+        }),
+        messageEvent("content_block_stop", { type: "content_block_stop", index }),
+      ]),
+      messageEvent("message_delta", {
+        type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 3 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "messages", "responses", chunks(encoder.encode(stream)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output?.map((item) => item.status)).toEqual(["completed", "incomplete"]);
+  });
+
   it("emits an incomplete reasoning-only Responses result without fabricating answer text", async () => {
     const source = [
       chatSse({
