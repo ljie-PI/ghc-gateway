@@ -55,7 +55,7 @@ export interface CreateStreamExecutionResponseInput<T> {
   readonly cleanupTimeoutMs?: number;
   readonly normalizeFailure: (error: unknown) => unknown;
   readonly presentPostCommitFailure?: (error: unknown) => unknown;
-  readonly finalizeSuccess?: ((value: T) => Promise<readonly Uint8Array[] | void>) | undefined;
+  readonly finalizeSuccess?: ((value: T) => Promise<void>) | undefined;
   readonly onTerminal: (result: Readonly<
     | { readonly kind: "success"; readonly value: T }
     | { readonly kind: "failure"; readonly error: unknown }

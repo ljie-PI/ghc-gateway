@@ -1055,7 +1055,11 @@ async function matrixGateway(
       },
     }, () => new Date(nowMs()));
     const history = new SqliteResponsesHistory(database, { nowMs });
-    const reasoningCarriers = new SqliteReasoningCarrierStore(database, { nowMs });
+    let carrierUuid = 0;
+    const reasoningCarriers = new SqliteReasoningCarrierStore(database, {
+      nowMs,
+      createId: () => `00000000-0000-4000-8000-${(++carrierUuid).toString().padStart(12, "0")}`,
+    });
     const responseReasoning = {
       id: "rs_matrix_stream",
       type: "reasoning",

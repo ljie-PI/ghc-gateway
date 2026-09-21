@@ -41,9 +41,8 @@ export async function createConvertedStreamResponse(input: {
   const createdCarrierTokens = new Set<string>();
   const lifecycle: {
     completeIntent?: ConversionCheckpointIntent | undefined;
-    finalWire: Uint8Array[];
     completed: boolean;
-  } = { finalWire: [], completed: false };
+  } = { completed: false };
   const converted = convertProtocolStream(
     withByteIdleDeadlines(
       input.upstream.bytes,
@@ -112,7 +111,6 @@ export async function createConvertedStreamResponse(input: {
         input.carrier.store.promote([...createdCarrierTokens], input.carrier.binding);
       }
       lifecycle.completed = true;
-      return lifecycle.finalWire;
     },
     onTerminal: (result) => result.kind === "success"
       ? observeTerminal(input.onTerminal, { kind: "success", usage: result.value })
@@ -124,7 +122,7 @@ async function* convertedEmissions(
   converted: AsyncIterable<ConvertedStreamEmission>,
   input: Parameters<typeof createConvertedStreamResponse>[0],
   createdCarrierTokens: Set<string>,
-  lifecycle: { completeIntent?: ConversionCheckpointIntent | undefined; finalWire: Uint8Array[]; completed: boolean },
+  lifecycle: { completeIntent?: ConversionCheckpointIntent | undefined; completed: boolean },
 ): AsyncIterable<StreamExecutionEmission<SemanticUsage>> {
   const iterator = converted[Symbol.asyncIterator]();
   let observedUsage: SemanticUsage = {
@@ -170,11 +168,7 @@ async function* convertedEmissions(
       } else if (emission.kind === "usage") {
         observedUsage = emission.usage;
       } else if (emission.kind === "wire") {
-        if (createdCarrierTokens.size > 0) {
-          lifecycle.finalWire.push(emission.bytes);
-        } else {
-          yield { kind: "wire", bytes: emission.bytes };
-        }
+        yield { kind: "wire", bytes: emission.bytes };
       } else if (emission.kind === "terminal") {
         input.scope.diagnostics?.set({ protocolStatus: emission.terminal });
         if (emission.terminal !== "completed") {

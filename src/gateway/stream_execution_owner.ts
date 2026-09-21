@@ -107,10 +107,7 @@ export async function createStreamExecutionResponseOwner<T>(
       try {
         if (terminalCause === "semantic_success" && result.kind === "success") {
           try {
-            const finalWire = await input.finalizeSuccess?.(result.value);
-            for (const bytes of finalWire ?? []) {
-              if (!await resources.writer?.enqueue(bytes)) break;
-            }
+            await input.finalizeSuccess?.(result.value);
           } catch (error: unknown) {
             const failure = input.normalizeFailure(error);
             cause = resources.writer?.committed === true ? "postcommit_failure" : "precommit_failure";
