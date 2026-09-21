@@ -29,6 +29,7 @@ import { migration as historyMigration } from "../../src/persistence/migrations/
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
+import { DiagnosticRecorder } from "../../src/telemetry/diagnostics.js";
 
 const NOW = Date.parse("2026-09-03T12:00:00.000Z");
 const PORT = 31_419;
@@ -45,6 +46,32 @@ const IDENTITY = {
 };
 
 describe("production composition", () => {
+  it("reports diagnostic failure from the same in-memory source through Admin and local control", async () => {
+    const harness = await compositionHarness();
+    let writes = 0;
+    const diagnostics = new DiagnosticRecorder({
+      write: () => { if (++writes > 1) throw new Error("PRIVATE_DIAGNOSTIC_PATH"); },
+    });
+    const gateway = await composeProductionDaemonGateway({
+      startup: { ...harness.startup, diagnostics: true }, diagnostics,
+      env: {}, identity: IDENTITY, logger: { write() {} }, requestStop() {},
+    }, { application: harness.application });
+    try {
+      diagnostics.begin("req_status", "chat").finish();
+      await diagnostics.close();
+      const admin = await adminJson(gateway, "/admin/api/v1/status");
+      const local = await (await control(gateway, "GET", "/status")).json();
+      expect(admin.data).toMatchObject({
+        diagnostics: { enabled: true, state: "failed", reason: "io_error", droppedRecords: 2 },
+      });
+      expect(local).toMatchObject({ data: { diagnostics: diagnostics.snapshot() } });
+      expect(JSON.stringify([admin, local])).not.toContain("PRIVATE");
+    } finally {
+      await gateway.close();
+      await diagnostics.close();
+    }
+  });
+
   it("closes inference responses and dispatchers before telemetry and SQLite", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-close-order-"));
     const application = await createProductionApplicationContext(

@@ -50,6 +50,7 @@ import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentOpenaiResponsesFailure } from "./failure_presenter.js";
 import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedPlannedResponse } from "../conversion/buffered.js";
@@ -80,7 +81,8 @@ export function createOpenaiResponsesRoute(dependencies: OpenaiResponsesRouteDep
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentOpenaiResponsesFailure,
-    createAttempt: (requestId, config) => createRequestAttempt({
+    createAttempt: (requestId, config, diagnostics) => createRequestAttempt({
+      ...(diagnostics === undefined ? {} : { diagnostics }),
       requestId,
       config,
       protocol: "openai_responses_unknown",
@@ -101,12 +103,15 @@ async function executeOpenaiResponses(
   if (request.body === undefined) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+  scope.diagnostics?.stage("request_validation");
   const decoded = decodeRequest(request.body);
   if (decoded.model !== undefined) {
     usage.setRequestedModel(decoded.model);
   }
+  scope.diagnostics?.stage("account_binding");
   const account = await bindAccount(dependencies.directory, scope.signal);
   usage.setAccount(account.accountId);
+  scope.diagnostics?.stage("continuation");
   const continuation = await resolveResponsesContinuation(
     dependencies.history,
     decoded.previousResponseId,
@@ -116,6 +121,7 @@ async function executeOpenaiResponses(
   const continuationReceipt = ownedContinuationReceipt(continuation);
   const requestedModel = continuationModel(decoded.model, continuationReceipt);
   const preference = dependencies.preferences.get(account.accountId);
+  scope.diagnostics?.stage("model_resolution");
   const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
   const resolved = resolveModel(catalog, requestedModel, preference);
   if ("kind" in resolved) {
@@ -129,6 +135,7 @@ async function executeOpenaiResponses(
     throw new GatewayFailureError({ kind: resolved.kind });
   }
   usage.setResolvedModel(resolved.upstreamModel);
+  scope.diagnostics?.stage("account_binding");
   const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
   validateContinuationTarget(continuationReceipt, bound.target.endpoint);
   const convertedContinuation = continuationReceipt !== undefined
@@ -167,6 +174,7 @@ async function executeOpenaiResponses(
   }
   const forcedTarget = continuationReceipt?.upstreamProtocol;
   const plan = planProtocolExecution({
+    diagnostics: scope.diagnostics,
     source: "responses",
     body: planningRequest.body,
     stream: decoded.stream,
@@ -230,12 +238,16 @@ async function nativeNonstreamResponse(
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
 ): Promise<Response> {
+  scope.diagnostics?.stage("upstream_request");
   const upstream = await transportCall(
     () => completeNativeResponses(bound, plan, nativeOptions(scope)),
     scope.signal,
   );
   assertUpstreamSuccess(upstream);
   const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+  observeDiagnosticProtocolStatus(scope.diagnostics, "responses", payload);
+  scope.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
+  scope.diagnostics?.shape("client_output", () => diagnosticShape(payload));
   const responseId = responseIdFromPayload(payload);
   if (responseId !== undefined) {
     await persistContinuation(
@@ -247,7 +259,7 @@ async function nativeNonstreamResponse(
       scope.signal,
     );
   }
-  if (usage.enabled) {
+  if (usage.enabled || scope.diagnostics !== undefined) {
     usage.finish(nativeOutcome(payload), responsesUsage(payload));
   }
   return new Response(Buffer.from(upstream.body), {
@@ -265,6 +277,7 @@ async function nativeStreamResponse(
   usage: RequestAttempt,
   performanceObserver?: ProtocolPerformanceObserver,
 ): Promise<Response> {
+  scope.diagnostics?.stage("upstream_request");
   const upstream = await transportCall(
     () => openNativeResponsesStream(bound, plan, nativeOptions(scope)),
     scope.signal,
@@ -279,7 +292,7 @@ async function nativeStreamResponse(
     scope.config.timeouts.firstByteMs,
     scope.config.timeouts.streamIdleMs,
   );
-  const observed = usage.enabled ? createNativeStreamObservation(usage) : undefined;
+  const observed = usage.enabled || scope.diagnostics !== undefined ? createNativeStreamObservation(usage) : undefined;
   return await streamBytesResponse(
     normalizeNativeResponsesStream(
       bytes,
@@ -300,6 +313,7 @@ async function nativeStreamResponse(
           scope.signal,
         );
       },
+      scope.diagnostics,
     ),
     upstream,
     scope,
@@ -322,6 +336,7 @@ async function convertedNonstreamResponse(
     upstream.body,
     plan,
     {
+      diagnostics: scope.diagnostics,
       maxBytes: scope.config.limits.nonstreamBodyBytes,
       createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
       nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
@@ -431,6 +446,7 @@ async function streamBytesResponse(
   onSuccess?: () => void,
 ): Promise<Response> {
   return await createStreamExecutionResponse({
+    diagnostics: scope.diagnostics,
     upstream,
     emissions: responseByteEmissions(bytes),
     signal: scope.signal,
@@ -474,6 +490,7 @@ async function* responseByteEmissions(
 
 function nativeOptions(scope: Readonly<RequestScope>) {
   return {
+    diagnostics: scope.diagnostics,
     requestId: scope.requestId,
     nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
     connectTimeoutMs: scope.config.timeouts.connectMs,

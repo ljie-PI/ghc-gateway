@@ -100,12 +100,27 @@ describe("CLI parser", () => {
   it("renders command help without starting foreground serve", () => {
     expect(parseCli(["serve", "--help"], { homedir: home }).command).toEqual({
       kind: "help",
-      text: "Usage: ghcg [--data-dir <path>] [--json] serve\n",
+      text: "Usage: ghcg [--data-dir <path>] [--json] serve\n\n  --diagnostics  Write bounded, content-free request diagnostics for this invocation.\n",
     });
     expect(parseCli(["start", "--help"], { homedir: home }).command).toEqual({
       kind: "help",
-      text: "Usage: ghcg [--data-dir <path>] [--json] start\n",
+      text: "Usage: ghcg [--data-dir <path>] [--json] start\n\n  --diagnostics  Write bounded, content-free request diagnostics for this invocation.\n",
     });
+
+  });
+
+  it("enables diagnostics only for an explicitly requested startup invocation", () => {
+    for (const command of ["serve", "start", "restart"]) {
+      for (const enabled of [false, true]) {
+        const parsed = parseCli([command, ...(enabled ? ["--diagnostics"] : [])], { homedir: home }).command;
+        if (parsed.kind !== "serve" && parsed.kind !== "lifecycle") throw new Error("expected startup");
+        expect(parsed.startup?.diagnostics === true).toBe(enabled);
+      }
+    }
+    for (const args of [
+      ["status", "--diagnostics"], ["stop", "--diagnostics"],
+      ["serve", "--diagnostics", "false"], ["restart", "--port", "31401"],
+    ]) expect(() => parseCli(args, { homedir: home })).toThrow(CliError);
   });
 
   it("renders group help from the canonical registry", () => {

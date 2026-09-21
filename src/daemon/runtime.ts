@@ -15,9 +15,10 @@ import {
   type DaemonIdentityLease,
 } from "./identity_file.js";
 import { LifecycleCoordinator } from "./lifecycle_coordinator.js";
-import { JsonlLogger, StderrLogger, type DaemonLogger } from "./logger.js";
+import { createFileDiagnostics, JsonlLogger, StderrLogger, type DaemonLogger } from "./logger.js";
 import { DaemonOperationLeaseFile } from "./operation_lease.js";
 import { captureProcessStartIdentity, terminateProcessIfMatching } from "./process_identity.js";
+import type { DiagnosticRecorder } from "../telemetry/diagnostics.js";
 
 const productionLifecycleCoordinator = new LifecycleCoordinator(new DaemonOperationLeaseFile());
 
@@ -26,6 +27,7 @@ export interface DaemonRuntimeComposition {
   readonly env: NodeJS.ProcessEnv;
   readonly identity: DaemonIdentity;
   readonly logger: DaemonLogger;
+  readonly diagnostics?: DiagnosticRecorder;
   requestStop(): void;
 }
 
@@ -120,6 +122,7 @@ export async function spawnDaemonProcess(
     "--internal-data-dir-source", startup.dataDirSource,
     "--port", String(startup.port),
     "--log-level", startup.logLevel,
+    ...(startup.diagnostics === true ? ["--diagnostics"] : []),
   ], {
     detached: true,
     stdio: "ignore",
@@ -193,6 +196,11 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
       ?? (options.managed
         ? new JsonlLogger(path.join(options.startup.dataDir, "logs"), Date.now, undefined, options.startup.logLevel)
         : new StderrLogger(options.stderr, Date.now, options.startup.logLevel));
+    const diagnostics = options.startup.diagnostics === true
+      ? createFileDiagnostics(path.join(options.startup.dataDir, "logs"), () => (
+        logger.write({ level: "error", category: "diagnostics_failed" })
+      ))
+      : undefined;
     let gateway: HostedGateway | undefined;
     try {
       gateway = await options.composeGateway({
@@ -200,6 +208,7 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
         env: options.env,
         identity,
         logger,
+        ...(diagnostics === undefined ? {} : { diagnostics }),
         requestStop: () => scheduleStop(() => stopping.abort()),
       });
       await gateway.listen();
@@ -208,12 +217,13 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
       await waitForAbort(AbortSignal.any([options.shutdownSignal, stopping.signal]));
       const closingGateway = gateway;
       gateway = undefined;
-      await closeGatewayBounded(closingGateway, logger);
+      await closeGatewayBounded(closingGateway, logger, diagnostics);
       logger.write({ level: "info", category: "gateway_stopped", managed: options.managed, pid });
     } finally {
       if (gateway !== undefined) {
-        await closeGatewayBounded(gateway, logger);
+        await closeGatewayBounded(gateway, logger, diagnostics);
       }
+      diagnostics?.forceClose();
     }
   } finally {
     lease.cleanup();
@@ -221,10 +231,10 @@ export async function runDaemonRuntime(options: Readonly<RunDaemonRuntimeOptions
   }
 }
 
-async function closeGatewayBounded(gateway: HostedGateway, logger: DaemonLogger): Promise<void> {
+async function closeGatewayBounded(gateway: HostedGateway, logger: DaemonLogger, diagnostics?: DiagnosticRecorder): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const result = await Promise.race([
-    gateway.close().then(
+    gateway.close().then(async () => await diagnostics?.close()).then(
       () => ({ timedOut: false as const }),
       (error: unknown) => ({ timedOut: false as const, error }),
     ),
@@ -239,6 +249,7 @@ async function closeGatewayBounded(gateway: HostedGateway, logger: DaemonLogger)
     throw result.error;
   }
   if (result.timedOut) {
+    diagnostics?.forceClose();
     logger.write({ level: "error", category: "shutdown_timeout" });
   }
 }

@@ -2,6 +2,7 @@ import path from "node:path";
 import { CliError, type CliLifecycleResult } from "../cli/control_client.js";
 import type { StartupConfig } from "../config/startup_config.js";
 import type { DaemonIdentity } from "./identity_file.js";
+import { parseDiagnosticsStatus, type DiagnosticsStatus } from "../telemetry/diagnostics.js";
 import {
   SelectedRootMissingError,
   sharedInProcessLifecycleCoordinator,
@@ -164,7 +165,9 @@ export class DaemonController {
         context.signal,
       );
       return {
-        result: identityResult(validControlResponse(response, identity, true) ? "running" : "conflict", identity, resolvedDataDir),
+        result: validControlResponse(response, identity, true) && isRecord(response)
+          ? identityResult("running", identity, resolvedDataDir, parseDiagnosticsStatus(response.diagnostics))
+          : identityResult("conflict", identity, resolvedDataDir),
         identity,
       };
     } catch (error: unknown) {
@@ -637,11 +640,13 @@ function identityResult(
   state: CliLifecycleResult["state"],
   identity: Readonly<DaemonIdentity> | null,
   dataDir: string,
+  diagnostics?: DiagnosticsStatus,
 ): CliLifecycleResult {
   if (identity === null) {
     return emptyResult(state, dataDir);
   }
   return {
+    ...(diagnostics === undefined ? {} : { diagnostics }),
     state,
     managed: identity.managed,
     pid: identity.pid,

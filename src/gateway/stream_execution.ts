@@ -4,6 +4,7 @@ import {
   type GatewayFailureOrigin,
 } from "./failures.js";
 import type { UpstreamByteStream } from "../copilot/upstream_types.js";
+import type { RequestDiagnostics } from "../telemetry/diagnostics.js";
 
 export type StreamExecutionState = "precommit" | "committed" | "terminating" | "completed";
 
@@ -43,6 +44,7 @@ export interface StreamExecutionHandle {
 }
 
 export interface CreateStreamExecutionResponseInput<T> {
+  readonly diagnostics?: RequestDiagnostics | undefined;
   readonly upstream: UpstreamByteStream;
   readonly emissions: AsyncIterable<StreamExecutionEmission<T>>;
   readonly signal: AbortSignal;

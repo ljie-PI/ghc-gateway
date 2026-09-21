@@ -19,12 +19,111 @@ import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_cha
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
+import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const nowMs = (): number => 1_700_000_000_000;
 
 describe("protocol conversion matrix", () => {
+  it.each([false, true])("observes native Responses before validation fails (stream=%s)", async (stream) => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const malformed = encoder.encode("PRIVATE_INVALID_JSON");
+    const harness = await matrixGateway(false, diagnostics, {
+      responsesBody: malformed, responsesStreamContentType: "application/json",
+    });
+    try {
+      const response = await harness.gw.fetch(protocolRequest("responses", "native-responses", { stream }));
+      expect(response.status).toBe(502);
+      expect(await response.text()).not.toContain("PRIVATE");
+      await diagnostics.close();
+      expect(records.at(-1)).toMatchObject({
+        httpStatus: 502, upstreamStatus: 200,
+        upstreamBytes: stream ? 0 : malformed.byteLength,
+        failure: { kind: "invalid_upstream_response", source: "parser", phase: stream ? "headers" : "body" },
+      });
+      expect(records.find((record) => record.event === "request_failed")?.stage).toBe("upstream_output");
+      expect(JSON.stringify(records)).not.toContain("PRIVATE");
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
+  it.each((["chat", "messages", "responses"] as const).flatMap((client) => (
+    (["chat", "messages", "responses"] as const).map((upstream) => ({ client, upstream }))
+  )))("retains buffered incomplete status independently of Usage ($client -> $upstream)", async ({ client, upstream }) => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const harness = await matrixGateway(false, diagnostics, {
+      chatBody: encoder.encode(JSON.stringify({
+        id: "chatcmpl_partial", choices: [{ message: { role: "assistant", content: "partial" }, finish_reason: "length" }],
+      })),
+      messagesBody: encoder.encode(JSON.stringify({
+        id: "msg_partial", type: "message", role: "assistant", model: "matrix",
+        content: [{ type: "text", text: "partial" }], stop_reason: "max_tokens",
+      })),
+      responsesBody: encoder.encode(JSON.stringify({
+        id: "resp_partial", object: "response", status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [{ type: "message", id: "msg_partial", role: "assistant", status: "incomplete",
+          content: [{ type: "output_text", text: "partial", annotations: [] }] }],
+      })),
+    });
+    try {
+      const response = await harness.gw.fetch(protocolRequest(client, `native-${upstream}`));
+      expect(response.status).toBe(200);
+      await response.text();
+      await diagnostics.close();
+      expect(records.filter((record) => record.event === "request_finished")).toMatchObject([{
+        httpStatus: 200, outcome: "success", protocolStatus: "incomplete",
+      }]);
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
+  it.each((["chat", "messages", "responses"] as const).flatMap((client) => (
+    (["chat", "messages", "responses"] as const).flatMap((upstream) => (
+      [false, true].map((stream) => ({ client, upstream, stream }))
+    ))
+  )))("keeps diagnostic $client -> $upstream wire identical (stream=$stream)", async ({ client, upstream, stream }) => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) }, {
+      nowMs, monotonicNowMs: () => 1,
+    });
+    const plain = await matrixGateway(true);
+    const traced = await matrixGateway(true, diagnostics);
+    try {
+      const input = client === "responses"
+        ? { input: "PRIVATE_REQUEST_CANARY", stream }
+        : { messages: [{ role: "user", content: "PRIVATE_REQUEST_CANARY" }], stream };
+      const baseline = await plain.gw.fetch(protocolRequest(client, `native-${upstream}`, input));
+      const observed = await traced.gw.fetch(protocolRequest(client, `native-${upstream}`, input));
+      expect(observed.status).toBe(baseline.status);
+      expect([...observed.headers]).toEqual([...baseline.headers]);
+      expect(await observed.text()).toBe(await baseline.text());
+      await diagnostics.close();
+      expect(records.filter((record) => record.event === "request_finished")).toMatchObject([{
+        requestId: "req_matrix", clientProtocol: client, upstreamProtocol: upstream, httpStatus: 200,
+        converted: client !== upstream, stream, outcome: "success",
+      }]);
+      expect(records.some((record) => record.stage === "request_decoded" && record.shape !== undefined)).toBe(true);
+      expect(records.some((record) => record.stage === "upstream_output" && record.shape !== undefined)).toBe(true);
+      expect(records.some((record) => record.stage === "client_output" && record.shape !== undefined)).toBe(true);
+      if (stream) expect(records.at(-1)?.sse).not.toEqual({});
+      const logged = JSON.stringify(records);
+      expect(logged).not.toContain("PRIVATE_");
+      expect(logged).not.toContain("visible plan");
+      expect(logged).not.toContain("provider-signature");
+      expect(diagnostics.snapshot().droppedRecords).toBe(0);
+    } finally {
+      await closeAll([() => plain.close(), () => traced.close(), () => diagnostics.close()]);
+    }
+  });
+
   it.each([
     ["chat", "chat", "native-chat", "chat"],
     ["chat", "messages", "native-messages", "messages"],
@@ -865,7 +964,16 @@ interface MatrixHarness {
   close(): Promise<void>;
 }
 
-async function matrixGateway(reasoning = false): Promise<MatrixHarness> {
+async function matrixGateway(
+  reasoning = false,
+  diagnostics?: DiagnosticRecorder,
+  overrides: {
+    readonly chatBody?: Uint8Array;
+    readonly messagesBody?: Uint8Array;
+    readonly responsesBody?: Uint8Array;
+    readonly responsesStreamContentType?: string;
+  } = {},
+): Promise<MatrixHarness> {
   return await withSetupCleanup(async (own) => {
     const database = openDatabase({
       path: ":memory:",
@@ -928,7 +1036,7 @@ async function matrixGateway(reasoning = false): Promise<MatrixHarness> {
           method: "POST", path: "/chat/completions", body: jsonStream(false), times: 8,
           reply: {
             headers: { "content-type": "application/json" }, stream: async (exchange) => {
-              await exchange.end(matrixChatResponse(exchange.request.body, reasoning));
+              await exchange.end(overrides.chatBody ?? matrixChatResponse(exchange.request.body, reasoning));
             }
           }
         },
@@ -937,7 +1045,7 @@ async function matrixGateway(reasoning = false): Promise<MatrixHarness> {
           reply: {
             status: 200,
             headers: {},
-            body: encoder.encode(JSON.stringify({
+            body: overrides.messagesBody ?? encoder.encode(JSON.stringify({
               id: "msg_matrix",
               type: "message",
               role: "assistant",
@@ -957,7 +1065,7 @@ async function matrixGateway(reasoning = false): Promise<MatrixHarness> {
           reply: {
             status: 200,
             headers: {},
-            body: encoder.encode(JSON.stringify({
+            body: overrides.responsesBody ?? encoder.encode(JSON.stringify({
               id: "resp_matrix",
               object: "response",
               created_at: 1_700_000_000,
@@ -1060,7 +1168,7 @@ async function matrixGateway(reasoning = false): Promise<MatrixHarness> {
         {
           method: "POST", path: "/responses", body: jsonStream(true), times: 8,
           reply: {
-            headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+            headers: { "content-type": overrides.responsesStreamContentType ?? "text/event-stream" }, body: Buffer.concat([
               responsesEvent(0, "response.created", { response: { ...response, status: "in_progress", output: [] } }),
               ...(reasoning ? [
                 responsesEvent(1, "response.output_item.added", {
@@ -1119,7 +1227,7 @@ async function matrixGateway(reasoning = false): Promise<MatrixHarness> {
       createOpenaiChatCompletionsRoute(routeDependencies),
       createAnthropicMessagesRoute(routeDependencies),
       createOpenaiResponsesRoute({ ...routeDependencies, history, nowUnixSeconds: () => 1_700_000_000 }),
-    ], { createRequestId: () => "req_matrix" });
+    ], { createRequestId: () => "req_matrix", ...(diagnostics === undefined ? {} : { diagnostics }) });
     own(() => gw.close());
     return {
       gw,

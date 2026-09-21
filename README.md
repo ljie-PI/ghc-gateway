@@ -101,6 +101,7 @@ Global options are `--data-dir <path>` and `--json`. Startup settings use CLI va
 | Port | `--port` | `GHC_GATEWAY_PORT` | `31400` |
 | Data directory | `--data-dir` | `GHC_GATEWAY_DATA_DIR` | `~/.ghc-gateway` |
 | Log level | `--log-level` | `GHC_GATEWAY_LOG_LEVEL` | `info` |
+| Request diagnostics | `--diagnostics` | Not available | Disabled |
 
 Read or update persisted runtime configuration with `ghcg config get [key]` and `ghcg config set <key> <value>`.
 
@@ -132,6 +133,7 @@ The default data directory is `~/.ghc-gateway`:
 - `credentials.json`: protected credentials
 - `daemon.json`: protected process identity and local-control authentication
 - `logs/*.jsonl`: bounded, sanitized daemon logs
+- `logs\diagnostics*.jsonl`: opt-in, content-free request diagnostics
 - `agents/{claude|codex}/state.db`: Agent management state
 
 Use `--data-dir` or `GHC_GATEWAY_DATA_DIR` to select another data directory. This does not change client targets selected by `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
@@ -139,6 +141,40 @@ Use `--data-dir` or `GHC_GATEWAY_DATA_DIR` to select another data directory. Thi
 Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors. Responses History stores only bounded bridge checkpoints needed for compatible continuations.
 
 On Windows, files inherit the selected directory's permissions. Existing and custom data roots and client configuration directories are caller-managed security boundaries.
+
+## Request Diagnostics
+
+Enable structured request diagnostics for one invocation:
+
+```text
+ghcg serve --diagnostics
+# Or use the managed daemon:
+ghcg start --diagnostics
+# Explicitly enable diagnostics when restarting an existing daemon:
+ghcg restart --diagnostics
+ghcg --json status
+```
+
+Both foreground and managed modes write `<data-dir>\logs\diagnostics.jsonl`. The flag is independent of `--log-level`; `--log-level debug` or `trace` alone does not enable request diagnostics. Plain `ghcg restart` disables diagnostics for the next process. `start` does not reconfigure an already-running instance: inspect its actual status and use `restart --diagnostics` when needed.
+
+Each inference request uses the same `requestId` as its HTTP response (`request-id` for Messages, `x-request-id` for OpenAI endpoints). JSONL records identify validation, model/protocol selection, conversion, upstream HTTP, output, commitment, and termination stages. They include fixed error categories and available conversion rule IDs, elapsed time, bounded structure summaries, byte counts, and finite SSE event counters. The allowlisted `protocolStatus` distinguishes an incomplete protocol result from a successful HTTP/Usage outcome. All three protocols, native and converted operations, and streaming and buffered requests are covered.
+
+These are **structure summaries, not captured requests or responses**. They contain allowlisted field types and counts, not prompts, replies, tool inputs/outputs, schema descriptions, credentials, opaque IDs, arbitrary keys, or raw upstream error bodies. Unknown fields/events are counted without retaining their names. A rejected upstream response provides status/category only. An HTTP 200 followed by a stream failure is recorded separately from an HTTP-level rejection.
+
+For example, filter a diagnostic file in PowerShell:
+
+```powershell
+# Use the configured data directory if different.
+$dataDir = Join-Path $HOME '.ghc-gateway'
+Get-Content -LiteralPath (Join-Path $dataDir 'logs\diagnostics.jsonl') -Tail 1000 |
+  ForEach-Object { ConvertFrom-Json $_ } |
+  Where-Object { $_.requestId -eq 'req_example' } |
+  Format-List
+```
+
+Diagnostics rotate at 10 MiB and retain at most five log files independently of daemon logs. Seven-day pruning runs when the diagnostic logger initializes or writes; disabling diagnostics does not immediately erase existing files or schedule background deletion. A request retains at most 32 records, a structure walk visits at most 256 nodes through depth four, and the pending queue is capped at 256 records and 1 MiB. Truncation and omitted/dropped records mean a trace may be incomplete; SSE deltas are counted, not logged individually.
+
+If diagnostics are requested but the file cannot be initialized, startup fails. If recording later fails, inference continues unchanged and diagnostics stop writing. CLI status and `/admin/api/v1/status` expose diagnostic state and dropped/pending counts; a missing field from an older daemon means unknown, not disabled. A failed recorder requires an explicit diagnostic restart to recover. Diagnostic failures never substitute for the inference result.
 
 ## Upgrading Existing Installations
 

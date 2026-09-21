@@ -9,6 +9,7 @@ import type {
   UsageUpdate,
 } from "../telemetry/recorder.js";
 import type { RuntimeConfigSnapshot } from "../config/schema.js";
+import type { RequestDiagnostics } from "../telemetry/diagnostics.js";
 
 export interface AttemptUsage {
   readonly inputTokens: number;
@@ -38,6 +39,7 @@ export interface RequestAttempt {
 }
 
 export interface RequestAttemptOptions {
+  readonly diagnostics?: RequestDiagnostics;
   readonly requestId: string;
   readonly config?: Readonly<RuntimeConfigSnapshot>;
   readonly protocol: TelemetryProtocol;
@@ -70,6 +72,7 @@ export function createRequestAttempt(options: Readonly<RequestAttemptOptions>): 
       return;
     }
     finalized = true;
+    options.diagnostics?.outcome(outcome);
     const occurredAtMs = nowMs();
     try {
       options.recorder?.recordUsage({
@@ -119,6 +122,7 @@ export function createRequestAttempt(options: Readonly<RequestAttemptOptions>): 
     setResolvedModel(value): void {
       if (resolvedModel === undefined && value.length > 0) {
         resolvedModel = value;
+        options.diagnostics?.set({ model: value });
       }
     },
     setProtocol(value): void {
@@ -139,6 +143,7 @@ export function createRequestAttempt(options: Readonly<RequestAttemptOptions>): 
     },
     markCommitted(): void {
       if (handedOff) {
+        if (!committed) options.diagnostics?.stage("committed");
         committed = true;
       }
     },
@@ -147,6 +152,7 @@ export function createRequestAttempt(options: Readonly<RequestAttemptOptions>): 
       finish("success", value);
     },
     failure(error): void {
+      options.diagnostics?.failure(error);
       finish(
         failureOutcome(failureFromUnknown(error, { source: "gateway", phase: "internal" })),
         ZERO_USAGE,

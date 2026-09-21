@@ -1,5 +1,6 @@
 import type { BoundCopilot } from "../../copilot/backend.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
 import { boundedCleanup } from "../../gateway/stream_execution.js";
 import { SseDecodeError } from "../../serialization/sse.js";
 import {
@@ -20,8 +21,11 @@ import type {
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import type { NativeResponsesPlan } from "./planner.js";
 import { encodeOpenaiResponsesSseEvent } from "./wire.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 
 export interface NativeResponsesRequestOptions {
+  readonly diagnostics?: RequestDiagnostics | undefined;
   readonly requestId: string;
   readonly nonstreamBodyBytes: number;
   readonly connectTimeoutMs: number;
@@ -41,7 +45,7 @@ export function nativeResponsesUpstreamRequest(
   options: Readonly<NativeResponsesRequestOptions>,
 ): NativeResponsesUpstreamRequest {
   return {
-    body: serializeNativeResponsesRequest(plan),
+    body: serializeNativeResponsesRequest(plan, options.diagnostics),
     hasVisionInput: hasNativeVisionInput(plan.originalRequest.input),
     initiator: nativeInitiator(plan.originalRequest.input),
     requestId: options.requestId,
@@ -57,12 +61,17 @@ export async function completeNativeResponses(
   plan: Readonly<NativeResponsesPlan>,
   options: Readonly<NativeResponsesRequestOptions>,
 ): Promise<UpstreamByteResponse> {
-  const response = await bound.completeResponses(nativeResponsesUpstreamRequest(plan, options));
-  return {
-    status: response.status,
-    headers: response.headers,
-    body: validatedNativeResponsesBody(response, options.nonstreamBodyBytes),
-  };
+  const response = observeDiagnosticUpstream(await bound.completeResponses(nativeResponsesUpstreamRequest(plan, options)), options.diagnostics);
+  try {
+    return {
+      status: response.status,
+      headers: response.headers,
+      body: validatedNativeResponsesBody(response, options.nonstreamBodyBytes),
+    };
+  } catch (error: unknown) {
+    options.diagnostics?.failure(error, { source: "parser", phase: "body" });
+    throw error;
+  }
 }
 
 export async function openNativeResponsesStream(
@@ -70,15 +79,18 @@ export async function openNativeResponsesStream(
   plan: Readonly<NativeResponsesPlan>,
   options: Readonly<NativeResponsesRequestOptions>,
 ): Promise<UpstreamByteStream> {
-  const upstream = await bound.openResponsesStream(nativeResponsesUpstreamRequest(plan, options));
+  const upstream = observeDiagnosticStream(await bound.openResponsesStream(nativeResponsesUpstreamRequest(plan, options)), options.diagnostics);
   if (upstream.status >= 200 && upstream.status < 300 && !isEventStream(upstream.headers)) {
+    options.diagnostics?.stage("upstream_output");
     await boundedCleanup(upstream.cancel());
-    throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+    const error = new GatewayFailureError({ kind: "invalid_upstream_response" });
+    options.diagnostics?.failure(error, { source: "parser", phase: "headers" });
+    throw error;
   }
   return upstream;
 }
 
-export function serializeNativeResponsesRequest(plan: Readonly<NativeResponsesPlan>): Uint8Array {
+export function serializeNativeResponsesRequest(plan: Readonly<NativeResponsesPlan>, diagnostics?: RequestDiagnostics): Uint8Array {
   let replaced = false;
   const members = plan.originalRequest.body.members.map((member) => {
     if (member.key !== "model") {
@@ -90,7 +102,9 @@ export function serializeNativeResponsesRequest(plan: Readonly<NativeResponsesPl
   if (!replaced) {
     members.push({ key: "model", value: plan.resolvedModel.upstreamModel });
   }
-  return serializeWireJson({ kind: "object", members });
+  const request = { kind: "object", members } as const;
+  diagnostics?.shape("upstream_request", () => diagnosticShape(request));
+  return serializeWireJson(request);
 }
 
 export function validatedNativeResponsesBody(
@@ -120,18 +134,23 @@ export async function* normalizeNativeResponsesStream(
   observeEvent?: (event: Readonly<WireJsonObject>) => void,
   performanceObserver?: ProtocolPerformanceObserver,
   beforeEvent?: (event: Readonly<WireJsonObject>) => Promise<void>,
+  diagnostics?: RequestDiagnostics,
 ): AsyncIterable<Uint8Array> {
   const stableIds = new Map<number, string>();
   let terminal = false;
   for await (const event of parseResponsesSse(bytes, eventLimitBytes)) {
     const payload = parseResponsesEventData(event);
     const type = stringMember(payload, "type");
+    observeDiagnosticProtocolStatus(diagnostics, "responses", payload);
+    diagnostics?.event(type ?? "unknown");
+    diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
     if (type === undefined || type.length === 0 || (event.eventName !== undefined && event.eventName !== type)) {
       throw new GatewayFailureError({ kind: "invalid_upstream_response" });
     }
     await beforeEvent?.(payload);
     const encoded = measureEvent(performanceObserver, () => {
       const normalized = normalizeNativeResponsesEvent(payload, stableIds, type);
+      diagnostics?.shape("client_output", () => diagnosticShape(normalized));
       try {
         observeEvent?.(normalized);
       } catch (_error: unknown) {

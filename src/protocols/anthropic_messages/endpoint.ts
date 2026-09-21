@@ -32,6 +32,8 @@ import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
 import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
+import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import {
   createNativeMessagesStreamResponse,
   nativeMessagesUsage,
@@ -63,7 +65,8 @@ export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRout
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentAnthropicMessagesFailure,
-    createAttempt: (requestId, config) => createRequestAttempt({
+    createAttempt: (requestId, config, diagnostics) => createRequestAttempt({
+      ...(diagnostics === undefined ? {} : { diagnostics }),
       requestId,
       config,
       protocol: "anthropic",
@@ -84,15 +87,18 @@ async function executeAnthropicMessages(
   if (request.body === undefined) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
-  assertAnthropicVersion(request.headers);
-  const betaFeatures = readAnthropicBetaFeatures(request.headers);
+  scope.diagnostics?.stage("request_validation");
+  assertAnthropicVersion(request.headers, scope.diagnostics);
+  const betaFeatures = readAnthropicBetaFeatures(request.headers, scope.diagnostics);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
     usage.setRequestedModel(requestedModel.value);
   }
+  scope.diagnostics?.stage("account_binding");
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
   const preference = dependencies.preferences.get(account.accountId);
+  scope.diagnostics?.stage("model_resolution");
   const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
   const resolved = resolveModel(catalog, requestedModel.value, preference);
   if ("kind" in resolved) {
@@ -101,6 +107,7 @@ async function executeAnthropicMessages(
   usage.setResolvedModel(resolved.upstreamModel);
   const stream = readStream(request.body);
   let plan = planProtocolExecution({
+    diagnostics: scope.diagnostics,
     source: "messages",
     body: request.body,
     stream,
@@ -112,6 +119,7 @@ async function executeAnthropicMessages(
       feature !== "prompt-caching-2024-07-31"
       && feature !== "interleaved-thinking-2025-05-14"
     ))) {
+      scope.diagnostics?.stage("request_validation", { code: "anthropic_beta_conversion_unsupported" });
       throw new GatewayFailureError({
         kind: "unsupported_semantics",
         source: "converter",
@@ -136,7 +144,9 @@ async function executeAnthropicMessages(
         }),
       });
     }
+    scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
+  scope.diagnostics?.stage("account_binding");
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
   if (plan.kind === "native") {
     return withUpstreamProtocol(
@@ -167,7 +177,7 @@ async function executeNativeMessages(
   scope: Readonly<RequestScope>,
   usage: ReturnType<typeof createRequestAttempt>,
 ): Promise<Response> {
-  const bytes = serializeNativeMessagesRequest(body, model);
+  const bytes = serializeNativeMessagesRequest(body, model, scope.diagnostics);
   const upstreamRequest = {
     body: bytes,
     version: MESSAGES_VERSION,
@@ -177,12 +187,14 @@ async function executeNativeMessages(
     firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
     signal: scope.signal,
   } as const;
+  scope.diagnostics?.stage("upstream_request");
   if (!stream) {
-    const upstream = await completeMessages(copilot, upstreamRequest);
+    const upstream = observeDiagnosticUpstream(await completeMessages(copilot, upstreamRequest), scope.diagnostics);
     throwIfUpstreamHttp(upstream);
     const validated = validatedNativeMessagesBody(
       upstream.body,
       scope.config.limits.nonstreamBodyBytes,
+      scope.diagnostics,
     );
     usage.success(attemptUsage(nativeMessagesUsage(validated, scope.config.limits.nonstreamBodyBytes)));
     return new Response(Buffer.from(validated), {
@@ -190,7 +202,7 @@ async function executeNativeMessages(
       headers: { ...JSON_HEADERS, "request-id": scope.requestId },
     });
   }
-  const upstream = await openMessagesStream(copilot, upstreamRequest);
+  const upstream = observeDiagnosticStream(await openMessagesStream(copilot, upstreamRequest), scope.diagnostics);
   if (upstream.status >= 400) {
     await boundedCleanup(upstream.cancel());
   }
@@ -215,6 +227,7 @@ async function executeConvertedMessages(
     const upstream = await completeConvertedOperation(copilot, plan, scope);
     throwIfUpstreamHttp(upstream);
     const converted = measureBuffered(dependencies, () => convertBufferedResponse(upstream.body, {
+      diagnostics: scope.diagnostics,
       source: plan.target,
       target: "messages",
       model: plan.requestModel,
@@ -276,14 +289,18 @@ function measureBuffered<T>(dependencies: AnthropicMessagesRouteDependencies, wo
     : dependencies.performanceObserver.measure("buffered", work);
 }
 
-function assertAnthropicVersion(headers: Headers): void {
+function assertAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnostics): void {
   const value = headers.get("anthropic-version");
+  diagnostics?.set({
+    messagesVersion: value === null ? "missing" : value.trim() === "2023-06-01" ? "supported" : "unsupported",
+  });
   if (value === null || value.includes(",") || value.trim() !== "2023-06-01") {
+    diagnostics?.stage("request_validation", { code: value === null ? "anthropic_version_missing" : "anthropic_version_unsupported" });
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
 }
 
-function readAnthropicBetaFeatures(headers: Headers): readonly MessagesBetaFeature[] {
+function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagnostics): readonly MessagesBetaFeature[] {
   const values = headers.get("anthropic-beta");
   if (values === null || values.trim().length === 0) {
     return [];
@@ -297,6 +314,8 @@ function readAnthropicBetaFeatures(headers: Headers): readonly MessagesBetaFeatu
   for (const raw of values.split(",")) {
     const value = raw.trim();
     if (!supported.has(value as MessagesBetaFeature)) {
+      diagnostics?.set({ messagesBetas: features, unknownBetaCount: 1 });
+      diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
       throw new GatewayFailureError({ kind: "invalid_request" });
     }
     const feature = value as MessagesBetaFeature;
@@ -304,6 +323,7 @@ function readAnthropicBetaFeatures(headers: Headers): readonly MessagesBetaFeatu
       features.push(feature);
     }
   }
+  diagnostics?.set({ messagesBetas: features });
   return features;
 }
 

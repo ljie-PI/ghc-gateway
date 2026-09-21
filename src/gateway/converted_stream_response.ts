@@ -43,6 +43,7 @@ export async function createConvertedStreamResponse(input: {
       input.scope.config.timeouts.streamIdleMs,
     ),
     {
+      diagnostics: input.scope.diagnostics,
       source: input.plan.target,
       target: input.plan.source,
       model: input.model,
@@ -75,6 +76,7 @@ export async function createConvertedStreamResponse(input: {
   );
 
   return await createStreamExecutionResponse({
+    diagnostics: input.scope.diagnostics,
     upstream: input.upstream,
     emissions: convertedEmissions(converted, input),
     signal: input.scope.signal,
@@ -124,6 +126,7 @@ async function* convertedEmissions(
       }
       const emission = next.value;
       if (emission.kind === "first_semantic") {
+        input.scope.diagnostics?.stage("stream");
         firstSemanticObserved = true;
       } else if (emission.kind === "checkpoint") {
         await input.persistCheckpoint?.(emission.intent);
@@ -132,6 +135,7 @@ async function* convertedEmissions(
       } else if (emission.kind === "wire") {
         yield { kind: "wire", bytes: emission.bytes };
       } else if (emission.kind === "terminal") {
+        input.scope.diagnostics?.set({ protocolStatus: emission.terminal });
         yield {
           kind: "terminal",
           outcome: { kind: "success", value: observedUsage },

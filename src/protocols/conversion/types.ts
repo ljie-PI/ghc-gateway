@@ -1,6 +1,7 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
 import type { SupportedReasoningEffort } from "../../copilot/model_capabilities.js";
 import type { WireJson, WireJsonObject } from "../../serialization/wire_json.js";
+import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 
 export type InferenceProtocol = "chat" | "messages" | "responses";
 
@@ -177,6 +178,7 @@ export interface ConvertedProtocolPlan {
 export type ProtocolExecutionPlan = NativeProtocolPlan | ConvertedProtocolPlan;
 
 export interface ConversionPlanningInput {
+  readonly diagnostics?: RequestDiagnostics | undefined;
   readonly source: InferenceProtocol;
   readonly body: WireJsonObject;
   readonly stream: boolean;

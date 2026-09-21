@@ -20,6 +20,7 @@ import type {
 } from "../telemetry/admin.js";
 import type { PerformanceSnapshot } from "../telemetry/performance.js";
 import { THRESHOLDS } from "../telemetry/performance.js";
+import type { DiagnosticsStatus } from "../telemetry/diagnostics.js";
 
 export type AdminErrorCode = AgentErrorCode
   | "validation_failed"
@@ -46,6 +47,7 @@ export interface AdminRuntimeStatus {
 }
 
 export interface AdminStatus {
+  readonly diagnostics?: DiagnosticsStatus;
   readonly version: string;
   readonly uptimeMs: number;
   readonly health: "ok";
@@ -271,6 +273,7 @@ export interface AdminHistory {
 }
 
 export interface AdminApiDependencies {
+  readonly diagnostics?: () => DiagnosticsStatus;
   readonly agents?: AgentsManager;
   readonly accounts: AdminAccountDirectory;
   readonly deviceFlows: AdminDeviceFlows;
@@ -297,6 +300,7 @@ export class AdminManagementApi {
     const history = this.dependencies.history.inspect();
     const active = activity.snapshot();
     return {
+      ...(this.dependencies.diagnostics === undefined ? {} : { diagnostics: this.dependencies.diagnostics() }),
       version: runtime.version,
       uptimeMs: runtime.uptimeMs,
       health: "ok",

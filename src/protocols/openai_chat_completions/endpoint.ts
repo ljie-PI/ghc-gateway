@@ -39,6 +39,8 @@ import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
 import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
+import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
 import {
   createNativeChatCompletionsStreamResponse,
   nativeChatCompletionsUsage,
@@ -78,7 +80,8 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
     admission: "inference",
     body: "wire-json-object",
     presentFailure: presentOpenaiChatCompletionsFailure,
-    createAttempt: (requestId, config) => createRequestAttempt({
+    createAttempt: (requestId, config, diagnostics) => createRequestAttempt({
+      ...(diagnostics === undefined ? {} : { diagnostics }),
       requestId,
       config,
       protocol: "openai_chat",
@@ -92,25 +95,30 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         throw new GatewayFailureError({ kind: "invalid_request" });
       }
 
+      scope.diagnostics?.stage("request_validation");
       const decoded = decodeOpenaiChatCompletionsRequest(request.body);
       if (decoded.requestedModel !== undefined) {
         usage.setRequestedModel(decoded.requestedModel);
       }
+      scope.diagnostics?.stage("account_binding");
       const account = await bindAccount(dependencies.directory, scope.signal);
       usage.setAccount(account.accountId);
       const preference = decoded.requestedModel === undefined
         ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
         : null;
+      scope.diagnostics?.stage("model_resolution");
       const catalog = await loadCatalog(dependencies, account, scope.signal);
       const resolved = resolveOpenaiChatCompletionsModel(decoded, catalog, preference);
       usage.setResolvedModel(resolved.upstreamModel);
       const plan = planProtocolExecution({
+        diagnostics: scope.diagnostics,
         source: "chat",
         body: decoded.body,
         stream: decoded.stream,
         capability: resolved.capability,
         resolvedModel: resolved.upstreamModel,
       });
+      scope.diagnostics?.stage("account_binding");
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       if (plan.kind === "converted") {
         return withUpstreamProtocol(
@@ -119,9 +127,11 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         );
       }
       const prepared = prepareOpenaiChatCompletionsRequest(decoded, resolved);
+      scope.diagnostics?.shape("upstream_request", () => diagnosticShape(prepared.body));
+      scope.diagnostics?.stage("upstream_request");
 
       if (!prepared.stream) {
-        const upstream = await completeChat(copilot, {
+        const upstream = observeDiagnosticUpstream(await completeChat(copilot, {
           model: prepared.resolvedModel,
           body: prepared.bytes,
           stream: false,
@@ -130,7 +140,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
           connectTimeoutMs: scope.config.timeouts.connectMs,
           firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
           signal: scope.signal,
-        });
+        }), scope.diagnostics);
         assertUpstreamSuccess(upstream.status, upstream.headers);
         if (upstream.body.byteLength > scope.config.limits.nonstreamBodyBytes) {
           throw new GatewayFailureError({ kind: "invalid_upstream_response" });
@@ -138,6 +148,9 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
 
         return withUpstreamProtocol(measure(dependencies.performanceObserver, "buffered", () => {
           const payload = validatedNativeChatCompletionsBody(upstream.body, scope.config.limits.nonstreamBodyBytes);
+          observeDiagnosticProtocolStatus(scope.diagnostics, "chat", payload);
+          scope.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
+          scope.diagnostics?.shape("client_output", () => diagnosticShape(payload));
           usage.success(attemptUsage(nativeChatCompletionsUsage(payload)));
           return new Response(Buffer.from(serializeWireJson(payload)), {
             status: upstream.status,
@@ -150,7 +163,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         }), "chat");
       }
 
-      const upstream = await openChatStream(copilot, {
+      const upstream = observeDiagnosticStream(await openChatStream(copilot, {
         model: prepared.resolvedModel,
         body: prepared.bytes,
         stream: true,
@@ -159,7 +172,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         connectTimeoutMs: scope.config.timeouts.connectMs,
         firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
         signal: scope.signal,
-      });
+      }), scope.diagnostics);
       if (upstream.status < 200 || upstream.status >= 300) {
         await boundedCleanup(upstream.cancel());
       }
@@ -193,6 +206,7 @@ async function executeConvertedChat(
     const converted = measure(dependencies.performanceObserver, "buffered", () => convertBufferedResponse(
       upstream.body,
       {
+        diagnostics: scope.diagnostics,
         source: plan.target,
         target: "chat",
         model: plan.requestModel,

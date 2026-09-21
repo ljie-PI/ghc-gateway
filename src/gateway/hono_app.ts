@@ -14,6 +14,8 @@ import {
 } from "./stream_execution.js";
 import { abortWithTimeout, armTimeout, type TimeoutScheduler } from "./timeouts.js";
 import type { WireJsonObject } from "../serialization/wire_json.js";
+import { diagnosticShape } from "../protocols/conversion/diagnostics.js";
+import type { DiagnosticRecorder, RequestDiagnostics } from "../telemetry/diagnostics.js";
 import type {
   AdminModule,
   AdminStaticModule,
@@ -50,6 +52,7 @@ export interface RouteRegistration {
   readonly createAttempt?: (
     requestId: string,
     config: Readonly<RuntimeConfigSnapshot>,
+    diagnostics?: RequestDiagnostics,
   ) => RequestAttempt;
   readonly endpoint: ProtocolEndpoint;
 }
@@ -59,6 +62,7 @@ export interface InflightRequest {
 }
 
 export interface HonoAppDependencies {
+  readonly diagnostics?: DiagnosticRecorder;
   readonly readRuntimeConfig: () => RuntimeConfigSnapshot;
   readonly admission: AdmissionController;
   readonly scheduler: TimeoutScheduler;
@@ -154,12 +158,17 @@ async function handleRoute(
     return new Response(null, { status: 503 });
   }
   const requestId = dependencies.createRequestId();
+  const protocol = route.path === "/v1/messages" ? "messages"
+    : route.path === "/v1/responses" ? "responses"
+      : route.path === "/v1/chat/completions" ? "chat" : undefined;
+  const diagnostics = protocol === undefined ? undefined : dependencies.diagnostics?.begin(requestId, protocol);
   const snapshot = structuredClone(dependencies.readRuntimeConfig());
-  const attempt = route.createAttempt?.(requestId, snapshot) ?? createRequestAttempt({
+  const attempt = route.createAttempt?.(requestId, snapshot, diagnostics) ?? createRequestAttempt({
     requestId,
     config: snapshot,
     protocol: "openai_chat",
     abortedErrorCount: 0,
+    ...(diagnostics === undefined ? {} : { diagnostics }),
   });
   const workController = new AbortController();
   const deliveryController = new AbortController();
@@ -218,6 +227,7 @@ async function handleRoute(
     deliveryController.signal,
     snapshot,
     attempt,
+    diagnostics,
   );
   let release: (() => void) | undefined;
   let disarmTotal: (() => void) | undefined;
@@ -233,11 +243,13 @@ async function handleRoute(
     release?.();
     dependencies.inflight.delete(inflight);
     request.signal.removeEventListener("abort", onAbort);
+    diagnostics?.finish();
     resolveSettled();
   };
 
   try {
     if (route.admission === "inference") {
+      diagnostics?.stage("admission");
       release = await dependencies.admission.acquire(snapshot, workController.signal);
       disarmTotal = armTimeout(snapshot.timeouts.totalMs, workController.signal, dependencies.scheduler, () => {
         abortWithTimeout(workController);
@@ -248,8 +260,10 @@ async function handleRoute(
     const url = new URL(request.url);
     let decoded: DecodedHttpRequest = { url, headers: request.headers };
     if (route.body === "wire-json-object") {
+      diagnostics?.stage("request_decode");
       const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes, workController.signal);
       decoded = { url, headers: request.headers, body };
+      diagnostics?.shape("request_decoded", () => diagnosticShape(body));
     }
 
     if (workController.signal.aborted) {
@@ -257,17 +271,19 @@ async function handleRoute(
       if (timeoutFailure !== undefined && !request.signal.aborted) {
         attempt.failure(new GatewayFailureError(timeoutFailure));
         const response = route.presentFailure(timeoutFailure, requestId, request);
+        diagnostics?.set({ httpStatus: response.status });
         holdUntilBody = response.body !== null;
         attempt.markPrepared();
         attempt.markHandedOff();
         return holdUntilBody
-          ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, cleanup)
+          ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, diagnostics, cleanup)
           : response;
       }
       return new Response(null);
     }
 
     const response = await route.endpoint(decoded, scope);
+    diagnostics?.set({ httpStatus: response.status });
     streamExecution = getStreamExecutionHandle(response);
     if (workController.signal.aborted) {
       await streamExecution?.completion;
@@ -275,11 +291,12 @@ async function handleRoute(
       if (timeoutFailure !== undefined && !request.signal.aborted) {
         attempt.failure(new GatewayFailureError(timeoutFailure));
         const timeoutResponse = route.presentFailure(timeoutFailure, requestId, request);
+        diagnostics?.set({ httpStatus: timeoutResponse.status });
         holdUntilBody = timeoutResponse.body !== null;
         attempt.markPrepared();
         attempt.markHandedOff();
         return holdUntilBody
-          ? attachLifecycle(timeoutResponse, deliveryController.signal, onAbort, attempt, cleanup)
+          ? attachLifecycle(timeoutResponse, deliveryController.signal, onAbort, attempt, diagnostics, cleanup)
           : timeoutResponse;
       }
       return new Response(null);
@@ -296,6 +313,7 @@ async function handleRoute(
       deliveryController.signal,
       () => cancelResponseDelivery({ kind: "aborted", source: "request", phase: "stream" }),
       attempt,
+      diagnostics,
       cleanup,
       stream ? dependencies.streamFinished : undefined,
       streamExecution,
@@ -306,23 +324,26 @@ async function handleRoute(
     if (timeoutFailure !== undefined && !request.signal.aborted) {
       attempt.failure(new GatewayFailureError(timeoutFailure));
       const response = route.presentFailure(timeoutFailure, requestId, request);
+      diagnostics?.set({ httpStatus: response.status });
       holdUntilBody = response.body !== null;
       attempt.markPrepared();
       attempt.markHandedOff();
       return holdUntilBody
-        ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, cleanup)
+        ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, diagnostics, cleanup)
         : response;
     }
+    diagnostics?.failure(error);
     attempt.failure(new GatewayFailureError(failure));
     if (request.signal.aborted || (failure.kind === "aborted" && workController.signal.aborted)) {
       return new Response(null);
     }
     const response = route.presentFailure(failure, requestId, request);
+    diagnostics?.set({ httpStatus: response.status });
     holdUntilBody = response.body !== null;
     attempt.markPrepared();
     attempt.markHandedOff();
     return holdUntilBody
-      ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, cleanup)
+      ? attachLifecycle(response, deliveryController.signal, onAbort, attempt, diagnostics, cleanup)
       : response;
   } finally {
     if (!holdUntilBody) {
@@ -344,6 +365,7 @@ function attachLifecycle(
   deliverySignal: AbortSignal,
   abortDelivery: () => void,
   attempt: RequestAttempt,
+  diagnostics: RequestDiagnostics | undefined,
   cleanup: () => void,
   onFinished?: () => void,
   streamExecution?: StreamExecutionHandle,
@@ -401,6 +423,7 @@ function attachLifecycle(
           return;
         }
         if (next.value !== undefined) {
+          diagnostics?.bytes("client", next.value.byteLength);
           attempt.markCommitted();
           streamController.enqueue(next.value);
           delivery?.markDelivered();
@@ -486,6 +509,7 @@ async function handleMountedRequest(
           protocol: "openai_chat",
           abortedErrorCount: 0,
         }),
+        undefined,
         cleanup,
       )
       : response;

@@ -317,4 +317,4 @@ function mapDispatcherError(error: unknown): CliError {
   return new CliError("internal_error");
 }
 
-const startupOnlyKeys = new Set(["port", "dataDir", "logLevel"]);
+const startupOnlyKeys = new Set(["port", "dataDir", "logLevel", "diagnostics"]);

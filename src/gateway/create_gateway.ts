@@ -8,6 +8,7 @@ import {
 import { AdmissionController, defaultDelay, type DelayFn } from "./admission.js";
 import { createHonoApp, type InflightRequest, type RouteRegistration } from "./hono_app.js";
 import type { TimeoutScheduler } from "./timeouts.js";
+import type { DiagnosticRecorder } from "../telemetry/diagnostics.js";
 
 export interface GatewayListener {
   readonly listening: boolean;
@@ -79,6 +80,7 @@ export interface LocalControlModule {
 }
 
 export interface GatewayDependencies {
+  readonly diagnostics?: DiagnosticRecorder;
   readonly nowMs?: () => number;
   readonly delay?: DelayFn;
   readonly createRequestId?: () => string;
@@ -122,6 +124,7 @@ export async function createGateway(
       }),
     };
   const appDependencies = {
+    ...(dependencies.diagnostics === undefined ? {} : { diagnostics: dependencies.diagnostics }),
     readRuntimeConfig: dependencies.readRuntimeConfig ?? (() => config.runtime),
     admission,
     scheduler,
