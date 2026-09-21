@@ -16,7 +16,10 @@ describe("Anthropic non-stream response", () => {
           finish_reason: "stop",
           message: {
             role: "assistant",
-            thinking_blocks: [{ type: "thinking", thinking: "signed plan", signature: "sigT" }],
+            thinking_blocks: [
+              { type: "thinking", thinking: "signed plan", signature: "sigT" },
+              { type: "redacted_thinking", data: "opaque2" },
+            ],
             content: "answer",
           },
         }],
@@ -32,6 +35,7 @@ describe("Anthropic non-stream response", () => {
       expect(JSON.parse(await response.text())).toMatchObject({
         content: [
           { type: "thinking", thinking: "signed plan", signature: "sigT" },
+          { type: "redacted_thinking", data: "opaque2" },
           { type: "text", text: "answer" },
         ],
       });

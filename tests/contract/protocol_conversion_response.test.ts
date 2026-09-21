@@ -183,6 +183,15 @@ describe("shared conversion response codecs", () => {
     expect(wire).toContain("\"signature\": \"sig1\"");
     expect(wire).toContain("\"type\": \"redacted_thinking\"");
     expect(wire).toContain("\"data\": \"opaque2\"");
+    const thinkingStart = wire.indexOf("\"type\": \"thinking\"");
+    const thinkingDelta = wire.indexOf("\"type\": \"thinking_delta\"");
+    const signatureDelta = wire.indexOf("\"type\": \"signature_delta\"");
+    const firstStop = wire.indexOf("event: content_block_stop", signatureDelta);
+    const redactedStart = wire.indexOf("\"type\": \"redacted_thinking\"");
+    const secondStop = wire.indexOf("event: content_block_stop", redactedStart);
+    expect([thinkingStart, thinkingDelta, signatureDelta, firstStop, redactedStart, secondStop]).toEqual(
+      [...[thinkingStart, thinkingDelta, signatureDelta, firstStop, redactedStart, secondStop]].sort((left, right) => left - right),
+    );
   });
 
   it("upgrades streamed Chat reasoning with an identical final signed snapshot without duplication", async () => {
@@ -649,7 +658,41 @@ describe("shared conversion response codecs", () => {
         item_id: "rs_text_done", output_index: 0, content_index: 0, delta: "late",
       }),
     ].join("");
-    for (const source of [doneThenDelta, partDoneThenDelta, textDoneThenDelta]) {
+    const textDoneThenChangedPart = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_changed_part", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_changed_part", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_changed_part", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.content_part.done", {
+        item_id: "rs_changed_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "done late" },
+      }),
+    ].join("");
+    const messageDoneThenDelta = [
+      responseEvent(0, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "msg_frozen", type: "message", status: "completed", role: "assistant",
+          content: [{ type: "output_text", text: "done", annotations: [] }],
+        },
+      }),
+      responseEvent(1, "response.output_text.delta", {
+        item_id: "msg_frozen", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    for (const source of [
+      doneThenDelta,
+      partDoneThenDelta,
+      textDoneThenDelta,
+      textDoneThenChangedPart,
+      messageDoneThenDelta,
+    ]) {
       await expect(async () => {
         for await (const _emission of convertProtocolStream(
           chunks(encoder.encode(source)), streamContext("responses", "chat"),

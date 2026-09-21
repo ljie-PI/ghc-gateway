@@ -990,7 +990,7 @@ async function* decodeResponsesStream(
   const observedContent = new Map<string, "output_text" | "refusal">();
   const addedOutputIndexes = new Set<number>();
   const doneOutputIndexes = new Set<number>();
-  const completedReasoningText = new Set<string>();
+  const completedReasoningText = new Map<string, string>();
   const completedReasoningParts = new Set<string>();
   let pendingStatuslessReasoning: { readonly outputIndex: number; readonly key: string } | undefined;
   const finishPendingStatuslessReasoning = function* (
@@ -1033,7 +1033,7 @@ async function* decodeResponsesStream(
       if (outputIndex === undefined || item === undefined) {
         invalid();
       }
-      if (addedOutputIndexes.has(outputIndex)) invalid();
+      if (addedOutputIndexes.has(outputIndex) || doneOutputIndexes.has(outputIndex)) invalid();
       addedOutputIndexes.add(outputIndex);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       const itemType = stringMember(item, "type");
@@ -1096,6 +1096,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.output_text.delta") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       const delta = singleMember(payload, "delta");
@@ -1112,6 +1113,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.output_text.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       const text = singleMember(payload, "text");
@@ -1134,6 +1136,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.refusal.delta") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       const delta = singleMember(payload, "delta");
@@ -1150,6 +1153,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.refusal.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       const refusal = singleMember(payload, "refusal");
@@ -1172,6 +1176,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.function_call_arguments.delta") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       const identity = toolsByIndex.get(outputIndex);
       if (identity === undefined) {
         invalid();
@@ -1188,6 +1193,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.function_call_arguments.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       const identity = toolsByIndex.get(outputIndex);
       if (identity === undefined) {
         invalid();
@@ -1309,6 +1315,7 @@ async function* decodeResponsesStream(
 
     if (type === "response.content_part.added" || type === "response.content_part.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       const contentIndex = integerMember(payload, "content_index");
       const part = objectMember(payload, "part");
       if (contentIndex === undefined || contentIndex < 0 || part === undefined) {
@@ -1343,7 +1350,6 @@ async function* decodeResponsesStream(
           refusal,
         };
       } else if (partType === "reasoning_text") {
-        if (doneOutputIndexes.has(outputIndex)) invalid();
         const identity = requiredResponseReasoningIdentity(
           payload,
           reasoningByIndex,
@@ -1355,7 +1361,12 @@ async function* decodeResponsesStream(
         const text = stringMember(part, "text");
         if (text === undefined) invalid();
         const partKey = responseReasoningPartKey(identity.key, "content", contentIndex);
-        if (type === "response.content_part.added" && completedReasoningParts.has(partKey)) invalid();
+        const completedText = completedReasoningText.get(partKey);
+        if (
+          type === "response.content_part.added"
+            ? completedReasoningParts.has(partKey) || completedText !== undefined
+            : completedReasoningParts.has(partKey) || (completedText !== undefined && completedText !== text)
+        ) invalid();
         observeResponseReasoningPart(identity, partKey, budget);
         yield { kind: "reasoning_start", key: identity.key, itemId: identity.itemId };
         yield {
@@ -1419,6 +1430,8 @@ async function* decodeResponsesStream(
       if (part === undefined || stringMember(part, "type") !== "summary_text") invalid();
       const text = stringMember(part, "text");
       if (text === undefined) invalid();
+      const completedText = completedReasoningText.get(partKey);
+      if (type === "response.reasoning_summary_part.done" && completedText !== undefined && completedText !== text) invalid();
       yield {
         kind: "reasoning_snapshot",
         key: identity.key,
@@ -1458,7 +1471,7 @@ async function* decodeResponsesStream(
       observeResponseReasoningPart(identity, partKey, budget);
       const text = singleMember(payload, done ? "text" : "delta");
       if (typeof text !== "string") invalid();
-      if (done) completedReasoningText.add(partKey);
+      if (done) completedReasoningText.set(partKey, text);
       yield {
         kind: done ? "reasoning_snapshot" : "reasoning_delta",
         key: identity.key,
