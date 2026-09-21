@@ -13,6 +13,7 @@ import {
 } from "../../serialization/wire_json.js";
 import type {
   InferenceProtocol,
+  SemanticReasoningItem,
   SemanticResponse,
   SemanticStreamEvent,
   SemanticUsage,
@@ -25,6 +26,19 @@ import {
   parseOpenaiChatCompletionsSse,
   type ChatCompletionsUsageCounters,
 } from "../openai_chat_completions/native.js";
+import {
+  decodeChatReasoning,
+  decodeResponsesReasoningItem,
+  type ChatThinkingBlock,
+} from "./reasoning.js";
+import {
+  responseMessageKey,
+  responseMessagePartKey,
+  responseMessagePartPosition,
+  responseReasoningKey,
+  responseReasoningPartKey,
+  responseToolKey,
+} from "./stream_keys.js";
 
 export function decodeProtocolStream(
   source: InferenceProtocol,
@@ -62,8 +76,91 @@ async function* decodeChatStream(
   let observedUsage: ChatCompletionsUsageCounters = {};
   let chatText = "";
   let chatRefusal = "";
+  let chatReasoning = "";
+  let scalarReasoning = "";
+  let reasoningOpen = false;
+  let reasoningClosed = false;
+  const observedThinkingBlocks = new Map<number, ChatThinkingBlock>();
+  const pendingThinkingKeys: string[] = [];
   let toolObserved = false;
   const pendingPostTool: SemanticStreamEvent[] = [];
+  const reasoningKey = "chat:reasoning:generic";
+  const reasoningPartKey = `${reasoningKey}:summary:0`;
+  const observeThinkingBlocks = function* (
+    blocks: readonly ChatThinkingBlock[],
+  ): Iterable<SemanticStreamEvent> {
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index] as ChatThinkingBlock;
+      const existing = observedThinkingBlocks.get(index);
+      if (existing !== undefined) {
+        if (!sameChatThinkingBlock(existing, block)) invalid();
+        continue;
+      }
+      if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
+      budget.reserveEntry();
+      observedThinkingBlocks.set(index, block);
+      const key = `chat:reasoning:block:${index}`;
+      if (block.type === "redacted_thinking") {
+        if (block.data.length === 0) continue;
+        budget.reserve(block.data);
+        yield {
+          kind: "reasoning_start",
+          key,
+          messagesState: { type: "redacted_thinking", data: block.data },
+        };
+        yield { kind: "semantic_progress" };
+        pendingThinkingKeys.push(key);
+        continue;
+      }
+      if (block.thinking.length === 0 && (block.signature === undefined || block.signature.length === 0)) continue;
+      budget.reserve(block.thinking);
+      if (block.signature !== undefined) budget.reserve(block.signature);
+      if (block.signature === undefined || block.signature.length === 0) continue;
+      yield {
+        kind: "reasoning_start",
+        key,
+        messagesState: { type: "thinking", thinking: block.thinking, signature: block.signature },
+      };
+      yield { kind: "semantic_progress" };
+      pendingThinkingKeys.push(key);
+    }
+  };
+  const updateVisibleReasoning = function* (): Iterable<SemanticStreamEvent> {
+    const thinkingReasoning = visibleThinkingBlockText(
+      [...observedThinkingBlocks.entries()].sort(([left], [right]) => left - right).map(([, block]) => block),
+    );
+    const next = compatibleReasoningProjection(scalarReasoning, thinkingReasoning);
+    if (!next.startsWith(chatReasoning)) invalid();
+    const suffix = next.slice(chatReasoning.length);
+    if (suffix.length === 0) return;
+    budget.reserve(suffix);
+    chatReasoning = next;
+    reasoningOpen = true;
+    yield {
+      kind: "reasoning_delta",
+      key: reasoningKey,
+      partKey: reasoningPartKey,
+      presentation: "summary",
+      partIndex: 0,
+      delta: suffix,
+    };
+  };
+  const closeReasoning = function* (
+    status: "completed" | "incomplete" = "completed",
+  ): Iterable<SemanticStreamEvent> {
+    if (!reasoningOpen && pendingThinkingKeys.length === 0) return;
+    let closed = false;
+    if (reasoningOpen) {
+      reasoningOpen = false;
+      yield { kind: "reasoning_done", key: reasoningKey, status };
+      closed = true;
+    }
+    for (const key of pendingThinkingKeys.splice(0)) {
+      yield { kind: "reasoning_done", key, status };
+      closed = true;
+    }
+    reasoningClosed ||= closed;
+  };
   const startReadyTools = function* (): Iterable<SemanticStreamEvent> {
     for (;;) {
       const tool = tools.get(nextToolToStart);
@@ -128,6 +225,9 @@ async function* decodeChatStream(
       if (pendingFinish === "length" || pendingFinish === "content_filter") {
         yield* startIdentifiedTools();
       }
+      yield* closeReasoning(
+        pendingFinish === "length" || pendingFinish === "content_filter" ? "incomplete" : "completed",
+      );
       for (const [index, tool] of tools) {
         if (pendingFinish === "length" || pendingFinish === "content_filter") {
           continue;
@@ -190,40 +290,21 @@ async function* decodeChatStream(
       if (audio !== undefined && audio !== null) {
         invalid();
       }
-      const reasoningContentValue = singleMember(delta, "reasoning_content");
-      if (
-        reasoningContentValue !== undefined
-        && reasoningContentValue !== null
-        && typeof reasoningContentValue !== "string"
-      ) {
-        invalid();
+      const reasoning = decodeChatReasoning(delta, invalid);
+      yield* observeThinkingBlocks(reasoning.thinkingBlocks);
+      if (reasoning.scalarText.length > 0) {
+        if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
+        budget.reserve(reasoning.scalarText);
+        scalarReasoning += reasoning.scalarText;
       }
-      const reasoningContent = typeof reasoningContentValue === "string" ? reasoningContentValue : undefined;
-      const reasoningTextValue = singleMember(delta, "reasoning_text");
-      if (
-        reasoningTextValue !== undefined
-        && reasoningTextValue !== null
-        && typeof reasoningTextValue !== "string"
-      ) {
-        invalid();
-      }
-      const reasoningText = typeof reasoningTextValue === "string" ? reasoningTextValue : undefined;
-      const thinkingBlocks = arrayMember(delta, "thinking_blocks");
-      if (
-        (reasoningContent !== undefined && reasoningContent.length > 0)
-        || (reasoningText !== undefined && reasoningText.length > 0)
-        || thinkingBlocks?.items.some((item) => (
-          isWireJsonObject(item) && hasSubstantiveReasoning(item)
-        )) === true
-      ) {
-        yield { kind: "semantic_progress" };
-      }
+      yield* updateVisibleReasoning();
       const contentValue = singleMember(delta, "content");
       if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
         invalid();
       }
       const content = typeof contentValue === "string" ? contentValue : undefined;
       if (content !== undefined && content.length > 0) {
+        yield* closeReasoning();
         budget.reserve(content);
         chatText += content;
         const event = { kind: "text_delta", key: toolObserved ? "chat:message:1" : "chat:message:0", delta: content } as const;
@@ -239,6 +320,7 @@ async function* decodeChatStream(
       }
       const refusal = typeof refusalValue === "string" ? refusalValue : undefined;
       if (refusal !== undefined && refusal.length > 0) {
+        yield* closeReasoning();
         budget.reserve(refusal);
         chatRefusal += refusal;
         const event = { kind: "refusal_delta", key: toolObserved ? "chat:message:1" : "chat:message:0", delta: refusal } as const;
@@ -254,6 +336,7 @@ async function* decodeChatStream(
       }
       const calls = isWireJsonArray(callsValue) ? callsValue : undefined;
       if (calls !== undefined) {
+        if (calls.items.length > 0) yield* closeReasoning();
         for (let position = 0; position < calls.items.length; position += 1) {
           const value = calls.items[position];
           if (!isWireJsonObject(value)) {
@@ -352,6 +435,16 @@ async function* decodeChatStream(
       if (audio !== undefined && audio !== null) {
         invalid();
       }
+      const reasoning = decodeChatReasoning(finalMessage, invalid);
+      yield* observeThinkingBlocks(reasoning.thinkingBlocks);
+      if (reasoning.scalarText.length > 0) {
+        if (!reasoning.scalarText.startsWith(scalarReasoning)) invalid();
+        if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
+        const suffix = reasoning.scalarText.slice(scalarReasoning.length);
+        budget.reserve(suffix);
+        scalarReasoning = reasoning.scalarText;
+      }
+      yield* updateVisibleReasoning();
       const contentValue = singleMember(finalMessage, "content");
       if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
         invalid();
@@ -365,6 +458,7 @@ async function* decodeChatStream(
         }
         const suffix = contentValue.slice(chatText.length);
         if (suffix.length > 0) {
+          yield* closeReasoning();
           budget.reserve(suffix);
           chatText = contentValue;
           const event = {
@@ -392,6 +486,7 @@ async function* decodeChatStream(
         }
         const suffix = refusalValue.slice(chatRefusal.length);
         if (suffix.length > 0) {
+          yield* closeReasoning();
           budget.reserve(suffix);
           chatRefusal = refusalValue;
           const event = {
@@ -408,6 +503,7 @@ async function* decodeChatStream(
       }
       const calls = arrayMember(finalMessage, "tool_calls");
       if (calls !== undefined) {
+        if (calls.items.length > 0) yield* closeReasoning();
         const finalToolArguments = new Map<number, string>();
         for (let position = 0; position < calls.items.length; position += 1) {
           const value = calls.items[position];
@@ -513,6 +609,25 @@ async function* decodeChatStream(
   invalidTruncated();
 }
 
+function visibleThinkingBlockText(blocks: readonly ChatThinkingBlock[]): string {
+  return blocks.flatMap((block) => block.type === "thinking" ? [block.thinking] : []).join("");
+}
+
+function compatibleReasoningProjection(left: string, right: string): string {
+  if (left.length === 0) return right;
+  if (right.length === 0) return left;
+  if (left.startsWith(right)) return left;
+  if (right.startsWith(left)) return right;
+  invalid();
+}
+
+function sameChatThinkingBlock(left: ChatThinkingBlock, right: ChatThinkingBlock): boolean {
+  if (left.type !== right.type) return false;
+  return left.type === "thinking"
+    ? left.thinking === (right as typeof left).thinking && left.signature === (right as typeof left).signature
+    : left.data === (right as typeof left).data;
+}
+
 async function* decodeMessagesStream(
   bytes: AsyncIterable<Uint8Array>,
   eventLimitBytes: number,
@@ -522,6 +637,7 @@ async function* decodeMessagesStream(
   const budget = new DecoderBudget(accumulatorBytes);
   const blocks = new Map<number, MessageBlockState>();
   let pendingFinish: SemanticResponse["finishReason"] | undefined;
+  let pendingReasoningKey: string | undefined;
   let observedUsage = emptyUsage();
   for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
     if (record.data === "[DONE]") {
@@ -549,6 +665,10 @@ async function* decodeMessagesStream(
       continue;
     }
     if (type === "content_block_start") {
+      if (pendingReasoningKey !== undefined) {
+        yield { kind: "reasoning_done", key: pendingReasoningKey, status: "completed" };
+        pendingReasoningKey = undefined;
+      }
       const index = integerMember(payload, "index");
       const block = objectMember(payload, "content_block");
       if (index === undefined || block === undefined || blocks.has(index)) {
@@ -600,11 +720,29 @@ async function* decodeMessagesStream(
         budget.reserve(callId);
         budget.reserve(name);
         yield { kind: "tool_start", key, callId, name };
-      } else if (blockType === "thinking" || blockType === "redacted_thinking") {
-        blocks.set(index, { kind: "ignored", closed: false });
-        if (hasSubstantiveReasoning(block)) {
+      } else if (blockType === "thinking") {
+        const thinking = singleMember(block, "thinking");
+        const signature = singleMember(block, "signature");
+        if (
+          typeof thinking !== "string"
+          || (signature !== undefined && typeof signature !== "string")
+        ) {
+          invalid();
+        }
+        const key = `messages:${index}:reasoning`;
+        const partKey = `${key}:summary:0`;
+        blocks.set(index, { kind: "reasoning", key, partKey, closed: false, sawContent: thinking.length > 0 });
+        if (thinking.length > 0) {
+          yield { kind: "reasoning_delta", key, partKey, presentation: "summary", partIndex: 0, delta: thinking };
+        }
+        if (typeof signature === "string" && signature.length > 0) {
           yield { kind: "semantic_progress" };
         }
+      } else if (blockType === "redacted_thinking") {
+        const data = singleMember(block, "data");
+        if (typeof data !== "string") invalid();
+        blocks.set(index, { kind: "opaque_reasoning", closed: false });
+        if (data.length > 0) yield { kind: "semantic_progress" };
       } else {
         invalid();
       }
@@ -666,11 +804,25 @@ async function* decodeMessagesStream(
           key: block.key,
           delta: partialJson,
         };
-      } else if (block.kind !== "ignored") {
-        invalid();
-      } else if (hasSubstantiveReasoning(delta)) {
-        yield { kind: "semantic_progress" };
-      }
+      } else if (block.kind === "reasoning" && deltaType === "thinking_delta") {
+        const thinking = singleMember(delta, "thinking");
+        if (typeof thinking !== "string") invalid();
+        block.sawContent ||= thinking.length > 0;
+        if (thinking.length > 0) {
+          yield {
+            kind: "reasoning_delta",
+            key: block.key,
+            partKey: block.partKey,
+            presentation: "summary",
+            partIndex: 0,
+            delta: thinking,
+          };
+        }
+      } else if (block.kind === "reasoning" && deltaType === "signature_delta") {
+        const signature = singleMember(delta, "signature");
+        if (typeof signature !== "string") invalid();
+        if (signature.length > 0) yield { kind: "semantic_progress" };
+      } else invalid();
       continue;
     }
     if (type === "content_block_stop") {
@@ -733,6 +885,11 @@ async function* decodeMessagesStream(
           orderKey: `messages:${index}:refusal`,
           contentIndex: 0,
         };
+      } else if (block.kind === "reasoning") {
+        if (block.sawContent) {
+          if (pendingReasoningKey !== undefined) invalid();
+          pendingReasoningKey = block.key;
+        }
       }
       continue;
     }
@@ -768,6 +925,14 @@ async function* decodeMessagesStream(
           yield { kind: "tool_done", key: block.key, completed };
         }
       }
+      if (pendingReasoningKey !== undefined) {
+        yield {
+          kind: "reasoning_done",
+          key: pendingReasoningKey,
+          status: completed ? "completed" : "incomplete",
+        };
+        pendingReasoningKey = undefined;
+      }
       yield {
         kind: "terminal",
         status: pendingFinish === "length" || pendingFinish === "content_filter" || pendingFinish === "refusal"
@@ -793,24 +958,28 @@ async function* decodeResponsesStream(
 ): AsyncIterable<SemanticStreamEvent> {
   const budget = new DecoderBudget(accumulatorBytes);
   const toolsByIndex = new Map<number, ResponseToolIdentity>();
-  const toolItemIndexes = new Map<string, number>();
+  const reasoningByIndex = new Map<number, ResponseReasoningIdentity>();
+  const itemAliases = new Map<string, { readonly outputIndex: number; readonly type: "function_call" | "reasoning" }>();
   const observeToolItemId = (outputIndex: number, value: WireJson | undefined): void => {
     if (value === undefined) return;
-    if (typeof value !== "string" || value.length === 0) invalid();
-    const existing = toolItemIndexes.get(value);
-    if (existing !== undefined) {
-      if (existing !== outputIndex) invalid();
-      return;
-    }
-    // Provider item IDs can change between events, but cannot belong to two calls.
-    budget.reserveEntry();
-    budget.reserve(value);
-    toolItemIndexes.set(value, outputIndex);
+    observeResponseItemAlias(itemAliases, outputIndex, "function_call", value, budget);
   };
   const observedOutputIndexes = new Set<number>();
   const observedOutputTypes = new Map<number, string>();
   const observedOutputStatuses = new Map<number, string>();
   const observedContent = new Map<string, "output_text" | "refusal">();
+  const addedOutputIndexes = new Set<number>();
+  const doneOutputIndexes = new Set<number>();
+  const completedReasoningParts = new Set<string>();
+  let pendingStatuslessReasoning: { readonly outputIndex: number; readonly key: string } | undefined;
+  const finishPendingStatuslessReasoning = function* (
+    status: "completed" | "incomplete",
+  ): Iterable<SemanticStreamEvent> {
+    if (pendingStatuslessReasoning === undefined) return;
+    yield { kind: "reasoning_done", key: pendingStatuslessReasoning.key, status };
+    yield { kind: "item_done", outputIndex: pendingStatuslessReasoning.outputIndex, itemType: "reasoning" };
+    pendingStatuslessReasoning = undefined;
+  };
   let observedUsage = emptyUsage();
   let lastSequence = -1;
   for await (const record of decodeSseRecords(bytes, eventLimitBytes, measureEvent)) {
@@ -829,12 +998,22 @@ async function* decodeResponsesStream(
       }
       lastSequence = sequence;
     }
+    const eventOutputIndex = integerMember(payload, "output_index");
+    if (
+      pendingStatuslessReasoning !== undefined
+      && eventOutputIndex !== undefined
+      && eventOutputIndex !== pendingStatuslessReasoning.outputIndex
+    ) {
+      yield* finishPendingStatuslessReasoning("completed");
+    }
     if (type === "response.output_item.added") {
       const outputIndex = integerMember(payload, "output_index");
       const item = objectMember(payload, "item");
       if (outputIndex === undefined || item === undefined) {
         invalid();
       }
+      if (addedOutputIndexes.has(outputIndex) || doneOutputIndexes.has(outputIndex)) invalid();
+      addedOutputIndexes.add(outputIndex);
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       const itemType = stringMember(item, "type");
       if (
@@ -844,14 +1023,14 @@ async function* decodeResponsesStream(
       ) {
         invalid();
       }
-      observedOutputTypes.set(outputIndex, itemType);
+      observeOutputType(observedOutputTypes, outputIndex, itemType);
       if (itemType === "message") {
         observeFinalItemContent(item, outputIndex, observedContent, budget);
-        yield { kind: "message_start", key: `responses:${outputIndex}:message` };
+        yield { kind: "message_start", key: responseMessageKey(outputIndex) };
         yield* messageContentEvents(item, outputIndex, false);
       }
       if (itemType === "function_call") {
-        const key = `responses:${outputIndex}`;
+        const key = responseToolKey(outputIndex);
         const callId = stringMember(item, "call_id");
         const name = stringMember(item, "name");
         if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0) {
@@ -882,13 +1061,21 @@ async function* decodeResponsesStream(
           yield { kind: "tool_arguments_delta", key, delta: argumentsJson };
         }
       }
-      if (itemType === "reasoning" && hasSubstantiveReasoning(item)) {
-        yield { kind: "semantic_progress" };
+      if (itemType === "reasoning") {
+        const identity = observeResponseReasoningIdentity(
+          reasoningByIndex,
+          itemAliases,
+          outputIndex,
+          item,
+          budget,
+        );
+        yield* responseReasoningItemEvents(item, identity, false, budget);
       }
       continue;
     }
     if (type === "response.output_text.delta") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       const delta = singleMember(payload, "delta");
@@ -905,6 +1092,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.output_text.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "text"), "output_text");
       const text = singleMember(payload, "text");
@@ -927,6 +1115,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.refusal.delta") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       const delta = singleMember(payload, "delta");
@@ -943,6 +1132,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.refusal.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       observeContent(observedContent, budget, responseContentKey(payload, "refusal"), "refusal");
       const refusal = singleMember(payload, "refusal");
@@ -965,6 +1155,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.function_call_arguments.delta") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       const identity = toolsByIndex.get(outputIndex);
       if (identity === undefined) {
         invalid();
@@ -981,6 +1172,7 @@ async function* decodeResponsesStream(
     }
     if (type === "response.function_call_arguments.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       const identity = toolsByIndex.get(outputIndex);
       if (identity === undefined) {
         invalid();
@@ -1001,6 +1193,7 @@ async function* decodeResponsesStream(
       if (outputIndex === undefined || item === undefined) {
         invalid();
       }
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       const itemType = stringMember(item, "type");
       if (itemType === undefined) {
@@ -1010,7 +1203,7 @@ async function* decodeResponsesStream(
       if (observedType !== undefined && observedType !== itemType) {
         invalid();
       }
-      observedOutputTypes.set(outputIndex, itemType);
+      observeOutputType(observedOutputTypes, outputIndex, itemType);
       const itemStatus = stringMember(item, "status");
       if (
         ((itemType === "message" || itemType === "function_call") && itemStatus === undefined)
@@ -1029,11 +1222,23 @@ async function* decodeResponsesStream(
         observedOutputStatuses.set(outputIndex, itemStatus);
       }
       observeFinalItemContent(item, outputIndex, observedContent, budget);
-      if (itemType === "reasoning" && hasSubstantiveReasoning(item)) {
-        yield { kind: "semantic_progress" };
+      yield* finalItemEvents(
+        item,
+        outputIndex,
+        toolsByIndex,
+        reasoningByIndex,
+        itemAliases,
+        observeToolItemId,
+        budget,
+      );
+      doneOutputIndexes.add(outputIndex);
+      if (itemType === "reasoning" && itemStatus === undefined) {
+        const identity = reasoningByIndex.get(outputIndex);
+        if (identity === undefined || pendingStatuslessReasoning !== undefined) invalid();
+        pendingStatuslessReasoning = { outputIndex, key: identity.key };
+      } else {
+        yield { kind: "item_done", outputIndex, itemType };
       }
-      yield* finalItemEvents(item, outputIndex, toolsByIndex, observeToolItemId);
-      yield { kind: "item_done", outputIndex, itemType };
       continue;
     }
     if (type === "response.completed" || type === "response.incomplete" || type === "response.failed") {
@@ -1057,7 +1262,16 @@ async function* decodeResponsesStream(
         });
       }
 
-      yield* finalResponseEvents(response, toolsByIndex, observeToolItemId);
+      yield* finalResponseEvents(
+        response,
+        toolsByIndex,
+        reasoningByIndex,
+        itemAliases,
+        doneOutputIndexes,
+        observeToolItemId,
+        budget,
+      );
+      yield* finishPendingStatuslessReasoning(type === "response.incomplete" ? "incomplete" : "completed");
       const usage = objectMember(response, "usage");
       if (usage !== undefined) {
         observedUsage = responsesUsage(usage, observedUsage);
@@ -1080,6 +1294,7 @@ async function* decodeResponsesStream(
 
     if (type === "response.content_part.added" || type === "response.content_part.done") {
       const outputIndex = requiredOutputIndex(payload);
+      if (doneOutputIndexes.has(outputIndex)) invalid();
       const contentIndex = integerMember(payload, "content_index");
       const part = objectMember(payload, "part");
       if (contentIndex === undefined || contentIndex < 0 || part === undefined) {
@@ -1092,12 +1307,12 @@ async function* decodeResponsesStream(
         if (text === undefined) {
           invalid();
         }
-        const key = `responses:${outputIndex}:${contentIndex}:text`;
+        const key = responseMessagePartKey(outputIndex, contentIndex, "text");
         observeContent(observedContent, budget, key, "output_text");
         yield {
           kind: "text_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           text,
         };
       } else if (partType === "refusal") {
@@ -1105,24 +1320,55 @@ async function* decodeResponsesStream(
         if (refusal === undefined) {
           invalid();
         }
-        const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+        const key = responseMessagePartKey(outputIndex, contentIndex, "refusal");
         observeContent(observedContent, budget, key, "refusal");
         yield {
           kind: "refusal_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           refusal,
         };
+      } else if (partType === "reasoning_text") {
+        const identity = requiredResponseReasoningIdentity(
+          payload,
+          reasoningByIndex,
+          itemAliases,
+          observedOutputIndexes,
+          observedOutputTypes,
+          budget,
+        );
+        const text = stringMember(part, "text");
+        if (text === undefined) invalid();
+        const partKey = responseReasoningPartKey(identity.key, "content", contentIndex);
+        const completedText = identity.completedText.get(partKey);
+        if (
+          type === "response.content_part.added"
+            ? completedReasoningParts.has(partKey) || completedText !== undefined
+            : completedReasoningParts.has(partKey) || (completedText !== undefined && completedText !== text)
+        ) invalid();
+        observeResponseReasoningPart(identity, partKey, budget);
+        yield { kind: "reasoning_start", key: identity.key, itemId: identity.itemId };
+        yield {
+          kind: "reasoning_snapshot",
+          key: identity.key,
+          partKey,
+          itemId: identity.itemId,
+          presentation: "content",
+          partIndex: contentIndex,
+          text,
+        };
+        if (type === "response.content_part.done") completedReasoningParts.add(partKey);
+        if (type === "response.content_part.done") identity.completedText.set(partKey, text);
       } else {
         invalid();
       }
-      if (type === "response.content_part.done") {
+      if (type === "response.content_part.done" && partType !== "reasoning_text") {
         yield {
           kind: "content_done",
           key: partType === "output_text"
-            ? `responses:${outputIndex}:${contentIndex}:text`
-            : `responses:${outputIndex}:${contentIndex}:refusal`,
-          orderKey: `responses:${outputIndex}:message`,
+            ? responseMessagePartKey(outputIndex, contentIndex, "text")
+            : responseMessagePartKey(outputIndex, contentIndex, "refusal"),
+          orderKey: responseMessageKey(outputIndex),
           contentIndex,
         };
       }
@@ -1140,10 +1386,82 @@ async function* decodeResponsesStream(
       }
       continue;
     }
-    if (type.startsWith("response.reasoning_")) {
-      if (hasSubstantiveReasoning(payload)) {
-        yield { kind: "semantic_progress" };
-      }
+    if (
+      type === "response.reasoning_summary_part.added"
+      || type === "response.reasoning_summary_part.done"
+    ) {
+      const identity = requiredResponseReasoningIdentity(
+        payload,
+        reasoningByIndex,
+        itemAliases,
+        observedOutputIndexes,
+        observedOutputTypes,
+        budget,
+      );
+      const summaryIndex = requiredReasoningPartIndex(payload, "summary_index");
+      const partKey = responseReasoningPartKey(identity.key, "summary", summaryIndex);
+      if (
+        doneOutputIndexes.has(requiredOutputIndex(payload))
+        || completedReasoningParts.has(partKey)
+        || (type === "response.reasoning_summary_part.added" && identity.completedText.has(partKey))
+      ) invalid();
+      observeResponseReasoningPart(identity, partKey, budget);
+      const part = objectMember(payload, "part");
+      if (part === undefined || stringMember(part, "type") !== "summary_text") invalid();
+      const text = stringMember(part, "text");
+      if (text === undefined) invalid();
+      const completedText = identity.completedText.get(partKey);
+      if (type === "response.reasoning_summary_part.done" && completedText !== undefined && completedText !== text) invalid();
+      yield {
+        kind: "reasoning_snapshot",
+        key: identity.key,
+        partKey,
+        itemId: identity.itemId,
+        presentation: "summary",
+        partIndex: summaryIndex,
+        text,
+      };
+      if (type === "response.reasoning_summary_part.done") completedReasoningParts.add(partKey);
+      if (type === "response.reasoning_summary_part.done") identity.completedText.set(partKey, text);
+      continue;
+    }
+    if (
+      type === "response.reasoning_summary_text.delta"
+      || type === "response.reasoning_summary_text.done"
+      || type === "response.reasoning_text.delta"
+      || type === "response.reasoning_text.done"
+    ) {
+      const identity = requiredResponseReasoningIdentity(
+        payload,
+        reasoningByIndex,
+        itemAliases,
+        observedOutputIndexes,
+        observedOutputTypes,
+        budget,
+      );
+      const summary = type.includes("summary");
+      const done = type.endsWith(".done");
+      const presentation = summary ? "summary" as const : "content" as const;
+      const partIndex = requiredReasoningPartIndex(payload, summary ? "summary_index" : "content_index");
+      const partKey = responseReasoningPartKey(identity.key, presentation, partIndex);
+      if (
+        doneOutputIndexes.has(requiredOutputIndex(payload))
+        || completedReasoningParts.has(partKey)
+        || identity.completedText.has(partKey)
+      ) invalid();
+      observeResponseReasoningPart(identity, partKey, budget);
+      const text = singleMember(payload, done ? "text" : "delta");
+      if (typeof text !== "string") invalid();
+      if (done) identity.completedText.set(partKey, text);
+      yield {
+        kind: done ? "reasoning_snapshot" : "reasoning_delta",
+        key: identity.key,
+        partKey,
+        itemId: identity.itemId,
+        presentation,
+        partIndex,
+        ...(done ? { text } : { delta: text }),
+      } as SemanticStreamEvent;
       continue;
     }
     if (type === "error") {
@@ -1183,14 +1501,17 @@ function validateTerminalResponse(
       continue;
     }
     const itemType = stringMember(item, "type");
-    if (itemType !== "function_call" && itemType !== "message") {
+    if (itemType !== "function_call" && itemType !== "message" && itemType !== "reasoning") {
       continue;
     }
     const itemStatus = stringMember(item, "status");
     if (
-      itemStatus === undefined
-      || (itemStatus !== "completed" && itemStatus !== "incomplete" && itemStatus !== "in_progress")
-      || (expectedStatus === "completed" && itemStatus !== "completed")
+      ((itemType === "function_call" || itemType === "message") && itemStatus === undefined)
+      || (itemStatus !== undefined
+        && itemStatus !== "completed"
+        && itemStatus !== "incomplete"
+        && itemStatus !== "in_progress")
+      || (expectedStatus === "completed" && itemStatus !== undefined && itemStatus !== "completed")
     ) {
       invalid();
     }
@@ -1211,12 +1532,9 @@ function validateTerminalResponse(
     }
   }
   for (const [key, expectedType] of observedContent) {
-    const match = /^responses:(\d+):(\d+):(text|refusal)$/u.exec(key);
-    if (match?.[1] === undefined || match[2] === undefined) {
-      invalid();
-    }
-    const outputIndex = Number.parseInt(match[1], 10);
-    const contentIndex = Number.parseInt(match[2], 10);
+    const position = responseMessagePartPosition(key);
+    if (position === undefined) invalid();
+    const { outputIndex, contentIndex } = position;
     const item = output.items[outputIndex];
     const content = isWireJsonObject(item) ? arrayMember(item, "content") : undefined;
     const part = content?.items[contentIndex];
@@ -1235,6 +1553,30 @@ function observeOutputIndex(
     budget.reserveEntry();
     indexes.add(outputIndex);
   }
+}
+
+function observeOutputType(types: Map<number, string>, outputIndex: number, type: string): void {
+  const existing = types.get(outputIndex);
+  if (existing !== undefined && existing !== type) invalid();
+  types.set(outputIndex, type);
+}
+
+function observeResponseItemAlias(
+  aliases: Map<string, { readonly outputIndex: number; readonly type: "function_call" | "reasoning" }>,
+  outputIndex: number,
+  type: "function_call" | "reasoning",
+  value: WireJson,
+  budget: DecoderBudget,
+): void {
+  if (typeof value !== "string" || value.length === 0) invalid();
+  const existing = aliases.get(value);
+  if (existing !== undefined) {
+    if (existing.outputIndex !== outputIndex || existing.type !== type) invalid();
+    return;
+  }
+  budget.reserveEntry();
+  budget.reserve(value);
+  aliases.set(value, { outputIndex, type });
 }
 
 function observeContent(
@@ -1279,7 +1621,7 @@ function observeFinalItemContent(
     observeContent(
       observedContent,
       budget,
-      `responses:${outputIndex}:${contentIndex}:${type === "output_text" ? "text" : "refusal"}`,
+      responseMessagePartKey(outputIndex, contentIndex, type === "output_text" ? "text" : "refusal"),
       type,
     );
   }
@@ -1311,41 +1653,6 @@ function responseHasRefusal(response: WireJsonObject): boolean {
       isWireJsonObject(part) && stringMember(part, "type") === "refusal"
     )) === true;
   }) === true;
-}
-
-function hasSubstantiveReasoning(item: WireJsonObject): boolean {
-  return [
-    "reasoning_text",
-    "thinking",
-    "signature",
-    "data",
-    "delta",
-    "text",
-    "part",
-    "content",
-    "summary",
-    "encrypted_content",
-  ].some((key) => (
-    memberValues(item, key).some((value) => hasNonemptyString(value))
-  ));
-}
-
-function hasNonemptyString(value: WireJson): boolean {
-  if (typeof value === "string") {
-    return value.length > 0;
-  }
-  if (isWireJsonArray(value)) {
-    return value.items.some((item) => hasNonemptyString(item));
-  }
-  if (isWireJsonObject(value)) {
-    return value.members.some((member) => (
-      member.key !== "type"
-      && member.key !== "id"
-      && member.key !== "status"
-      && hasNonemptyString(member.value)
-    ));
-  }
-  return false;
 }
 
 function sameToolArguments(left: string, right: string): boolean {
@@ -1480,7 +1787,11 @@ function subtractMagnitude(left: string, right: string): string {
 function* finalResponseEvents(
   response: WireJsonObject,
   toolsByIndex: Map<number, ResponseToolIdentity>,
+  reasoningByIndex: Map<number, ResponseReasoningIdentity>,
+  itemAliases: Map<string, { readonly outputIndex: number; readonly type: "function_call" | "reasoning" }>,
+  doneOutputIndexes: ReadonlySet<number>,
   observeToolItemId: (outputIndex: number, value: WireJson | undefined) => void,
+  budget: DecoderBudget,
 ): Iterable<SemanticStreamEvent> {
   const output = arrayMember(response, "output");
   if (output === undefined) {
@@ -1491,7 +1802,16 @@ function* finalResponseEvents(
     if (!isWireJsonObject(item)) {
       invalid();
     }
-    yield* finalItemEvents(item, index, toolsByIndex, observeToolItemId);
+    yield* finalItemEvents(
+      item,
+      index,
+      toolsByIndex,
+      reasoningByIndex,
+      itemAliases,
+      observeToolItemId,
+      budget,
+      doneOutputIndexes.has(index),
+    );
   }
 }
 
@@ -1499,7 +1819,11 @@ function* finalItemEvents(
   item: WireJsonObject,
   outputIndex: number,
   toolsByIndex: Map<number, ResponseToolIdentity>,
+  reasoningByIndex: Map<number, ResponseReasoningIdentity>,
+  itemAliases: Map<string, { readonly outputIndex: number; readonly type: "function_call" | "reasoning" }>,
   observeToolItemId: (outputIndex: number, value: WireJson | undefined) => void,
+  budget: DecoderBudget,
+  alreadyDone = false,
 ): Iterable<SemanticStreamEvent> {
   const type = stringMember(item, "type");
   if (type === "message") {
@@ -1519,7 +1843,7 @@ function* finalItemEvents(
     let identity = toolsByIndex.get(outputIndex);
     if (identity === undefined) {
       identity = {
-        key: `responses:${outputIndex}`,
+        key: responseToolKey(outputIndex),
         itemId: finalItemId,
         callId: finalCallId,
         name: finalName,
@@ -1551,6 +1875,14 @@ function* finalItemEvents(
   }
 
   if (type === "reasoning") {
+    const identity = observeResponseReasoningIdentity(
+      reasoningByIndex,
+      itemAliases,
+      outputIndex,
+      item,
+      budget,
+    );
+    yield* responseReasoningItemEvents(item, identity, true, budget, alreadyDone);
     return;
   }
   invalid();
@@ -1576,18 +1908,18 @@ function* messageContentEvents(
       if (text === undefined) {
         invalid();
       }
-      const key = `responses:${outputIndex}:${contentIndex}:text`;
+      const key = responseMessagePartKey(outputIndex, contentIndex, "text");
       yield {
         kind: "text_done",
         key,
-        orderKey: `responses:${outputIndex}:message`,
+        orderKey: responseMessageKey(outputIndex),
         text,
       };
       if (complete) {
         yield {
           kind: "content_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           contentIndex,
         };
       }
@@ -1596,18 +1928,18 @@ function* messageContentEvents(
       if (refusal === undefined) {
         invalid();
       }
-      const key = `responses:${outputIndex}:${contentIndex}:refusal`;
+      const key = responseMessagePartKey(outputIndex, contentIndex, "refusal");
       yield {
         kind: "refusal_done",
         key,
-        orderKey: `responses:${outputIndex}:message`,
+        orderKey: responseMessageKey(outputIndex),
         refusal,
       };
       if (complete) {
         yield {
           kind: "content_done",
           key,
-          orderKey: `responses:${outputIndex}:message`,
+          orderKey: responseMessageKey(outputIndex),
           contentIndex,
         };
       }
@@ -1633,9 +1965,169 @@ interface ResponseToolIdentity {
   readonly name: string;
 }
 
+interface ResponseReasoningIdentity {
+  readonly key: string;
+  readonly itemId: string;
+  readonly parts: Set<string>;
+  readonly completedText: Map<string, string>;
+  finalItem?: SemanticReasoningItem | undefined;
+}
+
+function observeResponseReasoningIdentity(
+  identities: Map<number, ResponseReasoningIdentity>,
+  itemAliases: Map<string, { readonly outputIndex: number; readonly type: "function_call" | "reasoning" }>,
+  outputIndex: number,
+  item: WireJsonObject,
+  budget: DecoderBudget,
+): ResponseReasoningIdentity {
+  const itemId = stringMember(item, "id");
+  if (itemId === undefined || itemId.length === 0) invalid();
+  const existing = identities.get(outputIndex);
+  if (existing !== undefined) {
+    observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
+    return existing;
+  }
+  observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
+  budget.reserveEntry();
+  const identity = {
+    key: responseReasoningKey(outputIndex),
+    itemId,
+    parts: new Set<string>(),
+    completedText: new Map<string, string>(),
+  };
+  identities.set(outputIndex, identity);
+  return identity;
+}
+
+function requiredResponseReasoningIdentity(
+  payload: WireJsonObject,
+  identities: Map<number, ResponseReasoningIdentity>,
+  itemAliases: Map<string, { readonly outputIndex: number; readonly type: "function_call" | "reasoning" }>,
+  observedOutputIndexes: Set<number>,
+  observedOutputTypes: Map<number, string>,
+  budget: DecoderBudget,
+): ResponseReasoningIdentity {
+  const outputIndex = requiredOutputIndex(payload);
+  const itemId = stringMember(payload, "item_id");
+  if (itemId === undefined || itemId.length === 0) invalid();
+  let identity = identities.get(outputIndex);
+  if (identity === undefined) {
+    observeOutputIndex(observedOutputIndexes, budget, outputIndex);
+    const observedType = observedOutputTypes.get(outputIndex);
+    if (observedType !== undefined && observedType !== "reasoning") invalid();
+    observeOutputType(observedOutputTypes, outputIndex, "reasoning");
+    observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
+    budget.reserveEntry();
+    identity = {
+      key: responseReasoningKey(outputIndex),
+      itemId,
+      parts: new Set<string>(),
+      completedText: new Map<string, string>(),
+    };
+    identities.set(outputIndex, identity);
+  } else observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
+  return identity;
+}
+
+function requiredReasoningPartIndex(payload: WireJsonObject, key: "summary_index" | "content_index"): number {
+  const index = integerMember(payload, key);
+  if (index === undefined || index < 0) invalid();
+  return index;
+}
+
+function observeResponseReasoningPart(
+  identity: ResponseReasoningIdentity,
+  partKey: string,
+  budget: DecoderBudget,
+): void {
+  if (identity.parts.has(partKey)) return;
+  budget.reserveEntry();
+  identity.parts.add(partKey);
+}
+
+function* responseReasoningItemEvents(
+  item: WireJsonObject,
+  identity: ResponseReasoningIdentity,
+  complete: boolean,
+  budget: DecoderBudget,
+  alreadyDone = false,
+): Iterable<SemanticStreamEvent> {
+  const reasoning = decodeResponsesReasoningItem(item, invalid);
+  const finalParts = new Set(reasoning.parts.map((part) => (
+    responseReasoningPartKey(identity.key, part.presentation, part.index)
+  )));
+  if (complete && [...identity.parts].some((partKey) => !finalParts.has(partKey))) invalid();
+  if (complete) {
+    const finalText = new Map(reasoning.parts.map((part) => [
+      responseReasoningPartKey(identity.key, part.presentation, part.index),
+      part.text,
+    ]));
+    if ([...identity.completedText].some(([partKey, text]) => finalText.get(partKey) !== text)) invalid();
+  }
+  if (alreadyDone) {
+    if (identity.finalItem === undefined || !sameSemanticReasoning(identity.finalItem, reasoning)) invalid();
+    return;
+  }
+  yield { kind: "reasoning_start", key: identity.key, itemId: identity.itemId };
+  for (const part of reasoning.parts) {
+    const partKey = responseReasoningPartKey(identity.key, part.presentation, part.index);
+    observeResponseReasoningPart(identity, partKey, budget);
+    yield {
+      kind: "reasoning_snapshot",
+      key: identity.key,
+      partKey,
+      itemId: identity.itemId,
+      presentation: part.presentation,
+      partIndex: part.index,
+      text: part.text,
+    };
+  }
+  if (reasoning.parts.every((part) => part.text.length === 0) && reasoning.hasOpaqueState) {
+    yield { kind: "semantic_progress" };
+  }
+  if (complete && reasoning.parts.some((part) => part.text.length > 0)) {
+    if (reasoning.status !== undefined) {
+      yield {
+        kind: "reasoning_done",
+        key: identity.key,
+        status: reasoning.status,
+      };
+    }
+  }
+  if (complete) {
+    identity.finalItem = reasoning;
+    if (reasoning.parts.every((part) => part.text.length === 0) && reasoning.status !== undefined) {
+      yield {
+        kind: "reasoning_done",
+        key: identity.key,
+        status: reasoning.status,
+      };
+    }
+  }
+}
+
+function sameSemanticReasoning(left: SemanticReasoningItem, right: SemanticReasoningItem): boolean {
+  return (left.status === undefined || right.status === undefined || left.status === right.status)
+    && left.parts.length === right.parts.length
+    && left.parts.every((part, index) => {
+      const candidate = right.parts[index];
+      return candidate !== undefined
+        && part.presentation === candidate.presentation
+        && part.index === candidate.index
+        && part.text === candidate.text;
+    });
+}
+
 type MessageBlockState =
   | { readonly kind: "text" | "refusal"; closed: boolean; sawContent: boolean }
-  | { readonly kind: "ignored"; closed: boolean }
+  | { readonly kind: "opaque_reasoning"; closed: boolean }
+  | {
+    readonly kind: "reasoning";
+    readonly key: string;
+    readonly partKey: string;
+    closed: boolean;
+    sawContent: boolean;
+  }
   | {
     readonly kind: "tool";
     readonly key: string;
@@ -1727,11 +2219,13 @@ function chatUsage(value: WireJsonObject): ChatCompletionsUsageCounters {
 }
 
 function messagesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
+  const outputDetails = nullableObjectMember(value, "output_tokens_details");
   return mergeMessagesUsage(current, {
     inputTokens: optionalNonnegativeIntegerMember(value, "input_tokens"),
     outputTokens: optionalNonnegativeIntegerMember(value, "output_tokens"),
     cacheReadTokens: optionalNonnegativeIntegerMember(value, "cache_read_input_tokens"),
     cacheWriteTokens: optionalNonnegativeIntegerMember(value, "cache_creation_input_tokens"),
+    thinkingTokens: optionalNonnegativeIntegerMember(outputDetails, "thinking_tokens"),
   });
 }
 
@@ -1753,11 +2247,11 @@ function responseContentKey(object: WireJsonObject, kind: "text" | "refusal"): s
   if (outputIndex === undefined || contentIndex === undefined) {
     invalid();
   }
-  return `responses:${outputIndex}:${contentIndex}:${kind}`;
+  return responseMessagePartKey(outputIndex, contentIndex, kind);
 }
 
 function responseStreamMessageKey(object: WireJsonObject): string {
-  return `responses:${requiredOutputIndex(object)}:message`;
+  return responseMessageKey(requiredOutputIndex(object));
 }
 
 function singleMember(object: WireJsonObject, key: string): WireJson | undefined {

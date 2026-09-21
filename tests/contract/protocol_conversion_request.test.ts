@@ -547,6 +547,22 @@ describe("shared conversion request codecs", () => {
     },
   );
 
+  it.each(["messages", "responses"] as const)(
+    "accepts generated Chat reasoning_content as omitted presentation for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("chat", target, body({
+        model: "source",
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: null, reasoning_content: "visible plan" },
+          { role: "user", content: "continue" },
+        ],
+      }), "target", capability([target]));
+      expect(converted.degradations).toContain("reasoning.presentation_omitted");
+      expect(JSON.stringify(decoded(converted.bytes))).not.toContain("visible plan");
+    },
+  );
+
   it("preserves source function-tool strictness defaults across OpenAI protocols", () => {
     const chatToResponses = decoded(prepareConvertedRequest("chat", "responses", body({
       model: "source",
@@ -770,6 +786,59 @@ describe("shared conversion request codecs", () => {
       "target",
       capability(["chat"]),
     )).toThrow();
+  });
+
+  it.each(["chat", "messages"] as const)(
+    "strictly validates generated Responses reasoning items before converting to %s",
+    (target) => {
+      const converted = prepareConvertedRequest("responses", target, body({
+        model: "source",
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+          {
+            type: "reasoning",
+            id: "rs_1",
+            status: "completed",
+            summary: [{ type: "summary_text", text: "visible plan" }],
+            content: [{ type: "reasoning_text", text: "detail" }],
+            encrypted_content: "opaque",
+          },
+        ],
+      }), "target", capability([target]));
+      expect(converted.degradations).toEqual([
+        "reasoning.presentation_omitted",
+        "reasoning.state_omitted",
+      ]);
+      for (const malformed of [
+        { type: "reasoning", summary: [{ type: "unknown", text: "plan" }] },
+        { type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: 1 }] },
+        { type: "reasoning", summary: [], encrypted_content: {} },
+        { type: "reasoning", status: "failed", summary: [] },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "plan", unknown: true }] },
+      ]) {
+        expect(() => prepareConvertedRequest("responses", target, body({
+          model: "source",
+          input: [
+            { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+            malformed,
+          ],
+        }), "target", capability([target]))).toThrow();
+      }
+    },
+  );
+
+  it("rejects unknown and conflicting nested Chat reasoning fields", () => {
+    for (const assistant of [
+      { role: "assistant", content: null, reasoning_text: "A", reasoning_content: "B" },
+      { role: "assistant", content: null, reasoning: { text: "plan", unknown: true } },
+      { role: "assistant", content: null, reasoning_details: [{ text: "plan", unknown: true }] },
+      { role: "assistant", content: null, thinking_blocks: [{ type: "thinking", thinking: "plan", unknown: true }] },
+    ]) {
+      expect(() => prepareConvertedRequest("chat", "responses", body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }, assistant],
+      }), "target", capability(["responses"]))).toThrow();
+    }
   });
 
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {

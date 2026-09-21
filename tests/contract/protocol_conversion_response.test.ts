@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { convertBufferedPlannedResponse, convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
 import { planProtocolExecution } from "../../src/protocols/conversion/planner.js";
@@ -23,6 +24,959 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 describe("shared conversion response codecs", () => {
+  it.each([
+    { source: "chat" as const, target: "responses" as const, visible: true },
+    { source: "chat" as const, target: "messages" as const, visible: false },
+    { source: "messages" as const, target: "chat" as const, visible: true },
+    { source: "messages" as const, target: "responses" as const, visible: true },
+    { source: "responses" as const, target: "chat" as const, visible: true },
+    { source: "responses" as const, target: "messages" as const, visible: false },
+  ])("preserves portable buffered reasoning for $source -> $target", ({ source, target, visible }) => {
+    const converted = convertBufferedResponse(
+      encoder.encode(JSON.stringify(reasoningBufferedSource(source))),
+      context(source, target),
+    );
+    const payload = decoded(converted.bytes);
+    const wire = decoder.decode(converted.bytes);
+    expect(wire.match(/visible plan/gu)?.length ?? 0).toBe(visible ? 1 : 0);
+    expect(wire).toContain("answer");
+    expect(wire).not.toContain("opaque-state");
+    expect(wire).not.toContain("provider-signature");
+    if (target === "chat") {
+      expect((payload.choices as Array<{ message: Record<string, unknown> }>)[0]?.message).toMatchObject({
+        reasoning_content: "visible plan",
+        content: "answer",
+      });
+    } else if (target === "responses") {
+      expect((payload.output as Array<Record<string, unknown>>).map((item) => item.type)).toEqual([
+        "reasoning",
+        "message",
+      ]);
+    } else {
+      expect(payload.content).toEqual([{ type: "text", text: "answer" }]);
+    }
+  });
+
+  it.each([
+    { source: "chat" as const, target: "responses" as const, visible: true },
+    { source: "chat" as const, target: "messages" as const, visible: false },
+    { source: "messages" as const, target: "chat" as const, visible: true },
+    { source: "messages" as const, target: "responses" as const, visible: true },
+    { source: "responses" as const, target: "chat" as const, visible: true },
+    { source: "responses" as const, target: "messages" as const, visible: false },
+  ])("preserves portable streamed reasoning for $source -> $target", async ({ source, target, visible }) => {
+    const emissions = await collectStream(
+      source,
+      target,
+      chunks(encoder.encode(reasoningStreamSource(source))),
+    );
+    const wire = wireText(emissions);
+    expect(wire).toContain("answer");
+    expect(wire).not.toContain("provider-signature");
+    if (target === "chat") {
+      const events = chatDataEvents(wire);
+      const reasoning = events
+        .flatMap((event) => event.choices as Array<{ delta?: { reasoning_content?: string } }> ?? [])
+        .map((choice) => choice.delta?.reasoning_content ?? "")
+        .join("");
+      expect(reasoning).toBe(visible ? "visible plan" : "");
+    } else if (target === "responses") {
+      const events = responseDataEvents(wire);
+      expect(events.some((event) => event.type === "response.reasoning_summary_text.delta")).toBe(visible);
+      expect(events.some((event) => event.type === "response.output_item.done"
+        && (event.item as { type?: string } | undefined)?.type === "reasoning")).toBe(visible);
+    } else {
+      expect(wire).not.toContain("thinking_delta");
+      expect(wire).not.toContain("signature_delta");
+    }
+    expect(emissions.filter((emission) => emission.kind === "terminal")).toHaveLength(1);
+  });
+
+  it("preserves Responses summary and content order in a reasoning-only Chat response", () => {
+    const converted = convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "resp_reasoning_only",
+      object: "response",
+      status: "completed",
+      output: [{
+        id: "rs_reasoning_only",
+        type: "reasoning",
+        status: "completed",
+        summary: [
+          { type: "summary_text", text: "summary one " },
+          { type: "summary_text", text: "summary two " },
+        ],
+        content: [{ type: "reasoning_text", text: "content" }],
+      }],
+      usage: { input_tokens: 1, output_tokens: 3, total_tokens: 4 },
+    })), context("responses", "chat"));
+    const payload = decoded(converted.bytes);
+    expect((payload.choices as Array<{ message: Record<string, unknown> }>)[0]?.message).toEqual({
+      role: "assistant",
+      reasoning_content: "summary one summary two content",
+      content: null,
+    });
+  });
+
+  it("rejects buffered Chat output when reasoning is interleaved after ordinary output", () => {
+    expect(() => convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "resp_interleaved",
+      object: "response",
+      status: "completed",
+      output: [
+        {
+          id: "msg_first", type: "message", status: "completed", role: "assistant",
+          content: [{ type: "output_text", text: "first", annotations: [] }],
+        },
+        {
+          id: "rs_after", type: "reasoning", status: "completed",
+          summary: [{ type: "summary_text", text: "after" }], content: [],
+        },
+      ],
+      usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+    })), context("responses", "chat"))).toThrow();
+  });
+
+  it("accepts identical Chat reasoning aliases and rejects conflicting aliases", () => {
+    const base = reasoningBufferedSource("chat");
+    const choice = (base.choices as Array<{ message: Record<string, unknown> }>)[0]!;
+    choice.message.reasoning_content = "visible plan";
+    expect(() => convertBufferedResponse(
+      encoder.encode(JSON.stringify(base)),
+      context("chat", "responses"),
+    )).not.toThrow();
+    choice.message.reasoning_content = "conflicting plan";
+    expect(() => convertBufferedResponse(
+      encoder.encode(JSON.stringify(base)),
+      context("chat", "responses"),
+    )).toThrow();
+  });
+
+  it("does not let an empty signed Chat block hide another visible reasoning field", () => {
+    const source = reasoningBufferedSource("chat");
+    const message = (source.choices as Array<{ message: Record<string, unknown> }>)[0]!.message;
+    message.reasoning_text = "visible plan";
+    message.thinking_blocks = [{ type: "thinking", thinking: "", signature: "sig" }];
+    const converted = decoded(convertBufferedResponse(
+      encoder.encode(JSON.stringify(source)), context("chat", "responses"),
+    ).bytes);
+    expect((converted.output as Array<Record<string, unknown>>)[0]).toMatchObject({
+      type: "reasoning", summary: [{ text: "visible plan" }],
+    });
+  });
+
+  it("preserves multiple exact signed Chat thinking blocks for Messages", async () => {
+    const source = chatSse({
+      id: "chat_multiple_signed",
+      choices: [{
+        index: 0,
+        delta: {
+          thinking_blocks: [
+            { type: "thinking", thinking: "first", signature: "sig1" },
+            { type: "redacted_thinking", data: "opaque2" },
+          ],
+        },
+        finish_reason: "stop",
+      }],
+    }) + "data: [DONE]\n\n";
+    const wire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(wire).toContain("\"thinking\": \"first\"");
+    expect(wire).toContain("\"signature\": \"sig1\"");
+    expect(wire).toContain("\"type\": \"redacted_thinking\"");
+    expect(wire).toContain("\"data\": \"opaque2\"");
+    const thinkingStart = wire.indexOf("\"type\": \"thinking\"");
+    const thinkingDelta = wire.indexOf("\"type\": \"thinking_delta\"");
+    const signatureDelta = wire.indexOf("\"type\": \"signature_delta\"");
+    const firstStop = wire.indexOf("event: content_block_stop", signatureDelta);
+    const redactedStart = wire.indexOf("\"type\": \"redacted_thinking\"");
+    const secondStop = wire.indexOf("event: content_block_stop", redactedStart);
+    expect([thinkingStart, thinkingDelta, signatureDelta, firstStop, redactedStart, secondStop]).toEqual(
+      [...[thinkingStart, thinkingDelta, signatureDelta, firstStop, redactedStart, secondStop]].sort((left, right) => left - right),
+    );
+  });
+
+  it("upgrades streamed Chat reasoning with an identical final signed snapshot without duplication", async () => {
+    const source = [
+      chatSse({
+        id: "chat_signed_upgrade",
+        choices: [{ index: 0, delta: { reasoning_content: "plan" }, finish_reason: null }],
+      }),
+      chatSse({
+        id: "chat_signed_upgrade",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [{ type: "thinking", thinking: "plan", signature: "sig" }],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const wire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(wire.match(/"thinking": "plan"/gu)).toHaveLength(1);
+    expect(wire).toContain("\"signature\": \"sig\"");
+  });
+
+  it("upgrades scalar Chat reasoning within a signed and redacted final snapshot without duplication", async () => {
+    const source = [
+      chatSse({
+        id: "chat_signed_redacted_upgrade",
+        choices: [{ index: 0, delta: { reasoning_content: "plan" }, finish_reason: null }],
+      }),
+      chatSse({
+        id: "chat_signed_redacted_upgrade",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [
+              { type: "thinking", thinking: "plan", signature: "sig" },
+              { type: "redacted_thinking", data: "opaque" },
+            ],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const messagesWire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(messagesWire.match(/"thinking": "plan"/gu)).toHaveLength(1);
+    expect(messagesWire).toContain("\"signature\": \"sig\"");
+    expect(messagesWire).toContain("\"data\": \"opaque\"");
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual(["plan"]);
+  });
+
+  it.each([
+    [
+      "redacted-before-signed",
+      "plan",
+      [
+        { type: "redacted_thinking", data: "opaque" },
+        { type: "thinking", thinking: "plan", signature: "sig" },
+      ],
+      ["redacted_thinking", "thinking"],
+    ],
+    [
+      "multiple-signed",
+      "firstsecond",
+      [
+        { type: "thinking", thinking: "first", signature: "sig1" },
+        { type: "thinking", thinking: "second", signature: "sig2" },
+      ],
+      ["thinking", "thinking"],
+    ],
+  ] as const)("reconciles scalar Chat reasoning with %s blocks in exact order", async (_name, scalar, blocks, types) => {
+    const source = [
+      chatSse({
+        id: "chat_multi_upgrade",
+        choices: [{ index: 0, delta: { reasoning_content: scalar }, finish_reason: null }],
+      }),
+      chatSse({
+        id: "chat_multi_upgrade",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "answer", thinking_blocks: blocks },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const messagesWire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    const starts = messagesWire.split(/\r?\n/u)
+      .filter((line) => line.startsWith("data: {") && line.includes("content_block_start"))
+      .map((line) => JSON.parse(line.slice(6)) as { content_block?: { type?: string } })
+      .map((event) => event.content_block?.type);
+    expect(starts.slice(0, types.length)).toEqual(types);
+    expect(starts.at(-1)).toBe("text");
+
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual([scalar]);
+  });
+
+  it("reconciles Chat blocks before scalar aliases without duplicating presentation", async () => {
+    const source = [
+      chatSse({
+        id: "chat_blocks_first",
+        choices: [{
+          index: 0,
+          delta: { thinking_blocks: [{ type: "thinking", thinking: "plan", signature: "sig" }] },
+          finish_reason: null,
+        }],
+      }),
+      chatSse({
+        id: "chat_blocks_first",
+        choices: [{ index: 0, delta: { reasoning_content: "plan" }, finish_reason: "stop" }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual(["plan"]);
+  });
+
+  it("reconciles incremental scalar and signed block aliases without duplicate suffixes", async () => {
+    const source = [
+      chatSse({ id: "chat_incremental_alias", choices: [{ index: 0, delta: { reasoning_content: "first" }, finish_reason: null }] }),
+      chatSse({
+        id: "chat_incremental_alias",
+        choices: [{
+          index: 0,
+          delta: { thinking_blocks: [{ type: "thinking", thinking: "first", signature: "sig1" }] },
+          finish_reason: null,
+        }],
+      }),
+      chatSse({ id: "chat_incremental_alias", choices: [{ index: 0, delta: { reasoning_content: "second" }, finish_reason: null }] }),
+      chatSse({
+        id: "chat_incremental_alias",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [
+              { type: "thinking", thinking: "first", signature: "sig1" },
+              { type: "thinking", thinking: "second", signature: "sig2" },
+            ],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual(["firstsecond"]);
+    const messagesWire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(messagesWire.match(/"type": "thinking"/gu)).toHaveLength(2);
+  });
+
+  it("marks signed Chat reasoning-only truncation incomplete", async () => {
+    const source = chatSse({
+      id: "chat_signed_incomplete",
+      choices: [{
+        index: 0,
+        delta: { thinking_blocks: [{ type: "thinking", thinking: "partial", signature: "sig" }] },
+        finish_reason: "length",
+      }],
+    }) + "data: [DONE]\n\n";
+    const events = responseDataEvents(wireText(await collectStream(
+      "chat", "responses", chunks(encoder.encode(source)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
+  });
+
+  it("rejects a signed Chat thinking block first observed after answer text", async () => {
+    const source = [
+      chatSse({ id: "chat_late_signed", choices: [{ index: 0, delta: { content: "answer" }, finish_reason: null }] }),
+      chatSse({
+        id: "chat_late_signed",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [{ type: "thinking", thinking: "late", signature: "sig" }],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)), streamContext("chat", "messages"),
+      )) void _emission;
+    }).rejects.toThrow();
+  });
+
+  it.each(["chat", "responses"] as const)(
+    "accepts nullable Messages output token details when converting to %s",
+    async (target) => {
+      const buffered = reasoningBufferedSource("messages");
+      (buffered.usage as Record<string, unknown>).output_tokens_details = null;
+      expect(() => convertBufferedResponse(
+        encoder.encode(JSON.stringify(buffered)),
+        context("messages", target),
+      )).not.toThrow();
+
+      const stream = reasoningStreamSource("messages").replace(
+        "\"usage\":{\"output_tokens\":4,\"output_tokens_details\":{\"thinking_tokens\":3}}",
+        "\"usage\":{\"output_tokens\":4,\"output_tokens_details\":null}",
+      );
+      await expect(collectStream("messages", target, chunks(encoder.encode(stream)))).resolves.toBeDefined();
+    },
+  );
+
+  it("decodes the official Responses reasoning content-part lifecycle", async () => {
+    const reasoningAdded = {
+      id: "rs_content_part", type: "reasoning", status: "in_progress", summary: [], content: [],
+    };
+    const reasoningDone = {
+      ...reasoningAdded,
+      status: "completed",
+      content: [{ type: "reasoning_text", text: "visible plan" }],
+    };
+    const source = [
+      responseEvent(0, "response.output_item.added", { output_index: 0, item: reasoningAdded }),
+      responseEvent(1, "response.content_part.added", {
+        item_id: "rs_content_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "" },
+      }),
+      responseEvent(2, "response.reasoning_text.delta", {
+        item_id: "rs_content_part", output_index: 0, content_index: 0, delta: "visible plan",
+      }),
+      responseEvent(3, "response.reasoning_text.done", {
+        item_id: "rs_content_part", output_index: 0, content_index: 0, text: "visible plan",
+      }),
+      responseEvent(4, "response.content_part.done", {
+        item_id: "rs_content_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "visible plan" },
+      }),
+      responseEvent(5, "response.output_item.done", { output_index: 0, item: reasoningDone }),
+      responseEvent(6, "response.completed", {
+        response: {
+          id: "resp_content_part", object: "response", status: "completed", output: [reasoningDone],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    const wire = wireText(await collectStream("responses", "chat", chunks(encoder.encode(source))));
+    expect(wire.match(/visible plan/gu)).toHaveLength(1);
+  });
+
+  it("keeps completed reasoning separate from a later truncated answer in both modes", async () => {
+    const buffered = convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "chat_truncated",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", reasoning_content: "plan", content: "partial" },
+        finish_reason: "length",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    })), context("chat", "responses"));
+    const bufferedOutput = decoded(buffered.bytes).output as Array<Record<string, unknown>>;
+    expect(bufferedOutput.map((item) => [item.type, item.status])).toEqual([
+      ["reasoning", "completed"],
+      ["message", "incomplete"],
+    ]);
+
+    const source = [
+      chatSse({ id: "chat_truncated", choices: [{ index: 0, delta: { reasoning_content: "plan" }, finish_reason: null }] }),
+      chatSse({ id: "chat_truncated", choices: [{ index: 0, delta: { content: "partial" }, finish_reason: "length" }] }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream("chat", "responses", chunks(encoder.encode(source)))));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output?.map((item) => [item.type, item.status])).toEqual([
+      ["reasoning", "completed"],
+      ["message", "incomplete"],
+    ]);
+  });
+
+  it("marks statusless reasoning-only Responses items incomplete at an incomplete terminal", async () => {
+    const reasoning = {
+      id: "rs_statusless_incomplete",
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "partial plan" }],
+      content: [],
+    };
+    const source = [
+      responseEvent(0, "response.output_item.done", { output_index: 0, item: reasoning }),
+      responseEvent(1, "response.incomplete", {
+        response: {
+          id: "resp_statusless_incomplete",
+          object: "response",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [reasoning],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "responses", "responses", chunks(encoder.encode(source)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
+  });
+
+  it("marks reasoning-only Messages thinking incomplete at max_tokens in both modes", async () => {
+    const bufferedSource = reasoningBufferedSource("messages");
+    bufferedSource.content = [{ type: "thinking", thinking: "partial plan", signature: "sig" }];
+    bufferedSource.stop_reason = "max_tokens";
+    const buffered = decoded(convertBufferedResponse(
+      encoder.encode(JSON.stringify(bufferedSource)),
+      context("messages", "responses"),
+    ).bytes);
+    expect(buffered.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
+
+    const stream = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg_partial", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start", index: 0,
+        content_block: { type: "thinking", thinking: "", signature: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta", index: 0,
+        delta: { type: "thinking_delta", thinking: "partial plan" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 2 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "messages", "responses", chunks(encoder.encode(stream)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
+  });
+
+  it("matches buffered and streamed status for consecutive Messages thinking blocks", async () => {
+    const bufferedSource = reasoningBufferedSource("messages");
+    bufferedSource.content = [
+      { type: "thinking", thinking: "first", signature: "sig1" },
+      { type: "thinking", thinking: "second", signature: "sig2" },
+    ];
+    bufferedSource.stop_reason = "max_tokens";
+    const buffered = decoded(convertBufferedResponse(
+      encoder.encode(JSON.stringify(bufferedSource)), context("messages", "responses"),
+    ).bytes);
+    expect((buffered.output as Array<Record<string, unknown>>).map((item) => item.status)).toEqual([
+      "completed",
+      "incomplete",
+    ]);
+
+    const stream = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg_two_thoughts", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+      }),
+      ...["first", "second"].flatMap((thinking, index) => [
+        messageEvent("content_block_start", {
+          type: "content_block_start", index,
+          content_block: { type: "thinking", thinking: "", signature: "" },
+        }),
+        messageEvent("content_block_delta", {
+          type: "content_block_delta", index,
+          delta: { type: "thinking_delta", thinking },
+        }),
+        messageEvent("content_block_stop", { type: "content_block_stop", index }),
+      ]),
+      messageEvent("message_delta", {
+        type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 3 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "messages", "responses", chunks(encoder.encode(stream)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output?.map((item) => item.status)).toEqual(["completed", "incomplete"]);
+  });
+
+  it("emits an incomplete reasoning-only Responses result without fabricating answer text", async () => {
+    const source = [
+      chatSse({
+        id: "chat_incomplete_reasoning",
+        choices: [{ index: 0, delta: { reasoning_content: "partial plan" }, finish_reason: "length" }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const wire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const events = responseDataEvents(wire);
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output).toMatchObject([{
+      type: "reasoning",
+      status: "incomplete",
+      summary: [{ type: "summary_text", text: "partial plan" }],
+    }]);
+    expect(terminal.response?.output?.some((item) => item.type === "message")).toBe(false);
+  });
+
+  it("bounds visible reasoning and rejects unknown Responses reasoning events", async () => {
+    const oversized = chatSse({
+      id: "chat_reasoning_overflow",
+      choices: [{ index: 0, delta: { reasoning_content: "x".repeat(256) }, finish_reason: "stop" }],
+    }) + "data: [DONE]\n\n";
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(oversized)),
+        { ...streamContext("chat", "responses"), accumulatorBytes: 64 },
+      )) void _emission;
+    }).rejects.toThrow();
+
+    const unknown = responseEvent(0, "response.reasoning_future.delta", {
+      item_id: "rs_unknown",
+      output_index: 0,
+      content_index: 0,
+      delta: "plan",
+    });
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(unknown)),
+        streamContext("responses", "chat"),
+      )) void _emission;
+    }).rejects.toThrow();
+  });
+
+  it("rejects Responses reasoning final snapshots that lose observed parts or reuse item IDs", async () => {
+    const missingPart = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_missing", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_missing", output_index: 0, content_index: 0, delta: "plan",
+      }),
+      responseEvent(2, "response.output_item.done", {
+        output_index: 0,
+        item: { id: "rs_missing", type: "reasoning", status: "completed", summary: [], content: [] },
+      }),
+    ].join("");
+    const reusedId = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_reused", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.output_item.added", {
+        output_index: 1,
+        item: { id: "rs_reused", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+    ].join("");
+    for (const source of [missingPart, reusedId]) {
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)),
+          streamContext("responses", "chat"),
+        )) void _emission;
+      }).rejects.toThrow();
+    }
+  });
+
+  it("rejects a reasoning event rebound to a message at the same Responses output index", async () => {
+    const source = [
+      responseEvent(0, "response.reasoning_text.delta", {
+        item_id: "rs_unbound", output_index: 0, content_index: 0, delta: "injected",
+      }),
+      responseEvent(1, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "msg_rebound", type: "message", status: "in_progress", role: "assistant", content: [] },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) void _emission;
+    }).rejects.toThrow();
+  });
+
+  it("orders Responses reasoning parts and intervening items by indexes for Chat", async () => {
+    const output = [
+      {
+        id: "rs_0", type: "reasoning", status: "completed",
+        summary: [{ type: "summary_text", text: "FIRST" }, { type: "summary_text", text: "SECOND" }], content: [],
+      },
+      {
+        id: "msg_1", type: "message", status: "completed", role: "assistant",
+        content: [{ type: "output_text", text: "MIDDLE", annotations: [] }],
+      },
+      {
+        id: "rs_2", type: "reasoning", status: "completed",
+        summary: [{ type: "summary_text", text: "LAST" }], content: [],
+      },
+    ];
+    const source = responseEvent(0, "response.completed", {
+      response: {
+        id: "resp_ordered", object: "response", status: "completed", output,
+        usage: { input_tokens: 1, output_tokens: 4, total_tokens: 5 },
+      },
+    });
+    const wire = wireText(await collectStream("responses", "chat", chunks(encoder.encode(source))));
+    const visible = chatDataEvents(wire).flatMap((event) => (
+      event.choices as Array<{ delta?: { reasoning_content?: string; content?: string } }> ?? []
+    )).map((choice) => choice.delta?.reasoning_content ?? choice.delta?.content ?? "").join("");
+    expect(visible).toBe("FIRSTSECONDMIDDLELAST");
+  });
+
+  it("accepts bounded Responses reasoning ID aliases for one output index", async () => {
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_added", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.output_item.done", {
+        output_index: 0,
+        item: { id: "rs_done", type: "reasoning", status: "completed", summary: [], content: [], encrypted_content: "opaque" },
+      }),
+      responseEvent(2, "response.completed", {
+        response: {
+          id: "resp_alias",
+          object: "response",
+          status: "completed",
+          output: [{ id: "rs_terminal", type: "reasoning", status: "completed", summary: [], content: [], encrypted_content: "opaque" }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    const emissions = await collectStream("responses", "chat", chunks(encoder.encode(source)));
+    expect(emissions.filter((emission) => emission.kind === "terminal")).toEqual([
+      { kind: "terminal", terminal: "completed" },
+    ]);
+    expect(wireText(emissions)).not.toContain("reasoning_content");
+  });
+
+  it.each(["chat", "messages"] as const)(
+    "accepts captured Responses reasoning ID rotation when converting to %s",
+    async (target) => {
+      const source = await readFile(
+        new URL("../sdk/corpus/responses/plain-text.stream.txt", import.meta.url),
+      );
+      const emissions = await collectStream("responses", target, chunks(source));
+      expect(emissions.filter((emission) => emission.kind === "terminal")).toEqual([
+        { kind: "terminal", terminal: "completed" },
+      ]);
+    },
+  );
+
+  it("rejects visible reasoning growth after an empty output item completed", async () => {
+    const source = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_added", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.output_item.done", {
+        output_index: 0,
+        item: { id: "rs_done", type: "reasoning", status: "completed", summary: [], content: [] },
+      }),
+      responseEvent(2, "response.completed", {
+        response: {
+          id: "resp_growth",
+          object: "response",
+          status: "completed",
+          output: [{
+            id: "rs_terminal",
+            type: "reasoning",
+            status: "completed",
+            summary: [{ type: "summary_text", text: "late" }],
+            content: [],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        streamContext("responses", "chat"),
+      )) void _emission;
+    }).rejects.toThrow();
+  });
+
+  it("rejects Responses reasoning deltas and content parts after completion", async () => {
+    const reasoning = {
+      id: "rs_frozen", type: "reasoning", status: "completed", summary: [],
+      content: [{ type: "reasoning_text", text: "done" }],
+    };
+    const doneThenDelta = [
+      responseEvent(0, "response.output_item.done", { output_index: 0, item: reasoning }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_frozen", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    const partDoneThenDelta = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_part", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.content_part.added", {
+        item_id: "rs_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "" },
+      }),
+      responseEvent(2, "response.content_part.done", {
+        item_id: "rs_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "done" },
+      }),
+      responseEvent(3, "response.reasoning_text.delta", {
+        item_id: "rs_part", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    const textDoneThenDelta = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_text_done", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_text_done", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_text_done", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.reasoning_text.delta", {
+        item_id: "rs_text_done", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    const textDoneThenChangedPart = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_changed_part", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_changed_part", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_changed_part", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.content_part.done", {
+        item_id: "rs_changed_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "done late" },
+      }),
+    ].join("");
+    const textDoneThenChangedItem = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_changed_item", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_changed_item", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_changed_item", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "rs_changed_item", type: "reasoning", status: "completed", summary: [],
+          content: [{ type: "reasoning_text", text: "done late" }],
+        },
+      }),
+    ].join("");
+    const partDoneThenChangedItem = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_part_item", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.content_part.done", {
+        item_id: "rs_part_item", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "done" },
+      }),
+      responseEvent(2, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "rs_part_item", type: "reasoning", status: "completed", summary: [],
+          content: [{ type: "reasoning_text", text: "done late" }],
+        },
+      }),
+    ].join("");
+    const summaryPartDoneThenChangedTerminal = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_summary_part", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_summary_part.done", {
+        item_id: "rs_summary_part", output_index: 0, summary_index: 0,
+        part: { type: "summary_text", text: "done" },
+      }),
+      responseEvent(2, "response.completed", {
+        response: {
+          id: "resp_summary_part", object: "response", status: "completed",
+          output: [{
+            id: "rs_summary_part", type: "reasoning", status: "completed",
+            summary: [{ type: "summary_text", text: "done late" }], content: [],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    const textDoneThenChangedTerminal = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_changed_terminal", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_changed_terminal", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_changed_terminal", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.completed", {
+        response: {
+          id: "resp_changed_terminal", object: "response", status: "completed",
+          output: [{
+            id: "rs_changed_terminal", type: "reasoning", status: "completed", summary: [],
+            content: [{ type: "reasoning_text", text: "done late" }],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
+    const messageDoneThenDelta = [
+      responseEvent(0, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "msg_frozen", type: "message", status: "completed", role: "assistant",
+          content: [{ type: "output_text", text: "done", annotations: [] }],
+        },
+      }),
+      responseEvent(1, "response.output_text.delta", {
+        item_id: "msg_frozen", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    for (const source of [
+      doneThenDelta,
+      partDoneThenDelta,
+      textDoneThenDelta,
+      textDoneThenChangedPart,
+      textDoneThenChangedItem,
+      textDoneThenChangedTerminal,
+      partDoneThenChangedItem,
+      summaryPartDoneThenChangedTerminal,
+      messageDoneThenDelta,
+    ]) {
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)), streamContext("responses", "chat"),
+        )) void _emission;
+      }).rejects.toThrow();
+    }
+  });
+
   it("creates one fixed Responses envelope with text and parallel same-name tools", () => {
     const converted = convertBufferedResponse(encoder.encode(JSON.stringify({
       id: "chatcmpl_source",
@@ -3503,7 +4457,7 @@ describe("shared conversion response codecs", () => {
     await handle?.completion;
 
     expect(delivered).toBe([
-      "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-000000000105\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"target\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}}}\n\n",
+      "event: message_start\ndata: {\"type\": \"message_start\", \"message\": {\"id\": \"msg_00000000-0000-4000-8000-000000000105\", \"type\": \"message\", \"role\": \"assistant\", \"content\": [], \"model\": \"target\", \"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 0, \"output_tokens\": 0, \"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0, \"output_tokens_details\": null}}}\n\n",
       "event: content_block_start\ndata: {\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", \"text\": \"\"}}\n\n",
       "event: content_block_delta\ndata: {\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", \"text\": \"partial\"}}\n\n",
     ].join(""));
@@ -4851,6 +5805,175 @@ function responseBody(value: unknown): WireJsonObject {
   return parsed;
 }
 
+function reasoningBufferedSource(source: InferenceProtocol): Record<string, unknown> {
+  if (source === "chat") {
+    return {
+      id: "chat_reasoning",
+      object: "chat.completion",
+      model: "source",
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          reasoning_text: "visible plan",
+          reasoning_opaque: "opaque-state",
+          content: "answer",
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    };
+  }
+  if (source === "messages") {
+    return {
+      id: "msg_reasoning",
+      type: "message",
+      role: "assistant",
+      model: "source",
+      content: [
+        { type: "thinking", thinking: "visible plan", signature: "provider-signature" },
+        { type: "text", text: "answer" },
+      ],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 1, output_tokens: 2 },
+    };
+  }
+  return {
+    id: "resp_reasoning",
+    object: "response",
+    status: "completed",
+    model: "source",
+    output: [
+      {
+        id: "rs_reasoning",
+        type: "reasoning",
+        status: "completed",
+        summary: [{ type: "summary_text", text: "visible plan" }],
+        content: [],
+        encrypted_content: "opaque-state",
+      },
+      {
+        id: "msg_reasoning",
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text: "answer", annotations: [] }],
+      },
+    ],
+    usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+  };
+}
+
+function reasoningStreamSource(source: InferenceProtocol): string {
+  if (source === "chat") {
+    return [
+      chatSse({
+        id: "chat_reasoning",
+        model: "source",
+        choices: [{ index: 0, delta: { role: "assistant", reasoning_content: "visible plan" }, finish_reason: null }],
+      }),
+      chatSse({
+        id: "chat_reasoning",
+        model: "source",
+        choices: [{ index: 0, delta: { content: "answer" }, finish_reason: "stop" }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+  }
+  if (source === "messages") {
+    return [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg_reasoning", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking", thinking: "", signature: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "visible plan" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "signature_delta", signature: "provider-signature" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("content_block_start", {
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "text", text: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "text_delta", text: "answer" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+      messageEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 2 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+  }
+  const reasoningAdded = {
+    id: "rs_reasoning",
+    type: "reasoning",
+    status: "in_progress",
+    summary: [],
+    content: [],
+  };
+  const reasoningDone = {
+    ...reasoningAdded,
+    status: "completed",
+    content: [{ type: "reasoning_text", text: "visible plan" }],
+  };
+  const messageAdded = {
+    id: "msg_reasoning",
+    type: "message",
+    status: "in_progress",
+    role: "assistant",
+    content: [],
+  };
+  const messageDone = {
+    ...messageAdded,
+    status: "completed",
+    content: [{ type: "output_text", text: "answer", annotations: [] }],
+  };
+  return [
+    responseEvent(0, "response.output_item.added", { output_index: 0, item: reasoningAdded }),
+    responseEvent(1, "response.reasoning_text.delta", {
+      item_id: "rs_reasoning", output_index: 0, content_index: 0, delta: "visible plan",
+    }),
+    responseEvent(2, "response.reasoning_text.done", {
+      item_id: "rs_reasoning", output_index: 0, content_index: 0, text: "visible plan",
+    }),
+    responseEvent(3, "response.output_item.done", { output_index: 0, item: reasoningDone }),
+    responseEvent(4, "response.output_item.added", { output_index: 1, item: messageAdded }),
+    responseEvent(5, "response.output_text.delta", {
+      item_id: "msg_reasoning", output_index: 1, content_index: 0, delta: "answer",
+    }),
+    responseEvent(6, "response.output_text.done", {
+      item_id: "msg_reasoning", output_index: 1, content_index: 0, text: "answer",
+    }),
+    responseEvent(7, "response.output_item.done", { output_index: 1, item: messageDone }),
+    responseEvent(8, "response.completed", {
+      response: {
+        id: "resp_reasoning",
+        object: "response",
+        status: "completed",
+        output: [reasoningDone, messageDone],
+        usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 },
+      },
+    }),
+  ].join("");
+}
+
 function toolSearchPlan(): ConvertedProtocolPlan {
   const plan = planProtocolExecution({
     source: "responses",
@@ -4950,6 +6073,16 @@ function wireText(emissions: readonly ConvertedStreamEmission[]): string {
     .filter((item): item is Extract<ConvertedStreamEmission, { readonly kind: "wire" }> => item.kind === "wire")
     .map((item) => decoder.decode(item.bytes))
     .join("");
+}
+
+function chatDataEvents(text: string): Array<Record<string, unknown>> {
+  return text.split(/\r?\n/u)
+    .filter((line) => line.startsWith("data: {") && line !== "data: [DONE]")
+    .map((line) => JSON.parse(line.slice(6)) as Record<string, unknown>);
+}
+
+function responseDataEvents(text: string): Array<Record<string, unknown>> {
+  return chatDataEvents(text);
 }
 
 function decoded(bytes: Uint8Array): Record<string, unknown> {

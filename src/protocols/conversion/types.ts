@@ -203,6 +203,29 @@ export interface SemanticUsage {
   readonly reasoningTokens: number;
 }
 
+export type SemanticReasoningPresentation = "summary" | "content";
+
+export type SemanticMessagesReasoningState =
+  | { readonly type: "thinking"; readonly thinking: string; readonly signature: string }
+  | { readonly type: "redacted_thinking"; readonly data: string };
+
+export interface SemanticReasoningPart {
+  readonly key?: string | undefined;
+  readonly presentation: SemanticReasoningPresentation;
+  readonly index: number;
+  readonly text: string;
+}
+
+export interface SemanticReasoningItem {
+  readonly type: "reasoning";
+  readonly key?: string | undefined;
+  readonly itemId?: string | undefined;
+  readonly parts: readonly SemanticReasoningPart[];
+  readonly status?: "completed" | "incomplete" | "in_progress" | undefined;
+  readonly hasOpaqueState: boolean;
+  readonly messagesState?: SemanticMessagesReasoningState | undefined;
+}
+
 export type SemanticResponseItem =
   | {
     readonly type: "message";
@@ -210,6 +233,7 @@ export type SemanticResponseItem =
     readonly contentKeys?: readonly string[] | undefined;
     readonly content: readonly (SemanticText | SemanticRefusal)[];
   }
+  | SemanticReasoningItem
   | SemanticToolCallItem;
 
 export interface SemanticResponse {
@@ -242,6 +266,35 @@ export interface ConvertedBufferedResponse {
 
 export type SemanticStreamEvent =
   | { readonly kind: "semantic_progress" }
+  | {
+    readonly kind: "reasoning_start";
+    readonly key: string;
+    readonly itemId?: string | undefined;
+    readonly messagesState?: SemanticMessagesReasoningState | undefined;
+  }
+  | {
+    readonly kind: "reasoning_delta";
+    readonly key: string;
+    readonly partKey: string;
+    readonly itemId?: string | undefined;
+    readonly presentation: SemanticReasoningPresentation;
+    readonly partIndex: number;
+    readonly delta: string;
+  }
+  | {
+    readonly kind: "reasoning_snapshot";
+    readonly key: string;
+    readonly partKey: string;
+    readonly itemId?: string | undefined;
+    readonly presentation: SemanticReasoningPresentation;
+    readonly partIndex: number;
+    readonly text: string;
+  }
+  | {
+    readonly kind: "reasoning_done";
+    readonly key: string;
+    readonly status: "completed" | "incomplete" | "in_progress";
+  }
   | { readonly kind: "message_start"; readonly key: string }
   | { readonly kind: "text_delta"; readonly key: string; readonly orderKey?: string | undefined; readonly delta: string }
   | { readonly kind: "text_done"; readonly key: string; readonly orderKey?: string | undefined; readonly text: string }

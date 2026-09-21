@@ -5,6 +5,45 @@ import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 import { anthropicGateway, anthropicRequest } from "./anthropic_harness.js";
 
 describe("Anthropic non-stream response", () => {
+  it("preserves an exact signed Chat thinking block", async () => {
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(false), reply: {
+      status: 200,
+      headers: {},
+      body: new TextEncoder().encode(JSON.stringify({
+        id: "chatcmpl_signed",
+        model: "gpt",
+        choices: [{
+          finish_reason: "stop",
+          message: {
+            role: "assistant",
+            thinking_blocks: [
+              { type: "thinking", thinking: "signed plan", signature: "sigT" },
+              { type: "redacted_thinking", data: "opaque2" },
+            ],
+            content: "answer",
+          },
+        }],
+        usage: { prompt_tokens: 2, completion_tokens: 3 },
+      })),
+    } }];
+    const { gw, close } = await anthropicGateway({ expectations });
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: false,
+      }));
+      expect(response.status).toBe(200);
+      expect(JSON.parse(await response.text())).toMatchObject({
+        content: [
+          { type: "thinking", thinking: "signed plan", signature: "sigT" },
+          { type: "redacted_thinking", data: "opaque2" },
+          { type: "text", text: "answer" },
+        ],
+      });
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects multiple choices and invalid complete tool arguments without repair", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(false), reply: {

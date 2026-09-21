@@ -1,6 +1,13 @@
 import { GatewayFailureError } from "../../gateway/failures.js";
 import { isWireJsonObject, parseWireJson, type WireJsonObject } from "../../serialization/wire_json.js";
-import type { SemanticResponseItem, SemanticToolCallItem } from "./types.js";
+import type {
+  SemanticReasoningItem,
+  SemanticMessagesReasoningState,
+  SemanticReasoningPresentation,
+  SemanticResponseItem,
+  SemanticToolCallItem,
+} from "./types.js";
+import { responseMessagePartPosition, responseOutputIndex } from "./stream_keys.js";
 
 interface ToolState {
   readonly key: string;
@@ -26,6 +33,23 @@ interface MessagePartState {
   frozen: boolean;
 }
 
+interface ReasoningState {
+  readonly key: string;
+  readonly itemId?: string | undefined;
+  readonly partKeys: string[];
+  status?: "completed" | "incomplete" | "in_progress" | undefined;
+  frozen: boolean;
+  messagesState?: SemanticMessagesReasoningState | undefined;
+}
+
+interface ReasoningPartState {
+  readonly itemKey: string;
+  readonly presentation: SemanticReasoningPresentation;
+  readonly index: number;
+  text: string;
+  frozen: boolean;
+}
+
 export class SemanticItemLedger {
   private readonly encoder = new TextEncoder();
   private usedBytes = 0;
@@ -33,7 +57,9 @@ export class SemanticItemLedger {
   private readonly callIds = new Set<string>();
   private readonly messages = new Map<string, MessageState>();
   private readonly messageParts = new Map<string, MessagePartState>();
-  private readonly order: Array<{ readonly kind: "message" | "tool"; readonly key: string }> = [];
+  private readonly reasoning = new Map<string, ReasoningState>();
+  private readonly reasoningParts = new Map<string, ReasoningPartState>();
+  private readonly order: Array<{ readonly kind: "message" | "reasoning" | "tool"; readonly key: string }> = [];
 
   constructor(private readonly maxBytes: number) {}
 
@@ -100,6 +126,66 @@ export class SemanticItemLedger {
         part.frozen = true;
       }
     }
+  }
+
+  startReasoning(key: string, itemId?: string, messagesState?: SemanticMessagesReasoningState): void {
+    this.reasoningState(key, itemId, messagesState);
+  }
+
+  appendReasoning(input: {
+    readonly key: string;
+    readonly partKey: string;
+    readonly itemId?: string | undefined;
+    readonly presentation: SemanticReasoningPresentation;
+    readonly partIndex: number;
+    readonly delta: string;
+  }): void {
+    this.reserve(input.delta);
+    const part = this.reasoningPart(input);
+    if (part.frozen) {
+      invalid();
+    }
+    part.text += input.delta;
+  }
+
+  reasoningValue(partKey: string): string {
+    return this.reasoningParts.get(partKey)?.text ?? "";
+  }
+
+  finishReasoning(key: string, status: "completed" | "incomplete" | "in_progress"): SemanticReasoningItem {
+    const reasoning = this.reasoning.get(key);
+    if (reasoning === undefined) {
+      invalid();
+    }
+    if (reasoning.frozen) {
+      if (reasoning.status !== status) {
+        invalid();
+      }
+      return this.reasoningItem(reasoning);
+    }
+    reasoning.frozen = true;
+    reasoning.status = status;
+    for (const partKey of reasoning.partKeys) {
+      const part = this.reasoningParts.get(partKey);
+      if (part !== undefined) {
+        part.frozen = true;
+      }
+    }
+    return this.reasoningItem(reasoning);
+  }
+
+  finishOpenReasoning(status: "completed" | "incomplete"): readonly SemanticReasoningItem[] {
+    const items: SemanticReasoningItem[] = [];
+    for (const entry of this.order) {
+      if (entry.kind !== "reasoning") {
+        continue;
+      }
+      const reasoning = this.reasoning.get(entry.key);
+      if (reasoning !== undefined && !reasoning.frozen) {
+        items.push(this.finishReasoning(entry.key, status));
+      }
+    }
+    return items;
   }
 
   startTool(input: {
@@ -213,6 +299,22 @@ export class SemanticItemLedger {
         }
         continue;
       }
+      if (entry.kind === "reasoning") {
+        const reasoning = this.reasoning.get(entry.key);
+        if (reasoning === undefined) {
+          invalid();
+        }
+        if (!reasoning.frozen) {
+          reasoning.status = status;
+          reasoning.frozen = true;
+          for (const partKey of reasoning.partKeys) {
+            const part = this.reasoningParts.get(partKey);
+            if (part !== undefined) part.frozen = true;
+          }
+        }
+        items.push(this.reasoningItem(reasoning));
+        continue;
+      }
       const tool = this.tool(entry.key);
       if (!tool.done && status === "completed") {
         invalid();
@@ -281,27 +383,141 @@ export class SemanticItemLedger {
     }
     return part;
   }
+
+  private reasoningItem(reasoning: ReasoningState): SemanticReasoningItem {
+    const parts = reasoning.partKeys.map((partKey) => {
+      const part = this.reasoningParts.get(partKey);
+      if (part === undefined) {
+        invalid();
+      }
+      return {
+        key: partKey,
+        presentation: part.presentation,
+        index: part.index,
+        text: part.text,
+      };
+    }).sort(compareReasoningParts);
+    return {
+      type: "reasoning",
+      key: reasoning.key,
+      ...(reasoning.itemId === undefined ? {} : { itemId: reasoning.itemId }),
+      parts,
+      ...(reasoning.status === undefined ? {} : { status: reasoning.status }),
+      hasOpaqueState: false,
+      ...(reasoning.messagesState === undefined ? {} : { messagesState: reasoning.messagesState }),
+    };
+  }
+
+  private reasoningPart(input: {
+    readonly key: string;
+    readonly partKey: string;
+    readonly itemId?: string | undefined;
+    readonly presentation: SemanticReasoningPresentation;
+    readonly partIndex: number;
+  }): ReasoningPartState {
+    const reasoning = this.reasoningState(input.key, input.itemId);
+    if (reasoning.frozen) {
+      invalid();
+    }
+    let part = this.reasoningParts.get(input.partKey);
+    if (part === undefined) {
+      if (input.partKey !== input.key) this.reserve(input.partKey);
+      part = {
+        itemKey: input.key,
+        presentation: input.presentation,
+        index: input.partIndex,
+        text: "",
+        frozen: false,
+      };
+      this.reasoningParts.set(input.partKey, part);
+      reasoning.partKeys.push(input.partKey);
+    } else if (
+      part.itemKey !== input.key
+      || part.presentation !== input.presentation
+      || part.index !== input.partIndex
+    ) {
+      invalid();
+    }
+    return part;
+  }
+
+  private reasoningState(
+    key: string,
+    itemId?: string,
+    messagesState?: SemanticMessagesReasoningState,
+  ): ReasoningState {
+    let reasoning = this.reasoning.get(key);
+    if (reasoning === undefined) {
+      this.reserve(key);
+      if (itemId !== undefined) this.reserve(itemId);
+      if (messagesState?.type === "thinking") {
+        this.reserve(messagesState.thinking);
+        this.reserve(messagesState.signature);
+      }
+      if (messagesState?.type === "redacted_thinking") this.reserve(messagesState.data);
+      reasoning = {
+        key,
+        ...(itemId === undefined ? {} : { itemId }),
+        partKeys: [],
+        frozen: false,
+        ...(messagesState === undefined ? {} : { messagesState }),
+      };
+      this.reasoning.set(key, reasoning);
+      this.order.push({ kind: "reasoning", key });
+    } else if (reasoning.itemId !== itemId) {
+      invalid();
+    } else if (messagesState !== undefined) {
+      if (reasoning.messagesState !== undefined && !sameMessagesState(reasoning.messagesState, messagesState)) invalid();
+      if (reasoning.messagesState === undefined) {
+        if (messagesState.type === "thinking") {
+          this.reserve(messagesState.thinking);
+          this.reserve(messagesState.signature);
+        } else {
+          this.reserve(messagesState.data);
+        }
+      }
+      reasoning.messagesState = messagesState;
+    }
+    return reasoning;
+  }
+}
+
+function sameMessagesState(left: SemanticMessagesReasoningState, right: SemanticMessagesReasoningState): boolean {
+  return left.type === right.type
+    && (left.type === "thinking"
+      ? left.thinking === (right as typeof left).thinking && left.signature === (right as typeof left).signature
+      : left.data === (right as typeof left).data);
 }
 
 function compareResponseItemKeys(
   left: { readonly key: string },
   right: { readonly key: string },
 ): number {
-  const leftMatch = /^responses:(\d+)(?::|$)/u.exec(left.key);
-  const rightMatch = /^responses:(\d+)(?::|$)/u.exec(right.key);
-  if (leftMatch?.[1] === undefined || rightMatch?.[1] === undefined) {
+  const leftIndex = responseOutputIndex(left.key);
+  const rightIndex = responseOutputIndex(right.key);
+  if (leftIndex === undefined || rightIndex === undefined) {
     return 0;
   }
-  return Number.parseInt(leftMatch[1], 10) - Number.parseInt(rightMatch[1], 10);
+  return leftIndex - rightIndex;
 }
 
 function compareMessagePartKeys(left: string, right: string): number {
-  const leftMatch = /^responses:\d+:(\d+):/u.exec(left);
-  const rightMatch = /^responses:\d+:(\d+):/u.exec(right);
-  if (leftMatch?.[1] === undefined || rightMatch?.[1] === undefined) {
+  const leftPosition = responseMessagePartPosition(left);
+  const rightPosition = responseMessagePartPosition(right);
+  if (leftPosition === undefined || rightPosition === undefined) {
     return 0;
   }
-  return Number.parseInt(leftMatch[1], 10) - Number.parseInt(rightMatch[1], 10);
+  return leftPosition.contentIndex - rightPosition.contentIndex;
+}
+
+function compareReasoningParts(
+  left: { readonly presentation: SemanticReasoningPresentation; readonly index: number },
+  right: { readonly presentation: SemanticReasoningPresentation; readonly index: number },
+): number {
+  if (left.presentation !== right.presentation) {
+    return left.presentation === "summary" ? -1 : 1;
+  }
+  return left.index - right.index;
 }
 
 function validateArguments(value: string): WireJsonObject {

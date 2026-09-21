@@ -5,6 +5,7 @@ export interface PartialMessagesUsage {
   readonly outputTokens?: number | undefined;
   readonly cacheReadTokens?: number | undefined;
   readonly cacheWriteTokens?: number | undefined;
+  readonly thinkingTokens?: number | undefined;
 }
 
 export function mergeMessagesUsage(
@@ -22,6 +23,6 @@ export function mergeMessagesUsage(
     outputTokens: update.outputTokens ?? current.outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
-    reasoningTokens: current.reasoningTokens,
+    reasoningTokens: update.thinkingTokens ?? current.reasoningTokens,
   };
 }

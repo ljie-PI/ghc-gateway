@@ -1,0 +1,1 @@
+{"kind":"stream","source":"chat","target":"messages","payload":[{"id":"chat_source","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"visible plan"},"finish_reason":null}]},{"id":"chat_source","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]},"[DONE]"]}

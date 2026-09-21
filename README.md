@@ -86,6 +86,12 @@ All routes share the loopback listener:
 
 The gateway selects one compatible native or converted upstream protocol for each request. It does not probe paid inference routes or retry a rejected request through a different protocol.
 
+Converted Chat and Responses output keeps visible reasoning separate from answer text. Chat uses
+the untyped `reasoning_content` compatibility extension; Responses uses reasoning items and summary
+events. Messages output preserves a Chat thinking block only when the source supplies its exact
+Anthropic signature or redacted data, and never fabricates one. Opaque reasoning state may otherwise
+be omitted, while reported reasoning-token details are normalized without estimating them from text.
+
 ## Configuration
 
 Global options are `--data-dir <path>` and `--json`. Startup settings use CLI values first, then environment variables, then defaults:

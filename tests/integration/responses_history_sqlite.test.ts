@@ -489,6 +489,44 @@ describe("Responses history SQLite", () => {
     }
   });
 
+  it("does not expand call-only checkpoints with standalone reasoning items", async () => {
+    const file = await dbPath("reasoning-privacy");
+    const opened = openHistory(file, () => 1_700_000_000_000);
+    try {
+      const privateValues = ["private-visible-plan", "existing-call-reasoning", "private-encrypted-state"];
+      await opened.store.recordCheckpoint({
+        responseId: "resp_reasoning_privacy",
+        output: outputFromJson(JSON.stringify([
+          {
+            type: "reasoning",
+            id: "rs_private",
+            summary: [{ type: "summary_text", text: privateValues[0] }],
+            encrypted_content: privateValues[2],
+          },
+          {
+            type: "function_call",
+            call_id: "call_private",
+            name: "lookup",
+            arguments: "{}",
+            reasoning_content: privateValues[1],
+          },
+        ])),
+      }, ownership("github.com/1"), "complete", SIGNAL);
+
+      const rows = opened.database.prepare(
+        "SELECT item_json FROM response_scoped_calls WHERE account_id = ? AND response_id = ?",
+      ).all("github.com/1", "resp_reasoning_privacy") as Array<{ item_json: string }>;
+      expect(rows).toHaveLength(1);
+      const stored = rows.map((row) => row.item_json).join("");
+      expect(stored).not.toContain(privateValues[0]);
+      expect(stored).not.toContain(privateValues[2]);
+      expect(stored).toContain(privateValues[1]);
+    } finally {
+      closeDatabase(opened.database);
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
   it("rolls back invalid checkpoint records and records bounded timing samples", async () => {
     const file = await dbPath("rollback-benchmark");
     const opened = openHistory(file, () => 1_700_000_000_000);

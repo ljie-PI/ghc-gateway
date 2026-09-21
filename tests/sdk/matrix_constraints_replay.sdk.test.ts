@@ -21,7 +21,7 @@ describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", 
     });
     afterAll(async () => { await harness.close(); });
 
-    it.each(REPLAY_TARGETS)("$protocol upstream preserves native reasoning or approved converted omission", async (target) => {
+    it.each(REPLAY_TARGETS)("$protocol upstream preserves native reasoning or portable converted presentation", async (target) => {
       const exchangeId = `replay.${target.protocol}.reasoning-effort.nonstream`;
       const exchange = harness.corpus.exchanges.find((candidate) => candidate.caseId === exchangeId)!;
       const expected = await readExpectedExchangeResult(exchange);

@@ -1,0 +1,1 @@
+{"id":"msg_00000000-0000-4000-8000-000000000104","type":"message","role":"assistant","model":"fixture-target","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":4,"output_tokens_details":{"thinking_tokens":3}}}
