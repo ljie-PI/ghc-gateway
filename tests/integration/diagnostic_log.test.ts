@@ -29,7 +29,7 @@ describe("protected diagnostic file namespace", () => {
     const oldGateway = path.join(root, "gateway.1.0.jsonl");
     const oldDiagnostics = path.join(root, "diagnostics.1.0.jsonl");
     for (const name of [oldGateway, oldDiagnostics]) {
-      writeFileSync(name, "old\n");
+      writeFileSync(name, "old\n", { mode: 0o600 });
       const old = new Date(now - 8 * 24 * 60 * 60 * 1000);
       utimesSync(name, old, old);
     }
@@ -42,7 +42,7 @@ describe("protected diagnostic file namespace", () => {
     const root = await temporaryDirectory();
     const now = 1_700_000_000_000;
     const old = path.join(root, "diagnostics.1.0.jsonl");
-    writeFileSync(old, "old\n");
+    writeFileSync(old, "old\n", { mode: 0o600 });
     const date = new Date(now - 8 * 24 * 60 * 60 * 1000);
     utimesSync(old, date, date);
     expect(() => new JsonlLogger(root, () => now, {
