@@ -219,6 +219,41 @@ describe("shared conversion response codecs", () => {
     expect(wire).toContain("\"signature\": \"sig\"");
   });
 
+  it("upgrades scalar Chat reasoning within a signed and redacted final snapshot without duplication", async () => {
+    const source = [
+      chatSse({
+        id: "chat_signed_redacted_upgrade",
+        choices: [{ index: 0, delta: { reasoning_content: "plan" }, finish_reason: null }],
+      }),
+      chatSse({
+        id: "chat_signed_redacted_upgrade",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [
+              { type: "thinking", thinking: "plan", signature: "sig" },
+              { type: "redacted_thinking", data: "opaque" },
+            ],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const messagesWire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(messagesWire.match(/"thinking": "plan"/gu)).toHaveLength(1);
+    expect(messagesWire).toContain("\"signature\": \"sig\"");
+    expect(messagesWire).toContain("\"data\": \"opaque\"");
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual(["plan"]);
+  });
+
   it("marks signed Chat reasoning-only truncation incomplete", async () => {
     const source = chatSse({
       id: "chat_signed_incomplete",
@@ -693,6 +728,43 @@ describe("shared conversion response codecs", () => {
         },
       }),
     ].join("");
+    const partDoneThenChangedItem = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_part_item", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.content_part.done", {
+        item_id: "rs_part_item", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "done" },
+      }),
+      responseEvent(2, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "rs_part_item", type: "reasoning", status: "completed", summary: [],
+          content: [{ type: "reasoning_text", text: "done late" }],
+        },
+      }),
+    ].join("");
+    const summaryPartDoneThenChangedTerminal = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_summary_part", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_summary_part.done", {
+        item_id: "rs_summary_part", output_index: 0, summary_index: 0,
+        part: { type: "summary_text", text: "done" },
+      }),
+      responseEvent(2, "response.completed", {
+        response: {
+          id: "resp_summary_part", object: "response", status: "completed",
+          output: [{
+            id: "rs_summary_part", type: "reasoning", status: "completed",
+            summary: [{ type: "summary_text", text: "done late" }], content: [],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
     const textDoneThenChangedTerminal = [
       responseEvent(0, "response.output_item.added", {
         output_index: 0,
@@ -734,6 +806,8 @@ describe("shared conversion response codecs", () => {
       textDoneThenChangedPart,
       textDoneThenChangedItem,
       textDoneThenChangedTerminal,
+      partDoneThenChangedItem,
+      summaryPartDoneThenChangedTerminal,
       messageDoneThenDelta,
     ]) {
       await expect(async () => {

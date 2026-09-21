@@ -88,21 +88,15 @@ async function* decodeChatStream(
   const observeThinkingBlocks = function* (
     blocks: readonly ChatThinkingBlock[],
   ): Iterable<SemanticStreamEvent> {
-    if (observedThinkingBlocks.size === 0 && chatReasoning.length > 0 && blocks.length === 1) {
-      const block = blocks[0] as ChatThinkingBlock;
-      if (block.type !== "thinking" || block.thinking !== chatReasoning) invalid();
-      if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
-      budget.reserveEntry();
-      observedThinkingBlocks.set(0, block);
-      if (block.signature !== undefined && block.signature.length > 0) {
-        budget.reserve(block.signature);
-        yield {
-          kind: "reasoning_start",
-          key: reasoningKey,
-          messagesState: { type: "thinking", signature: block.signature },
-        };
-      }
-      return;
+    let genericUpgradeIndex: number | undefined;
+    if (observedThinkingBlocks.size === 0 && chatReasoning.length > 0 && blocks.length > 0) {
+      const visible = blocks
+        .map((block, index) => ({ block, index }))
+        .filter((entry): entry is { readonly block: Extract<ChatThinkingBlock, { readonly type: "thinking" }>; readonly index: number } => (
+          entry.block.type === "thinking" && entry.block.thinking.length > 0
+        ));
+      if (visible.length > 1 || (visible[0] !== undefined && visible[0].block.thinking !== chatReasoning)) invalid();
+      genericUpgradeIndex = visible[0]?.index;
     }
     for (let index = 0; index < blocks.length; index += 1) {
       const block = blocks[index] as ChatThinkingBlock;
@@ -114,6 +108,18 @@ async function* decodeChatStream(
       if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
       budget.reserveEntry();
       observedThinkingBlocks.set(index, block);
+      if (index === genericUpgradeIndex) {
+        if (block.type !== "thinking") invalid();
+        if (block.signature !== undefined && block.signature.length > 0) {
+          budget.reserve(block.signature);
+          yield {
+            kind: "reasoning_start",
+            key: reasoningKey,
+            messagesState: { type: "thinking", signature: block.signature },
+          };
+        }
+        continue;
+      }
       const key = `chat:reasoning:block:${index}`;
       const partKey = `${key}:summary:0`;
       if (block.type === "redacted_thinking") {
@@ -1378,6 +1384,7 @@ async function* decodeResponsesStream(
           text,
         };
         if (type === "response.content_part.done") completedReasoningParts.add(partKey);
+        if (type === "response.content_part.done") identity.completedText.set(partKey, text);
       } else {
         invalid();
       }
@@ -1441,6 +1448,7 @@ async function* decodeResponsesStream(
         text,
       };
       if (type === "response.reasoning_summary_part.done") completedReasoningParts.add(partKey);
+      if (type === "response.reasoning_summary_part.done") identity.completedText.set(partKey, text);
       continue;
     }
     if (
