@@ -206,7 +206,7 @@ export interface SemanticUsage {
 export type SemanticReasoningPresentation = "summary" | "content";
 
 export type SemanticMessagesReasoningState =
-  | { readonly type: "thinking"; readonly signature: string }
+  | { readonly type: "thinking"; readonly thinking: string; readonly signature: string }
   | { readonly type: "redacted_thinking"; readonly data: string };
 
 export interface SemanticReasoningPart {

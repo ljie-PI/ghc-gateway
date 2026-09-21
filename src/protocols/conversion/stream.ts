@@ -938,7 +938,9 @@ class MessagesEmitter implements StreamEmitter {
       this.emittedReasoning.add(item.key);
       return;
     }
-    const thinking = item.parts.map((part) => part.text).join("");
+    const thinking = item.messagesState.thinking;
+    const visible = item.parts.map((part) => part.text).join("");
+    if (visible.length > 0 && visible !== thinking) invalid();
     yield this.event({
       type: "content_block_start",
       index,

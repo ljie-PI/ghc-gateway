@@ -162,7 +162,7 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
           parts: block.thinking.length === 0 ? [] : [{ presentation: "summary", index: 0, text: block.thinking }],
           status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
           hasOpaqueState: true,
-          messagesState: { type: "thinking", signature: block.signature },
+          messagesState: { type: "thinking", thinking: block.thinking, signature: block.signature },
         });
       } else if (block.type === "thinking" && block.thinking.length > 0) {
         items.push({

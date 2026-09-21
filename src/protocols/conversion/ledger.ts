@@ -450,7 +450,10 @@ export class SemanticItemLedger {
     if (reasoning === undefined) {
       this.reserve(key);
       if (itemId !== undefined) this.reserve(itemId);
-      if (messagesState?.type === "thinking") this.reserve(messagesState.signature);
+      if (messagesState?.type === "thinking") {
+        this.reserve(messagesState.thinking);
+        this.reserve(messagesState.signature);
+      }
       if (messagesState?.type === "redacted_thinking") this.reserve(messagesState.data);
       reasoning = {
         key,
@@ -466,7 +469,12 @@ export class SemanticItemLedger {
     } else if (messagesState !== undefined) {
       if (reasoning.messagesState !== undefined && !sameMessagesState(reasoning.messagesState, messagesState)) invalid();
       if (reasoning.messagesState === undefined) {
-        this.reserve(messagesState.type === "thinking" ? messagesState.signature : messagesState.data);
+        if (messagesState.type === "thinking") {
+          this.reserve(messagesState.thinking);
+          this.reserve(messagesState.signature);
+        } else {
+          this.reserve(messagesState.data);
+        }
       }
       reasoning.messagesState = messagesState;
     }
@@ -476,7 +484,9 @@ export class SemanticItemLedger {
 
 function sameMessagesState(left: SemanticMessagesReasoningState, right: SemanticMessagesReasoningState): boolean {
   return left.type === right.type
-    && (left.type === "thinking" ? left.signature === (right as typeof left).signature : left.data === (right as typeof left).data);
+    && (left.type === "thinking"
+      ? left.thinking === (right as typeof left).thinking && left.signature === (right as typeof left).signature
+      : left.data === (right as typeof left).data);
 }
 
 function compareResponseItemKeys(

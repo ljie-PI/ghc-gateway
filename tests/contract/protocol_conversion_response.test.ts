@@ -254,6 +254,57 @@ describe("shared conversion response codecs", () => {
       .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual(["plan"]);
   });
 
+  it.each([
+    [
+      "redacted-before-signed",
+      "plan",
+      [
+        { type: "redacted_thinking", data: "opaque" },
+        { type: "thinking", thinking: "plan", signature: "sig" },
+      ],
+      ["redacted_thinking", "thinking"],
+    ],
+    [
+      "multiple-signed",
+      "firstsecond",
+      [
+        { type: "thinking", thinking: "first", signature: "sig1" },
+        { type: "thinking", thinking: "second", signature: "sig2" },
+      ],
+      ["thinking", "thinking"],
+    ],
+  ] as const)("reconciles scalar Chat reasoning with %s blocks in exact order", async (_name, scalar, blocks, types) => {
+    const source = [
+      chatSse({
+        id: "chat_multi_upgrade",
+        choices: [{ index: 0, delta: { reasoning_content: scalar }, finish_reason: null }],
+      }),
+      chatSse({
+        id: "chat_multi_upgrade",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "answer", thinking_blocks: blocks },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const messagesWire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    const starts = messagesWire.split(/\r?\n/u)
+      .filter((line) => line.startsWith("data: {") && line.includes("content_block_start"))
+      .map((line) => JSON.parse(line.slice(6)) as { content_block?: { type?: string } })
+      .map((event) => event.content_block?.type);
+    expect(starts.slice(0, types.length)).toEqual(types);
+    expect(starts.at(-1)).toBe("text");
+
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual([scalar]);
+  });
+
   it("marks signed Chat reasoning-only truncation incomplete", async () => {
     const source = chatSse({
       id: "chat_signed_incomplete",

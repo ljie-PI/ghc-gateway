@@ -88,15 +88,11 @@ async function* decodeChatStream(
   const observeThinkingBlocks = function* (
     blocks: readonly ChatThinkingBlock[],
   ): Iterable<SemanticStreamEvent> {
-    let genericUpgradeIndex: number | undefined;
+    let aliasGeneric = false;
     if (observedThinkingBlocks.size === 0 && chatReasoning.length > 0 && blocks.length > 0) {
-      const visible = blocks
-        .map((block, index) => ({ block, index }))
-        .filter((entry): entry is { readonly block: Extract<ChatThinkingBlock, { readonly type: "thinking" }>; readonly index: number } => (
-          entry.block.type === "thinking" && entry.block.thinking.length > 0
-        ));
-      if (visible.length > 1 || (visible[0] !== undefined && visible[0].block.thinking !== chatReasoning)) invalid();
-      genericUpgradeIndex = visible[0]?.index;
+      const visible = visibleThinkingBlockText(blocks);
+      if (visible.length > 0 && visible !== chatReasoning) invalid();
+      aliasGeneric = visible.length > 0;
     }
     for (let index = 0; index < blocks.length; index += 1) {
       const block = blocks[index] as ChatThinkingBlock;
@@ -108,18 +104,6 @@ async function* decodeChatStream(
       if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
       budget.reserveEntry();
       observedThinkingBlocks.set(index, block);
-      if (index === genericUpgradeIndex) {
-        if (block.type !== "thinking") invalid();
-        if (block.signature !== undefined && block.signature.length > 0) {
-          budget.reserve(block.signature);
-          yield {
-            kind: "reasoning_start",
-            key: reasoningKey,
-            messagesState: { type: "thinking", signature: block.signature },
-          };
-        }
-        continue;
-      }
       const key = `chat:reasoning:block:${index}`;
       const partKey = `${key}:summary:0`;
       if (block.type === "redacted_thinking") {
@@ -137,14 +121,15 @@ async function* decodeChatStream(
       if (block.thinking.length === 0 && (block.signature === undefined || block.signature.length === 0)) continue;
       budget.reserve(block.thinking);
       if (block.signature !== undefined) budget.reserve(block.signature);
+      if (aliasGeneric && (block.signature === undefined || block.signature.length === 0)) continue;
       yield {
         kind: "reasoning_start",
         key,
         ...(block.signature === undefined || block.signature.length === 0
           ? {}
-          : { messagesState: { type: "thinking" as const, signature: block.signature } }),
+          : { messagesState: { type: "thinking" as const, thinking: block.thinking, signature: block.signature } }),
       };
-      if (block.thinking.length > 0) {
+      if (block.thinking.length > 0 && !aliasGeneric) {
         yield {
           kind: "reasoning_snapshot",
           key,
