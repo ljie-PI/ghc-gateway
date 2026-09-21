@@ -104,10 +104,23 @@ describe("content-free request diagnostics", () => {
       write: () => { if (++writes > 1) throw new Error("PRIVATE_IO_ERROR"); },
     }, { onFailure: () => { warnings++; throw new Error("PRIVATE_WARNING_FAILURE"); } });
     diagnostics.begin("req_io", "messages").finish();
-    await diagnostics.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(diagnostics.snapshot()).toMatchObject({ state: "failed", reason: "io_error", pendingRecords: 0 });
     expect(diagnostics.snapshot().droppedRecords).toBe(2);
     expect(warnings).toBe(1);
+    let shapes = 0;
+    const later = diagnostics.begin("req_after_failure", "messages");
+    later.stage("planning");
+    later.shape("upstream_output", () => { shapes++; throw new Error("must not inspect"); });
+    later.shape("upstream_output", () => { shapes++; throw new Error("must not inspect"); });
+    later.failure(new Error("PRIVATE_LATE"));
+    later.failure(new Error("PRIVATE_DUPLICATE"));
+    later.finish();
+    later.finish();
+    expect(diagnostics.snapshot().droppedRecords).toBe(7);
+    expect(shapes).toBe(0);
+    expect(writes).toBe(2);
+    await diagnostics.close();
 
     const { diagnostics: broken } = recorder();
     broken.begin("req_observer", "chat").observe(() => { throw new Error("PRIVATE_SHAPE_ERROR"); });

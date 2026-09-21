@@ -51,6 +51,7 @@ const DEGRADATIONS = [
   "cache.control_omitted", "reasoning.budget_coarsened", "reasoning.presentation_omitted",
   "reasoning.state_omitted", "sampling.top_k_omitted",
 ] as const;
+const PROTOCOL_STATUSES = ["completed", "incomplete", "failed", "error", "in_progress", "queued", "cancelled", "unknown"] as const;
 const SSE_TYPES = [
   "chunk", "done", "error", "ping", "message_start", "message_delta", "message_stop",
   "content_block_start", "content_block_delta", "content_block_stop",
@@ -90,6 +91,7 @@ export interface DiagnosticFields {
   readonly messagesBetas?: readonly typeof MESSAGE_BETAS[number][];
   readonly unknownBetaCount?: number;
   readonly degradations?: readonly typeof DEGRADATIONS[number][];
+  readonly protocolStatus?: typeof PROTOCOL_STATUSES[number];
   readonly shape?: DiagnosticShape;
 }
 
@@ -129,7 +131,7 @@ export interface RequestDiagnostics {
   shape(stage: typeof STAGES[number], work: () => DiagnosticShape): void;
   event(type: string): void;
   bytes(side: "upstream" | "client", size: number): void;
-  failure(error: unknown): void;
+  failure(error: unknown, origin?: Readonly<GatewayFailureOrigin>): void;
   outcome(outcome: typeof OUTCOMES[number]): void;
   terminal(cause: typeof TERMINALS[number]): void;
   finish(): void;
@@ -186,13 +188,16 @@ export class DiagnosticRecorder {
 
   begin(requestId: string, clientProtocol: DiagnosticFields["clientProtocol"]): RequestDiagnostics {
     let started = 0;
-    try { started = this.clock(); } catch { this.fail("observer_error"); }
+    if (this.state !== "failed" && !this.closing) {
+      try { started = this.clock(); } catch { this.fail("observer_error"); }
+    }
     let fields: DiagnosticFields = clientProtocol === undefined ? {} : { clientProtocol };
     let stage: DiagnosticRecord["stage"] = "received";
     let seq = 0;
     let omitted = 0;
     let finished = false;
     let failure: DiagnosticRecord["failure"];
+    let failureSeen = false;
     let outcome: DiagnosticRecord["outcome"];
     let terminalCause: DiagnosticRecord["terminalCause"];
     let upstreamBytes = 0;
@@ -216,20 +221,33 @@ export class DiagnosticRecorder {
       if (finished || this.state === "failed" || this.closing) return;
       try { work(); } catch { this.fail("observer_error"); }
     };
+    const record = (work: () => void): void => {
+      if (finished) return;
+      if (this.state === "failed" || this.closing) {
+        this.drop(this.state === "failed" ? this.reason ?? "observer_error" : "shutdown");
+        return;
+      }
+      try { work(); } catch {
+        this.dropped = increment(this.dropped, 1);
+        this.fail("observer_error");
+      }
+    };
     const trace: RequestDiagnostics = {
       set: (value) => observe(() => { fields = { ...fields, ...sanitizeDiagnosticFields(value) }; }),
-      stage: (value, extra = {}) => observe(() => {
+      stage: (value, extra = {}) => record(() => {
         stage = value;
         emit("stage", sanitizeDiagnosticFields(extra));
       }),
       observe,
-      shape: (value, work) => observe(() => {
-        if (shapeStages.has(value)) return;
-        const shape = work();
+      shape: (value, work) => {
+        if (finished || shapeStages.has(value)) return;
         shapeStages.add(value);
-        stage = value;
-        emit("stage", { shape });
-      }),
+        record(() => {
+          const shape = work();
+          stage = value;
+          emit("stage", { shape });
+        });
+      },
       event: (type) => observe(() => {
         const key = member(SSE_TYPES, type) ?? "unknown";
         sse[key] = increment(sse[key] ?? 0, 1);
@@ -238,25 +256,28 @@ export class DiagnosticRecorder {
         if (side === "upstream") upstreamBytes = increment(upstreamBytes, size);
         else clientBytes = increment(clientBytes, size);
       }),
-      failure: (error) => observe(() => {
-        if (failure !== undefined) return;
-        const value = failureFromUnknown(error, diagnosticOrigin(stage, fields.stream));
-        const cause = value.cause;
-        failure = {
-          kind: value.kind,
-          ...(value.source === undefined ? {} : { source: value.source }),
-          ...(value.phase === undefined ? {} : { phase: value.phase }),
-          ...(cause instanceof ConversionContractError && /^REQ-[A-Z0-9-]{1,100}$/u.test(cause.ruleId)
-            ? { ruleId: cause.ruleId } : {}),
-        };
-        outcome = failureOutcome(value);
-        emit("request_failed", { failure, outcome });
-      }),
+      failure: (error, origin) => {
+        if (finished || failureSeen) return;
+        failureSeen = true;
+        record(() => {
+          const value = failureFromUnknown(error, origin ?? diagnosticOrigin(stage, fields.stream));
+          const cause = value.cause;
+          failure = {
+            kind: value.kind,
+            ...(value.source === undefined ? {} : { source: value.source }),
+            ...(value.phase === undefined ? {} : { phase: value.phase }),
+            ...(cause instanceof ConversionContractError && /^REQ-[A-Z0-9-]{1,100}$/u.test(cause.ruleId)
+              ? { ruleId: cause.ruleId } : {}),
+          };
+          outcome = failureOutcome(value);
+          emit("request_failed", { failure, outcome });
+        });
+      },
       outcome: (value) => observe(() => { if (failure === undefined) outcome = value; }),
       terminal: (value) => observe(() => { terminalCause ??= value; }),
       finish: () => {
         if (finished) return;
-        observe(() => {
+        record(() => {
           stage = "finished";
           emit("request_finished", {
             outcome: outcome ?? "success", upstreamBytes, clientBytes, sse, omittedRecords: omitted,
@@ -388,6 +409,7 @@ function sanitizeDiagnosticFields(value: Readonly<DiagnosticFields>): Diagnostic
     ...(value.messagesBetas === undefined ? {} : { messagesBetas: MESSAGE_BETAS.filter((item) => value.messagesBetas?.slice(0, 3).includes(item)) }),
     ...(value.unknownBetaCount === undefined ? {} : { unknownBetaCount: finite(value.unknownBetaCount) }),
     ...(value.degradations === undefined ? {} : { degradations: DEGRADATIONS.filter((item) => value.degradations?.slice(0, 5).includes(item)) }),
+    ...(member(PROTOCOL_STATUSES, value.protocolStatus) === undefined ? {} : { protocolStatus: member(PROTOCOL_STATUSES, value.protocolStatus)! }),
     ...(value.shape === undefined ? {} : { shape: {
       fields: Object.fromEntries(DIAGNOSTIC_FIELDS.flatMap((key) => {
         const type = member(VALUE_TYPES, value.shape?.fields[key]);

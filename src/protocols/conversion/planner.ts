@@ -112,10 +112,8 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
 function observePlan(input: Readonly<ConversionPlanningInput>, plan: ProtocolExecutionPlan): ProtocolExecutionPlan {
   const diagnostics = input.diagnostics;
   diagnostics?.set({ upstreamProtocol: plan.target, converted: plan.kind === "converted", stream: plan.stream });
-  diagnostics?.observe(() => diagnostics.stage("planning", {
-    shape: diagnosticShape(plan.kind === "converted" ? plan.request.body : input.body),
-    ...(plan.kind === "converted" ? { degradations: plan.request.degradations } : {}),
-  }));
+  diagnostics?.shape("planning", () => diagnosticShape(plan.kind === "converted" ? plan.request.body : input.body));
+  if (plan.kind === "converted") diagnostics?.stage("planning", { degradations: plan.request.degradations });
   return plan;
 }
 

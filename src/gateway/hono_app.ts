@@ -263,7 +263,7 @@ async function handleRoute(
       diagnostics?.stage("request_decode");
       const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes, workController.signal);
       decoded = { url, headers: request.headers, body };
-      diagnostics?.observe(() => diagnostics.stage("request_decoded", { shape: diagnosticShape(body) }));
+      diagnostics?.shape("request_decoded", () => diagnosticShape(body));
     }
 
     if (workController.signal.aborted) {

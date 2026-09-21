@@ -18,7 +18,7 @@ import type { UpstreamByteStream } from "../../copilot/upstream_types.js";
 import type { SemanticUsage } from "../conversion/types.js";
 import { mergeMessagesUsage } from "../conversion/usage.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
-import { diagnosticShape } from "../conversion/diagnostics.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 
 export function serializeNativeMessagesRequest(body: WireJsonObject, model: string, diagnostics?: RequestDiagnostics): Uint8Array {
   let replaced = false;
@@ -53,6 +53,7 @@ export function validatedNativeMessagesBody(bytes: Uint8Array, maxBytes: number,
       invalid();
     }
     diagnostics?.shape("upstream_output", () => diagnosticShape(parsed));
+    observeDiagnosticProtocolStatus(diagnostics, "messages", parsed);
     diagnostics?.shape("client_output", () => diagnosticShape(parsed));
     return bytes;
   } catch (error: unknown) {
@@ -386,6 +387,7 @@ class NativeMessagesObserver {
       .at(-1);
     if (event === "error") {
       this.diagnostics?.event("error");
+      this.diagnostics?.set({ protocolStatus: "error" });
       this.semantic = true;
       throw new GatewayFailureError({
         kind: "upstream_stream_error",
@@ -419,6 +421,7 @@ class NativeMessagesObserver {
       invalid();
     }
     const type = types[0];
+    observeDiagnosticProtocolStatus(this.diagnostics, "messages", payload);
     this.diagnostics?.event(type);
     this.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
     this.diagnostics?.shape("client_output", () => diagnosticShape(payload));

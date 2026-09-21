@@ -1,5 +1,6 @@
 import type { BoundCopilot } from "../../copilot/backend.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
+import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
 import { boundedCleanup } from "../../gateway/stream_execution.js";
 import { SseDecodeError } from "../../serialization/sse.js";
 import {
@@ -21,7 +22,7 @@ import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import type { NativeResponsesPlan } from "./planner.js";
 import { encodeOpenaiResponsesSseEvent } from "./wire.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
-import { diagnosticShape } from "../conversion/diagnostics.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 
 export interface NativeResponsesRequestOptions {
   readonly diagnostics?: RequestDiagnostics | undefined;
@@ -60,12 +61,17 @@ export async function completeNativeResponses(
   plan: Readonly<NativeResponsesPlan>,
   options: Readonly<NativeResponsesRequestOptions>,
 ): Promise<UpstreamByteResponse> {
-  const response = await bound.completeResponses(nativeResponsesUpstreamRequest(plan, options));
-  return {
-    status: response.status,
-    headers: response.headers,
-    body: validatedNativeResponsesBody(response, options.nonstreamBodyBytes),
-  };
+  const response = observeDiagnosticUpstream(await bound.completeResponses(nativeResponsesUpstreamRequest(plan, options)), options.diagnostics);
+  try {
+    return {
+      status: response.status,
+      headers: response.headers,
+      body: validatedNativeResponsesBody(response, options.nonstreamBodyBytes),
+    };
+  } catch (error: unknown) {
+    options.diagnostics?.failure(error, { source: "parser", phase: "body" });
+    throw error;
+  }
 }
 
 export async function openNativeResponsesStream(
@@ -73,10 +79,13 @@ export async function openNativeResponsesStream(
   plan: Readonly<NativeResponsesPlan>,
   options: Readonly<NativeResponsesRequestOptions>,
 ): Promise<UpstreamByteStream> {
-  const upstream = await bound.openResponsesStream(nativeResponsesUpstreamRequest(plan, options));
+  const upstream = observeDiagnosticStream(await bound.openResponsesStream(nativeResponsesUpstreamRequest(plan, options)), options.diagnostics);
   if (upstream.status >= 200 && upstream.status < 300 && !isEventStream(upstream.headers)) {
+    options.diagnostics?.stage("upstream_output");
     await boundedCleanup(upstream.cancel());
-    throw new GatewayFailureError({ kind: "invalid_upstream_response" });
+    const error = new GatewayFailureError({ kind: "invalid_upstream_response" });
+    options.diagnostics?.failure(error, { source: "parser", phase: "headers" });
+    throw error;
   }
   return upstream;
 }
@@ -132,6 +141,7 @@ export async function* normalizeNativeResponsesStream(
   for await (const event of parseResponsesSse(bytes, eventLimitBytes)) {
     const payload = parseResponsesEventData(event);
     const type = stringMember(payload, "type");
+    observeDiagnosticProtocolStatus(diagnostics, "responses", payload);
     diagnostics?.event(type ?? "unknown");
     diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
     if (type === undefined || type.length === 0 || (event.eventName !== undefined && event.eventName !== type)) {

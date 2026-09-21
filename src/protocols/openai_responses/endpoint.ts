@@ -50,8 +50,7 @@ import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentOpenaiResponsesFailure } from "./failure_presenter.js";
 import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
-import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
-import { diagnosticShape } from "../conversion/diagnostics.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedPlannedResponse } from "../conversion/buffered.js";
@@ -240,12 +239,13 @@ async function nativeNonstreamResponse(
   usage: RequestAttempt,
 ): Promise<Response> {
   scope.diagnostics?.stage("upstream_request");
-  const upstream = observeDiagnosticUpstream(await transportCall(
+  const upstream = await transportCall(
     () => completeNativeResponses(bound, plan, nativeOptions(scope)),
     scope.signal,
-  ), scope.diagnostics);
+  );
   assertUpstreamSuccess(upstream);
   const payload = parseUpstreamObject(upstream.body, scope.config.limits.nonstreamBodyBytes);
+  observeDiagnosticProtocolStatus(scope.diagnostics, "responses", payload);
   scope.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
   scope.diagnostics?.shape("client_output", () => diagnosticShape(payload));
   const responseId = responseIdFromPayload(payload);
@@ -278,10 +278,10 @@ async function nativeStreamResponse(
   performanceObserver?: ProtocolPerformanceObserver,
 ): Promise<Response> {
   scope.diagnostics?.stage("upstream_request");
-  const upstream = observeDiagnosticStream(await transportCall(
+  const upstream = await transportCall(
     () => openNativeResponsesStream(bound, plan, nativeOptions(scope)),
     scope.signal,
-  ), scope.diagnostics);
+  );
   if (upstream.status < 200 || upstream.status >= 300) {
     await boundedCleanup(upstream.cancel());
   }

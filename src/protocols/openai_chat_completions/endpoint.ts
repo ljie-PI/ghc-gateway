@@ -39,7 +39,7 @@ import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedResponse } from "../conversion/buffered.js";
 import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
-import { diagnosticShape } from "../conversion/diagnostics.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
 import {
   createNativeChatCompletionsStreamResponse,
@@ -148,6 +148,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
 
         return withUpstreamProtocol(measure(dependencies.performanceObserver, "buffered", () => {
           const payload = validatedNativeChatCompletionsBody(upstream.body, scope.config.limits.nonstreamBodyBytes);
+          observeDiagnosticProtocolStatus(scope.diagnostics, "chat", payload);
           scope.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
           scope.diagnostics?.shape("client_output", () => diagnosticShape(payload));
           usage.success(attemptUsage(nativeChatCompletionsUsage(payload)));

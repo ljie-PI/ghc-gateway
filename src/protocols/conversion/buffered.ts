@@ -86,6 +86,7 @@ function convertBufferedResponseInternal(
   const semantic = responseBindings === undefined
     ? decoded
     : restoreResponsesExtendedTools(decoded, responseBindings);
+  context.diagnostics?.set({ protocolStatus: semantic.status });
   validateUniqueCallIds(semantic.items);
   const envelope = responseEnvelope(semantic, context);
   context.diagnostics?.shape("client_output", () => diagnosticShape(envelope));

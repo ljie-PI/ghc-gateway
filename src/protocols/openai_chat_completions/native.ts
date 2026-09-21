@@ -25,7 +25,7 @@ import {
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import type { SemanticUsage } from "../conversion/types.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
-import { diagnosticShape } from "../conversion/diagnostics.js";
+import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 import {
   encodeOpenaiChatCompletionsDone,
   encodeOpenaiChatCompletionsSseChunk,
@@ -255,6 +255,7 @@ async function* nativeChatCompletionsEmissions(
       }
       const frame = next.value;
       if (frame.kind === "chunk") {
+        observeDiagnosticProtocolStatus(input.scope.diagnostics, "chat", frame.chunk.payload);
         input.scope.diagnostics?.shape("client_output", () => diagnosticShape(frame.chunk.payload));
         const bytes = measure(input.performanceObserver, () => {
           usage = mergeChatCompletionsUsageCounters(usage, usageObservationFromPayload(frame.chunk.payload));

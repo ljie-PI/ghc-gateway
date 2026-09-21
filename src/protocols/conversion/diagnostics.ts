@@ -1,7 +1,8 @@
 import {
   isWireJsonArray, isWireJsonNumber, isWireJsonObject, type WireJson,
 } from "../../serialization/wire_json.js";
-import { DIAGNOSTIC_FIELDS, DIAGNOSTIC_LIMITS, type DiagnosticShape } from "../../telemetry/diagnostics.js";
+import { DIAGNOSTIC_FIELDS, DIAGNOSTIC_LIMITS, type DiagnosticShape, type RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import type { InferenceProtocol } from "./types.js";
 
 const KNOWN_FIELDS: ReadonlySet<string> = new Set(DIAGNOSTIC_FIELDS);
 const SHAPE_CHILDREN = new Set(["messages", "input", "output", "choices", "content", "message", "delta", "response", "item", "part", "content_block"]);
@@ -80,4 +81,55 @@ export function diagnosticObjectShape(value: Readonly<Record<string, unknown>>):
   }
   if (typeof value.type === "string") blocks[BLOCKS.find((candidate) => candidate === value.type) ?? "unknown"] = 1;
   return { fields, counts: {}, blocks, truncated };
+}
+
+export function observeDiagnosticProtocolStatus(
+  diagnostics: RequestDiagnostics | undefined,
+  protocol: InferenceProtocol,
+  payload: WireJson,
+): void {
+  diagnostics?.observe(() => {
+    if (!isWireJsonObject(payload)) return;
+    let remaining = DIAGNOSTIC_LIMITS.shapeNodes;
+    const field = (value: WireJson | undefined, key: string): WireJson | undefined => {
+      if (!isWireJsonObject(value)) return undefined;
+      let found: WireJson | undefined;
+      for (const entry of value.members) {
+        if (remaining-- <= 0) return undefined;
+        if (entry.key !== key) continue;
+        if (found !== undefined) return undefined;
+        found = entry.value;
+      }
+      return found;
+    };
+    const type = field(payload, "type");
+    if (type === "error") { diagnostics.set({ protocolStatus: "error" }); return; }
+    if (protocol === "responses") {
+      const response = field(payload, "response");
+      const status = field(isWireJsonObject(response) ? response : payload, "status");
+      if (status === "completed" || status === "incomplete" || status === "failed"
+        || status === "in_progress" || status === "queued" || status === "cancelled") {
+        diagnostics.set({ protocolStatus: status });
+      } else if (type === "response.completed") diagnostics.set({ protocolStatus: "completed" });
+      else if (type === "response.incomplete") diagnostics.set({ protocolStatus: "incomplete" });
+      else if (type === "response.failed") diagnostics.set({ protocolStatus: "failed" });
+      else if (remaining <= 0) diagnostics.set({ protocolStatus: "unknown" });
+      return;
+    }
+    let reason: WireJson | undefined;
+    if (protocol === "chat") {
+      const choices = field(payload, "choices");
+      if (!isWireJsonArray(choices) || choices.items.length !== 1 || !isWireJsonObject(choices.items[0])) return;
+      reason = field(choices.items[0], "finish_reason");
+    } else {
+      const delta = field(payload, "delta");
+      reason = field(isWireJsonObject(delta) ? delta : payload, "stop_reason");
+    }
+    if (reason === "length" || reason === "content_filter" || reason === "max_tokens" || reason === "model_context_window_exceeded") {
+      diagnostics.set({ protocolStatus: "incomplete" });
+    } else if (reason === "stop" || reason === "tool_calls" || reason === "end_turn"
+      || reason === "tool_use" || reason === "stop_sequence") {
+      diagnostics.set({ protocolStatus: "completed" });
+    } else if (remaining <= 0) diagnostics.set({ protocolStatus: "unknown" });
+  });
 }

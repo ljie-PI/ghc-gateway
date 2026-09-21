@@ -135,6 +135,7 @@ async function* convertedEmissions(
       } else if (emission.kind === "wire") {
         yield { kind: "wire", bytes: emission.bytes };
       } else if (emission.kind === "terminal") {
+        input.scope.diagnostics?.set({ protocolStatus: emission.terminal });
         yield {
           kind: "terminal",
           outcome: { kind: "success", value: observedUsage },
