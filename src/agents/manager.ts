@@ -6,6 +6,7 @@ import { AgentError, validateMappings, type AgentId, type AgentStatus, type Agen
 import { AgentStore, copyMappings, newImage, type AgentState, type StepState } from "./store.js";
 import { applyAccess, assertNoLinks, assertOwned, assertPrivate, assertSecurityPathUnchanged, canonical, digest, exists, observeSecurityPath, privateDirectory, protect, readImage, sameDisplacedContent, sameImage, sameSecurityPathIdentity, syncDirectory, writeExclusive, type FileImage, type SecurityPathObservation } from "./files.js";
 import { projectAgent, validateCodexTakeover } from "./transform.js";
+import { formatLocalBackupTimestamp, parseTimestampBackupPath, timestampBackupPattern } from "./backups.js";
 interface TakeoverEvidence extends NonNullable<AgentStatus["takeover"]> {
   readonly images: readonly (FileImage | null)[];
   readonly paths: readonly string[];
@@ -17,7 +18,7 @@ export interface AgentManagerOptions {
   readonly env?: Readonly<NodeJS.ProcessEnv>;
   readonly now?: () => Date;
   /** Deterministic failure/race injection at durable transaction boundaries. */
-  readonly checkpoint?: (point: "before_intent" | "intent" | "stage_written" | "staged" | "displaced" | "linked" | "published" | "cleanup" | "quarantined" | "complete", agent: AgentId, index: number) => void;
+  readonly checkpoint?: (point: "before_intent" | "intent" | "stage_written" | "staged" | "displaced_raw" | "displaced" | "linked" | "published" | "cleanup" | "quarantined" | "complete", agent: AgentId, index: number) => void;
 }
 
 export class FileAgentsManager implements AgentsManager {
@@ -73,58 +74,47 @@ export class FileAgentsManager implements AgentsManager {
       validateMappings(request.agent, request.mappings);
       const store = this.store(request.agent);
       // Parse and validate BEFORE making a recovery directory or lock file.
-      const initial = await this.readInitialState(store);
+      const initial = this.upgradeState(request.agent, await this.readInitialState(store));
       const paths = this.targetPaths(request.agent, initial);
       const before = await this.images(paths, initial);
-      this.requireRevision(request.expectedRevision, initial, before, paths, origin);
+      this.requireRevision(request.expectedRevision, initial, paths, origin);
       if (takeover) await this.requireTakeoverRevision(request as AgentTakeoverRequest, initial, origin);
       if (initial.pending === null) this.project(request, initial, before, paths, origin, models, takeover);
       signal.throwIfAborted();
       assertCurrent();
       return await store.locked(async (save) => {
-        const state = await store.read();
-        let current = await this.images(paths, state);
-        this.requireRevision(request.expectedRevision, state, current, paths, origin);
-        const takeoverEvidence = takeover
-          ? await this.requireTakeoverRevision(request as AgentTakeoverRequest, state, origin)
-          : undefined;
+        let state = await store.read();
+        let livePaths = this.targetPaths(request.agent, state);
+        let current = await this.images(livePaths, state);
+        this.requireRevision(request.expectedRevision, this.upgradeState(request.agent, state), this.targetPaths(request.agent, state), origin);
         assertCurrent();
         signal.throwIfAborted();
         const recovering = state.pending !== null;
         if (recovering) {
-          // Resume only the already-durable transaction, never a new restore.
-          current = [...await this.requireRecoverable(state, current)];
+          current = [...await this.requireRecoverable(state, current, undefined, save)];
           await this.execute(request.agent, state, save);
           await this.finish(request.agent, state, save);
         }
-        const livePaths = this.targetPaths(request.agent, state);
-        if (process.platform !== "win32" || recovering || !samePaths(paths, livePaths)) {
-          current = await this.images(livePaths, state);
-        }
-        if (initial.pending === null) this.requireRevision(request.expectedRevision, state, current, livePaths, origin);
+        state = this.upgradeState(request.agent, state);
+        livePaths = this.targetPaths(request.agent, state);
+        current = await this.images(livePaths, state);
+        if (initial.pending === null) this.requireRevision(request.expectedRevision, state, livePaths, origin);
+        if (takeover) await this.requireTakeoverRevision(request as AgentTakeoverRequest, state, origin);
         const projection = this.project(request, state, current, livePaths, origin, models, takeover);
-        const prepared = await this.prepareTargets(
-          request.agent, state, current, livePaths, takeover, takeoverEvidence,
-        );
-        current = prepared.current;
+        current = this.prepareTargets(request.agent, state, current, livePaths, takeover);
         const after = request.agent === "claude"
-          ? [prepared.backup, newImage(projection.config, current[1]!)]
-          : [prepared.configBackup, prepared.catalogBackup, newImage(projection.catalog!, current[2]!), newImage(projection.config, current[3]!)];
-        const steps = this.plan(request.agent, state, current, after);
+          ? [newImage(projection.config, current[0]!)]
+          : [newImage(projection.catalog!, current[0]!), newImage(projection.config, current[1]!)];
+        const appliedAt = (this.options.now ?? (() => new Date()))();
+        const steps = this.plan(request.agent, state, current, after, appliedAt);
         for (const [index, target] of state.targets.entries()) target.expected = current[index]!;
         state.mappings = copyMappings(request.mappings);
-        if (steps.length === 0) {
-          state.lastAppliedAt = (this.options.now ?? (() => new Date()))().toISOString();
-          state.revision += 1;
-          await save(state, () => this.requireCurrent(request.agent, assertCurrent, signal));
-          return await this.status(request.agent, origin);
-        }
         state.pending = { kind: "apply", steps, garbage: [] };
         // From this durable intent onward cancellation must not interrupt commit.
         await save(state, () => this.requireCurrent(request.agent, assertCurrent, signal));
         this.hit("intent", request.agent, -1);
         await this.execute(request.agent, state, save);
-        state.lastAppliedAt = (this.options.now ?? (() => new Date()))().toISOString();
+        state.lastAppliedAt = appliedAt.toISOString();
         await this.finish(request.agent, state, save);
         return await this.status(request.agent, origin);
       });
@@ -147,92 +137,20 @@ export class FileAgentsManager implements AgentsManager {
     );
   }
 
-  private async prepareTargets(
+  private prepareTargets(
     agent: AgentId,
     state: AgentState,
     current: (FileImage | null)[],
     paths: readonly string[],
     takeover: boolean,
-    takeoverEvidence?: TakeoverEvidence,
-  ) {
-    if ((agent === "claude" && state.version >= 2 || agent === "codex" && state.version === 3) && state.targets.length > 0) {
-      this.requireBackup(state, current);
-      if (agent === "codex" && takeoverEvidence !== undefined) {
-        const targetPaths = state.targets.map((target) => target.path);
-        const fresh = await this.images(targetPaths, state);
-        if (!sameFilePaths(takeoverEvidence.paths, targetPaths)
-          || fresh.some((image, index) => !sameImage(image, takeoverEvidence.images[index]!))) {
-          throw new AgentError("revision_conflict");
-        }
-        current = fresh;
-      }
-      return agent === "claude"
-        ? { current, backup: state.targets[0]!.expected, configBackup: null, catalogBackup: null }
-        : { current, backup: null, configBackup: state.targets[0]!.expected, catalogBackup: state.targets[1]!.expected };
-    }
-    const configPath = paths.at(-1)!;
-    const backupPath = `${configPath}.ghcg.bak`;
-    const clientPaths = agent === "claude" ? [configPath] : [path.join(path.dirname(configPath), "models.json"), configPath];
-    const catalogBackupPath = agent === "codex" ? `${clientPaths[0]}.ghcg.bak` : undefined;
-    const existing = await readImage(backupPath);
-    let existingCatalogBackup: FileImage | null = null;
-    if (existing !== null) await assertPrivate(backupPath, false);
-    if (catalogBackupPath !== undefined) {
-      existingCatalogBackup = await readImage(catalogBackupPath);
-      if (existingCatalogBackup !== null) await assertPrivate(catalogBackupPath, false);
-    }
-    const clientImages = await this.images(clientPaths);
-    const original = state.targets.length === 0 ? current.at(-1)! : state.targets.at(-1)!.original;
-    if (existing !== null && existing.bytes !== original?.bytes) throw new AgentError("agent_conflict");
-    if (!sameImage(clientImages.at(-1)!, current.at(-1)!)) throw new AgentError("agent_conflict");
-    if (agent === "codex") {
-      if (takeoverEvidence !== undefined) {
-        const observed = [existing, existingCatalogBackup, ...clientImages];
-        if (!sameFilePaths(takeoverEvidence.paths, [backupPath, catalogBackupPath!, ...clientPaths])
-          || observed.some((image, index) => !sameImage(image, takeoverEvidence.images[index]!))) {
-          throw new AgentError("revision_conflict");
-        }
-      }
-      if (clientImages[0] !== null && !takeover) throw new AgentError("agent_conflict");
-      if (existingCatalogBackup !== null) throw new AgentError("agent_conflict");
-      state.targets = [
-        { path: backupPath, original: existing, expected: existing },
-        { path: catalogBackupPath!, original: null, expected: null },
-        { path: clientPaths[0]!, original: clientImages[0]!, expected: clientImages[0]! },
-        { path: clientPaths[1]!, original, expected: clientImages[1]! },
-      ];
-      state.version = 3;
-      return {
-        current: [existing, existingCatalogBackup, ...clientImages],
-        backup: null,
-        configBackup: existing ?? (original === null ? null : newImage(Buffer.from(original.bytes, "base64"), null)),
-        catalogBackup: clientImages[0] === null ? null : newImage(Buffer.from(clientImages[0]!.bytes, "base64"), null),
-      };
-    }
-    const oldTargets = state.targets;
-    state.targets = [
-      { path: backupPath, original: existing, expected: existing },
-      ...clientPaths.map((target, index) => ({
-        path: target,
-        original: index === clientPaths.length - 1 ? original : oldTargets.find((item) => item.path === target)?.original ?? clientImages[index]!,
-        expected: clientImages[index]!,
-      })),
-    ];
-    state.version = 2;
-    return {
-      current: [existing, ...clientImages],
-      backup: existing ?? (original === null ? null : newImage(Buffer.from(original.bytes, "base64"), null)),
-      configBackup: null,
-      catalogBackup: null,
-    };
-  }
-
-  private requireBackup(state: AgentState, images: readonly (FileImage | null)[]): void {
-    if (state.version === 1 || state.targets.length === 0) return;
-    if (!sameImage(state.targets[0]!.expected, images[0]!)) throw new AgentError("agent_conflict");
-    if (state.version === 3 && state.targets.length === 4) {
-      if (!sameImage(state.targets[1]!.expected, images[1]!)) throw new AgentError("agent_conflict");
-    }
+  ): (FileImage | null)[] {
+    if (state.targets.length > 0) return current;
+    if (agent === "codex" && current[0] !== null && !takeover) throw new AgentError("agent_conflict");
+    state.targets = paths.map((target, index) => ({
+      path: target, original: current[index]!, expected: current[index]!, backups: [],
+    }));
+    state.version = 4;
+    return current;
   }
 
   private async requireTakeoverRevision(
@@ -259,34 +177,23 @@ export class FileAgentsManager implements AgentsManager {
     paths: readonly string[],
     images: readonly (FileImage | null)[],
   ): TakeoverEvidence {
-    const [configBackupPath, catalogBackupPath, catalogPath, configPath] = paths as readonly [string, string, string, string];
-    if (state.targets.length === 0) {
-      if (images[0] !== null || images[1] !== null) throw new AgentError("agent_conflict");
-      if (images[2] === null && images[3] === null) throw new AgentError("agent_conflict");
-    } else {
-      const expectedConfigBackup = state.version === 1 ? null : state.targets[0]?.expected ?? null;
-      if (!sameImage(images[0]!, expectedConfigBackup)) throw new AgentError("agent_conflict");
-      const expectedCatalogBackup = state.version === 3 && state.targets.length === 4
-        ? state.targets[1]!.expected : null;
-      if (!sameImage(images[1]!, expectedCatalogBackup)) throw new AgentError("agent_conflict");
-    }
-    const config = images[3] ?? null;
+    const [catalogPath, configPath] = paths as readonly [string, string];
+    if (images[0] === null && images[1] === null) throw new AgentError("agent_conflict");
+    const config = images[1] ?? null;
     validateCodexTakeover(config === null ? null : Buffer.from(config.bytes, "base64"));
     return {
-      revision: digest({ state, images, paths, origin }),
+      revision: digest({ revision: state.revision, paths, origin }),
       configPath,
       catalogPath,
-      configBackupPath,
-      catalogBackupPath,
       images,
       paths,
     };
   }
 
-  private takeoverPaths(state: AgentState): readonly [string, string, string, string] {
+  private takeoverPaths(state: AgentState): readonly [string, string] {
     const configPath = state.targets.at(-1)?.path ?? this.paths.codex.at(-1)!;
     const catalogPath = path.join(path.dirname(configPath), "models.json");
-    return [`${configPath}.ghcg.bak`, `${catalogPath}.ghcg.bak`, catalogPath, configPath];
+    return [catalogPath, configPath];
   }
 
   close(): void {
@@ -325,11 +232,11 @@ export class FileAgentsManager implements AgentsManager {
     let takeover: AgentStatus["takeover"] = null;
     const images: (FileImage | null)[] = [];
     try {
-      state = inspection?.state ?? await this.store(agent).read();
+      state = this.upgradeState(agent, inspection?.state ?? await this.store(agent).read());
       paths = inspection?.paths ?? this.fallbackTargetPaths(agent, state);
       if (inspection?.images !== undefined) {
         images.push(...inspection.images);
-        backupAvailable = this.backupAvailable(state, images);
+        backupAvailable = this.backupAvailable(agent, state);
         if (inspection.error !== undefined) throw inspection.error;
       } else {
         if (inspection?.error !== undefined) throw inspection.error;
@@ -341,7 +248,7 @@ export class FileAgentsManager implements AgentsManager {
             images.push(await this.image(validated, index, state));
           }
         } catch (error: unknown) {
-          backupAvailable = this.backupAvailable(state, images);
+          backupAvailable = this.backupAvailable(agent, state);
           throw error;
         }
         paths = validatedPaths;
@@ -362,8 +269,8 @@ export class FileAgentsManager implements AgentsManager {
           ? "unsafe_path"
           : state.pending !== null ? "recovery_required" : "conflict";
       }
-      revision = this.revision(state, images, paths, origin);
-      backupAvailable = this.backupAvailable(state, images);
+      revision = this.revision(state, paths, origin);
+      backupAvailable = this.backupAvailable(agent, state);
       if (agent === "codex" && state.pending === null
         && (kind === "conflict" || kind === "not_managed")) {
         try {
@@ -374,8 +281,6 @@ export class FileAgentsManager implements AgentsManager {
             revision: evidence.revision,
             configPath: evidence.configPath,
             catalogPath: evidence.catalogPath,
-            configBackupPath: evidence.configBackupPath,
-            catalogBackupPath: evidence.catalogBackupPath,
           };
         } catch { /* Unsafe conflicts remain fail closed. */ }
       }
@@ -383,8 +288,7 @@ export class FileAgentsManager implements AgentsManager {
       kind = error instanceof AgentError && error.code === "agent_unsafe_path" ? "unsafe_path" : "recovery_required";
     }
     return {
-      id: agent, state: kind, revision, paths: state !== null && state.version !== 1 && state.targets.length > 0
-        ? paths.slice(state.version === 3 && agent === "codex" ? 2 : 1) : paths,
+      id: agent, state: kind, revision, paths: state === null ? paths : this.liveConfigurationPaths(agent, state),
       endpoint: agent === "claude" ? origin : `${origin}/v1`,
       backupAvailable,
       lastAppliedAt: state?.lastAppliedAt ?? null,
@@ -407,17 +311,36 @@ export class FileAgentsManager implements AgentsManager {
     }
   }
 
-  private backupAvailable(state: AgentState, images: readonly (FileImage | null)[]): boolean {
-    if (state.version === 1 || state.targets.length === 0) return false;
-    const step = state.pending?.steps.find((candidate) => candidate.target === 0);
-    const image = images[0];
-    if (image === undefined || image === null) return false;
-    if (!sameImage(image, step?.after ?? state.targets[0]!.expected)) return false;
-    if (state.version === 3 && state.targets.length === 4 && state.targets[2]!.original !== null) {
-      const catalogStep = state.pending?.steps.find((candidate) => candidate.target === 1);
-      return images[1] !== null && sameImage(images[1]!, catalogStep?.after ?? state.targets[1]!.expected);
+  private backupAvailable(agent: AgentId, state: AgentState): boolean {
+    if (state.version === 4 && state.targets.length > 0) {
+      const tracked = state.targets.flatMap((target) => (target.backups ?? []).map((backup) => backup.path));
+      const pending = state.pending?.steps.flatMap((step) => step.backup === undefined ? [] : [step.backup]) ?? [];
+      return [...tracked, ...pending].some(exists);
     }
-    return true;
+    return this.liveConfigurationPaths(agent, state).some((target) => this.timestampBackups(target).length > 0);
+  }
+
+  private upgradeState(agent: AgentId, state: AgentState): AgentState {
+    if (state.version === 4) {
+      for (const target of state.targets) target.backups ??= [];
+      return state;
+    }
+    if (state.pending !== null) return state;
+    if (agent === "claude" && state.version === 1) state.mappings = state.mappings.slice(0, 3);
+    if (state.targets.length > 0) {
+      state.targets = (agent === "claude" ? state.targets.slice(-1) : state.targets.slice(-2))
+        .map((target) => ({ ...target, backups: [] }));
+    }
+    state.version = 4;
+    return state;
+  }
+
+  private liveConfigurationPaths(agent: AgentId, state: AgentState): readonly string[] {
+    if (state.targets.length === 0) return this.paths[agent].map(canonical);
+    const targets = state.version === 4 ? state.targets
+      : agent === "claude" ? state.targets.slice(-1) : state.targets.slice(-2);
+    return targets.map((target) => process.platform === "win32"
+      ? path.resolve(target.path).toLowerCase() : path.resolve(target.path));
   }
 
   private fallbackTargetPaths(agent: AgentId, state: AgentState): readonly string[] {
@@ -443,17 +366,17 @@ export class FileAgentsManager implements AgentsManager {
     await assertOwned(parent, true);
     const stage = state?.pending?.steps.find((step) => step.target === index);
     const image = await readImage(target, stage === undefined ? undefined : path.join(stage.scratch, "next"));
-    if (state !== undefined && state.version !== 1 && state.targets.length > 0
+    if (state !== undefined && state.version !== 1 && state.version !== 4 && state.targets.length > 0
       && (index === 0 || state.version === 3 && state.targets.length === 4 && index === 1) && image !== null) {
       await assertPrivate(target, false);
     }
     return image;
   }
-  private revision(state: AgentState, images: readonly (FileImage | null)[], paths: readonly string[], origin: string): string {
-    return digest({ state, images, paths, origin });
+  private revision(state: AgentState, paths: readonly string[], origin: string): string {
+    return digest({ state, paths, origin });
   }
-  private requireRevision(expected: string, state: AgentState, images: readonly (FileImage | null)[], paths: readonly string[], origin: string): void {
-    if (expected !== this.revision(state, images, paths, origin)) throw new AgentError("revision_conflict");
+  private requireRevision(expected: string, state: AgentState, paths: readonly string[], origin: string): void {
+    if (expected !== this.revision(state, paths, origin)) throw new AgentError("revision_conflict");
   }
   private requireExpected(state: AgentState, images: readonly (FileImage | null)[]): void {
     if (state.targets.some((target, index) => !sameImage(target.expected, images[index]!))) throw new AgentError("agent_conflict");
@@ -462,52 +385,71 @@ export class FileAgentsManager implements AgentsManager {
     state: AgentState,
     images: readonly (FileImage | null)[],
     observeCurrent?: (images: readonly (FileImage | null)[]) => void,
+    save?: (state: AgentState) => Promise<void>,
   ): Promise<readonly (FileImage | null)[]> {
     if (state.pending === null) { this.requireExpected(state, images); return images; }
     const current = images;
+    let changed = false;
     for (const step of state.pending.steps) {
-      await this.validateDisplaced(step);
+      changed = await this.validateDisplaced(state, step) || changed;
       this.classify(step, current[step.target]!);
     }
+    if (changed && save !== undefined) await save(state);
     observeCurrent?.(current);
     for (const [index, target] of state.targets.entries()) {
       if (!state.pending.steps.some((step) => step.target === index) && !sameImage(target.expected, current[index]!)) throw new AgentError("agent_conflict");
     }
     return current;
   }
-  private async validateDisplaced(step: StepState): Promise<void> {
+  private async validateDisplaced(state: AgentState, step: StepState): Promise<boolean> {
     const displaced = path.join(step.scratch, "previous");
-    if (exists(displaced)) {
-      const privateObservation = await this.privateObservation(step.scratch, true);
-      const saved = await this.privateChildImage(step.scratch, displaced, undefined, privateObservation);
-      if (saved?.bytes !== step.before?.bytes) throw new AgentError("agent_recovery_required");
+    if (!exists(displaced)) return false;
+    const saved = await this.privateChildImage(step.scratch, displaced, step.backup);
+    if (sameImage(saved, step.before)) return false;
+    if (state.version !== 4 || step.backup === undefined || step.phase === "published") {
+      throw new AgentError("agent_recovery_required");
     }
+    step.before = saved;
+    return true;
   }
   private classify(step: StepState, image: FileImage | null): "before" | "after" | "gap" {
     const displaced = path.join(step.scratch, "previous");
+    if (step.backup !== undefined && step.phase === "planned" && !exists(displaced)) return "before";
     if (sameImage(image, step.after)) return "after";
     if (sameImage(image, step.before)) return "before";
     if (image === null && step.before !== null && exists(displaced)) return "gap";
     throw new AgentError("agent_recovery_required");
   }
 
-  private plan(agent: AgentId, state: AgentState, before: readonly (FileImage | null)[], after: readonly (FileImage | null)[]): StepState[] {
+  private plan(
+    agent: AgentId,
+    state: AgentState,
+    before: readonly (FileImage | null)[],
+    after: readonly (FileImage | null)[],
+    appliedAt: Date,
+  ): StepState[] {
+    const timestamp = formatLocalBackupTimestamp(appliedAt);
+    const reserved = new Set<string>();
     return state.targets.map((target, index): StepState => ({
-      target: index, before: before[index]!, after: after[index]!, phase: "planned",
+      target: index,
+      before: before[index]!,
+      after: after[index]!,
+      phase: "planned",
       scratch: path.join(path.dirname(target.path), `.ghcg-agents-${agent}-${randomUUID()}`),
-    })).filter((step) => !sameImage(step.before, step.after));
+      backup: this.nextTimestampBackup(target.path, timestamp, reserved),
+    })).filter((step) => step.before !== null || !sameImage(step.before, step.after));
   }
 
   private async execute(agent: AgentId, state: AgentState, save: (state: AgentState) => Promise<void>): Promise<void> {
     const pending = state.pending!;
-    // Backup, catalog, then config.
+    // Catalog before config keeps Codex from observing a config that points at an unpublished catalog.
     const steps = pending.steps;
     const positions = new Map<StepState, "before" | "after" | "gap">();
     for (const step of steps) {
       const target = state.targets[step.target]!.path;
       assertNoLinks(target);
       const stage = path.join(step.scratch, "next");
-      await this.validateDisplaced(step);
+      if (await this.validateDisplaced(state, step)) await save(state);
       const position = this.classify(step, await this.securityImage(target, step));
       positions.set(step, position);
       if (position === "after") { step.phase = "published"; await save(state); continue; }
@@ -536,19 +478,67 @@ export class FileAgentsManager implements AgentsManager {
       this.hit("staged", agent, step.target);
     }
     const boundary = await this.images(state.targets.map((target) => target.path), state);
-    if ([...positions.values()].every((position) => position === "before")) this.requireExpected(state, boundary);
-    else await this.requireRecoverable(state, boundary);
+    if (state.version === 4) {
+      let changed = false;
+      for (const step of steps) {
+        if (positions.get(step) === "after" || step.phase !== "planned"
+          || exists(path.join(step.scratch, "previous"))) continue;
+        const latest = boundary[step.target]!;
+        if (!sameImage(step.before, latest)) {
+          step.before = latest;
+          changed = true;
+        }
+        positions.set(step, "before");
+      }
+      if (changed) await save(state);
+    } else if ([...positions.values()].every((position) => position === "before")) {
+      this.requireExpected(state, boundary);
+    } else {
+      await this.requireRecoverable(state, boundary, undefined, save);
+    }
     for (const step of steps) {
       let position = positions.get(step)!;
       if (position === "after") continue;
       const target = state.targets[step.target]!.path;
       const stage = path.join(step.scratch, "next");
       const displaced = path.join(step.scratch, "previous");
-      if (position === "before" && step.before !== null) {
-        // Staging and journal writes may take time. Revalidate the full live
-        // image immediately before moving it, then prove rename displaced the
-        // same filesystem object. This catches pathname replacements as well as
-        // content/access changes without trusting a stale pre-staging read.
+      if (position === "before" && state.version === 4) {
+        const scratchObservation = observeSecurityPath(step.scratch);
+        const expectedEntries = step.after === null ? [] : ["next"];
+        const entries = fs.readdirSync(step.scratch).sort();
+        if (exists(displaced) || entries.length !== expectedEntries.length
+          || entries.some((entry, index) => entry !== expectedEntries[index])) {
+          throw new AgentError("agent_recovery_required");
+        }
+        if (step.after !== null && !sameImage(
+          await this.privateChildImage(step.scratch, stage, target, scratchObservation),
+          step.after,
+        )) throw new AgentError("agent_recovery_required");
+        const latest = await readImage(target, stage);
+        if (!sameImage(step.before, latest)) {
+          step.before = latest;
+          await save(state);
+        }
+        assertSecurityPathUnchanged(step.scratch, scratchObservation, true);
+        if (latest !== null) {
+          const beforeMove = fs.lstatSync(target);
+          fs.renameSync(target, displaced);
+          const afterMove = fs.lstatSync(displaced);
+          syncDirectory(path.dirname(target));
+          syncDirectory(step.scratch);
+          if (beforeMove.dev !== afterMove.dev || beforeMove.ino !== afterMove.ino) {
+            throw new AgentError("agent_recovery_required");
+          }
+          const actual = await this.privateChildImage(step.scratch, displaced);
+          if (!sameDisplacedContent(actual, step.before)) {
+            step.before = actual;
+            await save(state);
+          }
+          this.hit("displaced_raw", agent, step.target);
+        }
+        position = "gap";
+      } else if (position === "before" && step.before !== null) {
+        // Legacy transactions retain their original compare-before-publish semantics.
         const scratchObservation = observeSecurityPath(step.scratch);
         const expectedEntries = step.after === null ? [] : ["next"];
         const entries = fs.readdirSync(step.scratch).sort();
@@ -562,11 +552,6 @@ export class FileAgentsManager implements AgentsManager {
         )) throw new AgentError("agent_recovery_required");
         if (!sameImage(await readImage(target, stage), step.before)) throw new AgentError("agent_conflict");
         assertSecurityPathUnchanged(step.scratch, scratchObservation, true);
-        const currentEntries = fs.readdirSync(step.scratch).sort();
-        if (currentEntries.length !== expectedEntries.length
-          || currentEntries.some((entry, index) => entry !== expectedEntries[index])) {
-          throw new AgentError("agent_recovery_required");
-        }
         const beforeMove = fs.lstatSync(target);
         fs.renameSync(target, displaced);
         const afterMove = fs.lstatSync(displaced);
@@ -581,6 +566,14 @@ export class FileAgentsManager implements AgentsManager {
         await save(state);
         this.hit("displaced", agent, step.target);
         position = "gap";
+      }
+      if (state.version === 4 && position === "gap" && step.before !== null && exists(displaced)) {
+        await this.archiveDisplaced(agent, step, save, state);
+        if (step.phase !== "displaced") {
+          step.phase = "displaced";
+          await save(state);
+          this.hit("displaced", agent, step.target);
+        }
       }
       if (step.after !== null) {
         const staged = await this.privateChildImage(step.scratch, stage, target);
@@ -600,6 +593,75 @@ export class FileAgentsManager implements AgentsManager {
     }
   }
 
+  private async archiveDisplaced(
+    agent: AgentId,
+    step: StepState,
+    save: (state: AgentState) => Promise<void>,
+    state: AgentState,
+  ): Promise<void> {
+    if (step.backup === undefined || step.before === null) return;
+    const target = state.targets[step.target]!;
+    target.backups ??= [];
+    const intended = step.before;
+    const intendedDigest = backupDigest(intended);
+    const archiveStage = path.join(step.scratch, "backup");
+    const staged = await this.privateChildImage(step.scratch, archiveStage, step.backup);
+    if (staged === null) {
+      await writeExclusive(archiveStage, intended);
+    } else if (!sameImage(staged, intended)) {
+      throw new AgentError("agent_recovery_required");
+    }
+    while (true) {
+      const owned = target.backups.find((backup) => backup.path === step.backup);
+      if (exists(step.backup)) {
+        if (sameSecurityPathIdentity(observeSecurityPath(archiveStage), observeSecurityPath(step.backup))) {
+          if (owned === undefined) {
+            if (!await this.trimTimestampBackups(agent, target, 364)) {
+              throw new AgentError("agent_conflict");
+            }
+            target.backups.push({ path: step.backup, digest: intendedDigest });
+            await save(state);
+          }
+          fs.unlinkSync(archiveStage);
+          syncDirectory(step.scratch);
+          return;
+        }
+        if (owned !== undefined) {
+          const existing = await readImage(step.backup);
+          if (existing === null || backupDigest(existing) !== owned.digest || owned.digest !== intendedDigest) {
+            throw new AgentError("agent_recovery_required");
+          }
+          fs.unlinkSync(archiveStage);
+          syncDirectory(step.scratch);
+          return;
+        }
+        step.backup = this.nextBackupCollision(step.backup);
+        await save(state);
+        continue;
+      }
+      if (!await this.trimTimestampBackups(agent, target, 364)) {
+        throw new AgentError("agent_conflict");
+      }
+      try {
+        fs.linkSync(archiveStage, step.backup);
+      } catch (error: unknown) {
+        if (!isAlreadyExists(error)) throw error;
+        step.backup = this.nextBackupCollision(step.backup);
+        await save(state);
+        continue;
+      }
+      syncDirectory(path.dirname(step.backup));
+      if (!sameSecurityPathIdentity(observeSecurityPath(archiveStage), observeSecurityPath(step.backup))) {
+        throw new AgentError("agent_recovery_required");
+      }
+      target.backups.push({ path: step.backup, digest: intendedDigest });
+      await save(state);
+      fs.unlinkSync(archiveStage);
+      syncDirectory(step.scratch);
+      return;
+    }
+  }
+
   private async finish(agent: AgentId, state: AgentState, save: (state: AgentState) => Promise<void>): Promise<void> {
     const pending = state.pending!;
     for (const step of pending.steps) {
@@ -614,8 +676,24 @@ export class FileAgentsManager implements AgentsManager {
     for (const step of pending.steps) {
       this.hit("cleanup", agent, step.target);
       await this.cleanup(agent, step.scratch, state.targets[step.target]?.path, step);
+      if (step.before !== null && step.backup !== undefined && exists(step.backup)) {
+        await protect(step.backup);
+        syncDirectory(path.dirname(step.backup));
+        const backup = await readImage(step.backup);
+        if (backup === null) throw new AgentError("agent_recovery_required");
+        const target = state.targets[step.target]!;
+        target.backups ??= [];
+        if (!target.backups.some((candidate) => candidate.path === step.backup)) {
+          target.backups.push({ path: step.backup, digest: backupDigest(backup) });
+        }
+      }
     }
     for (const scratch of pending.garbage) await this.cleanup(agent, scratch);
+    if (state.version === 4) {
+      for (const target of state.targets) {
+        if (!await this.trimTimestampBackups(agent, target, 365)) throw new AgentError("agent_conflict");
+      }
+    }
     if (pending.kind === "restore") {
       state.targets = [];
       state.mappings = [];
@@ -627,13 +705,115 @@ export class FileAgentsManager implements AgentsManager {
     this.hit("complete", agent, -1);
   }
 
+  private nextTimestampBackup(target: string, timestamp: string, reserved: Set<string>): string {
+    const base = `${target}.ghcg.${timestamp}`;
+    let candidate = base;
+    let sequence = 0;
+    while (reserved.has(candidate) || exists(candidate)) candidate = `${base}.${++sequence}`;
+    reserved.add(candidate);
+    return candidate;
+  }
+
+  private nextBackupCollision(current: string): string {
+    const parsed = parseTimestampBackupPath(current);
+    if (parsed === null) throw new AgentError("agent_recovery_required");
+    const base = parsed.base;
+    let sequence = parsed.sequence + 1;
+    let candidate = `${base}.${sequence}`;
+    while (exists(candidate)) candidate = `${base}.${++sequence}`;
+    return candidate;
+  }
+
+  private timestampBackups(target: string): readonly { readonly path: string; readonly timestamp: string; readonly sequence: number }[] {
+    const directory = path.dirname(target);
+    if (!exists(directory)) return [];
+    const pattern = timestampBackupPattern(path.basename(target));
+    const backups: { path: string; timestamp: string; sequence: number }[] = [];
+    for (const entry of fs.readdirSync(directory)) {
+      const match = pattern.exec(entry);
+      if (match === null) continue;
+      const candidate = path.join(directory, entry);
+      try {
+        const stat = fs.lstatSync(candidate);
+        if (!stat.isFile()) continue;
+      } catch { continue; }
+      backups.push({ path: candidate, timestamp: match[1]!, sequence: Number(match[2] ?? "0") });
+    }
+    return backups.sort((left, right) => left.timestamp.localeCompare(right.timestamp)
+      || left.sequence - right.sequence);
+  }
+
+  private async trimTimestampBackups(
+    agent: AgentId,
+    target: AgentState["targets"][number],
+    retain: number,
+  ): Promise<boolean> {
+    const owned: NonNullable<typeof target.backups> = [];
+    for (const backup of target.backups ?? []) {
+      try {
+        const image = await readImage(backup.path);
+        if (image !== null && backupDigest(image) === backup.digest) owned.push(backup);
+      } catch { /* A changed or unsafe path is no longer Gateway-owned. */ }
+    }
+    target.backups = owned;
+    while (target.backups.length > retain) {
+      const backup = target.backups[0]!;
+      const result = await this.removeTimestampBackup(agent, backup.path, backup.digest);
+      if (result === "failed") return false;
+      target.backups.shift();
+    }
+    return true;
+  }
+
+  private async removeTimestampBackup(
+    agent: AgentId,
+    target: string,
+    expectedDigest: string,
+  ): Promise<"removed" | "unowned" | "failed"> {
+    const scratch = path.join(path.dirname(target), `.ghcg-agents-${agent}-${randomUUID()}`);
+    const quarantined = path.join(scratch, "backup");
+    let observation: SecurityPathObservation | null = null;
+    try {
+      const current = await readImage(target);
+      if (current === null || backupDigest(current) !== expectedDigest) return "unowned";
+      observation = observeSecurityPath(target);
+      await privateDirectory(scratch);
+      fs.renameSync(target, quarantined);
+      syncDirectory(path.dirname(target));
+      syncDirectory(scratch);
+      const moved = observeSecurityPath(quarantined);
+      if (!sameSecurityPathIdentity(observation, moved)) {
+        this.restoreCleanupArtifact(quarantined, target, moved);
+        return "failed";
+      }
+      const image = await this.privateChildImage(scratch, quarantined);
+      if (image === null || backupDigest(image) !== expectedDigest) {
+        this.restoreCleanupArtifact(quarantined, target, moved);
+        return "unowned";
+      }
+      fs.unlinkSync(quarantined);
+      syncDirectory(scratch);
+      fs.rmdirSync(scratch);
+      syncDirectory(path.dirname(scratch));
+      return "removed";
+    } catch {
+      if (observation !== null && exists(quarantined)) {
+        this.restoreCleanupArtifact(quarantined, target, observeSecurityPath(quarantined));
+      }
+      try {
+        if (exists(scratch) && fs.readdirSync(scratch).length === 0) fs.rmdirSync(scratch);
+      } catch { /* A later Apply can retry retention cleanup. */ }
+      return "failed";
+    }
+  }
+
   private async cleanup(agent: AgentId, scratch: string, liveTarget?: string, step?: StepState): Promise<void> {
     if (!exists(scratch)) return;
     const scratchObservation = await this.privateObservation(scratch, true);
     const entries = fs.readdirSync(scratch);
-    const artifacts = new Map<"previous" | "next", string>();
-    const authorized = new Map<string, "previous" | "next">();
-    for (const role of ["previous", "next"] as const) {
+    const artifacts = new Map<"previous" | "next" | "backup", string>();
+    const authorized = new Map<string, "previous" | "next" | "backup">();
+    for (const role of ["previous", "next", "backup"] as const) {
       authorized.set(role, role);
       authorized.set(path.basename(this.cleanupQuarantine(scratch, role)), role);
     }
@@ -643,16 +823,16 @@ export class FileAgentsManager implements AgentsManager {
       if (artifacts.has(name)) throw new AgentError("agent_recovery_required");
       artifacts.set(name, path.join(scratch, entry));
     }
-    for (const name of ["previous", "next"] as const) {
+    for (const name of ["previous", "next", "backup"] as const) {
       const source = path.join(scratch, name);
       const target = artifacts.get(name);
-      const expected = step === undefined ? undefined : name === "previous" ? step.before : step.after;
+      const expected = step === undefined ? undefined : name === "next" ? step.after : step.before;
       if (target === undefined) continue;
       if (expected === null) throw new AgentError("agent_recovery_required");
       assertSecurityPathUnchanged(scratch, scratchObservation, true);
       let quarantine = target;
       let childObservation = observeSecurityPath(target);
-      const allowedLink = name === "next" ? liveTarget : undefined;
+      const allowedLink = name === "next" ? liveTarget : name === "backup" ? step?.backup : undefined;
       const image = await readImage(target, allowedLink);
       assertSecurityPathUnchanged(target, childObservation, false);
       if (expected !== undefined && !sameImage(image, expected)) throw new AgentError("agent_recovery_required");
@@ -686,7 +866,7 @@ export class FileAgentsManager implements AgentsManager {
     fs.rmdirSync(scratch);
     syncDirectory(path.dirname(scratch));
   }
-  private cleanupQuarantine(scratch: string, role: "previous" | "next"): string {
+  private cleanupQuarantine(scratch: string, role: "previous" | "next" | "backup"): string {
     return path.join(scratch, `${role}.cleanup-${digest([scratch, role])}`);
   }
   private restoreCleanupArtifact(
@@ -748,20 +928,6 @@ export class FileAgentsManager implements AgentsManager {
   }
 }
 
-function samePaths(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((target, index) => target === right[index]);
-}
-
-function sameFilePaths(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((target, index) => {
-    const other = right[index];
-    if (other === undefined) return false;
-    const resolved = path.resolve(target);
-    const resolvedOther = path.resolve(other);
-    return process.platform === "win32" ? resolved.toLowerCase() === resolvedOther.toLowerCase() : resolved === resolvedOther;
-  });
-}
-
 function isSqliteBusy(error: unknown): boolean {
   return typeof error === "object" && error !== null
     && "code" in error && (error.code === "ERR_SQLITE_ERROR" || error.code === "SQLITE_BUSY")
@@ -772,4 +938,12 @@ function isTransientStateRace(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"
     && "path" in error && typeof error.path === "string"
     && /state\.db-(?:journal|wal|shm)$/u.test(error.path);
+}
+
+function backupDigest(image: FileImage): string {
+  return digest(image.bytes);
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 }
