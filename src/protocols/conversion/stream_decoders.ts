@@ -190,8 +190,24 @@ async function* decodeChatStream(
       if (audio !== undefined && audio !== null) {
         invalid();
       }
-      const reasoningContent = stringMember(delta, "reasoning_content");
-      const reasoningText = stringMember(delta, "reasoning_text");
+      const reasoningContentValue = singleMember(delta, "reasoning_content");
+      if (
+        reasoningContentValue !== undefined
+        && reasoningContentValue !== null
+        && typeof reasoningContentValue !== "string"
+      ) {
+        invalid();
+      }
+      const reasoningContent = typeof reasoningContentValue === "string" ? reasoningContentValue : undefined;
+      const reasoningTextValue = singleMember(delta, "reasoning_text");
+      if (
+        reasoningTextValue !== undefined
+        && reasoningTextValue !== null
+        && typeof reasoningTextValue !== "string"
+      ) {
+        invalid();
+      }
+      const reasoningText = typeof reasoningTextValue === "string" ? reasoningTextValue : undefined;
       const thinkingBlocks = arrayMember(delta, "thinking_blocks");
       if (
         (reasoningContent !== undefined && reasoningContent.length > 0)
