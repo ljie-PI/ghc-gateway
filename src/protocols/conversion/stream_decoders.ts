@@ -190,10 +190,12 @@ async function* decodeChatStream(
       if (audio !== undefined && audio !== null) {
         invalid();
       }
-      const reasoning = stringMember(delta, "reasoning_content");
+      const reasoningContent = stringMember(delta, "reasoning_content");
+      const reasoningText = stringMember(delta, "reasoning_text");
       const thinkingBlocks = arrayMember(delta, "thinking_blocks");
       if (
-        (reasoning !== undefined && reasoning.length > 0)
+        (reasoningContent !== undefined && reasoningContent.length > 0)
+        || (reasoningText !== undefined && reasoningText.length > 0)
         || thinkingBlocks?.items.some((item) => (
           isWireJsonObject(item) && hasSubstantiveReasoning(item)
         )) === true
