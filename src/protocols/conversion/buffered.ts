@@ -151,6 +151,9 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
     content.push({ type: "refusal", text: refusal });
   }
   const toolCalls = arrayMember(message, "tool_calls");
+  const visibleThinking = reasoning.thinkingBlocks
+    .flatMap((block) => block.type === "thinking" ? [block.thinking] : [])
+    .join("");
   if (reasoning.thinkingBlocks.length > 0) {
     for (const block of reasoning.thinkingBlocks) {
       if (block.type === "thinking" && block.signature !== undefined && block.signature.length > 0) {
@@ -178,7 +181,8 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
         });
       }
     }
-  } else if (reasoning.text.length > 0) {
+  }
+  if (visibleThinking.length === 0 && reasoning.text.length > 0) {
     items.push({
       type: "reasoning",
       parts: [{ presentation: "summary", index: 0, text: reasoning.text }],

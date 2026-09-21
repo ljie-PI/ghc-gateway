@@ -151,6 +151,64 @@ describe("shared conversion response codecs", () => {
     )).toThrow();
   });
 
+  it("does not let an empty signed Chat block hide another visible reasoning field", () => {
+    const source = reasoningBufferedSource("chat");
+    const message = (source.choices as Array<{ message: Record<string, unknown> }>)[0]!.message;
+    message.reasoning_text = "visible plan";
+    message.thinking_blocks = [{ type: "thinking", thinking: "", signature: "sig" }];
+    const converted = decoded(convertBufferedResponse(
+      encoder.encode(JSON.stringify(source)), context("chat", "responses"),
+    ).bytes);
+    expect((converted.output as Array<Record<string, unknown>>)[0]).toMatchObject({
+      type: "reasoning", summary: [{ text: "visible plan" }],
+    });
+  });
+
+  it("preserves multiple exact signed Chat thinking blocks for Messages", async () => {
+    const source = chatSse({
+      id: "chat_multiple_signed",
+      choices: [{
+        index: 0,
+        delta: {
+          thinking_blocks: [
+            { type: "thinking", thinking: "first", signature: "sig1" },
+            { type: "redacted_thinking", data: "opaque2" },
+          ],
+        },
+        finish_reason: "stop",
+      }],
+    }) + "data: [DONE]\n\n";
+    const wire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(wire).toContain("\"thinking\": \"first\"");
+    expect(wire).toContain("\"signature\": \"sig1\"");
+    expect(wire).toContain("\"type\": \"redacted_thinking\"");
+    expect(wire).toContain("\"data\": \"opaque2\"");
+  });
+
+  it("rejects a signed Chat thinking block first observed after answer text", async () => {
+    const source = [
+      chatSse({ id: "chat_late_signed", choices: [{ index: 0, delta: { content: "answer" }, finish_reason: null }] }),
+      chatSse({
+        id: "chat_late_signed",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [{ type: "thinking", thinking: "late", signature: "sig" }],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    await expect(async () => {
+      for await (const _emission of convertProtocolStream(
+        chunks(encoder.encode(source)), streamContext("chat", "messages"),
+      )) void _emission;
+    }).rejects.toThrow();
+  });
+
   it.each(["chat", "responses"] as const)(
     "accepts nullable Messages output token details when converting to %s",
     async (target) => {
@@ -503,6 +561,43 @@ describe("shared conversion response codecs", () => {
         streamContext("responses", "chat"),
       )) void _emission;
     }).rejects.toThrow();
+  });
+
+  it("rejects Responses reasoning deltas and content parts after completion", async () => {
+    const reasoning = {
+      id: "rs_frozen", type: "reasoning", status: "completed", summary: [],
+      content: [{ type: "reasoning_text", text: "done" }],
+    };
+    const doneThenDelta = [
+      responseEvent(0, "response.output_item.done", { output_index: 0, item: reasoning }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_frozen", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    const partDoneThenDelta = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_part", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.content_part.added", {
+        item_id: "rs_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "" },
+      }),
+      responseEvent(2, "response.content_part.done", {
+        item_id: "rs_part", output_index: 0, content_index: 0,
+        part: { type: "reasoning_text", text: "done" },
+      }),
+      responseEvent(3, "response.reasoning_text.delta", {
+        item_id: "rs_part", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    for (const source of [doneThenDelta, partDoneThenDelta]) {
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)), streamContext("responses", "chat"),
+        )) void _emission;
+      }).rejects.toThrow();
+    }
   });
 
   it("creates one fixed Responses envelope with text and parallel same-name tools", () => {
