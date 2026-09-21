@@ -41,6 +41,7 @@ export async function createConvertedStreamResponse(input: {
   const createdCarrierTokens = new Set<string>();
   const lifecycle: {
     completeIntent?: ConversionCheckpointIntent | undefined;
+    terminal?: "completed" | "incomplete" | undefined;
     completed: boolean;
   } = { completed: false };
   const converted = convertProtocolStream(
@@ -100,10 +101,12 @@ export async function createConvertedStreamResponse(input: {
     firstEmissionTimeoutMs: input.scope.config.timeouts.firstByteMs,
     normalizeFailure: (error) => normalizeStreamFailure(error, input),
     finalizeSuccess: async () => {
-      if (lifecycle.completeIntent !== undefined) {
+      if (lifecycle.terminal === "completed" && lifecycle.completeIntent !== undefined) {
         await input.persistCheckpoint?.(lifecycle.completeIntent);
       }
       if (
+        lifecycle.terminal === "completed"
+        &&
         input.carrier !== undefined
         && input.carrierFinalization !== "checkpoint"
         && createdCarrierTokens.size > 0
@@ -122,7 +125,11 @@ async function* convertedEmissions(
   converted: AsyncIterable<ConvertedStreamEmission>,
   input: Parameters<typeof createConvertedStreamResponse>[0],
   createdCarrierTokens: Set<string>,
-  lifecycle: { completeIntent?: ConversionCheckpointIntent | undefined; completed: boolean },
+  lifecycle: {
+    completeIntent?: ConversionCheckpointIntent | undefined;
+    terminal?: "completed" | "incomplete" | undefined;
+    completed: boolean;
+  },
 ): AsyncIterable<StreamExecutionEmission<SemanticUsage>> {
   const iterator = converted[Symbol.asyncIterator]();
   let observedUsage: SemanticUsage = {
@@ -170,6 +177,7 @@ async function* convertedEmissions(
       } else if (emission.kind === "wire") {
         yield { kind: "wire", bytes: emission.bytes };
       } else if (emission.kind === "terminal") {
+        lifecycle.terminal = emission.terminal;
         input.scope.diagnostics?.set({ protocolStatus: emission.terminal });
         if (emission.terminal !== "completed") {
           if (input.carrier !== undefined && createdCarrierTokens.size > 0) {

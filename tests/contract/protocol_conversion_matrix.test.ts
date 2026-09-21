@@ -188,11 +188,11 @@ describe("protocol conversion matrix", () => {
   });
 
   it("round-trips Responses opaque reasoning through Chat and fails a cross-model carrier before inference", async () => {
-    const harness = await matrixGateway(true);
+    const harness = await matrixGateway(true, undefined, { responsesToolResponse: true });
     try {
       const first = await harness.gw.fetch(jsonRequest("/v1/chat/completions", {
         model: "native-responses",
-        messages: [{ role: "user", content: "Use the tool." }],
+        messages: [{ role: "user", content: "render" }],
         tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
       }));
       expect(first.status).toBe(200);
@@ -1018,6 +1018,7 @@ async function matrixGateway(
     readonly messagesBody?: Uint8Array;
     readonly responsesBody?: Uint8Array;
     readonly responsesStreamContentType?: string;
+    readonly responsesToolResponse?: boolean;
   } = {},
 ): Promise<MatrixHarness> {
   return await withSetupCleanup(async (own) => {
@@ -1082,6 +1083,17 @@ async function matrixGateway(
       }],
       usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
     };
+    const toolResponse = {
+      ...response,
+      output: [...(reasoning ? [responseReasoning] : []), {
+        id: "fc_matrix",
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+        status: "completed",
+      }],
+    };
     const http = await startHttpCopilot({
       credentials, accountCoordinator, nowMs,
       expectations: [
@@ -1118,27 +1130,9 @@ async function matrixGateway(
           reply: {
             status: 200,
             headers: {},
-            body: overrides.responsesBody ?? encoder.encode(JSON.stringify({
-              id: "resp_matrix",
-              object: "response",
-              created_at: 1_700_000_000,
-              status: "completed",
-              output: [...(reasoning ? [{
-                id: "rs_matrix",
-                type: "reasoning",
-                status: "completed",
-                summary: [{ type: "summary_text", text: "visible plan" }],
-                content: [],
-                encrypted_content: "provider-state",
-              }] : []), {
-                id: "msg_matrix",
-                type: "message",
-                status: "completed",
-                role: "assistant",
-                content: [{ type: "output_text", text: "ok", annotations: [] }],
-              }],
-              usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
-            })),
+            body: overrides.responsesBody ?? encoder.encode(JSON.stringify(
+              overrides.responsesToolResponse === true ? toolResponse : response,
+            )),
           }
         },
         {

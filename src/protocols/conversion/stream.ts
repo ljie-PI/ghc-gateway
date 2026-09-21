@@ -567,6 +567,13 @@ class ChatEmitter implements StreamEmitter {
     for (;;) {
       const reasoningKey = responseReasoningKey(this.responseFrontier.currentItemIndex());
       const reasoning = this.pendingReasoning.get(reasoningKey);
+      if (
+        reasoning?.opaqueState?.kind === "responses_item"
+        && this.context.carrier !== undefined
+        && this.responseFrontier.itemDoneAtFrontier()
+      ) {
+        return;
+      }
       if (reasoning !== undefined) {
         this.pendingReasoning.delete(reasoningKey);
         yield* this.emitReasoningItem(reasoning, false);
@@ -886,7 +893,10 @@ class MessagesEmitter implements StreamEmitter {
   ): Iterable<ConvertedStreamEmission> {
     yield* this.closeActiveText();
     yield* this.closeOpenTools();
-    yield* this.emitBufferedItems(items);
+    yield* this.emitBufferedItems(
+      items,
+      terminal.status === "completed" && items.some((item) => item.type === "tool_call"),
+    );
     yield* this.closeOpenTools();
     yield this.event({
       type: "message_delta",
@@ -906,10 +916,15 @@ class MessagesEmitter implements StreamEmitter {
     this.activeText = undefined;
   }
 
-  private *emitBufferedItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
+  private *emitBufferedItems(
+    items: readonly SemanticResponseItem[],
+    allowCarriers: boolean,
+  ): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
       if (item.type === "reasoning") {
-        if (item.messagesState !== undefined || item.opaqueState?.kind === "responses_item") yield* this.emitReasoning(item);
+        if (item.messagesState !== undefined || item.opaqueState?.kind === "responses_item") {
+          yield* this.emitReasoning(item, allowCarriers);
+        }
         continue;
       }
       if (item.type === "message") {
@@ -980,11 +995,11 @@ class MessagesEmitter implements StreamEmitter {
     if (item.key === undefined || this.emittedReasoning.has(item.key)) return;
     if (
       item.messagesState === undefined
-      && (this.context.carrier === undefined || item.opaqueState?.kind !== "responses_item")
+      && (!allowCarrier || this.context.carrier === undefined || item.opaqueState?.kind !== "responses_item")
     ) return;
     yield* this.closeActiveText();
-    const index = this.nextIndex++;
     if (allowCarrier && this.context.carrier !== undefined && item.opaqueState?.kind === "responses_item") {
+      const index = this.nextIndex++;
       let token = this.carrierTokens.get(item.key);
       if (token === undefined) {
         token = createStreamCarrier(item, this.context, "messages");
@@ -1003,6 +1018,7 @@ class MessagesEmitter implements StreamEmitter {
       return;
     }
     if (item.messagesState === undefined) return;
+    const index = this.nextIndex++;
     if (item.messagesState.type === "redacted_thinking") {
       yield this.event({
         type: "content_block_start",
@@ -1067,9 +1083,18 @@ class MessagesEmitter implements StreamEmitter {
     for (;;) {
       const reasoningKey = responseReasoningKey(this.responseFrontier.currentItemIndex());
       const reasoning = this.pendingReasoning.get(reasoningKey);
+      if (
+        reasoning?.opaqueState?.kind === "responses_item"
+        && this.context.carrier !== undefined
+        && this.responseFrontier.itemDoneAtFrontier()
+      ) {
+        return;
+      }
       if (reasoning !== undefined) {
-        this.pendingReasoning.delete(reasoningKey);
-        yield* this.emitReasoning(reasoning, false);
+        if (reasoning.messagesState !== undefined) {
+          this.pendingReasoning.delete(reasoningKey);
+          yield* this.emitReasoning(reasoning, false);
+        }
       }
       const toolKey = responseToolKey(this.responseFrontier.currentItemIndex());
       const tool = this.tools.get(toolKey);
@@ -1096,6 +1121,7 @@ class MessagesEmitter implements StreamEmitter {
         continue;
       }
       if (this.responseFrontier.itemDoneAtFrontier()) {
+        this.pendingReasoning.delete(reasoningKey);
         this.responseFrontier.advanceItem();
         continue;
       }

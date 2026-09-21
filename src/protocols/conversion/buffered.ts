@@ -107,7 +107,7 @@ function convertBufferedResponseInternal(
     ? managedConvertedResponseId(context.source, context.model, context.createUuid())
     : undefined;
   const outputContext = outputCarrier === undefined
-    ? context
+    ? { ...context, carrier: undefined }
     : { ...context, carrier: { ...outputCarrier, ...(responseId === undefined ? {} : { responseId }) } };
   const envelope = responseEnvelope(semantic, outputContext, responseId);
   context.diagnostics?.shape("client_output", () => diagnosticShape(envelope));

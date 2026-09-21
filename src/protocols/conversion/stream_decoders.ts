@@ -860,6 +860,7 @@ async function* decodeMessagesStream(
       } else if (block.kind === "reasoning" && deltaType === "thinking_delta") {
         const thinking = singleMember(delta, "thinking");
         if (typeof thinking !== "string") invalid();
+        budget.reserve(thinking);
         block.sawContent ||= thinking.length > 0;
         block.thinking += thinking;
         if (thinking.length > 0) {
