@@ -6,20 +6,28 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { AgentError, type AgentId, type AgentMapping } from "./types.js";
 import { assertNoLinks, assertPrivate, exists, privateDirectory, protect, syncDirectory, type FileImage } from "./files.js";
+import { timestampBackupPattern } from "./backups.js";
 
 const Image = Type.Union([Type.Null(), Type.Object({
   bytes: Type.String({ maxLength: 1_398_104, pattern: "^[A-Za-z0-9+/]*={0,2}$" }),
   mode: Type.Integer({ minimum: 0, maximum: 511 }), acl: Type.Union([Type.Null(), Type.String({ maxLength: 16384 })]),
 }, { additionalProperties: false })]);
 const Mapping = Type.Object({ displayName: Type.String({ maxLength: 80 }), modelId: Type.String({ maxLength: 128 }) }, { additionalProperties: false });
-const Target = Type.Object({ path: Type.String({ maxLength: 4096 }), original: Image, expected: Image }, { additionalProperties: false });
+const Backup = Type.Object({
+  path: Type.String({ maxLength: 4096 }), digest: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+}, { additionalProperties: false });
+const Target = Type.Object({
+  path: Type.String({ maxLength: 4096 }), original: Image, expected: Image,
+  backups: Type.Optional(Type.Array(Backup, { maxItems: 365 })),
+}, { additionalProperties: false });
 const Step = Type.Object({
   target: Type.Integer({ minimum: 0, maximum: 3 }), before: Image, after: Image,
   scratch: Type.String({ maxLength: 4096 }),
+  backup: Type.Optional(Type.String({ maxLength: 4096 })),
   phase: Type.Union([Type.Literal("planned"), Type.Literal("displaced"), Type.Literal("published")]),
 }, { additionalProperties: false });
 const StateSchema = Type.Object({
-  version: Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)]), revision: Type.Integer({ minimum: 0 }),
+  version: Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3), Type.Literal(4)]), revision: Type.Integer({ minimum: 0 }),
   targets: Type.Array(Target, { maxItems: 4 }), mappings: Type.Array(Mapping, { maxItems: 16 }),
   lastAppliedAt: Type.Union([Type.Null(), Type.String({ maxLength: 40 })]),
   pending: Type.Union([Type.Null(), Type.Object({
@@ -31,7 +39,7 @@ const StateSchema = Type.Object({
 export type AgentState = Static<typeof StateSchema>;
 export type StepState = NonNullable<AgentState["pending"]>["steps"][number];
 export function emptyState(): AgentState {
-  return { version: 3, revision: 0, targets: [], mappings: [], lastAppliedAt: null, pending: null };
+  return { version: 4, revision: 0, targets: [], mappings: [], lastAppliedAt: null, pending: null };
 }
 
 // A separate SQLite exclusive transaction is an OS-backed cross-process mutex.
@@ -460,14 +468,15 @@ function isSqliteBusy(error: unknown): boolean {
 }
 
 function validateStatePaths(state: AgentState, agent: AgentId): void {
-  if (agent === "codex" && state.targets.length > 0 && state.version !== 3) {
+  if (agent === "codex" && state.targets.length > 0 && state.version !== 3 && state.version !== 4) {
     throw new AgentError("agent_recovery_required");
   }
-  const count = agent === "claude" ? state.version === 1 ? 1 : 2
-    : state.version === 1 ? 2 : state.version === 2 ? 3 : 4;
+  const count = state.version === 4 ? agent === "claude" ? 1 : 2
+    : agent === "claude" ? state.version === 1 ? 1 : 2
+      : state.version === 1 ? 2 : state.version === 2 ? 3 : 4;
   if (state.targets.length !== 0 && state.targets.length !== count) throw new AgentError("agent_recovery_required");
   if (state.version !== 1 && state.pending?.kind === "restore") throw new AgentError("agent_recovery_required");
-  if (state.version !== 1 && state.targets.length > 0
+  if (state.version !== 1 && state.version !== 4 && state.targets.length > 0
     && state.targets[0]!.path !== `${state.targets.at(-1)!.path}.ghcg.bak`) throw new AgentError("agent_recovery_required");
   if (agent === "codex" && state.version === 3 && state.targets.length > 0
     && state.targets[1]!.path !== `${state.targets[2]!.path}.ghcg.bak`) throw new AgentError("agent_recovery_required");
@@ -482,6 +491,13 @@ function validateStatePaths(state: AgentState, agent: AgentId): void {
   }
   for (const target of state.targets) {
     if (!path.isAbsolute(target.path)) throw new AgentError("agent_recovery_required");
+    const backups = target.backups ?? [];
+    if (state.version !== 4 && backups.length > 0) throw new AgentError("agent_recovery_required");
+    if (backups.some((backup) => path.dirname(backup.path) !== path.dirname(target.path)
+      || !timestampBackupPattern(path.basename(target.path)).test(path.basename(backup.path)))
+      || new Set(backups.map((backup) => backup.path)).size !== backups.length) {
+      throw new AgentError("agent_recovery_required");
+    }
   }
   const steps = state.pending?.steps ?? [];
   if (new Set(steps.map((step) => step.target)).size !== steps.length) throw new AgentError("agent_recovery_required");
@@ -489,7 +505,13 @@ function validateStatePaths(state: AgentState, agent: AgentId): void {
     const target = state.targets[step.target];
     if (!target || path.dirname(step.scratch) !== path.dirname(target.path)
       || !new RegExp(`^\\.ghcg-agents-${agent}-[0-9a-f-]{36}$`, "u").test(path.basename(step.scratch))) throw new AgentError("agent_recovery_required");
+    if (state.version === 4 && (step.backup === undefined || path.dirname(step.backup) !== path.dirname(target.path)
+      || !timestampBackupPattern(path.basename(target.path)).test(path.basename(step.backup)))) {
+      throw new AgentError("agent_recovery_required");
+    }
   }
+  const backups = steps.flatMap((step) => step.backup === undefined ? [] : [step.backup]);
+  if (new Set(backups).size !== backups.length) throw new AgentError("agent_recovery_required");
   for (const garbage of state.pending?.garbage ?? []) {
     if (!state.targets.some((target) => path.dirname(target.path) === path.dirname(garbage))
       || !new RegExp(`^\\.ghcg-agents-${agent}-[0-9a-f-]{36}$`, "u").test(path.basename(garbage))) throw new AgentError("agent_recovery_required");

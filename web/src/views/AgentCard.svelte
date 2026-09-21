@@ -93,7 +93,7 @@
       failure = "Apply failed: selected model is unavailable.";
       return;
     }
-    if (status.state === "not_managed" && !window.confirm(`Apply ${title} configuration? The first original configuration will be retained in a .ghcg.bak file when it exists. On Windows, that backup inherits the client configuration directory permissions. Later applies preserve the backup and update only Gateway-owned settings. Restart the client after applying.`)) return;
+    if (status.state === "not_managed" && !window.confirm(`Apply ${title} configuration? Existing configuration files will be retained in local-time .ghcg.<timestamp> backups. Up to 365 backups are kept per file. Restart the client after applying.`)) return;
     busy = true;
     try {
       const next = await client.applyAgent({
@@ -214,7 +214,7 @@
     <dl>
       <dt>Configuration paths</dt><dd>{#each status.paths as target (target)}<code>{target}</code>{/each}</dd>
       <dt>Trusted Gateway URL</dt><dd><code>{status.endpoint}</code></dd>
-      <dt>Original backup</dt><dd>{status.backupAvailable ? "Available — retained from the first apply" : "Not created"}</dd>
+      <dt>Timestamped backups</dt><dd>{status.backupAvailable ? "Available — up to 365 retained per file" : "None created yet"}</dd>
       <dt>Last apply</dt><dd>{status.lastAppliedAt === null ? "Never" : new Date(status.lastAppliedAt).toLocaleString()}</dd>
     </dl>
   </details>
@@ -222,12 +222,10 @@
     <dialog class="agent-takeover-dialog" bind:this={takeoverDialog} aria-labelledby="codex-takeover-title">
       <form method="dialog">
         <h3 id="codex-takeover-title">Take over Codex configuration?</h3>
-        <p>Gateway-managed model, provider, and catalog fields will change. Unrelated TOML settings are preserved, <code>auth.json</code> is untouched, and Codex must restart.</p>
+        <p>Gateway-managed model, provider, and catalog fields will be replaced. Existing configuration files are retained in local-time <code>.ghcg.&lt;timestamp&gt;</code> backups, <code>auth.json</code> is untouched, and Codex must restart.</p>
         <dl>
           <dt>Configuration</dt><dd><code>{status.takeover.configPath}</code></dd>
           <dt>Model catalog</dt><dd><code>{status.takeover.catalogPath}</code></dd>
-          <dt>Configuration backup</dt><dd><code>{status.takeover.configBackupPath}</code></dd>
-          <dt>Catalog backup</dt><dd><code>{status.takeover.catalogBackupPath}</code></dd>
         </dl>
         <div class="agent-dialog-actions">
           <button value="cancel">Cancel</button>

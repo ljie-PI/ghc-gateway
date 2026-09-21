@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { supportsModelReasoning } from "../copilot/model_capabilities.js";
 import { protocolTargets } from "../protocols/conversion/routing.js";
@@ -44,7 +43,7 @@ export function projectAgent(
     const source = original?.toString("utf8").replace(/^\uFEFF/u, "") ?? "";
     return agent === "claude"
       ? { config: projectClaude(source, mappings, origin) }
-      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig, takeover);
+      : projectCodex(source, mappings, origin, catalogPath, models, managedConfig !== null, takeover);
   } catch (error: unknown) {
     if (error instanceof AgentError) throw error;
     // Parser diagnostics can contain configuration secrets.
@@ -118,7 +117,7 @@ function projectClaude(source: string, mappings: readonly AgentMapping[], origin
 
 function projectCodex(
   source: string, mappings: readonly AgentMapping[], origin: string, catalogPath: string, models: readonly AgentModel[],
-  managedConfig: Buffer | null,
+  managed: boolean,
   takeover: boolean,
 ): AgentProjection {
   const config = source === "" ? {} as TomlTable : parse(source);
@@ -131,14 +130,9 @@ function projectCodex(
   const reserved = "ghc_gateway";
   if (takeover) {
     // Explicit takeover owns only the root routing/provider/catalog fields.
-  } else if (managedConfig === null) {
+  } else if (!managed) {
     if (source !== "") throw new AgentError("agent_conflict");
     if (providers[reserved] !== undefined) throw new AgentError("agent_conflict");
-  } else {
-    const managed = parse(managedConfig.toString("utf8").replace(/^\uFEFF/u, ""));
-    const managedProviders = managed.model_providers === undefined ? {} : object(managed.model_providers);
-    if (managedProviders[reserved] === undefined
-      || !isDeepStrictEqual(providers[reserved], managedProviders[reserved])) throw new AgentError("agent_conflict");
   }
   providers[reserved] = {
     name: "GHC Gateway", base_url: `${origin}/v1`, wire_api: "responses",
