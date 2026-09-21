@@ -381,6 +381,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     if (scoped === undefined || scoped.formatVersion !== expectedFormatVersion) {
       unavailableCheckpoint();
     }
+    const scopedReasoningCarriers = new Set(scoped.items
+      .filter((item): item is StoredReasoningItem => item.kind === "reasoning")
+      .map((item) => reasoningCarrier(item.item))
+      .filter((carrier): carrier is string => carrier !== undefined));
     const originalCallsById = new Map<string, WireJsonObject>();
     const originalReasoningByCarrier = new Map<string, WireJsonObject>();
     for (const item of originalItems) {
@@ -402,7 +406,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       } else if (isReasoningItem(item)) {
         const carrier = reasoningCarrier(item);
         if (carrier !== undefined) {
-          if (originalReasoningByCarrier.has(carrier)) unavailableCheckpoint();
+          if (!scopedReasoningCarriers.has(carrier) || originalReasoningByCarrier.has(carrier)) unavailableCheckpoint();
           originalReasoningByCarrier.set(carrier, item);
         }
       }

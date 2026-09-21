@@ -306,6 +306,28 @@ describe("Responses continuation history", () => {
     }
   });
 
+  it("rejects an explicit carrier without a persisted v2 replay slot", async () => {
+    const { database, store } = history();
+    try {
+      const stored = "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef";
+      const extra = "ghcg-rsn-v1:chat_state:responses:11234567-89ab-4def-8123-456789abcdef";
+      await store.recordCheckpoint({
+        responseId: "resp_unmatched_carrier",
+        output: outputFromJson(`[{"type":"reasoning","summary":[],"encrypted_content":"${stored}"},{"type":"function_call","call_id":"call_unmatched","name":"lookup","arguments":"{}"}]`),
+      }, ownership("github.com/1"), "complete", SIGNAL);
+      const request = decodeResponsesRequest(objectFromJson(
+        `{"model":"gpt","input":[{"type":"reasoning","summary":[],"encrypted_content":"${extra}"},{"type":"function_call_output","call_id":"call_unmatched","output":"ok"}]}`,
+      ));
+      await expect(store.enrich(
+        request,
+        await owned(store, "resp_unmatched_carrier", "github.com/1"),
+        SIGNAL,
+      )).rejects.toMatchObject({ code: "checkpoint_unavailable" });
+    } finally {
+      database.close();
+    }
+  });
+
   it("requires a complete durable checkpoint before replay", async () => {
     const { database, store } = history();
     try {
