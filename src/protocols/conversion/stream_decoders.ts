@@ -990,7 +990,6 @@ async function* decodeResponsesStream(
   const observedContent = new Map<string, "output_text" | "refusal">();
   const addedOutputIndexes = new Set<number>();
   const doneOutputIndexes = new Set<number>();
-  const completedReasoningText = new Map<string, string>();
   const completedReasoningParts = new Set<string>();
   let pendingStatuslessReasoning: { readonly outputIndex: number; readonly key: string } | undefined;
   const finishPendingStatuslessReasoning = function* (
@@ -1361,7 +1360,7 @@ async function* decodeResponsesStream(
         const text = stringMember(part, "text");
         if (text === undefined) invalid();
         const partKey = responseReasoningPartKey(identity.key, "content", contentIndex);
-        const completedText = completedReasoningText.get(partKey);
+        const completedText = identity.completedText.get(partKey);
         if (
           type === "response.content_part.added"
             ? completedReasoningParts.has(partKey) || completedText !== undefined
@@ -1423,14 +1422,14 @@ async function* decodeResponsesStream(
       if (
         doneOutputIndexes.has(requiredOutputIndex(payload))
         || completedReasoningParts.has(partKey)
-        || (type === "response.reasoning_summary_part.added" && completedReasoningText.has(partKey))
+        || (type === "response.reasoning_summary_part.added" && identity.completedText.has(partKey))
       ) invalid();
       observeResponseReasoningPart(identity, partKey, budget);
       const part = objectMember(payload, "part");
       if (part === undefined || stringMember(part, "type") !== "summary_text") invalid();
       const text = stringMember(part, "text");
       if (text === undefined) invalid();
-      const completedText = completedReasoningText.get(partKey);
+      const completedText = identity.completedText.get(partKey);
       if (type === "response.reasoning_summary_part.done" && completedText !== undefined && completedText !== text) invalid();
       yield {
         kind: "reasoning_snapshot",
@@ -1466,12 +1465,12 @@ async function* decodeResponsesStream(
       if (
         doneOutputIndexes.has(requiredOutputIndex(payload))
         || completedReasoningParts.has(partKey)
-        || completedReasoningText.has(partKey)
+        || identity.completedText.has(partKey)
       ) invalid();
       observeResponseReasoningPart(identity, partKey, budget);
       const text = singleMember(payload, done ? "text" : "delta");
       if (typeof text !== "string") invalid();
-      if (done) completedReasoningText.set(partKey, text);
+      if (done) identity.completedText.set(partKey, text);
       yield {
         kind: done ? "reasoning_snapshot" : "reasoning_delta",
         key: identity.key,
@@ -1988,6 +1987,7 @@ interface ResponseReasoningIdentity {
   readonly key: string;
   readonly itemId: string;
   readonly parts: Set<string>;
+  readonly completedText: Map<string, string>;
   finalItem?: SemanticReasoningItem | undefined;
 }
 
@@ -2007,7 +2007,12 @@ function observeResponseReasoningIdentity(
   }
   observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
   budget.reserveEntry();
-  const identity = { key: responseReasoningKey(outputIndex), itemId, parts: new Set<string>() };
+  const identity = {
+    key: responseReasoningKey(outputIndex),
+    itemId,
+    parts: new Set<string>(),
+    completedText: new Map<string, string>(),
+  };
   identities.set(outputIndex, identity);
   return identity;
 }
@@ -2031,7 +2036,12 @@ function requiredResponseReasoningIdentity(
     observeOutputType(observedOutputTypes, outputIndex, "reasoning");
     observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
     budget.reserveEntry();
-    identity = { key: responseReasoningKey(outputIndex), itemId, parts: new Set<string>() };
+    identity = {
+      key: responseReasoningKey(outputIndex),
+      itemId,
+      parts: new Set<string>(),
+      completedText: new Map<string, string>(),
+    };
     identities.set(outputIndex, identity);
   } else observeResponseItemAlias(itemAliases, outputIndex, "reasoning", itemId, budget);
   return identity;
@@ -2065,6 +2075,13 @@ function* responseReasoningItemEvents(
     responseReasoningPartKey(identity.key, part.presentation, part.index)
   )));
   if (complete && [...identity.parts].some((partKey) => !finalParts.has(partKey))) invalid();
+  if (complete) {
+    const finalText = new Map(reasoning.parts.map((part) => [
+      responseReasoningPartKey(identity.key, part.presentation, part.index),
+      part.text,
+    ]));
+    if ([...identity.completedText].some(([partKey, text]) => finalText.get(partKey) !== text)) invalid();
+  }
   if (alreadyDone) {
     if (identity.finalItem === undefined || !sameSemanticReasoning(identity.finalItem, reasoning)) invalid();
     return;

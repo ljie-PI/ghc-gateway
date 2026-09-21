@@ -674,6 +674,47 @@ describe("shared conversion response codecs", () => {
         part: { type: "reasoning_text", text: "done late" },
       }),
     ].join("");
+    const textDoneThenChangedItem = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_changed_item", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_changed_item", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_changed_item", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.output_item.done", {
+        output_index: 0,
+        item: {
+          id: "rs_changed_item", type: "reasoning", status: "completed", summary: [],
+          content: [{ type: "reasoning_text", text: "done late" }],
+        },
+      }),
+    ].join("");
+    const textDoneThenChangedTerminal = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_changed_terminal", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_changed_terminal", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_changed_terminal", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.completed", {
+        response: {
+          id: "resp_changed_terminal", object: "response", status: "completed",
+          output: [{
+            id: "rs_changed_terminal", type: "reasoning", status: "completed", summary: [],
+            content: [{ type: "reasoning_text", text: "done late" }],
+          }],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      }),
+    ].join("");
     const messageDoneThenDelta = [
       responseEvent(0, "response.output_item.done", {
         output_index: 0,
@@ -691,6 +732,8 @@ describe("shared conversion response codecs", () => {
       partDoneThenDelta,
       textDoneThenDelta,
       textDoneThenChangedPart,
+      textDoneThenChangedItem,
+      textDoneThenChangedTerminal,
       messageDoneThenDelta,
     ]) {
       await expect(async () => {
