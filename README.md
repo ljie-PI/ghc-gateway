@@ -1,6 +1,6 @@
 # GHC Gateway
 
-GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages APIs. It runs as one Node.js process and includes a local Admin UI for account, model, runtime configuration, usage, and operational-event management.
+GHC Gateway is a loopback-only GitHub Copilot gateway that exposes OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages APIs. It runs as one Node.js process and includes a local Admin UI for accounts, models, client configuration, usage, and operational events.
 
 ## Requirements
 
@@ -8,190 +8,93 @@ GHC Gateway is a loopback-only GitHub Copilot gateway with OpenAI Chat Completio
 - A GitHub Copilot subscription
 - Windows x64, Linux x64/arm64, or macOS x64/arm64
 
-Storage uses Node.js built-in SQLite. Neither package installation nor source installation requires Python or a local C++ compiler. SQLite's version follows the installed Node.js release; no extra runtime flags are required. Earlier Node.js 24 releases are not supported because Windows file-identity differences can prevent secure daemon startup.
+The gateway uses Node.js built-in SQLite. Installation does not require Python or a local C++ compiler.
 
-## Installation
+## Install And Start
+
+Install the `ghcg` executable, then run it in the foreground or as a detached daemon:
 
 ```bash
 npm install --global @ljie-pi/ghc-gateway
-```
 
-The package installs one executable: `ghcg`.
-
-To build and run a source checkout instead, see [Development](#development).
-
-## Start The Gateway
-
-Run in the foreground:
-
-```bash
 ghcg serve
-```
-
-Or start one detached, self-managed daemon:
-
-```bash
+# Or:
 ghcg start
 ghcg status
 ghcg restart
 ghcg stop
 ```
 
-The listener is always `127.0.0.1`. The default port is `31400`. A different startup port can be selected only for `serve` or `start`:
+The listener is always `127.0.0.1` and uses port `31400` by default. Select another startup port with `ghcg serve --port 31401` or `ghcg start --port 31401`.
 
-```bash
-ghcg serve --port 31401
-ghcg start --port 31401
-```
+With the gateway running:
 
-There is no watchdog, automatic restart, operating-system service installation, or second server process. Stop and restart verify the daemon PID, operating-system process start identity, instance nonce, and authenticated control endpoint before termination.
+- Admin UI: `http://127.0.0.1:31400/`
+- OpenAI-compatible base URL: `http://127.0.0.1:31400/v1`
 
-Gateway runtime data, credentials, and Agent management state are stored under the selected data directory. The default Agent state paths are `~/.ghc-gateway/agents/claude/state.db` and `~/.ghc-gateway/agents/codex/state.db`; `--data-dir` or `GHC_GATEWAY_DATA_DIR` moves them to `<data-dir>/agents` without changing `CLAUDE_CONFIG_DIR` or `CODEX_HOME` client configuration targets. On Windows, a missing true-default data directory is atomically created for the current user. Existing directories and every explicit CLI or environment path, including one equal to the default path, are trusted as caller-managed permission boundaries.
+Inference routes do not require a separate gateway API key in this release.
 
-## Authentication And Accounts
+## Accounts And Models
 
-Start GitHub.com device authorization:
-
-```bash
-ghcg auth login
-```
-
-Start authorization for GitHub Enterprise Server:
-
-```bash
-ghcg auth login --host github.example.com
-```
-
-Other account commands:
+Start device authorization after the gateway is running, then list or select account-specific Copilot models:
 
 ```text
-ghcg auth login poll <flow-id>
+ghcg auth login
+ghcg auth login --host github.example.com
 ghcg auth logout [--account <account-id>]
 ghcg auth status
+
 ghcg accounts list
 ghcg accounts use <account-id>
 ghcg accounts remove <account-id>
-```
 
-Management commands are authenticated clients of the running gateway. They never open its SQLite database or credential file in a second process. If the gateway is not running, start it with `ghcg start` or `ghcg serve` first.
-
-## Models
-
-```text
 ghcg models list [--account <account-id>]
 ghcg models current
 ghcg models set <model-id>
 ```
 
-Preferred models are account-specific. If a catalog refresh removes a preferred model, it is marked invalid and must be explicitly reselected. The gateway never silently selects the first model.
+If a catalog refresh removes the preferred model, select another model explicitly. The gateway never silently chooses the first available model.
 
-The Models Admin view shows read-only account-scoped native HTTP interfaces, token and context limits, reasoning levels, input modalities, tool calling, reasoning summaries, verbosity, and search support. Recognized reasoning levels are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; future catalog values remain visible as unrecognized declarations but are not advertised as executable Gateway support. These capabilities are catalog declarations used by the Gateway, not live inference validation. You can refresh the catalog; preferred models are selected through the CLI commands above. Only discovered models are listed; built-in metadata never exposes undiscovered model IDs. Capability metadata cannot be added or edited manually.
+## Admin UI And Agents
 
-Unknown or malformed boolean capability declarations fail closed as not supported; unknown protocols and numeric limits remain unavailable. The gateway does not guess Chat support, probe a paid inference route, or retry a rejected model through a different protocol.
+Open the Admin UI at the listener root. It is an unauthenticated loopback management interface: any local process that can reach the listener can read or change Admin-managed state. Do not expose the listener outside the local machine.
 
-For conversions that require an output-token value, an explicit valid request value wins. Otherwise the model's upstream or built-in default is used, followed by `min(8192, known output ceiling)` or `4096` when the ceiling is unknown. Invalid explicit request values are not replaced by a default.
+The Agents view configures this machine's Claude Code and Codex clients to use the gateway. Each mapping selects an exact Copilot model ID; the first row is the startup model.
 
-## Admin UI
+- Claude Code keeps its Sonnet, Opus, and Haiku roles and supports additional menu models through `modelPicker` with Claude Code 2.1.243 or newer.
+- Codex writes the selected catalog to `models.json` and references it from `config.toml`. Restart Codex after applying changes.
+- Apply updates Gateway-owned routing and model fields while preserving unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude credentials.
 
-With the gateway running, open `http://127.0.0.1:31400/` in a browser, replacing `31400` if a different startup port was selected. The Admin application and its read APIs require no cookie, bootstrap exchange, or other authentication.
+Every Apply, including a no-change Apply, and every confirmed Codex Take over snapshots the current Agent files before replacement. Codex snapshots `config.toml` and `models.json`; Claude Code snapshots `settings.json`. Backups use local-time names such as `config.toml.ghcg.20260921T163015`, with `.1`, `.2`, and so on for same-second collisions. Up to 365 Gateway-owned backups are retained per source file; legacy `.ghcg.bak` and unrelated files are left untouched.
 
-Admin is an unauthenticated loopback management interface. Any local process that can connect to the listener can read and change Admin-managed state. State-changing browser requests require an exact `Origin` equal to the listener origin, which protects against ordinary cross-origin browser requests but does not authenticate native local clients. Authenticated daemon local control remains separate: CLI status, stop, restart, and management commands still use the protected control token, instance nonce, PID, and process start identity.
+There is no Restore action in Admin. To restore manually, stop the client and copy the selected backup over the corresponding `config.toml`, `models.json`, or `settings.json` file.
 
-Admin monitoring uses bounded, replayable SSE with no WebSocket or remote-listener access.
+## HTTP APIs
 
-The six views are Overview, Accounts, Models, Agents, Configuration, and Events.
-The Agents view points this machine's global Claude Code and Codex configuration at the gateway.
-Each Model mapping selects an exact Copilot model ID with autocomplete; selection fills its display name, which remains editable. The first row is the client's startup model, with at most 16 rows per client.
-Claude Code keeps its Sonnet, Opus, and Haiku role rows and allows extra ordinary menu models using `modelPicker` (Claude Code **2.1.243 or newer**). The mapped menu replaces built-in options, subject to the client's Default/current-model entries and managed-settings policy. There is no separate Subagent mapping.
-Codex receives only its selected mappings in `models.json`, referenced by `model_catalog_json` in `config.toml`. Codex reads that catalog at startup; restart it after applying changes.
-**Apply changes** can be repeated without editing the mappings. It updates gateway-owned routing and model fields in the current config; unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude login credentials are left untouched. Apply intentionally replaces externally changed managed fields instead of requiring the displayed file contents to remain unchanged. Path, ownership, parsing, catalog-revision, and crash-recovery checks still fail closed.
-Every Apply or confirmed Codex takeover snapshots each existing configuration file immediately before replacement. Codex snapshots `config.toml` and `models.json`; Claude Code snapshots `settings.json`. Backups use local-time names such as `config.toml.ghcg.20260921T163015`; additional applies in the same second append `.1`, `.2`, and so on. At most 365 Gateway-owned timestamped backups are retained per source file; cleanup removes the oldest tracked backups first. Existing legacy `.ghcg.bak` files are left untouched. On Windows, backups inherit the client configuration directory's permissions and are not guaranteed to be current-user-only.
-There is no Restore operation. To restore manually, stop the affected client and copy the selected timestamped backup over its source file. A recoverable interrupted write can be completed by refreshing and applying again; retain backup/recovery files if it cannot complete safely.
-Local configuration inspection loads independently of model choices and works without an account. Apply validates mappings against the current Copilot catalog and requires a signed-in account. Status means configuration installed, not a tested client connection.
-Overview shows cumulative usage for the last 24 hours, 7 days, and 28 days, using the gateway's clock
-and retained hourly Usage Buckets. These overlapping windows include only available data; shortening
-retention or clearing data cannot be undone by refreshing. Cache tokens are read + write tokens already included in input.
-Refresh reloads Overview statistics or the Accounts list; Accounts also clears old transient feedback.
-Feedback does not have a timed auto-dismiss. Models Refresh fetches a new account catalog; its generation
-and credential numbers are internal versions, and fetched is the last successful catalog-fetch time.
-Responses History is managed by the backend independently of the Admin UI; there is no dedicated history page.
-The Accounts view checks an active device authorization automatically. The gateway enforces GitHub's required
-interval while the browser promptly retries transient local status failures. Keep that view open until it reports
-completion; closing or leaving it stops browser polling, and no device code or token is stored in browser storage.
-Copying the device code marks the copy button with a checkmark; no manual checking is needed.
-
-## HTTP Interfaces
-
-All routes use the same loopback listener. Inference routes do not require a separate gateway API key in this release.
+All routes share the loopback listener:
 
 | Method | Route | Interface |
 | --- | --- | --- |
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
-| `POST` | `/v1/responses` | OpenAI Responses, native or Chat bridge |
+| `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
 | `GET` | `/v1/models` | OpenAI models; Anthropic shape with `anthropic-version` |
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/readyz` | Runtime readiness |
-| `GET` | `/` | Admin static application index |
-| `GET` | `/assets/*` | Admin static assets |
+| `GET` | `/` | Admin application |
 | `GET`, `POST`, `PUT`, `DELETE` | `/admin/api/v1/*` | Admin API and SSE |
 
-No root wildcard SPA fallback is registered. Unsupported protocol, probe, local-control, Admin API, and asset paths return their normal 404 response rather than Admin HTML. `/admin`, `/admin/`, and static `/admin/*` are not aliases for the application.
-No unversioned, compact, trailing-slash, or legacy route aliases are registered.
-Successful inference responses include the content-free
-`x-ghcg-upstream-protocol: chat|messages|responses` header so operators can verify the
-captured native or converted route without exposing credentials or request/response content.
+The gateway selects one compatible native or converted upstream protocol for each request. It does not probe paid inference routes or retry a rejected request through a different protocol.
 
-### Protocol Routing And Conversion
-
-Routing uses the bound account's immutable model-capability snapshot. A matching native HTTP
-protocol is selected first and preserves protocol extensions. Otherwise the gateway evaluates
-conversion compatibility without making an inference call. For requests with reasoning, a target
-that declares the requested level is preferred; remaining compatible targets use these priorities:
-
-- Chat: Responses, then Messages
-- Messages: Chat, then Responses
-- Responses: Chat, then Messages
-
-One request captures one plan and performs exactly one typed upstream operation. The gateway does
-not probe interfaces, infer routing from model names, retry through another protocol, or recurse
-through another local endpoint.
-
-Converted requests use strict direction-specific validation. Unknown protocol keys, duplicate
-keys, invalid types or ranges, `n` values other than `1`, unbound tool results, invalid complete
-tool arguments, and constraints that the target cannot preserve are rejected before inference.
-Message order, images, function names and arguments, call IDs, result binding, structured output,
-forced tool choice, and `parallel_tool_calls: false` are preserved when the route is eligible.
-File, audio, and server-hosted tools require an explicit adapter and are otherwise rejected.
-
-Native routes preserve declared reasoning effort values exactly. Converted routes preserve `max`
-when the target declares it; an `xhigh`-only target can coarsen `max` to `xhigh`. Unrecognized future
-efforts are rejected when conversion is required. Other optional reasoning effort or budget can be
-coarsened. Converted Chat and Responses outputs preserve visible reasoning separately from answer
-text. Chat uses the untyped `reasoning_content` compatibility extension; Chat or Messages reasoning
-converted to Responses is represented as a reasoning summary. Converted Messages outputs preserve
-Chat thinking blocks only when the source supplies the exact Anthropic signature or redacted data;
-other reasoning is omitted because the gateway does not fabricate a signature. Other opaque
-reasoning state can still be omitted. Reported reasoning or thinking token details are normalized
-without estimating them from text. These finite, content-free degradations do not change success
-accounting, add warning text, or trigger a retry. Native routes do not apply conversion-only
-degradation.
-
-Responses continuations stay on their recorded account, model, origin, and upstream protocol.
-For Responses-to-Messages conversion, `previous_response_id` is consumed locally and is never sent
-to the Messages operation. The bounded Responses History can restore completed tool checkpoints;
-it is not a full transcript or reasoning-state store.
+Converted Chat and Responses output keeps visible reasoning separate from answer text. Chat uses
+the untyped `reasoning_content` compatibility extension; Responses uses reasoning items and summary
+events. Messages output preserves a Chat thinking block only when the source supplies its exact
+Anthropic signature or redacted data, and never fabricates one. Opaque reasoning state may otherwise
+be omitted, while reported reasoning-token details are normalized without estimating them from text.
 
 ## Configuration
 
-Global options:
-
-```text
---data-dir <path>
---json
-```
-
-Startup configuration applies only when the process starts. Priority is CLI, then environment, then default.
+Global options are `--data-dir <path>` and `--json`. Startup settings use CLI values first, then environment variables, then defaults:
 
 | Setting | CLI | Environment | Default |
 | --- | --- | --- | --- |
@@ -199,12 +102,7 @@ Startup configuration applies only when the process starts. Priority is CLI, the
 | Data directory | `--data-dir` | `GHC_GATEWAY_DATA_DIR` | `~/.ghc-gateway` |
 | Log level | `--log-level` | `GHC_GATEWAY_LOG_LEVEL` | `info` |
 
-Runtime configuration is stored in SQLite. Environment values seed a missing database row once; later starts use the persisted values. Read or update it through:
-
-```text
-ghcg config get [key]
-ghcg config set <key> <value>
-```
+Read or update persisted runtime configuration with `ghcg config get [key]` and `ghcg config set <key> <value>`.
 
 | Runtime key | Default | Range |
 | --- | ---: | ---: |
@@ -224,34 +122,31 @@ ghcg config set <key> <value>
 | `usage.retentionDays` | 90 | 1..365 |
 | `events.retentionDays` | 7 | 1..30 |
 
-The corresponding one-time seed variable uses the `GHC_GATEWAY_` prefix and upper snake case, for example `GHC_GATEWAY_LIMITS_REQUEST_BODY_BYTES`.
+A missing runtime row can be seeded once with an upper-snake-case `GHC_GATEWAY_` variable, for example `GHC_GATEWAY_LIMITS_REQUEST_BODY_BYTES`.
 
 ## Local Data And Privacy
 
-The default data directory is `~/.ghc-gateway` and contains:
+The default data directory is `~/.ghc-gateway`:
 
-- `state.db` with runtime settings, account metadata, bounded Responses History, usage buckets, and sanitized operational events
-- `credentials.json` with protected credentials
-- `daemon.json` with protected process identity and local-control authentication
-- `logs/*.jsonl` with bounded, sanitized daemon logs
+- `state.db`: runtime settings, account metadata, bounded Responses History, Usage Buckets, and sanitized Operational Events
+- `credentials.json`: protected credentials
+- `daemon.json`: protected process identity and local-control authentication
+- `logs/*.jsonl`: bounded, sanitized daemon logs
+- `agents/{claude|codex}/state.db`: Agent management state
 
-Credentials and daemon identity use protected atomic files. On Windows, files under the selected data root inherit that root's permissions; existing and custom roots are not inspected or repaired, so callers must secure them. Agent targets under `CLAUDE_CONFIG_DIR` and `CODEX_HOME` likewise inherit and trust those client-directory permissions while link, type, file-identity, and concurrent-replacement checks remain enforced. Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors.
+Use `--data-dir` or `GHC_GATEWAY_DATA_DIR` to select another data directory. This does not change client targets selected by `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
 
-Responses History stores only minimal bridge tool checkpoints, at most 512 responses, with a seven-day default TTL. Separate content-free route receipts bind observed response IDs to the account, resolved model, trusted upstream origin, native or converted protocol owner, conversion version, and checkpoint state. Receipts are independently bounded at 2048 and do not consume the 512-checkpoint limit.
+Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors. Responses History stores only bounded bridge checkpoints needed for compatible continuations.
 
-Known continuations keep their original compatible route under the currently bound account; the gateway never switches accounts to follow a response ID. Untracked native IDs are passed through only on a direct native Responses route so the upstream can authorize them. If bounded cleanup or account removal has discarded exact ownership evidence, untracked continuation fails closed until Responses History is explicitly cleared. Legacy unscoped history remains visible as unowned data after migration and cannot be used for new continuation; start a new conversation instead.
+On Windows, files inherit the selected directory's permissions. Existing and custom data roots and client configuration directories are caller-managed security boundaries.
 
-Usage is content-free and retained for 90 days by default. Operational Events retain at most 512 sanitized entries for seven days by default.
+## Upgrading Existing Installations
 
-## Existing Installations
-
-This release removes retired schema content and manual model capability settings. Existing databases may fail migration integrity checks; those checks remain strict, and old settings are not imported.
-
-Stop the gateway using its existing data directory before upgrading. Keep that directory intact as a private backup; do not edit its migration records or copy its database into a new directory. Start with a new, empty directory, for example `ghcg --data-dir <new-directory> serve`, then use the same `--data-dir <new-directory>` for `auth login` and subsequent management commands. Reauthenticate each account and reselect preferences and runtime settings. Do not delete the original directory or credential file as part of this process.
+This release does not import retired schema content or manual model-capability settings. If an existing database fails strict migration checks, stop the gateway, keep the old data directory as a private backup, and start with `ghcg --data-dir <new-directory> serve`. Use the same `--data-dir <new-directory>` for `auth login` and every later management command, then reselect runtime preferences. Do not edit or copy migration records manually.
 
 ## Automation
 
-Every command accepts `--json` and writes one compact success or error object. Human successes go to stdout and errors go to stderr.
+Every command accepts `--json` and emits one compact success or error object, for example:
 
 ```bash
 ghcg --json status
@@ -261,102 +156,30 @@ ghcg --json config get limits.requestBodyBytes
 
 ## Development
 
-Use [Run from Source](#run-from-source) for a local instance, or [Validate Changes](#validate-changes) when preparing code changes.
-
-### Run from Source
-
-Run these commands from the repository root using a supported Node.js version. No global `ghcg` installation or `npm link` is needed.
-
-Install dependencies once after cloning and again only when dependencies change:
+Run and validate a source checkout from the repository root:
 
 ```sh
+# Build and run in the foreground:
 npm ci
-```
-
-Build after source changes:
-
-```sh
 npm run build
-```
-
-Run the built gateway in the foreground:
-
-```sh
 npm start
-```
 
-This listens on `127.0.0.1:31400` by default and accepts only local connections. Keep the terminal open; press `Ctrl+C` to stop it. Pass startup options after `--`, for example `npm start -- --port 31401`.
-
-In a second terminal, use the built CLI for account authentication when needed:
-
-```sh
-node dist/src/cli/main.js auth login
-```
-
-Follow the URL and device code printed by `auth login` to authorize your GitHub account. This management command requires the gateway to be running. Open `http://127.0.0.1:31400/` directly for the Admin UI; opening the UI itself does not require an authenticated account.
-
-OpenAI-compatible clients can use `http://127.0.0.1:31400/v1` as their base URL. The current release does not require a separate gateway API key.
-
-As an alternative, stop the foreground process first, then start one detached, self-managed daemon:
-
-```sh
-node dist/src/cli/main.js start
-node dist/src/cli/main.js status
-```
-
-Stop the daemon when finished:
-
-```sh
-node dist/src/cli/main.js stop
-```
-
-Do not run the foreground process and detached daemon simultaneously for the same data directory and port. Later starts can reuse the existing dependencies and build until they change.
-
-### Validate Changes
-
-Install dependencies before checking types or linting, then build before running the runtime and packaging checks. This is a separate validation workflow, not an extra step required for every ordinary startup.
-
-```sh
-npm ci
+# In another terminal, or after stopping the gateway, validate changes:
 npm run typecheck
 npm run lint
-npm run build
 npm run smoke:sqlite
 npm test
 npm run fixtures:verify
 npm run e2e
-npm run bench -- full --repeat 3
 npm run pack
 ```
 
-Automated tests are offline and use scripted GitHub remotes and synthetic or fixed-response loopback Copilot HTTP replay. Official-client suites are manual release evidence and require explicit opt-in:
+Use `node dist/src/cli/main.js` instead of `ghcg` when exercising the built CLI. Automated tests use scripted remotes and local fixed-response replay.
+Official-client suites require explicit opt-in and remain offline:
 
 ```bash
 GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 ```
-
-The replay suite exercises the production gateway against a local mock Copilot HTTP server on `127.0.0.1:31488` using fixed response fixtures with byte-integrity checks. Official client SDK tests run strictly offline without outbound network access.
-
-### Explicit Upstream Capture
-
-Recording is a manual, potentially billable operation, never part of tests, build, fixtures, packaging or CI. Preview without account access or inference:
-
-```sh
-node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts
-```
-
-After separately authorizing account access and live inference, record with the existing Bound Account (default data directory/account, or explicit `--data-dir PATH --account ID`). Stop any gateway using that data directory first. Generate migrations once in a fresh source checkout before execution with `node scripts/tooling/bootstrap.mjs scripts/tooling/generate_migrations.ts`.
-
-```sh
-node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts --execute --model gemini-3.5-flash --scenario all --mode both
-node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts --execute --model gpt-5.5 --scenario all --mode both
-```
-
-Configured native targets are `gemini-3.5-flash` (Chat), `gpt-5.5` (Responses), and `claude-sonnet-4` (Messages). There is no provider selection, model substitution or protocol retry. Claude uses the same recorder but has only local synthetic HTTP validation; live Claude recording requires separate authorization.
-
-Select `--scenario long-text|image|parallel-tools|five-turn|all` and `--mode nonstream|stream|both`. The fixed reference image is `tests/sdk/images/vergil.jpg`; five-turn requests retain the original image and actual assistant/tool history. `all` with `both` makes at most 16 sequential requests per model. Limits are 20 minutes per run (reducible with `--total-timeout-ms`), three minutes per request, 30 seconds stream idle, and 8 MiB per response. Output budgets include reasoning headroom; truncated, refused or incomplete responses fail validation rather than being accepted or retried.
-
-Every successful run publishes raw request/response bytes and a content-free digest/terminal/tool/usage manifest under a new `ghcg-capture-*/capture` directory in the OS temporary directory. No output path override or automatic corpus promotion is supported. All exchanges must validate before publication; failure removes the run's unpublished temporary files. Stdout contains only the plan or sanitized evidence, never payloads, credentials or upstream diagnostics. Capture files themselves contain scenario content: keep them private and outside commits, and remove them when no longer needed. Existing capture artifacts and replay corpus files are never rewritten.
 
 ## License
 
