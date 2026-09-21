@@ -173,9 +173,9 @@ describe("full-gateway benchmark smoke", () => {
     expect(result.streamEvent.valuesMs).toHaveLength(20);
     expect(result.streamEvent.valuesMs.every((value) => value >= 0)).toBe(true);
     expect(result.streamEvent.passed).toBe(true);
-    expect(result.checkpoint.valuesMs).toHaveLength(8);
-    expect(result.checkpoint.diagnostics.observedCount).toBe(8);
-    expect(result.checkpoint.diagnostics.states.partial.count).toBe(4);
+    expect(result.checkpoint.valuesMs).toHaveLength(12);
+    expect(result.checkpoint.diagnostics.observedCount).toBe(12);
+    expect(result.checkpoint.diagnostics.states.partial.count).toBe(8);
     expect(result.checkpoint.diagnostics.states.complete.count).toBe(4);
     expect(result.checkpoint.diagnostics.thresholdMs).toBe(result.checkpoint.thresholdMs);
     expect(result.checkpoint.diagnostics.thresholdExceededCount).toBe(

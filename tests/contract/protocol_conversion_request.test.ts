@@ -6,6 +6,7 @@ import {
   parseWireJson,
   type WireJsonObject,
 } from "../../src/serialization/wire_json.js";
+import type { ReasoningCarrierRecord } from "../../src/protocols/conversion/reasoning_carriers.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -805,10 +806,7 @@ describe("shared conversion request codecs", () => {
           },
         ],
       }), "target", capability([target]));
-      expect(converted.degradations).toEqual([
-        "reasoning.presentation_omitted",
-        "reasoning.state_omitted",
-      ]);
+      expect(converted.degradations).toEqual(["reasoning.state_omitted"]);
       for (const malformed of [
         { type: "reasoning", summary: [{ type: "unknown", text: "plan" }] },
         { type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: 1 }] },
@@ -826,6 +824,76 @@ describe("shared conversion request codecs", () => {
       }
     },
   );
+
+  it("restores source-bound carrier state and rejects a changed visible projection", () => {
+    const token = "ghcg-rsn-v1:messages_block:responses:01234567-89ab-4def-8123-456789abcdef";
+    const record: ReasoningCarrierRecord = {
+      token,
+      sourceKind: "messages_block",
+      state: "complete",
+      payload: body({
+        kind: "messages_block",
+        state: { type: "thinking", thinking: "visible plan", signature: "provider-signature" },
+      }),
+      projection: body({ type: "reasoning", text: "visible plan" }),
+      storedBytes: 1,
+    };
+    const input = body({
+      model: "source",
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Use the tool." }],
+      }, {
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "visible plan" }],
+        encrypted_content: token,
+      }, {
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+      }, {
+        type: "function_call_output",
+        call_id: "call_1",
+        output: "ok",
+      }],
+    });
+    const plan = planProtocolExecution({
+      source: "responses",
+      body: input,
+      stream: false,
+      resolvedModel: "target",
+      capability: capability(["messages"]),
+      forcedTarget: "messages",
+      carrierRecords: new Map([[token, record]]),
+    });
+    const converted = plan.kind === "converted" ? decoded(plan.request.bytes) : undefined;
+    expect((converted?.messages as Array<Record<string, unknown>>)[1]).toMatchObject({
+      role: "assistant",
+      content: expect.arrayContaining([
+        { type: "thinking", thinking: "visible plan", signature: "provider-signature" },
+      ]),
+    });
+
+    const changed = body({
+      model: "source",
+      input: [{
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "changed" }],
+        encrypted_content: token,
+      }],
+    });
+    expect(() => planProtocolExecution({
+      source: "responses",
+      body: changed,
+      stream: false,
+      resolvedModel: "target",
+      capability: capability(["messages"]),
+      forcedTarget: "messages",
+      carrierRecords: new Map([[token, record]]),
+    })).toThrow();
+  });
 
   it("rejects unknown and conflicting nested Chat reasoning fields", () => {
     for (const assistant of [

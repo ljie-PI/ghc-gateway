@@ -19,12 +19,13 @@ import type {
   SemanticResponseItem,
   SemanticToolCallItem,
   SemanticUsage,
+  ReasoningCarrierConversionContext,
 } from "./types.js";
 import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
 import { chatCompletionsUsageFromCounters } from "../openai_chat_completions/native.js";
 import { restoreResponsesExtendedTools } from "./responses_extended_tools.js";
-import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
+import { chatReasoningState, decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import { diagnosticShape } from "./diagnostics.js";
 
@@ -37,6 +38,7 @@ export interface BufferedConversionContext {
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
   readonly degradations?: readonly ConversionDegradationRule[];
+  readonly carrier?: ReasoningCarrierConversionContext | undefined;
 }
 
 const ZERO_USAGE: SemanticUsage = {
@@ -52,6 +54,7 @@ export interface PlannedBufferedConversionContext {
   readonly maxBytes: number;
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
+  readonly carrier?: ReasoningCarrierConversionContext | undefined;
 }
 
 export function convertBufferedPlannedResponse(
@@ -88,10 +91,28 @@ function convertBufferedResponseInternal(
     : restoreResponsesExtendedTools(decoded, responseBindings);
   context.diagnostics?.set({ protocolStatus: semantic.status });
   validateUniqueCallIds(semantic.items);
-  const envelope = responseEnvelope(semantic, context);
+  const createdTokens: string[] = [];
+  const carrier = context.carrier === undefined ? undefined : {
+    ...context.carrier,
+    onCreated: (token: string) => {
+      createdTokens.push(token);
+      context.carrier?.onCreated?.(token);
+    },
+  };
+  const outputCarrier = semantic.status === "completed"
+    && semantic.items.some((item) => item.type === "tool_call")
+    ? carrier
+    : undefined;
+  const responseId = context.target === "responses"
+    ? managedConvertedResponseId(context.source, context.model, context.createUuid())
+    : undefined;
+  const outputContext = outputCarrier === undefined
+    ? { ...context, carrier: undefined }
+    : { ...context, carrier: { ...outputCarrier, ...(responseId === undefined ? {} : { responseId }) } };
+  const envelope = responseEnvelope(semantic, outputContext, responseId);
   context.diagnostics?.shape("client_output", () => diagnosticShape(envelope));
   const checkpoint = context.target === "responses"
-    ? responseCheckpoint(envelope)
+    ? responseCheckpoint(envelope, createdTokens)
     : undefined;
   return {
     body: envelope,
@@ -143,6 +164,7 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   const finishReason = chatFinishReason(singleMember(choice, "finish_reason"));
   const completeTools = finishReason !== "length" && finishReason !== "content_filter";
   const reasoning = decodeChatReasoning(message, upstreamInvalid);
+  const opaqueChatState = chatReasoningState(message, upstreamInvalid);
   const content: Array<Extract<SemanticContent, { readonly type: "text" | "refusal" }>> = [];
   const audio = singleMember(message, "audio");
   if (audio !== undefined && audio !== null) {
@@ -161,12 +183,13 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   const reasoningStatus = completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0
     ? "completed" as const
     : "incomplete" as const;
-  if (reasoning.text.length > 0) {
+  if (reasoning.text.length > 0 || opaqueChatState !== undefined) {
     items.push({
       type: "reasoning",
       parts: [{ presentation: "summary", index: 0, text: reasoning.text }],
       status: reasoningStatus,
       hasOpaqueState: reasoning.hasOpaqueState,
+      ...(opaqueChatState === undefined ? {} : { opaqueState: { kind: "chat_state" as const, state: opaqueChatState } }),
     });
   }
   if (reasoning.thinkingBlocks.length > 0) {
@@ -323,6 +346,9 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
           type: "reasoning",
           parts: [{ presentation: "summary", index: 0, text: thinking }],
           hasOpaqueState: typeof signatureValue === "string" && signatureValue.length > 0,
+          ...(typeof signatureValue === "string" && signatureValue.length > 0
+            ? { opaqueState: { kind: "messages_block" as const, block: value } }
+            : {}),
         });
         pendingReasoningIndex = items.length - 1;
       }
@@ -332,6 +358,15 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
       const data = stringMember(value, "data");
       if (data === undefined) {
         upstreamInvalid();
+      }
+      if (data.length > 0) {
+        items.push({
+          type: "reasoning",
+          parts: [],
+          hasOpaqueState: true,
+          opaqueState: { kind: "messages_block", block: value },
+        });
+        pendingReasoningIndex = items.length - 1;
       }
       continue;
     }
@@ -488,7 +523,7 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
       if (status === "completed" && reasoning.status !== undefined && reasoning.status !== "completed") {
         upstreamInvalid();
       }
-      if (reasoning.parts.some((part) => part.text.length > 0)) {
+      if (reasoning.parts.some((part) => part.text.length > 0) || reasoning.opaqueState !== undefined) {
         items.push(reasoning);
       }
       continue;
@@ -516,6 +551,7 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
 function responseEnvelope(
   response: Readonly<SemanticResponse>,
   context: Readonly<BufferedConversionContext>,
+  responseId?: string,
 ): WireJsonObject {
   if (context.target === "chat") {
     return chatEnvelope(response, context);
@@ -523,7 +559,7 @@ function responseEnvelope(
   if (context.target === "messages") {
     return messagesEnvelope(response, context);
   }
-  return responsesEnvelope(response, context);
+  return responsesEnvelope(response, context, responseId);
 }
 
 function chatEnvelope(
@@ -548,6 +584,13 @@ function chatEnvelope(
     .flatMap((item) => item.parts)
     .map((part) => part.text)
     .join("");
+  const reasoningItems = response.items
+    .filter((item): item is Extract<SemanticResponseItem, { readonly type: "reasoning" }> => (
+      context.carrier !== undefined
+      && item.type === "reasoning"
+      && item.opaqueState?.kind === "responses_item"
+    ))
+    .map((item) => carrierReasoningItem(item, context, "chat"));
   const calls = response.items
     .filter((item): item is SemanticToolCallItem => item.type === "tool_call")
     .map((item, index) => wireObject([
@@ -559,6 +602,7 @@ function chatEnvelope(
   const message = wireObject([
     ["role", "assistant"],
     ["reasoning_content", reasoning.length === 0 ? undefined : reasoning],
+    ["reasoning_items", reasoningItems.length === 0 ? undefined : wireArray(reasoningItems)],
     ["content", text.length === 0 ? null : text],
     ["refusal", refusal.length === 0 ? undefined : refusal],
     ["tool_calls", calls.length === 0 ? undefined : wireArray(calls)],
@@ -584,6 +628,14 @@ function messagesEnvelope(
   const content: WireJsonObject[] = [];
   for (const item of response.items) {
     if (item.type === "reasoning") {
+      if (context.carrier !== undefined && item.opaqueState?.kind === "responses_item") {
+        const carrier = createCarrier(item, context, "messages");
+        const visible = item.parts.map((part) => part.text).join("");
+        content.push(visible.length === 0
+          ? wireObject([["type", "redacted_thinking"], ["data", carrier.token]])
+          : wireObject([["type", "thinking"], ["thinking", visible], ["signature", carrier.token]]));
+        continue;
+      }
       if (item.messagesState?.type === "thinking") {
         content.push(wireObject([
           ["type", "thinking"],
@@ -626,11 +678,12 @@ function messagesEnvelope(
 function responsesEnvelope(
   response: Readonly<SemanticResponse>,
   context: Readonly<BufferedConversionContext>,
+  responseId?: string,
 ): WireJsonObject {
   const output: WireJsonObject[] = [];
   for (const item of response.items) {
     if (item.type === "reasoning") {
-      if (item.parts.length === 0) continue;
+      if (item.parts.length === 0 && (item.opaqueState === undefined || context.carrier === undefined)) continue;
       const summary = item.parts
         .filter((part) => part.presentation === "summary")
         .sort((left, right) => left.index - right.index)
@@ -645,6 +698,9 @@ function responsesEnvelope(
         ["status", item.status ?? response.status],
         ["summary", wireArray(summary)],
         ["content", content.length === 0 ? undefined : wireArray(content)],
+        ["encrypted_content", item.opaqueState === undefined || context.carrier === undefined
+          ? undefined
+          : createCarrier(item, context, "responses").token],
       ]));
     } else if (item.type === "message") {
       const content = item.content.map((part) => part.type === "text"
@@ -691,9 +747,9 @@ function responsesEnvelope(
       ]));
     }
   }
-  const responseId = managedConvertedResponseId(context.source, context.model, context.createUuid());
+  const outputResponseId = responseId ?? managedConvertedResponseId(context.source, context.model, context.createUuid());
   return wireObject([
-    ["id", responseId],
+    ["id", outputResponseId],
     ["object", "response"],
     ["created_at", wireNumber(context.nowUnixSeconds())],
     ["status", response.status],
@@ -721,7 +777,59 @@ function responsesEnvelope(
   ]);
 }
 
-function responseCheckpoint(body: WireJsonObject) {
+function carrierReasoningItem(
+  item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+  context: Readonly<BufferedConversionContext>,
+  wireProtocol: "chat",
+): WireJsonObject {
+  const carrier = createCarrier(item, context, wireProtocol);
+  const source = item.opaqueState?.kind === "responses_item" ? item.opaqueState.item : undefined;
+  if (source === undefined) upstreamInvalid();
+  return replaceEncryptedContent(source, carrier.token);
+}
+
+function createCarrier(
+  item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+  context: Readonly<BufferedConversionContext>,
+  wireProtocol: "chat" | "messages" | "responses",
+) {
+  if (context.carrier === undefined || context.carrier.binding.wireProtocol !== wireProtocol) upstreamInvalid();
+  const opaque = item.opaqueState;
+  if (opaque === undefined) upstreamInvalid();
+  const sourceKind = opaque.kind;
+  const state = opaque.kind === "responses_item" ? opaque.item
+    : opaque.kind === "messages_block" ? opaque.block : opaque.state;
+  const carrier = context.carrier.store.create({
+    binding: context.carrier.binding,
+    sourceKind,
+    state: "partial",
+    ...(context.carrier.responseId === undefined ? {} : { responseId: context.carrier.responseId }),
+    payload: wireObject([["kind", sourceKind], ["state", state]]),
+    projection: reasoningProjection(item),
+  });
+  context.carrier.onCreated?.(carrier.token);
+  return carrier;
+}
+
+function reasoningProjection(item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>): WireJsonObject {
+  return wireObject([
+    ["type", "reasoning"],
+    ["text", item.parts.map((part) => part.text).join("")],
+  ]);
+}
+
+function replaceEncryptedContent(item: WireJsonObject, token: string): WireJsonObject {
+  let replaced = false;
+  const members = item.members.map((member) => {
+    if (member.key !== "encrypted_content") return member;
+    replaced = true;
+    return { key: member.key, value: token };
+  });
+  if (!replaced) members.push({ key: "encrypted_content", value: token });
+  return { kind: "object", members };
+}
+
+function responseCheckpoint(body: WireJsonObject, carrierTokens: readonly string[]) {
   const responseId = stringMember(body, "id");
   const output = arrayMember(body, "output");
   const status = stringMember(body, "status");
@@ -732,6 +840,7 @@ function responseCheckpoint(body: WireJsonObject) {
     responseId,
     output: status === "completed" ? output.items : [],
     state: status === "completed" ? "complete" as const : "route_only" as const,
+    ...(carrierTokens.length === 0 ? {} : { carrierTokens: [...carrierTokens] }),
   };
 }
 

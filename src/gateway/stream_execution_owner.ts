@@ -98,15 +98,27 @@ export async function createStreamExecutionResponseOwner<T>(
       return;
     }
     cause = terminalCause;
-    input.diagnostics?.terminal(terminalCause);
-    if (result.kind === "failure") input.diagnostics?.failure(result.error);
     state = "terminating";
     barrier = (async () => {
+      let effectiveResult = result;
+      let effectiveWriterMode = writerMode;
       try {
-        observe(result);
-        if (writerMode === "abort") {
-          const error = result.kind === "failure"
-            ? (input.presentPostCommitFailure?.(result.error) ?? result.error)
+        if (terminalCause === "semantic_success" && result.kind === "success") {
+          try {
+            await input.finalizeSuccess?.(result.value);
+          } catch (error: unknown) {
+            const failure = input.normalizeFailure(error);
+            cause = resources.writer?.committed === true ? "postcommit_failure" : "precommit_failure";
+            effectiveResult = { kind: "failure", error: failure };
+            effectiveWriterMode = "abort";
+          }
+        }
+        input.diagnostics?.terminal(cause ?? terminalCause);
+        if (effectiveResult.kind === "failure") input.diagnostics?.failure(effectiveResult.error);
+        observe(effectiveResult);
+        if (effectiveWriterMode === "abort") {
+          const error = effectiveResult.kind === "failure"
+            ? (input.presentPostCommitFailure?.(effectiveResult.error) ?? effectiveResult.error)
             : undefined;
           resources.writer?.abort(error);
         }
@@ -123,7 +135,7 @@ export async function createStreamExecutionResponseOwner<T>(
         if (!fromProducer && resources.producer !== undefined) {
           await dependencies.boundedCleanup(resources.producer, input.cleanupTimeoutMs ?? 1_000);
         }
-        if (writerMode === "close") {
+        if (effectiveWriterMode === "close") {
           resources.writer?.close();
         }
         if (!deliveryAdapterClaimed) {

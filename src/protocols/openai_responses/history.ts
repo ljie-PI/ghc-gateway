@@ -19,11 +19,25 @@ import {
 const DEFAULT_TTL_DAYS = 7;
 const DEFAULT_MAX_RESPONSES = 512;
 const DEFAULT_MAX_RECEIPTS = 2_048;
+const DEFAULT_MAX_REPLAY_ITEMS = 1_024;
+const DEFAULT_MAX_REPLAY_ITEM_BYTES = 4_194_304;
+const DEFAULT_MAX_REPLAY_BYTES = 33_554_432;
+const DEFAULT_MAX_STORED_REPLAY_BYTES = 33_554_432;
 const DAY_MS = 86_400_000;
 const JSON_ENCODER = new TextEncoder();
 const JSON_DECODER = new TextDecoder();
-export const RESPONSES_CHAT_CONVERSION_VERSION = "responses-chat-v1";
-export const RESPONSES_MESSAGES_CONVERSION_VERSION = "responses-messages-v1";
+const RESPONSES_CHAT_LEGACY_CONVERSION_VERSION = "responses-chat-v1";
+const RESPONSES_MESSAGES_LEGACY_CONVERSION_VERSION = "responses-messages-v1";
+export const RESPONSES_CHAT_CONVERSION_VERSION = "responses-chat-v2";
+export const RESPONSES_MESSAGES_CONVERSION_VERSION = "responses-messages-v2";
+const RESPONSES_CHAT_CONVERSION_VERSIONS = [
+  RESPONSES_CHAT_LEGACY_CONVERSION_VERSION,
+  RESPONSES_CHAT_CONVERSION_VERSION,
+] as const;
+const RESPONSES_MESSAGES_CONVERSION_VERSIONS = [
+  RESPONSES_MESSAGES_LEGACY_CONVERSION_VERSION,
+  RESPONSES_MESSAGES_CONVERSION_VERSION,
+] as const;
 
 const MINIMAL_CALL_FIELDS = new Set([
   "type",
@@ -96,6 +110,7 @@ export interface ResponsesHistory {
     ownership: Readonly<ResponsesContinuationOwnership>,
     checkpointState: "partial" | "complete",
     signal: AbortSignal,
+    finalize?: (() => void) | undefined,
   ): Promise<void>;
 }
 
@@ -108,6 +123,16 @@ export interface ResponsesHistoryAdmin {
 export interface ResponsesHistoryRecord {
   readonly responseId: string;
   readonly output: readonly WireJson[] | WireJson;
+}
+
+export function isKnownResponsesConversionVersion(
+  protocol: ResponsesContinuationProtocol,
+  version: string | null,
+): boolean {
+  return protocol === "chat"
+    ? (RESPONSES_CHAT_CONVERSION_VERSIONS as readonly unknown[]).includes(version)
+    : protocol === "messages"
+      && (RESPONSES_MESSAGES_CONVERSION_VERSIONS as readonly unknown[]).includes(version);
 }
 
 export interface ResponsesReceiptRecord extends ResponsesContinuationOwnership {
@@ -147,25 +172,51 @@ export class ResponsesContinuationError extends Error {
   }
 }
 
-interface ResponsesHistoryOptions {
+export interface ResponsesHistoryOptions {
   readonly nowMs?: () => number;
   readonly ttlDays?: number;
   readonly maxResponses?: number;
   readonly maxReceipts?: number;
+  readonly maxReplayItems?: number;
+  readonly maxReplayItemBytes?: number;
+  readonly maxReplayBytes?: number;
+  readonly maxStoredReplayBytes?: number;
   readonly accountIsActive?: (accountId: string) => boolean;
 }
 
-interface StoredCall {
-  readonly responseId: string;
-  readonly ordinal: number;
-  readonly callId: string;
-  readonly kind: ResponsesCallKind;
+type ReplayFormatVersion = 1 | 2;
+type ReplayItemKind = "reasoning" | ResponsesCallKind;
+
+interface StoredReplayItemBase {
+  readonly groupOrdinal: number;
+  readonly itemOrdinal: number;
   readonly item: WireJsonObject;
   readonly itemJson: string;
+  readonly itemBytes: number;
+}
+
+interface StoredReasoningItem extends StoredReplayItemBase {
+  readonly kind: "reasoning";
+  readonly callId: null;
+}
+
+interface StoredCall extends StoredReplayItemBase {
+  readonly callId: string;
+  readonly kind: ResponsesCallKind;
+}
+
+type StoredReplayItem = StoredReasoningItem | StoredCall;
+
+interface StoredReplay {
+  readonly formatVersion: ReplayFormatVersion;
+  readonly items: readonly StoredReplayItem[];
+  readonly itemCount: number;
+  readonly bytes: number;
 }
 
 interface StoredResponse {
-  readonly responseId: string;
+  readonly formatVersion: ReplayFormatVersion;
+  readonly items: readonly StoredReplayItem[];
   readonly calls: readonly StoredCall[];
   readonly byCallId: ReadonlyMap<string, StoredCall>;
 }
@@ -183,12 +234,27 @@ interface ReceiptRow {
   readonly expires_at_ms: number;
 }
 
-interface CallRow {
+interface CheckpointRow {
   readonly response_id: string;
-  readonly ordinal: number;
-  readonly call_id: string;
-  readonly kind: ResponsesCallKind;
+  readonly replay_format_version: number;
+  readonly replay_item_count: number;
+  readonly replay_bytes: number;
+}
+
+interface ReplayItemRow {
+  readonly response_id: string;
+  readonly group_ordinal: number;
+  readonly item_ordinal: number;
+  readonly item_kind: ReplayItemKind;
+  readonly call_id: string | null;
   readonly item_json: string;
+  readonly item_bytes: number;
+}
+
+interface ReplaySummaryRow {
+  readonly item_count: number;
+  readonly replay_bytes: number;
+  readonly max_item_bytes: number;
 }
 
 interface StateRow {
@@ -204,6 +270,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   private ttlMs: number;
   private readonly maxResponses: number;
   private readonly maxReceipts: number;
+  private readonly maxReplayItems: number;
+  private readonly maxReplayItemBytes: number;
+  private readonly maxReplayBytes: number;
+  private readonly maxStoredReplayBytes: number;
   private readonly accountIsActive: ((accountId: string) => boolean) | undefined;
 
   constructor(
@@ -214,6 +284,18 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     this.ttlMs = (options.ttlDays ?? DEFAULT_TTL_DAYS) * DAY_MS;
     this.maxResponses = options.maxResponses ?? DEFAULT_MAX_RESPONSES;
     this.maxReceipts = options.maxReceipts ?? DEFAULT_MAX_RECEIPTS;
+    this.maxReplayItems = options.maxReplayItems ?? DEFAULT_MAX_REPLAY_ITEMS;
+    this.maxReplayItemBytes = options.maxReplayItemBytes ?? DEFAULT_MAX_REPLAY_ITEM_BYTES;
+    this.maxReplayBytes = options.maxReplayBytes ?? DEFAULT_MAX_REPLAY_BYTES;
+    this.maxStoredReplayBytes = options.maxStoredReplayBytes ?? DEFAULT_MAX_STORED_REPLAY_BYTES;
+    if (
+      !isBoundedInteger(this.maxReplayItems, 1, Number.MAX_SAFE_INTEGER - 1)
+      || !isBoundedInteger(this.maxReplayItemBytes, 1, Number.MAX_SAFE_INTEGER)
+      || !isBoundedInteger(this.maxReplayBytes, 1, Number.MAX_SAFE_INTEGER)
+      || !isBoundedInteger(this.maxStoredReplayBytes, 1, Number.MAX_SAFE_INTEGER)
+    ) {
+      throw new Error("Responses history replay limits must be positive integers");
+    }
     this.accountIsActive = options.accountIsActive;
     this.mutateIfChanged(() => false);
   }
@@ -231,9 +313,17 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
 
     const own = this.readReceipt(account, id);
     if (own !== undefined) {
-      return own.checkpoint_state === "expired"
-        ? { kind: "expired" }
-        : { kind: "owned", receipt: toReceipt(own) };
+      validateStoredOwnership(own);
+      if (own.checkpoint_state === "expired") {
+        return { kind: "expired" };
+      }
+      if (own.checkpoint_state === "complete" && own.owner === "converted") {
+        const checkpoint = this.readResponse(account, id);
+        if (checkpoint !== undefined && checkpoint.formatVersion !== replayFormatVersion(toReceipt(own))) {
+          unavailableCheckpoint();
+        }
+      }
+      return { kind: "owned", receipt: toReceipt(own) };
     }
     const foreign = this.database.prepare(
       "SELECT 1 FROM response_route_receipts WHERE response_id = ? LIMIT 1",
@@ -261,21 +351,63 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     throwIfAborted(signal);
     this.mutateIfChanged(() => false);
     throwIfAborted(signal);
-    if (receipt.owner !== "converted" || receipt.checkpointState === "expired") {
+    if (receipt.owner !== "converted") {
       throw new ResponsesContinuationError("checkpoint_unavailable", "continuation has no local checkpoint");
+    }
+    const expectedFormatVersion = replayFormatVersion(receipt);
+    const persistedReceipt = this.readReceipt(receipt.accountId, receipt.responseId);
+    if (
+      receipt.checkpointState !== "complete"
+      || persistedReceipt === undefined
+      || persistedReceipt.checkpoint_state !== "complete"
+      || !sameOwnership(persistedReceipt, receipt)
+    ) {
+      unavailableCheckpoint();
     }
 
     const originalItems = inputItems(request.input);
     if (originalItems === undefined) {
       throw new ResponsesContinuationError("checkpoint_unavailable", "continuation input is not replayable");
     }
-    const scoped = this.readResponse(receipt.accountId, receipt.responseId);
+    let scoped: StoredResponse | undefined;
+    try {
+      scoped = this.readResponse(receipt.accountId, receipt.responseId);
+    } catch (error: unknown) {
+      if (error instanceof ResponsesContinuationError) {
+        throw error;
+      }
+      unavailableCheckpoint();
+    }
+    if (scoped === undefined || scoped.formatVersion !== expectedFormatVersion) {
+      unavailableCheckpoint();
+    }
+    const scopedReasoningCarriers = new Set(scoped.items
+      .filter((item): item is StoredReasoningItem => item.kind === "reasoning")
+      .map((item) => reasoningCarrier(item.item))
+      .filter((carrier): carrier is string => carrier !== undefined));
     const originalCallsById = new Map<string, WireJsonObject>();
+    const originalReasoningByCarrier = new Map<string, WireJsonObject>();
     for (const item of originalItems) {
+      if (isDeclaredReplayItem(item) && !isCallItem(item) && !isReasoningItem(item)) {
+        unavailableCheckpoint();
+      }
+      if (isDeclaredOutputItem(item) && !isOutputItem(item)) {
+        unavailableCheckpoint();
+      }
+      if (isOutputItem(item) && strictCallIdFromItem(item) === undefined) {
+        unavailableCheckpoint();
+      }
       if (isCallItem(item)) {
-        const callId = callIdFromItem(item);
-        if (callId !== undefined && !originalCallsById.has(callId)) {
-          originalCallsById.set(callId, item);
+        const callId = strictCallIdFromItem(item);
+        if (callId === undefined || originalCallsById.has(callId)) {
+          unavailableCheckpoint();
+        }
+        originalCallsById.set(callId, item);
+      } else if (isReasoningItem(item)) {
+        const carrier = reasoningCarrier(item);
+        if (carrier !== undefined) {
+          if (!scopedReasoningCarriers.has(carrier) || originalReasoningByCarrier.has(carrier)) unavailableCheckpoint();
+          originalReasoningByCarrier.set(carrier, item);
         }
       }
     }
@@ -287,13 +419,21 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     const enrichedItems: WireJson[] = [];
 
     for (const item of originalItems) {
+      if (isReasoningItem(item) && reasoningCarrier(item) !== undefined) {
+        changed = true;
+        continue;
+      }
       if (isCallItem(item)) {
-        const callId = callIdFromItem(item);
+        const callId = strictCallIdFromItem(item);
+        if (scoped.formatVersion === 2 && callId !== undefined && scoped.byCallId.has(callId)) {
+          changed = true;
+          continue;
+        }
         if (callId !== undefined && emittedCallIds.has(callId)) {
           changed = true;
           continue;
         }
-        const cached = callId === undefined ? undefined : scoped?.byCallId.get(callId);
+        const cached = callId === undefined ? undefined : scoped.byCallId.get(callId);
         const filled = cached === undefined ? item : fillEmptyFields(item, cached.item);
         changed ||= filled !== item;
         enrichedItems.push(filled);
@@ -305,20 +445,43 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
 
       if (isOutputItem(item)) {
         sawOutput = true;
-        const outputCallId = callIdFromItem(item);
+        const outputCallId = strictCallIdFromItem(item);
         if (outputCallId === undefined) {
           throw new ResponsesContinuationError("checkpoint_unavailable", "tool output has no call id");
         }
-        if (!emittedCallIds.has(outputCallId)) {
-          const scopedCall = scoped?.byCallId.get(outputCallId);
-          if (scopedCall === undefined) {
+        if (scoped.formatVersion === 1) {
+          if (!emittedCallIds.has(outputCallId)) {
+            if (!scoped.byCallId.has(outputCallId)) {
+              throw new ResponsesContinuationError("checkpoint_unavailable", "tool checkpoint is unavailable");
+            }
+            if (!scopedGroupInserted) {
+              for (const call of scoped.calls) {
+                if (!emittedCallIds.has(call.callId)) {
+                  enrichedItems.push(restoreCall(call, originalCallsById.get(call.callId)));
+                  emittedCallIds.add(call.callId);
+                  changed = true;
+                }
+              }
+              scopedGroupInserted = true;
+            }
+          }
+        } else {
+          if (!scoped.byCallId.has(outputCallId)) {
             throw new ResponsesContinuationError("checkpoint_unavailable", "tool checkpoint is unavailable");
           }
           if (!scopedGroupInserted) {
-            for (const call of scoped?.calls ?? []) {
-              if (!emittedCallIds.has(call.callId)) {
-                enrichedItems.push(restoreCall(call, originalCallsById.get(call.callId)));
-                emittedCallIds.add(call.callId);
+            for (const replayItem of scoped.items) {
+              if (replayItem.kind === "reasoning") {
+                const carrier = reasoningCarrier(replayItem.item);
+                enrichedItems.push(
+                  carrier === undefined
+                    ? replayItem.item
+                    : originalReasoningByCarrier.get(carrier) ?? replayItem.item,
+                );
+                changed = true;
+              } else if (!emittedCallIds.has(replayItem.callId)) {
+                enrichedItems.push(restoreCall(replayItem, originalCallsById.get(replayItem.callId)));
+                emittedCallIds.add(replayItem.callId);
                 changed = true;
               }
             }
@@ -356,14 +519,24 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     ownership: Readonly<ResponsesContinuationOwnership>,
     checkpointState: "partial" | "complete",
     signal: AbortSignal,
+    finalize?: (() => void) | undefined,
   ): Promise<void> {
     throwIfAborted(signal);
     const responseId = requireNonEmpty(record.responseId.trim(), "responseId");
-    const calls = extractRecordableCalls(responseId, record.output);
     validateOwnership(ownership);
+    if (ownership.owner !== "converted") {
+      throw new ResponsesContinuationError("ownership_conflict", "native continuation cannot store local history");
+    }
     if (this.accountIsActive !== undefined && !this.accountIsActive(ownership.accountId)) {
       throw new ResponsesContinuationError("checkpoint_unavailable", "bound account is no longer active");
     }
+    const replay = extractRecordableReplay(
+      record.output,
+      replayFormatVersion(ownership),
+      this.maxReplayItems,
+      this.maxReplayItemBytes,
+      this.maxReplayBytes,
+    );
     const existing = this.readReceipt(ownership.accountId, responseId);
     if (
       existing !== undefined
@@ -371,8 +544,17 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       && existing.created_at_ms + this.ttlMs > this.nowMs()
       && sameOwnership(existing, ownership)
       && checkpointRank(checkpointState) <= checkpointRank(existing.checkpoint_state)
-      && (calls.length === 0 || callRowsEqual(this.readCallRows(ownership.accountId, responseId), calls))
+      && (replay.items.length === 0 || this.checkpointMatches(ownership.accountId, responseId, replay))
     ) {
+      if (
+        checkpointState === "complete"
+        && finalize !== undefined
+        && replay.items.length === 0
+        && this.readResponse(ownership.accountId, responseId) === undefined
+      ) {
+        throw new ResponsesContinuationError("checkpoint_unavailable", "response checkpoint is unavailable");
+      }
+      this.finalizeCheckpoint(checkpointState, finalize);
       return;
     }
     if (
@@ -392,14 +574,24 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         canSkipExpiry
         && checkpointState === "complete"
         && existing.checkpoint_state === "partial"
-        && (calls.length === 0 || callRowsEqual(this.readCallRows(ownership.accountId, responseId), calls))
+        && (replay.items.length === 0 || this.checkpointMatches(ownership.accountId, responseId, replay))
       ) {
-        // The durable calls and Admin-visible counts are unchanged; only promote the receipt atomically.
-        this.statement(
-          `UPDATE response_route_receipts
-           SET checkpoint_state = 'complete'
-           WHERE account_id = ? AND response_id = ? AND checkpoint_state = 'partial'`,
-        ).run(ownership.accountId, responseId);
+        if (
+          finalize !== undefined
+          && replay.items.length === 0
+          && this.readResponse(ownership.accountId, responseId) === undefined
+        ) {
+          throw new ResponsesContinuationError("checkpoint_unavailable", "response checkpoint is unavailable");
+        }
+        const promote = this.database.transaction(() => {
+          this.statement(
+            `UPDATE response_route_receipts
+             SET checkpoint_state = 'complete'
+             WHERE account_id = ? AND response_id = ? AND checkpoint_state = 'partial'`,
+          ).run(ownership.accountId, responseId);
+          finalize?.();
+        });
+        promote();
         throwIfAborted(signal);
         return;
       }
@@ -426,15 +618,15 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
              WHERE account_id = ? AND response_id = ?`,
           ).run(checkpointState, ownership.accountId, responseId);
         }
-        const checkpointChanged = !unavailableAfterCleanup && !ownershipChanged && calls.length > 0
+        const checkpointChanged = !unavailableAfterCleanup && !ownershipChanged && replay.items.length > 0
           ? canSkipExpiry && existing.checkpoint_state === "route_only"
             ? (revisionBumped = this.insertFirstCheckpoint(
               ownership.accountId,
               responseId,
-              calls,
+              replay,
               nowMs,
             ))
-            : this.upsertCheckpoint(ownership.accountId, responseId, calls)
+            : this.upsertCheckpoint(ownership.accountId, responseId, replay)
           : false;
         const checkpointEvicted = receiptsExpired || legacyExpired || receiptChanged || checkpointChanged
           ? this.evictCheckpointOverflow()
@@ -452,6 +644,9 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         )) {
           this.bumpRevision(nowMs);
         }
+        if (!unavailableAfterCleanup && !ownershipChanged && checkpointState === "complete") {
+          finalize?.();
+        }
       });
       transaction();
       if (ownershipChanged) {
@@ -463,14 +658,26 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       throwIfAborted(signal);
       return;
     }
+    if (checkpointState === "complete" && finalize !== undefined && replay.items.length === 0) {
+      throw new ResponsesContinuationError("checkpoint_unavailable", "response checkpoint is unavailable");
+    }
     this.mutateIfChanged(() => {
       const receiptChanged = this.upsertReceipt({ ...ownership, responseId, checkpointState });
-      const checkpointChanged = calls.length > 0
-        ? this.upsertCheckpoint(ownership.accountId, responseId, calls)
+      const checkpointChanged = replay.items.length > 0
+        ? this.upsertCheckpoint(ownership.accountId, responseId, replay)
         : false;
+      if (checkpointState === "complete") finalize?.();
       return receiptChanged || checkpointChanged;
     });
     throwIfAborted(signal);
+  }
+
+  private finalizeCheckpoint(
+    checkpointState: "partial" | "complete",
+    finalize: (() => void) | undefined,
+  ): void {
+    if (checkpointState !== "complete" || finalize === undefined) return;
+    this.database.transaction(finalize)();
   }
 
   setTtlDays(ttlDays: number): void {
@@ -524,11 +731,13 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       const changed = this.responseCount() > 0
         || this.receiptCount() > 0
         || this.legacyCount() > 0
-        || this.uncertaintyCount() > 0;
+        || this.uncertaintyCount() > 0
+        || this.carrierCount() > 0;
       if (!changed) {
         return;
       }
       this.database.prepare("DELETE FROM response_route_receipts").run();
+      this.database.prepare("DELETE FROM reasoning_carriers").run();
       this.database.prepare("DELETE FROM response_calls").run();
       this.database.prepare("DELETE FROM responses").run();
       this.database.prepare("DELETE FROM response_receipt_uncertainty").run();
@@ -546,13 +755,14 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     }
     const account = requireNonEmpty(accountId, "accountId");
     this.mutateIfChanged(() => {
+      const carriers = this.database.prepare("DELETE FROM reasoning_carriers WHERE account_id = ?").run(account);
       const result = this.database.prepare(
         "DELETE FROM response_route_receipts WHERE account_id = ?",
       ).run(account);
       if (result.changes > 0) {
         this.markUncertain(this.nowMs());
       }
-      return result.changes > 0;
+      return result.changes > 0 || carriers.changes > 0;
     });
   }
 
@@ -594,6 +804,9 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     );
     for (const row of expired) {
       deleteCheckpoint.run(row.account_id, row.response_id);
+      this.database.prepare(
+        "DELETE FROM reasoning_carriers WHERE account_id = ? AND response_id = ?",
+      ).run(row.account_id, row.response_id);
       markExpired.run(row.account_id, row.response_id);
     }
     return true;
@@ -602,20 +815,29 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   private insertFirstCheckpoint(
     accountId: string,
     responseId: string,
-    calls: readonly StoredCall[],
+    replay: Readonly<StoredReplay>,
     nowMs: number,
   ): true {
     const inserted = this.statement(
       `INSERT INTO response_scoped_checkpoints
-       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
-       SELECT ?, ?, next_checkpoint_seq, ?, ?
+       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms,
+        replay_format_version, replay_item_count, replay_bytes)
+       SELECT ?, ?, next_checkpoint_seq, ?, ?, ?, ?, ?
        FROM responses_continuation_state
        WHERE singleton_id = 1`,
-    ).run(accountId, responseId, nowMs, nowMs + this.ttlMs);
+    ).run(
+      accountId,
+      responseId,
+      nowMs,
+      nowMs + this.ttlMs,
+      replay.formatVersion,
+      replay.itemCount,
+      replay.bytes,
+    );
     if (inserted.changes !== 1) {
       throw new Error("Responses history state is unavailable");
     }
-    this.insertCalls(accountId, responseId, calls);
+    this.insertReplayItems(accountId, responseId, replay.items);
     this.statement(
       `UPDATE responses_continuation_state
        SET next_checkpoint_seq = next_checkpoint_seq + 1,
@@ -650,30 +872,23 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
          + (SELECT COUNT(*) FROM responses)
          - ? AS overflow`,
     ).get(this.maxResponses) as { overflow: number }).overflow;
-    if (overflow <= 0) {
-      return false;
-    }
-    const legacy = this.database.prepare(
-      "SELECT response_id FROM responses ORDER BY insertion_seq ASC LIMIT ?",
-    ).all(overflow) as Array<{ response_id: string }>;
-    if (legacy.length > 0) {
-      this.markUncertain(this.nowMs());
-      const removeCalls = this.database.prepare("DELETE FROM response_calls WHERE response_id = ?");
-      const removeResponse = this.database.prepare("DELETE FROM responses WHERE response_id = ?");
-      for (const row of legacy) {
-        removeCalls.run(row.response_id);
-        removeResponse.run(row.response_id);
+    let changed = false;
+    if (overflow > 0) {
+      const legacy = this.database.prepare(
+        "SELECT response_id FROM responses ORDER BY insertion_seq ASC LIMIT ?",
+      ).all(overflow) as Array<{ response_id: string }>;
+      if (legacy.length > 0) {
+        this.markUncertain(this.nowMs());
+        const removeCalls = this.database.prepare("DELETE FROM response_calls WHERE response_id = ?");
+        const removeResponse = this.database.prepare("DELETE FROM responses WHERE response_id = ?");
+        for (const row of legacy) {
+          removeCalls.run(row.response_id);
+          removeResponse.run(row.response_id);
+        }
+        overflow -= legacy.length;
+        changed = true;
       }
-      overflow -= legacy.length;
     }
-    if (overflow <= 0) {
-      return legacy.length > 0;
-    }
-    const rows = this.database.prepare(
-      `SELECT account_id, response_id
-       FROM response_scoped_checkpoints
-       ORDER BY insertion_seq ASC LIMIT ?`,
-    ).all(overflow) as Array<{ account_id: string; response_id: string }>;
     const remove = this.database.prepare(
       "DELETE FROM response_scoped_checkpoints WHERE account_id = ? AND response_id = ?",
     );
@@ -682,11 +897,38 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
        SET checkpoint_state = 'route_only'
        WHERE account_id = ? AND response_id = ? AND checkpoint_state <> 'expired'`,
     );
-    for (const row of rows) {
-      remove.run(row.account_id, row.response_id);
-      reset.run(row.account_id, row.response_id);
+    if (overflow > 0) {
+      const rows = this.database.prepare(
+        `SELECT account_id, response_id
+         FROM response_scoped_checkpoints
+         ORDER BY insertion_seq ASC LIMIT ?`,
+      ).all(overflow) as Array<{ account_id: string; response_id: string }>;
+      for (const row of rows) {
+        this.deleteResponseCarriers(row.account_id, row.response_id);
+        remove.run(row.account_id, row.response_id);
+        reset.run(row.account_id, row.response_id);
+      }
+      changed ||= rows.length > 0;
     }
-    return legacy.length > 0 || rows.length > 0;
+    let storedBytes = (this.database.prepare(
+      "SELECT COALESCE(SUM(replay_bytes), 0) AS value FROM response_scoped_checkpoints",
+    ).get() as { value: number }).value;
+    if (storedBytes > this.maxStoredReplayBytes) {
+      const overflowRows = this.database.prepare(
+        `SELECT account_id, response_id, replay_bytes
+         FROM response_scoped_checkpoints
+         ORDER BY insertion_seq ASC`,
+      ).all() as Array<{ account_id: string; response_id: string; replay_bytes: number }>;
+      for (const row of overflowRows) {
+        if (storedBytes <= this.maxStoredReplayBytes) break;
+        this.deleteResponseCarriers(row.account_id, row.response_id);
+        remove.run(row.account_id, row.response_id);
+        reset.run(row.account_id, row.response_id);
+        storedBytes -= row.replay_bytes;
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   private evictReceiptOverflow(): boolean {
@@ -769,10 +1011,9 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
   private upsertCheckpoint(
     accountId: string,
     responseId: string,
-    calls: readonly StoredCall[],
+    replay: Readonly<StoredReplay>,
   ): boolean {
-    const existingCalls = this.readCallRows(accountId, responseId);
-    if (existingCalls.length > 0 && callRowsEqual(existingCalls, calls)) {
+    if (this.checkpointMatches(accountId, responseId, replay)) {
       return false;
     }
     const existing = this.statement(
@@ -780,48 +1021,81 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
        WHERE account_id = ? AND response_id = ?`,
     ).get(accountId, responseId);
     if (existing === undefined) {
-      return this.insertCheckpoint(accountId, responseId, calls);
+      return replay.items.length > 0
+        ? this.insertCheckpoint(accountId, responseId, replay)
+        : false;
     } else {
       this.statement(
-        "DELETE FROM response_scoped_calls WHERE account_id = ? AND response_id = ?",
+        "DELETE FROM response_scoped_replay_items WHERE account_id = ? AND response_id = ?",
       ).run(accountId, responseId);
     }
-    this.insertCalls(accountId, responseId, calls);
+    this.statement(
+      `UPDATE response_scoped_checkpoints
+       SET replay_format_version = ?, replay_item_count = ?, replay_bytes = ?
+       WHERE account_id = ? AND response_id = ?`,
+    ).run(replay.formatVersion, replay.itemCount, replay.bytes, accountId, responseId);
+    this.insertReplayItems(accountId, responseId, replay.items);
     return true;
   }
 
   private insertCheckpoint(
     accountId: string,
     responseId: string,
-    calls: readonly StoredCall[],
+    replay: Readonly<StoredReplay>,
   ): boolean {
     const state = this.readState();
     const nowMs = this.nowMs();
     this.statement(
       `INSERT INTO response_scoped_checkpoints
-       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).run(accountId, responseId, state.next_checkpoint_seq, nowMs, nowMs + this.ttlMs);
+       (account_id, response_id, insertion_seq, created_at_ms, expires_at_ms,
+        replay_format_version, replay_item_count, replay_bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      accountId,
+      responseId,
+      state.next_checkpoint_seq,
+      nowMs,
+      nowMs + this.ttlMs,
+      replay.formatVersion,
+      replay.itemCount,
+      replay.bytes,
+    );
     this.statement(
       "UPDATE responses_continuation_state SET next_checkpoint_seq = ? WHERE singleton_id = 1",
     ).run(state.next_checkpoint_seq + 1);
-    this.insertCalls(accountId, responseId, calls);
+    this.insertReplayItems(accountId, responseId, replay.items);
     return true;
   }
 
-  private insertCalls(
+  private insertReplayItems(
     accountId: string,
     responseId: string,
-    calls: readonly StoredCall[],
+    items: readonly StoredReplayItem[],
   ): void {
-    const insertCall = this.statement(
-      `INSERT INTO response_scoped_calls
-       (account_id, response_id, ordinal, call_id, kind, item_json)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+    const insertItem = this.statement(
+      `INSERT INTO response_scoped_replay_items
+       (account_id, response_id, group_ordinal, item_ordinal, item_kind, call_id,
+        item_json, item_bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    for (const call of calls) {
-      insertCall.run(accountId, responseId, call.ordinal, call.callId, call.kind, call.itemJson);
+    for (const item of items) {
+      insertItem.run(
+        accountId,
+        responseId,
+        item.groupOrdinal,
+        item.itemOrdinal,
+        item.kind,
+        item.callId,
+        item.itemJson,
+        item.itemBytes,
+      );
     }
+  }
+
+  private deleteResponseCarriers(accountId: string, responseId: string): void {
+    this.database.prepare(
+      "DELETE FROM reasoning_carriers WHERE account_id = ? AND response_id = ?",
+    ).run(accountId, responseId);
   }
 
   private readReceipt(accountId: string, responseId: string): ReceiptRow | undefined {
@@ -835,49 +1109,124 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
 
   private readResponse(accountId: string, responseId: string): StoredResponse | undefined {
     const row = this.database.prepare(
-      `SELECT response_id FROM response_scoped_checkpoints
+      `SELECT response_id, replay_format_version, replay_item_count, replay_bytes
+       FROM response_scoped_checkpoints
        WHERE account_id = ? AND response_id = ?`,
-    ).get(accountId, responseId) as { response_id: string } | undefined;
+    ).get(accountId, responseId) as CheckpointRow | undefined;
     if (row === undefined) {
       return undefined;
     }
-    const calls = this.readCalls(accountId, responseId);
-    return responseFromCalls(responseId, calls);
+    const replay = this.readReplay(accountId, responseId, row);
+    return responseFromReplay(replay);
   }
 
-  private readCalls(accountId: string, responseId: string): readonly StoredCall[] {
-    return this.readCallRows(accountId, responseId).map((row) => {
-      const itemBytes = JSON_ENCODER.encode(row.item_json);
-      const item = parseWireJson(itemBytes, {
-        maxBytes: Math.max(itemBytes.byteLength, 1),
-        maxDepth: 64,
-      });
-      if (!isWireJsonObject(item)) {
-        throw new Error("Responses history stored call item must be an object");
+  private checkpointMatches(
+    accountId: string,
+    responseId: string,
+    replay: Readonly<StoredReplay>,
+  ): boolean {
+    const row = this.statement(
+      `SELECT response_id, replay_format_version, replay_item_count, replay_bytes
+       FROM response_scoped_checkpoints
+       WHERE account_id = ? AND response_id = ?`,
+    ).get(accountId, responseId) as CheckpointRow | undefined;
+    if (row === undefined) {
+      return false;
+    }
+    const stored = this.readReplay(accountId, responseId, row);
+    if (stored.formatVersion !== replay.formatVersion) {
+      unavailableCheckpoint();
+    }
+    return stored.itemCount === replay.itemCount
+      && stored.bytes === replay.bytes
+      && replayItemsEqual(stored.items, replay.items);
+  }
+
+  private readReplay(
+    accountId: string,
+    responseId: string,
+    checkpoint: Readonly<CheckpointRow>,
+  ): StoredReplay {
+    const formatVersion = storedReplayFormatVersion(checkpoint.replay_format_version);
+    if (
+      !isBoundedInteger(checkpoint.replay_item_count, 1, this.maxReplayItems)
+      || !isBoundedInteger(checkpoint.replay_bytes, 1, this.maxReplayBytes)
+    ) {
+      unavailableCheckpoint();
+    }
+    const summary = this.statement(
+      `SELECT COUNT(*) AS item_count,
+              COALESCE(SUM(item_bytes), 0) AS replay_bytes,
+              COALESCE(MAX(item_bytes), 0) AS max_item_bytes
+       FROM response_scoped_replay_items
+       WHERE account_id = ? AND response_id = ?`,
+    ).get(accountId, responseId) as ReplaySummaryRow;
+    if (
+      summary.item_count !== checkpoint.replay_item_count
+      || summary.replay_bytes !== checkpoint.replay_bytes
+      || !isBoundedInteger(summary.max_item_bytes, 1, this.maxReplayItemBytes)
+    ) {
+      unavailableCheckpoint();
+    }
+    const rows = this.readReplayRows(accountId, responseId);
+    if (rows.length !== checkpoint.replay_item_count) {
+      unavailableCheckpoint();
+    }
+    let bytes = 0;
+    const items = rows.map((row) => {
+      if (
+        !isBoundedInteger(row.group_ordinal, 0, this.maxReplayItems - 1)
+        || !isBoundedInteger(row.item_ordinal, 0, this.maxReplayItems - 1)
+        || !isBoundedInteger(row.item_bytes, 1, this.maxReplayItemBytes)
+      ) {
+        unavailableCheckpoint();
       }
-      return {
-        responseId: row.response_id,
-        ordinal: row.ordinal,
-        callId: row.call_id,
-        kind: row.kind,
-        itemJson: row.item_json,
-        item,
-      };
+      const encoded = JSON_ENCODER.encode(row.item_json);
+      if (encoded.byteLength !== row.item_bytes) {
+        unavailableCheckpoint();
+      }
+      bytes += row.item_bytes;
+      if (bytes > this.maxReplayBytes) {
+        unavailableCheckpoint();
+      }
+      let item: WireJson;
+      try {
+        item = parseWireJson(encoded, { maxBytes: this.maxReplayItemBytes, maxDepth: 64 });
+      } catch {
+        unavailableCheckpoint();
+      }
+      if (!isWireJsonObject(item)) {
+        unavailableCheckpoint();
+      }
+      return replayItemFromRow(row, item);
     });
+    if (bytes !== checkpoint.replay_bytes) {
+      unavailableCheckpoint();
+    }
+    validateStoredReplay(formatVersion, items);
+    return { formatVersion, items, itemCount: items.length, bytes };
   }
 
-  private readCallRows(accountId: string, responseId: string): readonly CallRow[] {
+  private readReplayRows(accountId: string, responseId: string): readonly ReplayItemRow[] {
     return this.statement(
-      `SELECT response_id, ordinal, call_id, kind, item_json
-       FROM response_scoped_calls
+      `SELECT response_id, group_ordinal, item_ordinal, item_kind, call_id,
+              item_json, item_bytes
+       FROM response_scoped_replay_items
        WHERE account_id = ? AND response_id = ?
-       ORDER BY ordinal ASC`,
-    ).all(accountId, responseId) as CallRow[];
+       ORDER BY group_ordinal ASC, item_ordinal ASC
+       LIMIT ?`,
+    ).all(accountId, responseId, this.maxReplayItems + 1) as ReplayItemRow[];
   }
 
   private responseCount(): number {
     return (this.statement(
       "SELECT COUNT(*) AS count FROM response_scoped_checkpoints",
+    ).get() as { count: number }).count;
+  }
+
+  private carrierCount(): number {
+    return (this.database.prepare(
+      "SELECT COUNT(*) AS count FROM reasoning_carriers",
     ).get() as { count: number }).count;
   }
 
@@ -958,27 +1307,118 @@ function receiptCleanupKey(accountId: string, responseId: string): string {
   return `${accountId}\u0000${responseId}`;
 }
 
-function extractRecordableCalls(responseId: string, output: readonly WireJson[] | WireJson): readonly StoredCall[] {
-  const calls: StoredCall[] = [];
-  for (const item of outputItems(output)) {
-    if (!isCallItem(item)) {
+function extractRecordableReplay(
+  output: readonly WireJson[] | WireJson,
+  formatVersion: ReplayFormatVersion,
+  maxItems: number,
+  maxItemBytes: number,
+  maxBytes: number,
+): StoredReplay {
+  const items: StoredReplayItem[] = [];
+  const callIds = new Set<string>();
+  const reasoningCarriers = new Set<string>();
+  let group: Array<{
+    readonly kind: ReplayItemKind;
+    readonly callId: string | null;
+    readonly item: WireJsonObject;
+  }> = [];
+  let groupOrdinal = 0;
+  let bytes = 0;
+
+  const finishGroup = (): void => {
+    if (!group.some((item) => item.kind !== "reasoning")) {
+      group = [];
+      return;
+    }
+    for (let itemOrdinal = 0; itemOrdinal < group.length; itemOrdinal += 1) {
+      const groupItem = group[itemOrdinal];
+      if (groupItem === undefined) {
+        unavailableCheckpoint();
+      }
+      const encoded = encodeReplayItem(groupItem.item, maxItemBytes);
+      if (items.length >= maxItems || bytes + encoded.itemBytes > maxBytes) {
+        unavailableCheckpoint();
+      }
+      const base = { groupOrdinal, itemOrdinal, item: groupItem.item, ...encoded };
+      items.push(groupItem.kind === "reasoning"
+        ? { ...base, kind: "reasoning", callId: null }
+        : { ...base, kind: groupItem.kind, callId: groupItem.callId as string });
+      bytes += encoded.itemBytes;
+    }
+    group = [];
+    groupOrdinal += 1;
+  };
+
+  for (const outputItem of outputItems(output)) {
+    if (isReasoningItem(outputItem)) {
+      if (memberValues(outputItem, "call_id").length > 0) {
+        unavailableCheckpoint();
+      }
+      if (formatVersion === 1) {
+        continue;
+      }
+      const carrier = reasoningCarrier(outputItem);
+      if (carrier !== undefined) {
+        if (reasoningCarriers.has(carrier)) unavailableCheckpoint();
+        reasoningCarriers.add(carrier);
+      }
+      if (group.some((item) => item.kind !== "reasoning")) {
+        finishGroup();
+      }
+      group.push({ kind: "reasoning", callId: null, item: outputItem });
       continue;
     }
-    const callId = callIdFromItem(item);
-    if (callId === undefined) {
+    if (isDeclaredReplayItem(outputItem) && !isCallItem(outputItem)) {
+      unavailableCheckpoint();
+    }
+    if (!isCallItem(outputItem)) {
       continue;
     }
-    const itemObject = minimalCallItem(item);
-    calls.push({
-      responseId,
-      ordinal: calls.length,
-      callId,
-      kind: firstMemberValue(item, "type") as ResponsesCallKind,
-      item: itemObject,
-      itemJson: JSON_DECODER.decode(serializeWireJson(itemObject)),
-    });
+    const callId = strictCallIdFromItem(outputItem);
+    if (callId === undefined || callIds.has(callId)) {
+      unavailableCheckpoint();
+    }
+    callIds.add(callId);
+    const item = minimalCallItem(outputItem);
+    const encoded = encodeReplayItem(item, maxItemBytes);
+    const kind = firstMemberValue(outputItem, "type") as ResponsesCallKind;
+    if (formatVersion === 1) {
+      if (items.length >= maxItems || bytes + encoded.itemBytes > maxBytes) {
+        unavailableCheckpoint();
+      }
+      items.push({
+        groupOrdinal: 0,
+        itemOrdinal: items.length,
+        callId,
+        kind,
+        item,
+        ...encoded,
+      });
+      bytes += encoded.itemBytes;
+    } else {
+      group.push({ kind, callId, item });
+    }
   }
-  return calls;
+  if (formatVersion === 2) {
+    finishGroup();
+  }
+  return { formatVersion, items, itemCount: items.length, bytes };
+}
+
+function encodeReplayItem(
+  item: WireJsonObject,
+  maxItemBytes: number,
+): { readonly itemJson: string; readonly itemBytes: number } {
+  let encoded: Uint8Array;
+  try {
+    encoded = serializeWireJson(item);
+  } catch {
+    unavailableCheckpoint();
+  }
+  if (encoded.byteLength === 0 || encoded.byteLength > maxItemBytes) {
+    unavailableCheckpoint();
+  }
+  return { itemJson: JSON_DECODER.decode(encoded), itemBytes: encoded.byteLength };
 }
 
 function outputItems(output: readonly WireJson[] | WireJson): readonly WireJson[] {
@@ -1009,21 +1449,64 @@ function isCallItem(item: WireJson): item is WireJsonObject {
   if (!isWireJsonObject(item)) {
     return false;
   }
-  const type = firstMemberValue(item, "type");
+  const types = memberValues(item, "type");
+  const type = types.length === 1 ? types[0] : undefined;
   return typeof type === "string" && (RESPONSE_CALL_KINDS as readonly string[]).includes(type);
+}
+
+function isReasoningItem(item: WireJson): item is WireJsonObject {
+  if (!isWireJsonObject(item)) {
+    return false;
+  }
+  const types = memberValues(item, "type");
+  return types.length === 1 && types[0] === "reasoning";
+}
+
+function reasoningCarrier(item: WireJsonObject): string | undefined {
+  const values = memberValues(item, "encrypted_content");
+  return values.length === 1 && typeof values[0] === "string" && values[0].length > 0
+    ? values[0]
+    : undefined;
+}
+
+function isDeclaredReplayItem(item: WireJson): boolean {
+  if (!isWireJsonObject(item)) {
+    return false;
+  }
+  const types = memberValues(item, "type");
+  return types.some((type) => type === "reasoning"
+    || (typeof type === "string" && (RESPONSE_CALL_KINDS as readonly string[]).includes(type)));
 }
 
 function isOutputItem(item: WireJson): item is WireJsonObject {
   if (!isWireJsonObject(item)) {
     return false;
   }
-  const type = firstMemberValue(item, "type");
+  const types = memberValues(item, "type");
+  const type = types.length === 1 ? types[0] : undefined;
   return typeof type === "string" && (RESPONSE_CALL_OUTPUT_KINDS as readonly string[]).includes(type);
 }
 
-function callIdFromItem(item: WireJsonObject): string | undefined {
-  return trimmedString(firstMemberValue(item, "call_id"))
-    ?? trimmedString(firstMemberValue(item, "id"));
+function isDeclaredOutputItem(item: WireJson): boolean {
+  if (!isWireJsonObject(item)) {
+    return false;
+  }
+  return memberValues(item, "type").some((type) => typeof type === "string"
+    && (RESPONSE_CALL_OUTPUT_KINDS as readonly string[]).includes(type));
+}
+
+function strictCallIdFromItem(item: WireJsonObject): string | undefined {
+  const callIds = memberValues(item, "call_id");
+  const ids = memberValues(item, "id");
+  if (callIds.length > 1 || ids.length > 1) {
+    return undefined;
+  }
+  const callId = callIds.length === 1 ? trimmedString(callIds[0]) : undefined;
+  const id = ids.length === 1 ? trimmedString(ids[0]) : undefined;
+  if ((callIds.length === 1 && callId === undefined) || (ids.length === 1 && id === undefined)) {
+    return undefined;
+  }
+  return callId ?? id;
 }
 
 function firstMemberValue(item: WireJsonObject, key: string): WireJson | undefined {
@@ -1080,25 +1563,141 @@ function restoreCall(cached: StoredCall, original: WireJsonObject | undefined): 
   return original === undefined ? cached.item : fillEmptyFields(original, cached.item);
 }
 
-function responseFromCalls(responseId: string, calls: readonly StoredCall[]): StoredResponse {
+function responseFromReplay(replay: Readonly<StoredReplay>): StoredResponse {
   const byCallId = new Map<string, StoredCall>();
-  for (const call of calls) {
-    if (!byCallId.has(call.callId)) {
-      byCallId.set(call.callId, call);
+  const calls: StoredCall[] = [];
+  for (const item of replay.items) {
+    if (item.kind === "reasoning") {
+      continue;
     }
+    if (byCallId.has(item.callId)) {
+      unavailableCheckpoint();
+    }
+    calls.push(item);
+    byCallId.set(item.callId, item);
   }
-  return { responseId, calls, byCallId };
+  return { formatVersion: replay.formatVersion, items: replay.items, calls, byCallId };
 }
 
-function callRowsEqual(left: readonly CallRow[], right: readonly StoredCall[]): boolean {
-  return left.length === right.length && left.every((call, index) => {
+function replayItemsEqual(left: readonly StoredReplayItem[], right: readonly StoredReplayItem[]): boolean {
+  return left.length === right.length && left.every((item, index) => {
     const other = right[index];
     return other !== undefined
-      && call.ordinal === other.ordinal
-      && call.call_id === other.callId
-      && call.kind === other.kind
-      && call.item_json === other.itemJson;
+      && item.groupOrdinal === other.groupOrdinal
+      && item.itemOrdinal === other.itemOrdinal
+      && item.kind === other.kind
+      && item.callId === other.callId
+      && item.itemJson === other.itemJson
+      && item.itemBytes === other.itemBytes;
   });
+}
+
+function replayItemFromRow(row: Readonly<ReplayItemRow>, item: WireJsonObject): StoredReplayItem {
+  const types = memberValues(item, "type");
+  if (types.length !== 1 || types[0] !== row.item_kind || !isReplayItemKind(row.item_kind)) {
+    unavailableCheckpoint();
+  }
+  if (row.item_kind === "reasoning") {
+    if (row.call_id !== null || memberValues(item, "call_id").length > 0) {
+      unavailableCheckpoint();
+    }
+    return {
+      groupOrdinal: row.group_ordinal,
+      itemOrdinal: row.item_ordinal,
+      kind: "reasoning",
+      callId: null,
+      item,
+      itemJson: row.item_json,
+      itemBytes: row.item_bytes,
+    };
+  }
+  const callId = strictCallIdFromItem(item);
+  if (row.call_id === null || callId !== row.call_id) {
+    unavailableCheckpoint();
+  }
+  return {
+    groupOrdinal: row.group_ordinal,
+    itemOrdinal: row.item_ordinal,
+    kind: row.item_kind,
+    callId: row.call_id,
+    item,
+    itemJson: row.item_json,
+    itemBytes: row.item_bytes,
+  };
+}
+
+function isReplayItemKind(value: string): value is ReplayItemKind {
+  return value === "reasoning" || (RESPONSE_CALL_KINDS as readonly string[]).includes(value);
+}
+
+function validateStoredReplay(
+  formatVersion: ReplayFormatVersion,
+  items: readonly StoredReplayItem[],
+): void {
+  const callIds = new Set<string>();
+  const reasoningCarriers = new Set<string>();
+  let expectedGroup = 0;
+  let expectedItem = 0;
+  let groupHasCall = false;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item === undefined) {
+      unavailableCheckpoint();
+    }
+    if (formatVersion === 1) {
+      if (
+        item.kind === "reasoning"
+        || item.groupOrdinal !== 0
+        || item.itemOrdinal !== expectedItem
+      ) {
+        unavailableCheckpoint();
+      }
+      expectedItem += 1;
+    } else {
+      if (item.groupOrdinal !== expectedGroup || item.itemOrdinal !== expectedItem) {
+        unavailableCheckpoint();
+      }
+      if (item.kind === "reasoning") {
+        const carrier = reasoningCarrier(item.item);
+        if (carrier !== undefined) {
+          if (reasoningCarriers.has(carrier)) unavailableCheckpoint();
+          reasoningCarriers.add(carrier);
+        }
+        if (groupHasCall) {
+          unavailableCheckpoint();
+        }
+      } else {
+        groupHasCall = true;
+      }
+      expectedItem += 1;
+      const next = items[index + 1];
+      if (next === undefined || next.groupOrdinal !== expectedGroup) {
+        if (!groupHasCall) {
+          unavailableCheckpoint();
+        }
+        expectedGroup += 1;
+        expectedItem = 0;
+        groupHasCall = false;
+      }
+    }
+    if (item.kind !== "reasoning") {
+      if (callIds.has(item.callId)) {
+        unavailableCheckpoint();
+      }
+      callIds.add(item.callId);
+    }
+  }
+}
+
+function storedReplayFormatVersion(value: number): ReplayFormatVersion {
+  if (value !== 1 && value !== 2) {
+    unavailableCheckpoint();
+  }
+  return value;
+}
+
+function isBoundedInteger(value: number, minimum: number, maximum: number): boolean {
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }
 
 function membersEqual(
@@ -1121,12 +1720,54 @@ function validateOwnership(ownership: Readonly<ResponsesContinuationOwnership>):
     }
     return;
   }
-  if (
-    (ownership.upstreamProtocol !== "chat" && ownership.upstreamProtocol !== "messages")
-    || ownership.conversionVersion === null
-    || ownership.conversionVersion.length === 0
-  ) {
+  if (ownership.upstreamProtocol !== "chat" && ownership.upstreamProtocol !== "messages") {
     throw new ResponsesContinuationError("ownership_conflict", "invalid converted continuation ownership");
+  }
+  replayFormatVersion(ownership);
+}
+
+function replayFormatVersion(
+  ownership: Pick<ResponsesContinuationOwnership, "owner" | "upstreamProtocol" | "conversionVersion">,
+): ReplayFormatVersion {
+  if (ownership.owner !== "converted") {
+    throw new ResponsesContinuationError("ownership_conflict", "invalid converted continuation ownership");
+  }
+  if (ownership.upstreamProtocol === "chat") {
+    return knownReplayFormatVersion(
+      ownership.conversionVersion,
+      RESPONSES_CHAT_CONVERSION_VERSIONS,
+    );
+  } else if (ownership.upstreamProtocol === "messages") {
+    return knownReplayFormatVersion(
+      ownership.conversionVersion,
+      RESPONSES_MESSAGES_CONVERSION_VERSIONS,
+    );
+  }
+  throw new ResponsesContinuationError("ownership_conflict", "unknown converted continuation version");
+}
+
+function knownReplayFormatVersion(
+  version: string | null,
+  versions: readonly [string, string],
+): ReplayFormatVersion {
+  if (version === versions[0]) {
+    return 1;
+  }
+  if (version === versions[1]) {
+    return 2;
+  }
+  throw new ResponsesContinuationError("ownership_conflict", "unknown converted continuation version");
+}
+
+function validateStoredOwnership(row: Readonly<ReceiptRow>): void {
+  if (row.owner === "native") {
+    if (row.upstream_protocol !== "responses" || row.conversion_version !== null) {
+      unavailableCheckpoint();
+    }
+    return;
+  }
+  if (!isKnownResponsesConversionVersion(row.upstream_protocol, row.conversion_version)) {
+    unavailableCheckpoint();
   }
 }
 
@@ -1167,6 +1808,10 @@ function requireNonEmpty(value: string, field: string): string {
     throw new Error(`Responses history ${field} must be non-empty`);
   }
   return value;
+}
+
+function unavailableCheckpoint(): never {
+  throw new ResponsesContinuationError("checkpoint_unavailable", "response checkpoint is unavailable");
 }
 
 function throwIfAborted(signal: AbortSignal): void {

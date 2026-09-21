@@ -8,7 +8,7 @@ import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
 import { MIGRATION_MANIFEST } from "../../src/persistence/generated_migrations.js";
 import { ProtectedFileSystem } from "../../src/daemon/protected_file.js";
 
-const EXPECTED_VERSIONS = [1, 10, 20, 21, 30, 41];
+const EXPECTED_VERSIONS = [1, 10, 20, 21, 30, 41, 42];
 
 async function createStartup(): Promise<StartupConfig> {
   return {
@@ -61,9 +61,9 @@ describe("production migration manifest", () => {
       expect(application.database?.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
       ).all()).toEqual([
-        "account_model_preferences", "accounts", "gateway_preferences", "operational_events",
+        "account_model_preferences", "accounts", "gateway_preferences", "operational_events", "reasoning_carriers",
         "response_calls", "response_receipt_uncertainty", "response_route_receipts", "response_scoped_calls",
-        "response_scoped_checkpoints", "responses", "responses_continuation_state", "responses_history_state",
+        "response_scoped_checkpoints", "response_scoped_replay_items", "responses", "responses_continuation_state", "responses_history_state",
         "runtime_config", "schema_migrations", "telemetry_state", "usage_buckets",
       ].map((name) => ({ name })));
     } finally {

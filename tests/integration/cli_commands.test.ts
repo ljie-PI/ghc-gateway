@@ -27,8 +27,10 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as continuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { bootstrapGateway, createPublicRouteRegistrations } from "../../src/main.js";
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
+import { SqliteReasoningCarrierStore, type ReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 import { windowsCmdCommandLine } from "../../scripts/tooling/windows_cmd.js";
 
 const encoder = new TextEncoder();
@@ -789,6 +791,7 @@ describe("CLI commands", () => {
         registry: harness.registry,
         copilot: harness.backend,
         history: harness.history,
+        reasoningCarriers: harness.reasoningCarriers,
       });
       expect(routes.map((route) => `${route.method} ${route.path}`)).toEqual([
         "GET /v1/models",
@@ -919,6 +922,7 @@ async function dispatcherHarness(options: {
   readonly registry: ModelCapabilityRegistry;
   readonly backend: Awaited<ReturnType<typeof startHttpCopilot>>["backend"];
   readonly history: SqliteResponsesHistory;
+  readonly reasoningCarriers: ReasoningCarrierStore;
   readonly runtimeConfig: RuntimeConfigStore;
   capiModels: Array<{ readonly id: string; readonly name: string; readonly vendor: string; readonly model_picker_enabled: boolean }>;
   readonly close: () => Promise<void>;
@@ -935,6 +939,7 @@ async function dispatcherHarness(options: {
         embedMigration(telemetryMigration),
         embedMigration(historyMigration),
         embedMigration(continuationMigration),
+        embedMigration(reasoningCarriersMigration),
       ],
       nowMs: now,
     });
@@ -955,6 +960,7 @@ async function dispatcherHarness(options: {
     const runtimeConfig = new RuntimeConfigStore(database, now);
     runtimeConfig.seedIfEmpty({});
     const history = new SqliteResponsesHistory(database, { nowMs: now });
+    const reasoningCarriers = new SqliteReasoningCarrierStore(database, { nowMs: now });
     const http = await startHttpCopilot({ credentials, accountCoordinator, nowMs: now, expectations: [{ method: "POST", path: "/chat/completions", body: jsonStream(false), reply: { status: 200, headers: {}, body: encoder.encode("{\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}") } },
       { method: "POST", path: "/responses", body: jsonStream(false), reply: { status: 200, headers: {}, body: encoder.encode("{}") } }] });
     own(() => http.close());
@@ -971,6 +977,7 @@ async function dispatcherHarness(options: {
       registry,
       backend: http.backend,
       history,
+      reasoningCarriers,
       runtimeConfig,
       advanceTime: (milliseconds) => { clock.value += milliseconds; },
       get capiModels() {

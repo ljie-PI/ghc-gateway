@@ -15,6 +15,7 @@ import { migration as telemetryMigration } from "../../src/persistence/migration
 import { migration as responsesUnknownProtocolMigration } from "../../src/persistence/migrations/021_responses_unknown_protocol.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import {
   applyMigrations,
   embedMigration,
@@ -183,6 +184,7 @@ describe("migrations", () => {
       embedMigration(telemetryMigration),
       embedMigration(responsesHistoryMigration),
       embedMigration(responsesContinuationMigration),
+      embedMigration(reasoningCarriersMigration),
     ];
     applyMigrations(database, base, nowMs);
     database.prepare(
@@ -208,6 +210,52 @@ describe("migrations", () => {
     ]);
     database.close();
   });
+
+  it("backfills scoped calls into byte-counted replay items", () => {
+    const database = new Database(":memory:");
+    const base = [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
+    ];
+    applyMigrations(database, base, nowMs);
+    database.prepare(
+      `INSERT INTO response_route_receipts VALUES (
+        'github.com/1', 'resp_1', 'gpt', 'https://api.githubcopilot.com',
+        'converted', 'chat', 'responses-chat-v1', 'complete', 1, 1, 2
+      )`,
+    ).run();
+    database.prepare(
+      "INSERT INTO response_scoped_checkpoints VALUES ('github.com/1', 'resp_1', 1, 1, 2)",
+    ).run();
+    const itemJson = "{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\",\"arguments\":\"{}\"}";
+    database.prepare(
+      "INSERT INTO response_scoped_calls VALUES ('github.com/1', 'resp_1', 0, 'call_1', 'function_call', ?)",
+    ).run(itemJson);
+
+    applyMigrations(database, [...base, embedMigration(reasoningCarriersMigration)], nowMs);
+    expect(database.prepare(
+      `SELECT group_ordinal, item_ordinal, item_kind, call_id, item_json, item_bytes
+       FROM response_scoped_replay_items`,
+    ).all()).toEqual([{
+      group_ordinal: 0,
+      item_ordinal: 0,
+      item_kind: "function_call",
+      call_id: "call_1",
+      item_json: itemJson,
+      item_bytes: new TextEncoder().encode(itemJson).byteLength,
+    }]);
+    expect(database.prepare(
+      "SELECT replay_format_version, replay_item_count, replay_bytes FROM response_scoped_checkpoints",
+    ).get()).toEqual({
+      replay_format_version: 1,
+      replay_item_count: 1,
+      replay_bytes: new TextEncoder().encode(itemJson).byteLength,
+    });
+    expect(database.pragma("foreign_key_check")).toEqual([]);
+    expect(database.pragma("integrity_check", { simple: true })).toBe("ok");
+    database.close();
+  });
 });
 
 describe("generate_migrations", () => {
@@ -220,6 +268,7 @@ describe("generate_migrations", () => {
       embedMigration(responsesUnknownProtocolMigration),
       embedMigration(responsesHistoryMigration),
       embedMigration(responsesContinuationMigration),
+      embedMigration(reasoningCarriersMigration),
     ]);
     const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-manifest-"));
     const manifestPath = path.join(dir, "generated_migrations.ts");

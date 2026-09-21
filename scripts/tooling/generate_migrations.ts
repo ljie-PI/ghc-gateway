@@ -11,6 +11,7 @@ export const RESERVED_MIGRATION_FILES: ReadonlyMap<number, string> = new Map([
   [21, "021_responses_unknown_protocol.ts"],
   [30, "030_responses_history.ts"],
   [41, "041_responses_continuation_ownership.ts"],
+  [42, "042_responses_reasoning_carriers.ts"],
 ]);
 
 export const DEFAULT_MIGRATIONS_DIR = path.resolve("src/persistence/migrations");

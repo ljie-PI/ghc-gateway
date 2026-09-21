@@ -10,7 +10,10 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
 import {
+  RESPONSES_CHAT_CONVERSION_VERSION,
   ResponsesHistoryAdminError,
   SqliteResponsesHistory,
   type ResponsesContinuationOwnership,
@@ -30,7 +33,7 @@ function ownership(accountId: string, modelId = "gpt"): ResponsesContinuationOwn
     upstreamOrigin: "https://api.githubcopilot.com",
     owner: "converted",
     upstreamProtocol: "chat",
-    conversionVersion: "responses-chat-v1",
+    conversionVersion: RESPONSES_CHAT_CONVERSION_VERSION,
   };
 }
 
@@ -85,6 +88,7 @@ function openHistory(
       embedMigration(accountsMigration),
       embedMigration(responsesHistoryMigration),
       embedMigration(responsesContinuationMigration),
+      embedMigration(reasoningCarriersMigration),
     ],
     nowMs,
   });
@@ -156,6 +160,52 @@ describe("Responses history SQLite", () => {
         await expect(reopened.store.resolve("resp_restart", "github.com/2", SIGNAL))
           .resolves.toEqual({ kind: "owned_by_another_account" });
         expect(reopened.store.inspect()).toMatchObject({ count: 1, receiptCount: 1 });
+      } finally {
+        closeDatabase(reopened.database);
+      }
+    } finally {
+      await rm(path.dirname(file), { recursive: true, force: true });
+    }
+  });
+
+  it("replays v2 reasoning and calls in order after restart", async () => {
+    const file = await dbPath("ordered-restart");
+    const now = () => 1_700_000_000_000;
+    const first = openHistory(file, now);
+    try {
+      await first.store.recordCheckpoint({
+        responseId: "resp_ordered_restart",
+        output: outputFromJson(JSON.stringify([
+          { type: "reasoning", id: "rs_restart", encrypted_content: "opaque", summary: [] },
+          { type: "function_call", call_id: "call_restart", name: "lookup", arguments: "{}" },
+        ])),
+      }, ownership("github.com/1"), "complete", SIGNAL);
+      expect(first.database.prepare(
+        "SELECT replay_format_version, replay_item_count FROM response_scoped_checkpoints WHERE response_id = ?",
+      ).get("resp_ordered_restart")).toEqual({ replay_format_version: 2, replay_item_count: 2 });
+      closeDatabase(first.database);
+
+      const reopened = openHistory(file, now);
+      try {
+        const resolution = await reopened.store.resolve("resp_ordered_restart", "github.com/1", SIGNAL);
+        if (resolution.kind !== "owned") throw new Error("expected owned response");
+        const request = parseWireJson(new TextEncoder().encode(JSON.stringify({
+          model: "gpt",
+          input: { type: "function_call_output", call_id: "call_restart", output: "ok" },
+        })), { maxBytes: 8192, maxDepth: 32 });
+        if (typeof request !== "object" || request === null || !("kind" in request) || request.kind !== "object") {
+          throw new Error("expected request object");
+        }
+        const enriched = await reopened.store.enrich(
+          decodeResponsesRequest(request),
+          resolution.receipt,
+          SIGNAL,
+        );
+        expect(enriched.input).toEqual(parseWireJson(new TextEncoder().encode(JSON.stringify([
+          { type: "reasoning", id: "rs_restart", encrypted_content: "opaque", summary: [] },
+          { type: "function_call", call_id: "call_restart", name: "lookup", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_restart", output: "ok" },
+        ])), { maxBytes: 8192, maxDepth: 32 }));
       } finally {
         closeDatabase(reopened.database);
       }
@@ -283,6 +333,8 @@ describe("Responses history SQLite", () => {
       expect(opened.store.inspect().untrackedContinuationBlocked).toBe(false);
       await opened.store.recordCheckpoint(record("resp_same", "call_1"), ownership("github.com/1"), "complete", SIGNAL);
       await opened.store.recordCheckpoint(record("resp_same", "call_2"), ownership("github.com/2"), "complete", SIGNAL);
+      insertCarrier(opened.database, "github.com/1", "resp_same", 1);
+      insertCarrier(opened.database, "github.com/2", "resp_same", 2);
       opened.store.clearAccount("github.com/1");
 
       await expect(opened.store.resolve("resp_same", "github.com/1", SIGNAL))
@@ -290,6 +342,9 @@ describe("Responses history SQLite", () => {
       await expect(opened.store.resolve("resp_same", "github.com/2", SIGNAL))
         .resolves.toMatchObject({ kind: "owned" });
       expect(opened.store.inspect()).toMatchObject({ count: 1, receiptCount: 1 });
+      expect(opened.database.prepare("SELECT account_id FROM reasoning_carriers").all()).toEqual([
+        { account_id: "github.com/2" },
+      ]);
     } finally {
       closeDatabase(opened.database);
       await rm(path.dirname(file), { recursive: true, force: true });
@@ -389,6 +444,7 @@ describe("Responses history SQLite", () => {
         responseId: "resp_native",
         checkpointState: "complete",
       }, SIGNAL);
+      insertCarrier(opened.database, "github.com/1", "resp_native", 1);
       const afterReceipt = opened.store.inspect();
       expect(afterReceipt).toMatchObject({
         revision: 1,
@@ -404,6 +460,7 @@ describe("Responses history SQLite", () => {
         count: 0,
         receiptCount: 0,
       });
+      expect(opened.database.prepare("SELECT COUNT(*) AS count FROM reasoning_carriers").get()).toEqual({ count: 0 });
     } finally {
       closeDatabase(opened.database);
       await rm(path.dirname(file), { recursive: true, force: true });
@@ -489,7 +546,7 @@ describe("Responses history SQLite", () => {
     }
   });
 
-  it("does not expand call-only checkpoints with standalone reasoning items", async () => {
+  it("stores v2 reasoning only when it is followed by a call", async () => {
     const file = await dbPath("reasoning-privacy");
     const opened = openHistory(file, () => 1_700_000_000_000);
     try {
@@ -514,12 +571,16 @@ describe("Responses history SQLite", () => {
       }, ownership("github.com/1"), "complete", SIGNAL);
 
       const rows = opened.database.prepare(
-        "SELECT item_json FROM response_scoped_calls WHERE account_id = ? AND response_id = ?",
-      ).all("github.com/1", "resp_reasoning_privacy") as Array<{ item_json: string }>;
-      expect(rows).toHaveLength(1);
+        `SELECT item_kind, item_json
+         FROM response_scoped_replay_items
+         WHERE account_id = ? AND response_id = ?
+         ORDER BY group_ordinal, item_ordinal`,
+      ).all("github.com/1", "resp_reasoning_privacy") as Array<{ item_kind: string; item_json: string }>;
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.item_kind)).toEqual(["reasoning", "function_call"]);
       const stored = rows.map((row) => row.item_json).join("");
-      expect(stored).not.toContain(privateValues[0]);
-      expect(stored).not.toContain(privateValues[2]);
+      expect(stored).toContain(privateValues[0]);
+      expect(stored).toContain(privateValues[2]);
       expect(stored).toContain(privateValues[1]);
     } finally {
       closeDatabase(opened.database);
@@ -562,3 +623,25 @@ describe("Responses history SQLite", () => {
     }
   });
 });
+
+function insertCarrier(database: SqliteDatabase, accountId: string, responseId: string, sequence: number): void {
+  database.prepare(
+    `INSERT INTO reasoning_carriers (
+       carrier_id, token, account_id, model_id, upstream_origin, source_protocol,
+       wire_protocol, conversion_version, source_kind, state, response_id,
+       payload_json, projection_json, stored_bytes, insertion_seq, created_at_ms, expires_at_ms
+     ) VALUES (?, ?, ?, 'gpt', 'https://api.githubcopilot.com', 'chat',
+       'responses', 'responses-chat-v2', 'chat_state', 'complete', ?,
+       '{"kind":"chat_state","state":{"reasoning_opaque":"secret"}}',
+       '{"type":"reasoning","text":""}',
+       length(CAST('{"kind":"chat_state","state":{"reasoning_opaque":"secret"}}' AS BLOB))
+         + length(CAST('{"type":"reasoning","text":""}' AS BLOB)),
+       ?, 1700000000000, 1700604800000)`,
+  ).run(
+    `01234567-89ab-4def-8123-456789abcde${sequence}`,
+    `ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcde${sequence}`,
+    accountId,
+    responseId,
+    sequence,
+  );
+}

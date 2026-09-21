@@ -15,7 +15,9 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
+import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 import { bootstrapGateway } from "../../src/main.js";
 import { MockCopilotReplayServer, parseReplayManifestText, type ReplayReceipt } from "../support/replay/server.js";
 import type { SdkProtocol } from "./client.js";
@@ -152,6 +154,7 @@ async function startHttpSdkGateway(origin: string, requestId: string) {
       migrations: [
         embedMigration(runtimeConfigMigration), embedMigration(accountsMigration),
         embedMigration(responsesHistoryMigration), embedMigration(responsesContinuationMigration),
+        embedMigration(reasoningCarriersMigration),
       ], nowMs,
     });
     let databaseClosed = false;
@@ -178,10 +181,11 @@ async function startHttpSdkGateway(origin: string, requestId: string) {
     const registry = new ModelCapabilityRegistry(catalog, { get: () => null });
     disposers.push(async () => registry.close());
     const history = new SqliteResponsesHistory(database, { nowMs });
+    const reasoningCarriers = new SqliteReasoningCarrierStore(database, { nowMs });
     gateway = await bootstrapGateway({
       startup: { host: "127.0.0.1", port, dataDir, dataDirSource: "custom", logLevel: "error" },
       application: {
-        database, credentials, accountCoordinator, directory, registry, copilot, history, modelsSource,
+        database, credentials, accountCoordinator, directory, registry, copilot, history, reasoningCarriers, modelsSource,
         close: dispose,
         forceClose: () => {
           copilot.forceClose(); modelsSource.forceClose(); endpointDiscovery.forceClose(); closeState();

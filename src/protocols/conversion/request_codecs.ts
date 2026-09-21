@@ -1,9 +1,11 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
 import { chooseOutputTokenBudget, resolveModelReasoningEffort } from "../../copilot/model_capabilities.js";
+import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
 import {
   duplicateMemberNames,
   isWireJsonArray,
   isWireJsonObject,
+  memberValues,
   parseWireJson,
   serializeWireJson,
   type WireJson,
@@ -51,6 +53,7 @@ import {
 import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
 import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
+import { isReasoningCarrier, type ReasoningCarrierRecord } from "./reasoning_carriers.js";
 
 const CHAT_TOP_LEVEL = new Set([
   "model",
@@ -120,25 +123,25 @@ interface EncodeContext {
 
 export interface ProtocolRequestCodec {
   readonly protocol: InferenceProtocol;
-  decode(body: WireJsonObject): SemanticRequest;
+  decode(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest;
   encode(request: Readonly<SemanticRequest>, context: Readonly<EncodeContext>): EncodedConversionRequest;
 }
 
 export const CHAT_REQUEST_CODEC: ProtocolRequestCodec = {
   protocol: "chat",
-  decode: decodeChatRequest,
+  decode: (body, carriers) => decodeChatRequest(body, carriers),
   encode: (request, context) => encodeChatRequest(request, context),
 };
 
 export const MESSAGES_REQUEST_CODEC: ProtocolRequestCodec = {
   protocol: "messages",
-  decode: decodeMessagesRequest,
+  decode: (body, carriers) => decodeMessagesRequest(body, carriers),
   encode: (request, context) => encodeMessagesRequest(request, context),
 };
 
 export const RESPONSES_REQUEST_CODEC: ProtocolRequestCodec = {
   protocol: "responses",
-  decode: decodeResponsesRequest,
+  decode: (body, carriers) => decodeResponsesRequest(body, carriers),
   encode: (request, context) => encodeResponsesRequest(request, context),
 };
 
@@ -148,7 +151,7 @@ export const PROTOCOL_REQUEST_CODECS: Readonly<Record<InferenceProtocol, Protoco
   responses: RESPONSES_REQUEST_CODEC,
 };
 
-function decodeChatRequest(body: WireJsonObject): SemanticRequest {
+function decodeChatRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest {
   assertAllowedKeys(body, CHAT_TOP_LEVEL, "REQ-C-TOP");
   validateStreamOptions(oneMember(body, "stream_options", "REQ-C-STREAM-OPTIONS"));
   validateSingleChoice(oneMember(body, "n", "REQ-C-N"), "REQ-C-N");
@@ -156,7 +159,7 @@ function decodeChatRequest(body: WireJsonObject): SemanticRequest {
   const items: SemanticRequestItem[] = [];
   const messages = requiredArray(oneMember(body, "messages", "REQ-C-MESSAGES"), "REQ-C-MESSAGES");
   for (const value of messages.items) {
-    decodeChatMessage(value, items, degradations);
+    decodeChatMessage(value, items, degradations, carrierRecords);
   }
   const reasoning = reasoningFromEffort(
     optionalString(oneMember(body, "reasoning_effort", "REQ-C-REASONING"), "REQ-C-REASONING"),
@@ -192,6 +195,7 @@ function decodeChatRequest(body: WireJsonObject): SemanticRequest {
     reasoning,
     metadata: validatedMetadata(oneMember(body, "metadata", "REQ-C-METADATA"), "chat"),
     degradations: [...degradations],
+    ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
 }
 
@@ -199,6 +203,7 @@ function decodeChatMessage(
   value: WireJson,
   output: SemanticRequestItem[],
   degradations: Set<ConversionDegradationRule>,
+  carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>,
 ): void {
   const message = requiredObject(value, "REQ-C-MESSAGE");
   const role = requiredString(oneMember(message, "role", "REQ-C-MESSAGE-ROLE"), "REQ-C-MESSAGE-ROLE");
@@ -252,6 +257,14 @@ function decodeChatMessage(
           oneMember(object, "type", "REQ-C-ASSISTANT-REASONING-TYPE"),
           "REQ-C-ASSISTANT-REASONING-TYPE",
         );
+        const encrypted = oneMember(object, "encrypted_content", "REQ-C-ASSISTANT-REASONING-STATE");
+        if (typeof encrypted === "string" && isReasoningCarrier(encrypted)) {
+          const record = requiredCarrier(carrierRecords, encrypted, "responses_item", "REQ-C-ASSISTANT-REASONING-STATE");
+          const state = carrierState(record, "REQ-C-ASSISTANT-REASONING-STATE");
+          const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-C-ASSISTANT-REASONING-STATE"));
+          requireProjection(record, reasoningProjection(object), "REQ-C-ASSISTANT-REASONING-STATE");
+          output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
+        }
       }
       degradations.add("reasoning.state_omitted");
     }
@@ -354,13 +367,13 @@ function decodeChatToolCall(value: WireJson) {
   } as const;
 }
 
-function decodeMessagesRequest(body: WireJsonObject): SemanticRequest {
+function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest {
   assertAllowedKeys(body, MESSAGES_TOP_LEVEL, "REQ-M-TOP");
   const degradations = new Set<ConversionDegradationRule>();
   const instructions = decodeMessagesSystem(oneMember(body, "system", "REQ-M-SYSTEM"), degradations);
   const items: SemanticRequestItem[] = [];
   for (const value of requiredArray(oneMember(body, "messages", "REQ-M-MESSAGES"), "REQ-M-MESSAGES").items) {
-    decodeMessagesMessage(value, items, degradations);
+    decodeMessagesMessage(value, items, degradations, carrierRecords);
   }
   if (oneMember(body, "top_k", "REQ-M-TOP-K") !== undefined) {
     positiveInteger(oneMember(body, "top_k", "REQ-M-TOP-K"), "REQ-M-TOP-K");
@@ -407,6 +420,7 @@ function decodeMessagesRequest(body: WireJsonObject): SemanticRequest {
     reasoning,
     metadata: validatedMetadata(oneMember(body, "metadata", "REQ-M-METADATA"), "messages"),
     degradations: [...degradations],
+    ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
 }
 
@@ -441,6 +455,7 @@ function decodeMessagesMessage(
   value: WireJson,
   output: SemanticRequestItem[],
   degradations: Set<ConversionDegradationRule>,
+  carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>,
 ): void {
   const message = requiredObject(value, "REQ-M-MESSAGE");
   assertAllowedKeys(message, new Set(["role", "content"]), "REQ-M-MESSAGE");
@@ -506,10 +521,26 @@ function decodeMessagesMessage(
       if (type === "thinking") {
         assertAllowedKeys(block, new Set(["type", "thinking", "signature"]), "REQ-M-THINKING-BLOCK");
         requiredString(oneMember(block, "thinking", "REQ-M-THINKING-TEXT"), "REQ-M-THINKING-TEXT", true);
-        optionalString(oneMember(block, "signature", "REQ-M-THINKING-SIGNATURE"), "REQ-M-THINKING-SIGNATURE");
+        const signature = optionalString(oneMember(block, "signature", "REQ-M-THINKING-SIGNATURE"), "REQ-M-THINKING-SIGNATURE");
+        if (signature !== undefined && isReasoningCarrier(signature)) {
+          const record = requiredCarrier(carrierRecords, signature, "responses_item", "REQ-M-THINKING-SIGNATURE");
+          const state = carrierState(record, "REQ-M-THINKING-SIGNATURE");
+          const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-THINKING-SIGNATURE"));
+          requireProjection(record, messagesProjection(block), "REQ-M-THINKING-SIGNATURE");
+          output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
+          continue;
+        }
       } else {
         assertAllowedKeys(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING");
-        requiredString(oneMember(block, "data", "REQ-M-REDACTED-DATA"), "REQ-M-REDACTED-DATA", true);
+        const data = requiredString(oneMember(block, "data", "REQ-M-REDACTED-DATA"), "REQ-M-REDACTED-DATA", true);
+        if (isReasoningCarrier(data)) {
+          const record = requiredCarrier(carrierRecords, data, "responses_item", "REQ-M-REDACTED-DATA");
+          const state = carrierState(record, "REQ-M-REDACTED-DATA");
+          const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-REDACTED-DATA"));
+          requireProjection(record, messagesProjection(block), "REQ-M-REDACTED-DATA");
+          output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
+          continue;
+        }
       }
       degradations.add(type === "thinking" ? "reasoning.presentation_omitted" : "reasoning.state_omitted");
       continue;
@@ -591,7 +622,7 @@ function decodeMessagesToolResult(
   };
 }
 
-function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
+function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest {
   const extended = prepareResponsesExtendedTools(body);
   const semanticBody = extended?.body ?? body;
   assertAllowedKeys(semanticBody, RESPONSES_TOP_LEVEL, "REQ-R-TOP");
@@ -610,7 +641,7 @@ function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
     unsupported("REQ-R-STORE");
   }
   const degradations = new Set<ConversionDegradationRule>();
-  const items = decodeResponsesInput(oneMember(semanticBody, "input", "REQ-R-INPUT"), degradations);
+  const items = decodeResponsesInput(oneMember(semanticBody, "input", "REQ-R-INPUT"), degradations, carrierRecords);
   const reasoningObject = optionalObject(
     oneMember(semanticBody, "reasoning", "REQ-R-REASONING"),
     "REQ-R-REASONING",
@@ -674,6 +705,7 @@ function decodeResponsesRequest(body: WireJsonObject): SemanticRequest {
     metadata: validatedMetadata(oneMember(semanticBody, "metadata", "REQ-R-METADATA"), "responses"),
     degradations: [...degradations],
     ...(extended === undefined ? {} : { responseBindings: extended.ledger }),
+    ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
 }
 
@@ -687,6 +719,7 @@ function decodeResponsesInstructions(value: WireJson | undefined): readonly Sema
 function decodeResponsesInput(
   value: WireJson | undefined,
   degradations: Set<ConversionDegradationRule>,
+  carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>,
 ): readonly SemanticRequestItem[] {
   if (value === undefined) {
     return [];
@@ -773,8 +806,24 @@ function decodeResponsesInput(
         () => invalid("REQ-R-REASONING-ITEM"),
         false,
       );
+      const encrypted = oneMember(object, "encrypted_content", "REQ-R-REASONING-STATE");
+      if (typeof encrypted === "string" && isReasoningCarrier(encrypted)) {
+        const record = requiredCarrier(carrierRecords, encrypted, undefined, "REQ-R-REASONING-STATE");
+        const state = carrierState(record, "REQ-R-REASONING-STATE");
+        requireProjection(record, reasoningProjection(object), "REQ-R-REASONING-STATE");
+        if (record.sourceKind === "messages_block") {
+          output.push({ type: "reasoning", parts: reasoning.parts, opaqueState: { kind: "messages_block", block: state } });
+        } else if (record.sourceKind === "chat_state") {
+          output.push({ type: "reasoning", parts: reasoning.parts, opaqueState: { kind: "chat_state", state } });
+        } else {
+          invalid("REQ-R-REASONING-STATE");
+        }
+        continue;
+      }
       if (reasoning.parts.some((part) => part.text.length > 0)) {
-        degradations.add("reasoning.presentation_omitted");
+        output.push({ type: "reasoning", parts: reasoning.parts });
+        if (reasoning.hasOpaqueState) degradations.add("reasoning.state_omitted");
+        continue;
       }
       if (reasoning.hasOpaqueState) {
         degradations.add("reasoning.state_omitted");
@@ -1599,6 +1648,39 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
       ]));
       continue;
     }
+    if (item.type === "reasoning") {
+      if (item.opaqueState === undefined) {
+        const text = item.parts.map((part) => part.text).join("");
+        if (text.length === 0) continue;
+        const previous = output.at(-1);
+        if (
+          previous === undefined
+          || oneMember(previous, "role", "REQ-INTERNAL") !== "assistant"
+          || oneMember(previous, "tool_calls", "REQ-INTERNAL") !== undefined
+        ) {
+          output.push(wireObject([
+            ["role", "assistant"],
+            ["content", null],
+            ["reasoning_content", text],
+          ]));
+        } else {
+          appendMember(previous, "reasoning_content", text);
+        }
+        continue;
+      }
+      if (item.opaqueState.kind !== "chat_state") unsupported("REQ-TARGET-C-REASONING-STATE");
+      const last = output.at(-1);
+      if (
+        last === undefined
+        || oneMember(last, "role", "REQ-INTERNAL") !== "assistant"
+        || oneMember(last, "tool_calls", "REQ-INTERNAL") !== undefined
+      ) {
+        output.push(wireObject([["role", "assistant"], ["content", null], ...item.opaqueState.state.members.map((member) => [member.key, member.value] as const)]));
+      } else {
+        for (const member of item.opaqueState.state.members) appendMember(last, member.key, member.value);
+      }
+      continue;
+    }
     if (item.type === "tool_call") {
       const last = output.at(-1);
       if (last !== undefined && oneMember(last, "role", "REQ-INTERNAL") === "assistant") {
@@ -1660,6 +1742,9 @@ function encodeResponsesItems(items: readonly SemanticRequestItem[]): WireJsonOb
         ["role", item.role],
         ["content", wireArray(item.content.map((part) => encodeResponsesContent(part, item.role === "assistant")))],
       ]));
+    } else if (item.type === "reasoning") {
+      if (item.opaqueState?.kind !== "responses_item") unsupported("REQ-TARGET-R-REASONING-STATE");
+      output.push(item.opaqueState.item);
     } else if (item.type === "tool_call") {
       output.push(wireObject([
         ["type", "function_call"],
@@ -1690,6 +1775,21 @@ function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObj
         continue;
       }
       pushMessagesRole(output, item.role, item.content.map(encodeMessagesContent));
+      continue;
+    }
+    if (item.type === "reasoning") {
+      if (item.opaqueState === undefined) {
+        const text = item.parts.map((part) => part.text).join("");
+        if (text.length > 0) {
+          pushMessagesRole(output, "assistant", [wireObject([
+            ["type", "thinking"],
+            ["thinking", text],
+          ])]);
+        }
+        continue;
+      }
+      if (item.opaqueState.kind !== "messages_block") unsupported("REQ-TARGET-M-REASONING-STATE");
+      pushMessagesRole(output, "assistant", [item.opaqueState.block]);
       continue;
     }
     if (item.type === "tool_call") {
@@ -1986,7 +2086,53 @@ function encodedRequest(
     messagesBetaFeatures: [],
     degradations: [...new Set([...request.degradations, ...additionalDegradations])],
     ...(request.responseBindings === undefined ? {} : { responseBindings: request.responseBindings }),
+    ...(request.carrierRecords === undefined ? {} : { carrierRecords: request.carrierRecords }),
   });
+}
+
+function requiredCarrier(
+  records: ReadonlyMap<string, ReasoningCarrierRecord> | undefined,
+  token: string,
+  sourceKind: ReasoningCarrierRecord["sourceKind"] | undefined,
+  ruleId: string,
+): ReasoningCarrierRecord {
+  const record = records?.get(token);
+  if (record === undefined || (sourceKind !== undefined && record.sourceKind !== sourceKind) || record.state !== "complete") invalid(ruleId);
+  return record;
+}
+
+function carrierState(record: ReasoningCarrierRecord, ruleId: string): WireJsonObject {
+  const values = memberValues(record.payload, "state");
+  if (values.length !== 1 || !isWireJsonObject(values[0])) invalid(ruleId);
+  return values[0];
+}
+
+function requireProjection(
+  record: ReasoningCarrierRecord,
+  projection: WireJsonObject,
+  ruleId: string,
+): void {
+  const expected = canonicalizeWireJson(record.projection);
+  const observed = canonicalizeWireJson(projection);
+  if (expected.byteLength !== observed.byteLength || expected.some((value, index) => value !== observed[index])) invalid(ruleId);
+}
+
+function reasoningProjection(item: WireJsonObject): WireJsonObject {
+  const type = oneMember(item, "type", "REQ-INTERNAL");
+  if (type === "reasoning") {
+    const reasoning = decodeResponsesReasoningItem(item, () => invalid("REQ-INTERNAL"), false);
+    return wireObject([["type", "reasoning"], ["text", reasoning.parts.map((part) => part.text).join("")]]);
+  }
+  const text = oneMember(item, "reasoning_text", "REQ-INTERNAL")
+    ?? oneMember(item, "reasoning_content", "REQ-INTERNAL");
+  return wireObject([["type", "reasoning"], ["text", typeof text === "string" ? text : ""]]);
+}
+
+function messagesProjection(block: WireJsonObject): WireJsonObject {
+  const type = oneMember(block, "type", "REQ-INTERNAL");
+  const text = type === "thinking" ? oneMember(block, "thinking", "REQ-INTERNAL") : "";
+  if (typeof text !== "string") invalid("REQ-INTERNAL");
+  return wireObject([["type", "reasoning"], ["text", text]]);
 }
 
 function outputBudget(explicit: number | undefined, capability: EffectiveModelCapabilitySnapshot): number {

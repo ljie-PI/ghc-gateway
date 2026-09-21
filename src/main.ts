@@ -42,6 +42,7 @@ import { VERSION } from "./version.js";
 import type { SqliteDatabase } from "./persistence/sqlite.js";
 import { createFileDiagnostics } from "./daemon/logger.js";
 import { DISABLED_DIAGNOSTICS, type DiagnosticRecorder } from "./telemetry/diagnostics.js";
+import { SqliteReasoningCarrierStore, type ReasoningCarrierStore } from "./protocols/conversion/reasoning_carriers.js";
 
 export interface BootstrapOptions {
   readonly argv?: readonly string[];
@@ -68,6 +69,7 @@ export interface ApplicationContext {
   readonly registry: ModelCapabilityRegistry;
   readonly copilot: CopilotBackend;
   readonly history: ResponsesHistory;
+  readonly reasoningCarriers?: ReasoningCarrierStore;
   readonly telemetry?: TelemetryRecorder;
   readonly telemetryRuntime?: TelemetryRuntime;
   readonly performanceObserver?: ProtocolPerformanceObserver;
@@ -153,6 +155,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       registry,
       preferences,
       copilot: context.copilot,
+      ...(context.reasoningCarriers === undefined ? {} : { reasoningCarriers: context.reasoningCarriers }),
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
       ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
@@ -163,6 +166,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       registry,
       preferences,
       copilot: context.copilot,
+      ...(context.reasoningCarriers === undefined ? {} : { reasoningCarriers: context.reasoningCarriers }),
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
       ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
@@ -174,6 +178,7 @@ export function createPublicRouteRegistrations(context: Readonly<ApplicationCont
       preferences,
       copilot: context.copilot,
       history: context.history,
+      ...(context.reasoningCarriers === undefined ? {} : { reasoningCarriers: context.reasoningCarriers }),
       ...(context.telemetry === undefined ? {} : { usageRecorder: context.telemetry }),
       ...(context.performanceObserver === undefined ? {} : { performanceObserver: context.performanceObserver }),
       ...(context.nowMs === undefined ? {} : { nowMs: context.nowMs }),
@@ -204,6 +209,9 @@ export async function createProductionApplicationContext(
       return row?.credential_state === "active";
     },
   });
+  const reasoningCarriers = new SqliteReasoningCarrierStore(database, {
+    ttlMs: snapshot.history.ttlDays * 86_400_000,
+  });
   const directory = new SqliteAccountDirectory(
     database,
     credentials,
@@ -212,6 +220,7 @@ export async function createProductionApplicationContext(
     snapshot.accounts.maxAuthenticated,
     (accountId) => {
       history.clearAccount(accountId);
+      reasoningCarriers.clearAccount(accountId);
     },
   );
   await directory.reconcile();
@@ -259,6 +268,7 @@ export async function createProductionApplicationContext(
     registry,
     copilot,
     history,
+    reasoningCarriers,
     telemetry,
     telemetryRuntime,
     performanceObserver: telemetryRuntime.performance,
@@ -348,6 +358,7 @@ export async function composeProductionDaemonGateway(
       runtime,
       application.directory,
       application.history,
+      application.reasoningCarriers,
       telemetryRecorder,
     );
     deviceFlows = new DeviceFlowService(application.directory, new HttpDeviceOAuthClient());
@@ -444,6 +455,7 @@ function createRuntimeConfigCoordinator(
   runtime: RuntimeConfigStore,
   directory: SqliteAccountDirectory,
   history: SqliteResponsesHistory,
+  reasoningCarriers: ReasoningCarrierStore | undefined,
   telemetry: TelemetryRecorder,
 ): (
   candidate: RuntimeConfigSnapshot,
@@ -456,6 +468,7 @@ function createRuntimeConfigCoordinator(
     const config = runtime.update(validated, expectedRevision);
     directory.setMaxAuthenticated(config.accounts.maxAuthenticated);
     history.setTtlDays(config.history.ttlDays);
+    reasoningCarriers?.setTtlDays(config.history.ttlDays);
     telemetry.setRetentionDays(config.usage.retentionDays, config.events.retentionDays);
     return { revision: runtime.readRevision(), config };
   };

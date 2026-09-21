@@ -88,9 +88,21 @@ The gateway selects one compatible native or converted upstream protocol for eac
 
 Converted Chat and Responses output keeps visible reasoning separate from answer text. Chat uses
 the untyped `reasoning_content` compatibility extension; Responses uses reasoning items and summary
-events. Messages output preserves a Chat thinking block only when the source supplies its exact
-Anthropic signature or redacted data, and never fabricates one. Opaque reasoning state may otherwise
-be omitted, while reported reasoning-token details are normalized without estimating them from text.
+events. Messages output preserves native Anthropic signatures and redacted data exactly. When a
+Responses reasoning item must cross a compatible tool continuation, Messages carries a versioned
+gateway reference in `thinking.signature` or `redacted_thinking.data`; that reference is never
+presented to Anthropic as native ciphertext. Reported reasoning-token details are normalized without
+estimating them from text.
+
+Opaque carriers use `ghcg-rsn-v1:<source_kind>:<wire_protocol>:<uuid>` in documented reasoning-state
+slots. Responses-origin state uses Chat `assistant.reasoning_items[].encrypted_content` or Messages
+`thinking.signature`/`redacted_thinking.data`; Chat- and Messages-origin state uses a Responses
+reasoning item's `encrypted_content`. The restored state always returns to its original source
+protocol. Carriers are scoped to the bound account, model, upstream origin, source protocol, wire
+protocol, and conversion version. Each carrier is limited to 4 MiB, aggregate carrier and Responses replay
+storage is limited to 32 MiB with oldest-first eviction, and the default retention is 7 days.
+Converted Responses History v2 retains only ordered reasoning-and-call groups needed for tool results;
+existing v1 call-only checkpoints remain readable.
 
 ## Configuration
 
@@ -129,7 +141,7 @@ A missing runtime row can be seeded once with an upper-snake-case `GHC_GATEWAY_`
 
 The default data directory is `~/.ghc-gateway`:
 
-- `state.db`: runtime settings, account metadata, bounded Responses History, Usage Buckets, and sanitized Operational Events
+- `state.db`: runtime settings, account metadata, bounded Responses History and opaque reasoning carriers, Usage Buckets, and sanitized Operational Events
 - `credentials.json`: protected credentials
 - `daemon.json`: protected process identity and local-control authentication
 - `logs/*.jsonl`: bounded, sanitized daemon logs
@@ -138,7 +150,7 @@ The default data directory is `~/.ghc-gateway`:
 
 Use `--data-dir` or `GHC_GATEWAY_DATA_DIR` to select another data directory. This does not change client targets selected by `CLAUDE_CONFIG_DIR` or `CODEX_HOME`.
 
-Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors. Responses History stores only bounded bridge checkpoints needed for compatible continuations.
+Prompts, responses, tool arguments, authorization values, and complete upstream error bodies are not persisted in telemetry or exposed by Admin errors. Responses History stores only bounded bridge checkpoints needed for compatible continuations. Tool continuations can also retain bounded, source-bound opaque reasoning state for up to `history.ttlDays`; carriers are accepted only for the same account, model, upstream origin, protocol, and conversion version, and are removed with their account or Responses History.
 
 On Windows, files inherit the selected directory's permissions. Existing and custom data roots and client configuration directories are caller-managed security boundaries.
 

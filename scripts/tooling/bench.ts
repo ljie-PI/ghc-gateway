@@ -36,6 +36,7 @@ import {
   type ResponsesHistoryRecord,
 } from "../../src/protocols/openai_responses/history.js";
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
+import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 import { nearestRankP95, THRESHOLDS } from "../../src/telemetry/performance.js";
 import { assertNode24 } from "./node_version.js";
 import type { PerformanceMeasurement, ProtocolPerformanceObserver } from "../../src/telemetry/runtime.js";
@@ -240,11 +241,12 @@ class MeasuredHistory extends SqliteResponsesHistory {
     ownership: Readonly<ResponsesContinuationOwnership>,
     checkpointState: "partial" | "complete",
     signal: AbortSignal,
+    finalize?: (() => void) | undefined,
   ): Promise<void> {
     const measurement = this.measuring ? this.diagnostics.startCheckpoint(checkpointState) : undefined;
     const gateStartedAtMs = measurement === undefined ? undefined : performance.now();
     try {
-      await super.recordCheckpoint(record, ownership, checkpointState, signal);
+      await super.recordCheckpoint(record, ownership, checkpointState, signal, finalize);
     } catch (error: unknown) {
       measurement?.abandon();
       throw error;
@@ -596,6 +598,7 @@ async function createBenchmarkRuntime(diagnosticsEnabled = false): Promise<Bench
     registry,
     copilot: backend,
     history: measuredHistory,
+    reasoningCarriers: new SqliteReasoningCarrierStore(database, { nowMs }),
     telemetry,
     performanceObserver,
     nowMs,

@@ -55,7 +55,7 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
 
   let decoded: SemanticRequest;
   try {
-    decoded = PROTOCOL_REQUEST_CODECS[input.source].decode(input.body);
+    decoded = PROTOCOL_REQUEST_CODECS[input.source].decode(input.body, input.carrierRecords);
     validateSemanticBindings(decoded);
   } catch (error: unknown) {
     throw contractFailure(error);
@@ -165,6 +165,12 @@ function validateSemanticBindings(request: Readonly<SemanticRequest>): void {
   const openCalls = new Set<string>();
   let resultsStarted = false;
   for (const item of request.items) {
+    if (item.type === "reasoning") {
+      if (resultsStarted) {
+        throw new ConversionContractError("invalid_request", "REQ-REASONING-ROUND-ORDER");
+      }
+      continue;
+    }
     if (item.type === "message") {
       if (openCalls.size > 0 && (item.role !== "assistant" || resultsStarted)) {
         throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-ORDER");

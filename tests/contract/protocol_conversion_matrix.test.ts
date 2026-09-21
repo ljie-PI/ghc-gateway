@@ -14,10 +14,13 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as accountsMigration } from "../../src/persistence/migrations/010_accounts.js";
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
 import { createAnthropicMessagesRoute } from "../../src/protocols/anthropic_messages/endpoint.js";
 import { createOpenaiChatCompletionsRoute } from "../../src/protocols/openai_chat_completions/endpoint.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
+import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
+import type { ReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
 
@@ -161,7 +164,9 @@ describe("protocol conversion matrix", () => {
     for (const stream of [false, true]) {
       const harness = await matrixGateway(true);
       try {
-        const response = await harness.gw.fetch(protocolRequest(client, `native-${upstream}`, { stream }));
+        const response = await harness.gw.fetch(protocolRequest(client, `native-${upstream}`, {
+          stream,
+        }));
         expect(response.status).toBe(200);
         expect(response.headers.get("x-ghcg-upstream-protocol")).toBe(upstream);
         const wire = await response.text();
@@ -179,6 +184,46 @@ describe("protocol conversion matrix", () => {
       } finally {
         await harness.close();
       }
+    }
+  });
+
+  it("round-trips Responses opaque reasoning through Chat and fails a cross-model carrier before inference", async () => {
+    const harness = await matrixGateway(true, undefined, { responsesToolResponse: true });
+    try {
+      const first = await harness.gw.fetch(jsonRequest("/v1/chat/completions", {
+        model: "native-responses",
+        messages: [{ role: "user", content: "render" }],
+        tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object" } } }],
+      }));
+      expect(first.status).toBe(200);
+      const message = ((await first.json()) as {
+        choices: Array<{ message: { reasoning_items?: Array<Record<string, unknown>>; tool_calls?: Array<{ id: string }> } }>;
+      }).choices[0]?.message;
+      const token = message?.reasoning_items?.[0]?.encrypted_content;
+      expect(token).toEqual(expect.stringMatching(/^ghcg-rsn-v1:responses_item:chat:/u));
+
+      const before = harness.upstream.requests.length;
+      const rejected = await harness.gw.fetch(jsonRequest("/v1/chat/completions", {
+        model: "native-chat",
+        messages: [{
+          role: "assistant",
+          content: null,
+          reasoning_items: message?.reasoning_items,
+          tool_calls: [{
+            id: "call_1",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          }],
+        }, {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "ok",
+        }],
+      }));
+      expect(rejected.status).toBe(400);
+      expect(harness.upstream.requests).toHaveLength(before);
+    } finally {
+      await harness.close();
     }
   });
 
@@ -958,6 +1003,7 @@ interface MatrixHarness {
   readonly gw: Gateway;
   readonly upstream: CopilotHttpMock;
   readonly history: SqliteResponsesHistory;
+  readonly reasoningCarriers: ReasoningCarrierStore;
   readonly chatBodies: Uint8Array[];
   readonly messagesBodies: Uint8Array[];
   readonly responsesBodies: Uint8Array[];
@@ -972,6 +1018,7 @@ async function matrixGateway(
     readonly messagesBody?: Uint8Array;
     readonly responsesBody?: Uint8Array;
     readonly responsesStreamContentType?: string;
+    readonly responsesToolResponse?: boolean;
   } = {},
 ): Promise<MatrixHarness> {
   return await withSetupCleanup(async (own) => {
@@ -982,6 +1029,7 @@ async function matrixGateway(
         embedMigration(accountsMigration),
         embedMigration(responsesHistoryMigration),
         embedMigration(responsesContinuationMigration),
+        embedMigration(reasoningCarriersMigration),
       ],
       nowMs,
     });
@@ -1008,12 +1056,18 @@ async function matrixGateway(
       },
     }, () => new Date(nowMs()));
     const history = new SqliteResponsesHistory(database, { nowMs });
+    let carrierUuid = 0;
+    const reasoningCarriers = new SqliteReasoningCarrierStore(database, {
+      nowMs,
+      createId: () => `00000000-0000-4000-8000-${(++carrierUuid).toString().padStart(12, "0")}`,
+    });
     const responseReasoning = {
       id: "rs_matrix_stream",
       type: "reasoning",
       status: "completed",
       summary: [],
       content: [{ type: "reasoning_text", text: "visible plan" }],
+      encrypted_content: "provider-state",
     };
     const response = {
       id: "resp_matrix_stream",
@@ -1028,6 +1082,17 @@ async function matrixGateway(
         content: [{ type: "output_text", text: "ok", annotations: [] }],
       }],
       usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+    };
+    const toolResponse = {
+      ...response,
+      output: [...(reasoning ? [responseReasoning] : []), {
+        id: "fc_matrix",
+        type: "function_call",
+        call_id: "call_1",
+        name: "lookup",
+        arguments: "{}",
+        status: "completed",
+      }],
     };
     const http = await startHttpCopilot({
       credentials, accountCoordinator, nowMs,
@@ -1065,26 +1130,9 @@ async function matrixGateway(
           reply: {
             status: 200,
             headers: {},
-            body: overrides.responsesBody ?? encoder.encode(JSON.stringify({
-              id: "resp_matrix",
-              object: "response",
-              created_at: 1_700_000_000,
-              status: "completed",
-              output: [...(reasoning ? [{
-                id: "rs_matrix",
-                type: "reasoning",
-                status: "completed",
-                summary: [{ type: "summary_text", text: "visible plan" }],
-                content: [],
-              }] : []), {
-                id: "msg_matrix",
-                type: "message",
-                status: "completed",
-                role: "assistant",
-                content: [{ type: "output_text", text: "ok", annotations: [] }],
-              }],
-              usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
-            })),
+            body: overrides.responsesBody ?? encoder.encode(JSON.stringify(
+              overrides.responsesToolResponse === true ? toolResponse : response,
+            )),
           }
         },
         {
@@ -1217,6 +1265,7 @@ async function matrixGateway(
       registry,
       preferences: directory.preferences,
       copilot: http.backend,
+      reasoningCarriers,
       createUuid: () => "00000000-0000-4000-8000-000000000104",
       nowMs,
     };
@@ -1233,6 +1282,7 @@ async function matrixGateway(
       gw,
       upstream: http.upstream,
       history,
+      reasoningCarriers,
       get chatBodies() { return http.upstream.requests.filter((request) => request.path === "/chat/completions").map((request) => request.body); },
       get messagesBodies() { return http.upstream.requests.filter((request) => request.path === "/v1/messages").map((request) => request.body); },
       get responsesBodies() { return http.upstream.requests.filter((request) => request.path === "/responses").map((request) => request.body); },
@@ -1291,7 +1341,7 @@ function matrixChatResponse(raw: Uint8Array, reasoning = false): Uint8Array {
         }
         : {
           role: "assistant",
-          ...(reasoning ? { reasoning_content: "visible plan" } : {}),
+          ...(reasoning ? { reasoning_content: "visible plan", reasoning_opaque: "provider-state" } : {}),
           content: "ok",
         },
       finish_reason: partialCustom

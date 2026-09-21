@@ -34,6 +34,12 @@ import { convertBufferedResponse } from "../conversion/buffered.js";
 import type { ConvertedProtocolPlan, SemanticUsage } from "../conversion/types.js";
 import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
+import {
+  carrierBinding,
+  claimReasoningCarriers,
+  resolveReasoningCarriers,
+} from "../conversion/reasoning_carrier_preflight.js";
 import {
   createNativeMessagesStreamResponse,
   nativeMessagesUsage,
@@ -50,6 +56,7 @@ export interface AnthropicMessagesRouteDependencies {
   readonly usageRecorder?: Pick<TelemetryRecorder, "recordUsage">;
   readonly performanceObserver?: ProtocolPerformanceObserver;
   readonly nowMs?: () => number;
+  readonly reasoningCarriers?: ReasoningCarrierStore;
 }
 
 const JSON_HEADERS = {
@@ -97,15 +104,38 @@ async function executeAnthropicMessages(
   scope.diagnostics?.stage("account_binding");
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
-  const preference = dependencies.preferences.get(account.accountId);
+  const carrierClaim = dependencies.reasoningCarriers === undefined
+    ? undefined
+    : claimReasoningCarriers(request.body, "messages", account.accountId, dependencies.reasoningCarriers);
+  if (
+    requestedModel.value !== undefined
+    && carrierClaim !== undefined
+    && requestedModel.value !== carrierClaim.binding.modelId
+  ) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
+  const effectiveModel = carrierClaim?.binding.modelId ?? requestedModel.value;
+  const preference = effectiveModel === undefined ? dependencies.preferences.get(account.accountId) : null;
   scope.diagnostics?.stage("model_resolution");
   const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
-  const resolved = resolveModel(catalog, requestedModel.value, preference);
+  const resolved = resolveModel(catalog, effectiveModel, preference);
   if ("kind" in resolved) {
     throw new GatewayFailureError({ kind: resolved.kind });
   }
   usage.setResolvedModel(resolved.upstreamModel);
   const stream = readStream(request.body);
+  scope.diagnostics?.stage("account_binding");
+  const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
+  const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
+    accountId: account.accountId,
+    modelId: resolved.upstreamModel,
+    endpoint: copilot.target.endpoint,
+    sourceProtocol: carrierClaim.binding.sourceProtocol,
+    wireProtocol: "messages",
+  });
+  const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
+    ? undefined
+    : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
   let plan = planProtocolExecution({
     diagnostics: scope.diagnostics,
     source: "messages",
@@ -113,6 +143,8 @@ async function executeAnthropicMessages(
     stream,
     capability: resolved.capability,
     resolvedModel: resolved.upstreamModel,
+    ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
+    ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
   if (plan.kind === "converted") {
     if (betaFeatures.some((feature) => (
@@ -146,8 +178,6 @@ async function executeAnthropicMessages(
     }
     scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
-  scope.diagnostics?.stage("account_binding");
-  const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
   if (plan.kind === "native") {
     return withUpstreamProtocol(
       await executeNativeMessages(
@@ -163,7 +193,20 @@ async function executeAnthropicMessages(
     );
   }
   return withUpstreamProtocol(
-    await executeConvertedMessages(dependencies, copilot, plan, scope, usage),
+    await executeConvertedMessages(
+      dependencies,
+      copilot,
+      plan,
+      scope,
+      usage,
+      dependencies.reasoningCarriers === undefined || plan.target !== "responses" ? undefined : carrierBinding({
+        accountId: account.accountId,
+        modelId: resolved.upstreamModel,
+        endpoint: copilot.target.endpoint,
+        sourceProtocol: plan.target,
+        wireProtocol: "messages",
+      }),
+    ),
     plan.target,
   );
 }
@@ -222,25 +265,49 @@ async function executeConvertedMessages(
   plan: Readonly<ConvertedProtocolPlan>,
   scope: Readonly<RequestScope>,
   usage: ReturnType<typeof createRequestAttempt>,
+  carrierBindingValue?: ReasoningCarrierBinding,
 ): Promise<Response> {
   if (!plan.stream) {
     const upstream = await completeConvertedOperation(copilot, plan, scope);
     throwIfUpstreamHttp(upstream);
-    const converted = measureBuffered(dependencies, () => convertBufferedResponse(upstream.body, {
-      diagnostics: scope.diagnostics,
-      source: plan.target,
-      target: "messages",
-      model: plan.requestModel,
-      maxBytes: scope.config.limits.nonstreamBodyBytes,
-      createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
-      nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
-      degradations: plan.request.degradations,
-    }));
-    usage.success(attemptUsage(converted.observations.usage));
-    return new Response(Buffer.from(converted.bytes), {
-      status: upstream.status,
-      headers: { ...JSON_HEADERS, "request-id": scope.requestId },
-    });
+    const createdTokens: string[] = [];
+    try {
+      const converted = measureBuffered(dependencies, () => convertBufferedResponse(upstream.body, {
+        diagnostics: scope.diagnostics,
+        source: plan.target,
+        target: "messages",
+        model: plan.requestModel,
+        maxBytes: scope.config.limits.nonstreamBodyBytes,
+        createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
+        nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
+        degradations: plan.request.degradations,
+        ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
+          carrier: {
+            store: dependencies.reasoningCarriers,
+            binding: carrierBindingValue,
+            stream: false,
+            onCreated: (token: string) => createdTokens.push(token),
+          },
+        }),
+      }));
+      if (dependencies.reasoningCarriers !== undefined && carrierBindingValue !== undefined && createdTokens.length > 0) {
+        if (converted.observations.terminal === "completed") {
+          dependencies.reasoningCarriers.promote(createdTokens, carrierBindingValue);
+        } else {
+          dependencies.reasoningCarriers.discard(createdTokens, carrierBindingValue);
+        }
+      }
+      usage.success(attemptUsage(converted.observations.usage));
+      return new Response(Buffer.from(converted.bytes), {
+        status: upstream.status,
+        headers: { ...JSON_HEADERS, "request-id": scope.requestId },
+      });
+    } catch (error: unknown) {
+      if (dependencies.reasoningCarriers !== undefined && carrierBindingValue !== undefined) {
+        dependencies.reasoningCarriers.discard(createdTokens, carrierBindingValue);
+      }
+      throw error;
+    }
   }
   const upstream = await openConvertedOperation(copilot, plan, scope);
   if (upstream.status >= 400) {
@@ -255,6 +322,9 @@ async function executeConvertedMessages(
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     nowUnixSeconds: () => Math.floor((dependencies.nowMs?.() ?? Date.now()) / 1000),
     performanceObserver: dependencies.performanceObserver,
+    ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
+      carrier: { store: dependencies.reasoningCarriers, binding: carrierBindingValue },
+    }),
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-store",

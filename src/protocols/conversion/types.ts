@@ -2,6 +2,11 @@ import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_
 import type { SupportedReasoningEffort } from "../../copilot/model_capabilities.js";
 import type { WireJson, WireJsonObject } from "../../serialization/wire_json.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import type {
+  ReasoningCarrierBinding,
+  ReasoningCarrierRecord,
+  ReasoningCarrierStore,
+} from "./reasoning_carriers.js";
 
 export type InferenceProtocol = "chat" | "messages" | "responses";
 
@@ -60,8 +65,20 @@ export interface SemanticToolResultItem {
   readonly status?: "completed" | "incomplete" | "in_progress" | "failed" | undefined;
 }
 
+export type SemanticOpaqueReasoningState =
+  | { readonly kind: "responses_item"; readonly item: WireJsonObject }
+  | { readonly kind: "messages_block"; readonly block: WireJsonObject }
+  | { readonly kind: "chat_state"; readonly state: WireJsonObject };
+
+export interface SemanticReasoningRequestItem {
+  readonly type: "reasoning";
+  readonly parts: readonly SemanticReasoningPart[];
+  readonly opaqueState?: SemanticOpaqueReasoningState | undefined;
+}
+
 export type SemanticRequestItem =
   | SemanticMessageItem
+  | SemanticReasoningRequestItem
   | SemanticToolCallItem
   | SemanticToolResultItem;
 
@@ -142,6 +159,7 @@ export interface SemanticRequest {
   readonly metadata?: WireJson | undefined;
   readonly degradations: readonly ConversionDegradationRule[];
   readonly responseBindings?: ResponsesToolBindingLedger | undefined;
+  readonly carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord> | undefined;
 }
 
 export interface EncodedConversionRequest {
@@ -157,6 +175,7 @@ export interface EncodedConversionRequest {
   )[];
   readonly degradations: readonly ConversionDegradationRule[];
   readonly responseBindings?: ResponsesToolBindingLedger | undefined;
+  readonly carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord> | undefined;
 }
 
 export interface NativeProtocolPlan {
@@ -185,6 +204,7 @@ export interface ConversionPlanningInput {
   readonly capability: EffectiveModelCapabilitySnapshot;
   readonly resolvedModel: string;
   readonly forcedTarget?: InferenceProtocol | undefined;
+  readonly carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord> | undefined;
 }
 
 export class ConversionContractError extends Error {
@@ -226,6 +246,7 @@ export interface SemanticReasoningItem {
   readonly status?: "completed" | "incomplete" | "in_progress" | undefined;
   readonly hasOpaqueState: boolean;
   readonly messagesState?: SemanticMessagesReasoningState | undefined;
+  readonly opaqueState?: SemanticOpaqueReasoningState | undefined;
 }
 
 export type SemanticResponseItem =
@@ -257,6 +278,15 @@ export interface ConversionCheckpointIntent {
   readonly responseId: string;
   readonly output: readonly WireJson[];
   readonly state: "route_only" | "partial" | "complete";
+  readonly carrierTokens?: readonly string[] | undefined;
+}
+
+export interface ReasoningCarrierConversionContext {
+  readonly store: ReasoningCarrierStore;
+  readonly binding: ReasoningCarrierBinding;
+  readonly responseId?: string | undefined;
+  readonly stream: boolean;
+  readonly onCreated?: ((token: string) => void) | undefined;
 }
 
 export interface ConvertedBufferedResponse {
@@ -273,6 +303,7 @@ export type SemanticStreamEvent =
     readonly key: string;
     readonly itemId?: string | undefined;
     readonly messagesState?: SemanticMessagesReasoningState | undefined;
+    readonly opaqueState?: SemanticOpaqueReasoningState | undefined;
   }
   | {
     readonly kind: "reasoning_delta";
