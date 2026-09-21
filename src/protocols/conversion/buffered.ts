@@ -151,44 +151,37 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
     content.push({ type: "refusal", text: refusal });
   }
   const toolCalls = arrayMember(message, "tool_calls");
-  const visibleThinking = reasoning.thinkingBlocks
-    .flatMap((block) => block.type === "thinking" ? [block.thinking] : [])
-    .join("");
+  const reasoningStatus = completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0
+    ? "completed" as const
+    : "incomplete" as const;
+  if (reasoning.text.length > 0) {
+    items.push({
+      type: "reasoning",
+      parts: [{ presentation: "summary", index: 0, text: reasoning.text }],
+      status: reasoningStatus,
+      hasOpaqueState: reasoning.hasOpaqueState,
+    });
+  }
   if (reasoning.thinkingBlocks.length > 0) {
     for (const block of reasoning.thinkingBlocks) {
       if (block.type === "thinking" && block.signature !== undefined && block.signature.length > 0) {
         items.push({
           type: "reasoning",
-          parts: block.thinking.length === 0 ? [] : [{ presentation: "summary", index: 0, text: block.thinking }],
-          status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
+          parts: [],
+          status: reasoningStatus,
           hasOpaqueState: true,
           messagesState: { type: "thinking", thinking: block.thinking, signature: block.signature },
-        });
-      } else if (block.type === "thinking" && block.thinking.length > 0) {
-        items.push({
-          type: "reasoning",
-          parts: [{ presentation: "summary", index: 0, text: block.thinking }],
-          status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
-          hasOpaqueState: false,
         });
       } else if (block.type === "redacted_thinking" && block.data.length > 0) {
         items.push({
           type: "reasoning",
           parts: [],
-          status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
+          status: reasoningStatus,
           hasOpaqueState: true,
           messagesState: { type: "redacted_thinking", data: block.data },
         });
       }
     }
-  }
-  if (visibleThinking.length === 0 && reasoning.text.length > 0) {
-    items.push({
-      type: "reasoning",
-      parts: [{ presentation: "summary", index: 0, text: reasoning.text }],
-      status: completeTools || content.length > 0 || (toolCalls?.items.length ?? 0) > 0 ? "completed" : "incomplete",
-      hasOpaqueState: reasoning.hasOpaqueState,
-    });
   }
   if (content.length > 0) {
     items.push({ type: "message", content });
@@ -578,10 +571,9 @@ function messagesEnvelope(
   for (const item of response.items) {
     if (item.type === "reasoning") {
       if (item.messagesState?.type === "thinking") {
-        const thinking = item.parts.map((part) => part.text).join("");
         content.push(wireObject([
           ["type", "thinking"],
-          ["thinking", thinking],
+          ["thinking", item.messagesState.thinking],
           ["signature", item.messagesState.signature],
         ]));
       } else if (item.messagesState?.type === "redacted_thinking") {

@@ -77,6 +77,7 @@ async function* decodeChatStream(
   let chatText = "";
   let chatRefusal = "";
   let chatReasoning = "";
+  let scalarReasoning = "";
   let reasoningOpen = false;
   let reasoningClosed = false;
   const observedThinkingBlocks = new Map<number, ChatThinkingBlock>();
@@ -88,12 +89,6 @@ async function* decodeChatStream(
   const observeThinkingBlocks = function* (
     blocks: readonly ChatThinkingBlock[],
   ): Iterable<SemanticStreamEvent> {
-    let aliasGeneric = false;
-    if (observedThinkingBlocks.size === 0 && chatReasoning.length > 0 && blocks.length > 0) {
-      const visible = visibleThinkingBlockText(blocks);
-      if (visible.length > 0 && visible !== chatReasoning) invalid();
-      aliasGeneric = visible.length > 0;
-    }
     for (let index = 0; index < blocks.length; index += 1) {
       const block = blocks[index] as ChatThinkingBlock;
       const existing = observedThinkingBlocks.get(index);
@@ -105,7 +100,6 @@ async function* decodeChatStream(
       budget.reserveEntry();
       observedThinkingBlocks.set(index, block);
       const key = `chat:reasoning:block:${index}`;
-      const partKey = `${key}:summary:0`;
       if (block.type === "redacted_thinking") {
         if (block.data.length === 0) continue;
         budget.reserve(block.data);
@@ -121,28 +115,35 @@ async function* decodeChatStream(
       if (block.thinking.length === 0 && (block.signature === undefined || block.signature.length === 0)) continue;
       budget.reserve(block.thinking);
       if (block.signature !== undefined) budget.reserve(block.signature);
-      if (aliasGeneric && (block.signature === undefined || block.signature.length === 0)) continue;
+      if (block.signature === undefined || block.signature.length === 0) continue;
       yield {
         kind: "reasoning_start",
         key,
-        ...(block.signature === undefined || block.signature.length === 0
-          ? {}
-          : { messagesState: { type: "thinking" as const, thinking: block.thinking, signature: block.signature } }),
+        messagesState: { type: "thinking", thinking: block.thinking, signature: block.signature },
       };
-      if (block.thinking.length > 0 && !aliasGeneric) {
-        yield {
-          kind: "reasoning_snapshot",
-          key,
-          partKey,
-          presentation: "summary",
-          partIndex: 0,
-          text: block.thinking,
-        };
-      } else {
-        yield { kind: "semantic_progress" };
-      }
+      yield { kind: "semantic_progress" };
       pendingThinkingKeys.push(key);
     }
+  };
+  const updateVisibleReasoning = function* (): Iterable<SemanticStreamEvent> {
+    const thinkingReasoning = visibleThinkingBlockText(
+      [...observedThinkingBlocks.entries()].sort(([left], [right]) => left - right).map(([, block]) => block),
+    );
+    const next = compatibleReasoningProjection(scalarReasoning, thinkingReasoning);
+    if (!next.startsWith(chatReasoning)) invalid();
+    const suffix = next.slice(chatReasoning.length);
+    if (suffix.length === 0) return;
+    budget.reserve(suffix);
+    chatReasoning = next;
+    reasoningOpen = true;
+    yield {
+      kind: "reasoning_delta",
+      key: reasoningKey,
+      partKey: reasoningPartKey,
+      presentation: "summary",
+      partIndex: 0,
+      delta: suffix,
+    };
   };
   const closeReasoning = function* (
     status: "completed" | "incomplete" = "completed",
@@ -291,22 +292,12 @@ async function* decodeChatStream(
       }
       const reasoning = decodeChatReasoning(delta, invalid);
       yield* observeThinkingBlocks(reasoning.thinkingBlocks);
-      const blockText = visibleThinkingBlockText(reasoning.thinkingBlocks);
-      const genericReasoning = blockText.length > 0 ? "" : reasoning.text;
-      if (genericReasoning.length > 0) {
+      if (reasoning.scalarText.length > 0) {
         if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
-        budget.reserve(genericReasoning);
-        chatReasoning += genericReasoning;
-        reasoningOpen = true;
-        yield {
-          kind: "reasoning_delta",
-          key: reasoningKey,
-          partKey: reasoningPartKey,
-          presentation: "summary",
-          partIndex: 0,
-          delta: genericReasoning,
-        };
+        budget.reserve(reasoning.scalarText);
+        scalarReasoning += reasoning.scalarText;
       }
+      yield* updateVisibleReasoning();
       const contentValue = singleMember(delta, "content");
       if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
         invalid();
@@ -446,24 +437,14 @@ async function* decodeChatStream(
       }
       const reasoning = decodeChatReasoning(finalMessage, invalid);
       yield* observeThinkingBlocks(reasoning.thinkingBlocks);
-      const blockText = visibleThinkingBlockText(reasoning.thinkingBlocks);
-      const genericReasoning = blockText.length > 0 ? "" : reasoning.text;
-      if (genericReasoning.length > 0 && !genericReasoning.startsWith(chatReasoning)) invalid();
-      const reasoningSuffix = genericReasoning.length === 0 ? "" : genericReasoning.slice(chatReasoning.length);
-      if (reasoningSuffix.length > 0) {
+      if (reasoning.scalarText.length > 0) {
+        if (!reasoning.scalarText.startsWith(scalarReasoning)) invalid();
         if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
-        budget.reserve(reasoningSuffix);
-        chatReasoning = genericReasoning;
-        reasoningOpen = true;
-        yield {
-          kind: "reasoning_delta",
-          key: reasoningKey,
-          partKey: reasoningPartKey,
-          presentation: "summary",
-          partIndex: 0,
-          delta: reasoningSuffix,
-        };
+        const suffix = reasoning.scalarText.slice(scalarReasoning.length);
+        budget.reserve(suffix);
+        scalarReasoning = reasoning.scalarText;
       }
+      yield* updateVisibleReasoning();
       const contentValue = singleMember(finalMessage, "content");
       if (contentValue !== undefined && contentValue !== null && typeof contentValue !== "string") {
         invalid();
@@ -630,6 +611,14 @@ async function* decodeChatStream(
 
 function visibleThinkingBlockText(blocks: readonly ChatThinkingBlock[]): string {
   return blocks.flatMap((block) => block.type === "thinking" ? [block.thinking] : []).join("");
+}
+
+function compatibleReasoningProjection(left: string, right: string): string {
+  if (left.length === 0) return right;
+  if (right.length === 0) return left;
+  if (left.startsWith(right)) return left;
+  if (right.startsWith(left)) return right;
+  invalid();
 }
 
 function sameChatThinkingBlock(left: ChatThinkingBlock, right: ChatThinkingBlock): boolean {

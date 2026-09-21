@@ -11,6 +11,8 @@ type Invalid = () => never;
 
 export interface ChatReasoning {
   readonly text: string;
+  readonly scalarText: string;
+  readonly thinkingText: string;
   readonly hasOpaqueState: boolean;
   readonly thinkingBlocks: readonly ChatThinkingBlock[];
 }
@@ -25,11 +27,14 @@ export function decodeChatReasoning(object: WireJsonObject, invalid: Invalid): C
   const reasoning = decodeReasoningValue(singleMember(object, "reasoning", invalid), invalid);
   const reasoningDetails = decodeReasoningDetails(singleMember(object, "reasoning_details", invalid), invalid, 0);
   const thinking = decodeThinkingBlocks(singleMember(object, "thinking_blocks", invalid), invalid);
+  const scalarText = consistentSubstantive(
+    [reasoningText, reasoningContent, reasoning, reasoningDetails],
+    invalid,
+  );
   return {
-    text: consistentSubstantive(
-      [reasoningText, reasoningContent, reasoning, reasoningDetails, thinking.text],
-      invalid,
-    ),
+    text: compatiblePresentation(scalarText, thinking.text, invalid),
+    scalarText,
+    thinkingText: thinking.text,
     hasOpaqueState: thinking.hasOpaqueState,
     thinkingBlocks: thinking.blocks,
   };
@@ -226,6 +231,14 @@ function consistentSubstantive(values: readonly (string | undefined)[], invalid:
   const first = substantive[0] ?? "";
   if (substantive.some((value) => value !== first)) invalid();
   return first;
+}
+
+function compatiblePresentation(left: string, right: string, invalid: Invalid): string {
+  if (left.length === 0) return right;
+  if (right.length === 0) return left;
+  if (left.startsWith(right)) return left;
+  if (right.startsWith(left)) return right;
+  invalid();
 }
 
 function nullableStringMember(

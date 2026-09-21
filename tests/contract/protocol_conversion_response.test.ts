@@ -305,6 +305,69 @@ describe("shared conversion response codecs", () => {
       .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual([scalar]);
   });
 
+  it("reconciles Chat blocks before scalar aliases without duplicating presentation", async () => {
+    const source = [
+      chatSse({
+        id: "chat_blocks_first",
+        choices: [{
+          index: 0,
+          delta: { thinking_blocks: [{ type: "thinking", thinking: "plan", signature: "sig" }] },
+          finish_reason: null,
+        }],
+      }),
+      chatSse({
+        id: "chat_blocks_first",
+        choices: [{ index: 0, delta: { reasoning_content: "plan" }, finish_reason: "stop" }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual(["plan"]);
+  });
+
+  it("reconciles incremental scalar and signed block aliases without duplicate suffixes", async () => {
+    const source = [
+      chatSse({ id: "chat_incremental_alias", choices: [{ index: 0, delta: { reasoning_content: "first" }, finish_reason: null }] }),
+      chatSse({
+        id: "chat_incremental_alias",
+        choices: [{
+          index: 0,
+          delta: { thinking_blocks: [{ type: "thinking", thinking: "first", signature: "sig1" }] },
+          finish_reason: null,
+        }],
+      }),
+      chatSse({ id: "chat_incremental_alias", choices: [{ index: 0, delta: { reasoning_content: "second" }, finish_reason: null }] }),
+      chatSse({
+        id: "chat_incremental_alias",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [
+              { type: "thinking", thinking: "first", signature: "sig1" },
+              { type: "thinking", thinking: "second", signature: "sig2" },
+            ],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const responsesWire = wireText(await collectStream("chat", "responses", chunks(encoder.encode(source))));
+    const terminal = responseDataEvents(responsesWire).find((event) => event.type === "response.completed") as {
+      response?: { output?: Array<{ type?: string; summary?: Array<{ text?: string }> }> };
+    };
+    expect(terminal.response?.output?.filter((item) => item.type === "reasoning")
+      .flatMap((item) => item.summary ?? []).map((part) => part.text)).toEqual(["firstsecond"]);
+    const messagesWire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(messagesWire.match(/"type": "thinking"/gu)).toHaveLength(2);
+  });
+
   it("marks signed Chat reasoning-only truncation incomplete", async () => {
     const source = chatSse({
       id: "chat_signed_incomplete",
