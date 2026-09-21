@@ -281,25 +281,16 @@ describe("production composition", () => {
       await harness.endpointDiscovery.discover(account);
       expect(harness.endpointFetchCount()).toBe(1);
 
-      const bootstrap = await control(gateway, "POST", "/admin-bootstrap");
-      expect(bootstrap.status).toBe(200);
-      const bootstrapBody = await bootstrap.json() as { data: { token: string } };
-      const exchange = await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/bootstrap`, {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: ORIGIN },
-        body: JSON.stringify({ token: bootstrapBody.data.token }),
-      }));
-      expect(exchange.status).toBe(200);
-      const session = await exchange.json() as { data: { csrfToken: string } };
-      const cookie = exchange.headers.get("set-cookie") ?? "";
+      const removedBootstrap = await control(gateway, "POST", "/admin-bootstrap");
+      expect(removedBootstrap.status).toBe(404);
 
-      const status = await adminJson(gateway, "/admin/api/v1/status", cookie);
+      const status = await adminJson(gateway, "/admin/api/v1/status");
       expect(status.data).toMatchObject({
         version: "0.1.0",
         uptimeMs: 1234,
         daemon: { managed: true, pid: 4242, startedAt: IDENTITY.createdAt },
       });
-      const models = await adminJson(gateway, "/admin/api/v1/models", cookie);
+      const models = await adminJson(gateway, "/admin/api/v1/models");
       expect(models.data).toMatchObject({
         items: [{ id: "gpt-test", maxInputTokens: 200_000, maxOutputTokens: 16_384 }],
       });
@@ -321,9 +312,7 @@ describe("production composition", () => {
         method: "PUT",
         headers: {
           "content-type": "application/json",
-          cookie,
           origin: ORIGIN,
-          "x-ghcg-csrf": session.data.csrfToken,
         },
         body: JSON.stringify({ expectedRevision: harness.runtime.readRevision(), config }),
       }));
@@ -358,7 +347,7 @@ describe("production composition", () => {
       expect(harness.database.prepare("SELECT COUNT(*) AS count FROM operational_events").get()).toEqual({ count: 0 });
 
       const events = await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/events/stream`, {
-        headers: { cookie },
+        headers: {},
       }));
       expect(events.status).toBe(200);
       const reader = events.body!.getReader();
@@ -564,9 +553,8 @@ async function control(
 async function adminJson(
   gateway: { fetch(request: Request): Promise<Response> },
   path: string,
-  cookie: string,
 ): Promise<{ data: unknown }> {
-  const response = await gateway.fetch(new Request(`${ORIGIN}${path}`, { headers: { cookie } }));
+  const response = await gateway.fetch(new Request(`${ORIGIN}${path}`));
   expect(response.status).toBe(200);
   return await response.json() as { data: unknown };
 }

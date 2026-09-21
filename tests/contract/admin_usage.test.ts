@@ -12,7 +12,7 @@ import { migration as runtimeConfigMigration } from "../../src/persistence/migra
 import { migration as telemetryMigration } from "../../src/persistence/migrations/020_telemetry.js";
 import { SqliteAdminTelemetry, type AdminUsagePage } from "../../src/telemetry/admin.js";
 import { TelemetryRecorder, type UsageUpdate } from "../../src/telemetry/recorder.js";
-import { adminDependencies, login } from "./admin_test_harness.js";
+import { adminDependencies } from "./admin_test_harness.js";
 
 const ORIGIN = "http://127.0.0.1:31400";
 const NOW = Date.parse("2027-01-29T12:00:00.000Z");
@@ -52,11 +52,9 @@ async function createHarness(updates: readonly UsageUpdate[] = [], now = NOW) {
   const recorder = new TelemetryRecorder(db, () => now);
   for (const update of updates) recorder.recordUsage(update);
   await recorder.flush();
-  let token = 0;
   const admin = createAdminModule({
     ...adminDependencies({ value: now }),
     telemetry: new SqliteAdminTelemetry(db, { recorder }),
-    createToken: () => `usage-token-${++token}`,
   });
   const gateway = await createGateway({
     startup: parseStartupConfig([], {}, { homedir: directory }),
@@ -67,10 +65,7 @@ async function createHarness(updates: readonly UsageUpdate[] = [], now = NOW) {
     closeDatabase(db);
     await rm(directory, { recursive: true, force: true });
   });
-  const session = await login(gateway, admin);
-  const get = (query: string, cookie = session.cookie) => gateway.fetch(new Request(
-    `${ORIGIN}/admin/api/v1/usage?${query}`, { headers: { cookie } },
-  ));
+  const get = (query: string) => gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/usage?${query}`));
   return {
     get,
     async read(query: string): Promise<AdminUsagePage> {
@@ -193,15 +188,13 @@ describe("Admin usage HTTP windows", () => {
     }
   });
 
-  it("requires an Admin Session for every relative window", async () => {
+  it("serves every relative window without authentication", async () => {
     const harness = await createHarness(BOUNDARY_USAGE);
     for (const query of ["", "window=24h", "window=7d", "window=28d"]) {
-      const response = await harness.get(query, "");
-      expect(response.status).toBe(401);
+      const response = await harness.get(query);
+      expect(response.status).toBe(200);
       expect(response.headers.get("cache-control")).toBe("no-store");
-      expect(await response.json()).toEqual({
-        error: { code: "unauthenticated", message: "unauthenticated", requestId: "req_admin_usage" },
-      });
+      expect(await response.json()).toMatchObject({ data: { items: expect.any(Array) } });
     }
   });
 });

@@ -93,19 +93,11 @@ For conversions that require an output-token value, an explicit valid request va
 
 ## Admin UI
 
-```bash
-ghcg admin open
-```
+With the gateway running, open `http://127.0.0.1:31400/` in a browser, replacing `31400` if a different startup port was selected. The Admin application and its read APIs require no cookie, bootstrap exchange, or other authentication.
 
-This requests a one-use, 60-second bootstrap token through authenticated local control and opens it in the URL fragment. The browser exchanges it for an in-memory Admin Session; the token is removed from the URL and is not stored in browser storage.
+Admin is an unauthenticated loopback management interface. Any local process that can connect to the listener can read and change Admin-managed state. State-changing browser requests require an exact `Origin` equal to the listener origin, which protects against ordinary cross-origin browser requests but does not authenticate native local clients. Authenticated daemon local control remains separate: CLI status, stop, restart, and management commands still use the protected control token, instance nonce, PID, and process start identity.
 
-Admin security defaults:
-
-- HttpOnly, SameSite=Strict session cookie scoped to `/admin`
-- 30-minute idle expiry and 12-hour absolute expiry
-- exact loopback Origin and CSRF validation for mutations
-- sessions invalidated when the gateway restarts
-- bounded, replayable SSE monitoring with no WebSocket or remote Admin access
+Admin monitoring uses bounded, replayable SSE with no WebSocket or remote-listener access.
 
 The six views are Overview, Accounts, Models, Agents, Configuration, and Events.
 The Agents view points this machine's global Claude Code and Codex configuration at the gateway.
@@ -140,8 +132,11 @@ All routes use the same loopback listener. Inference routes do not require a sep
 | `GET` | `/v1/models` | OpenAI models; Anthropic shape with `anthropic-version` |
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/readyz` | Runtime readiness |
-| `GET` | `/admin/*` | Admin static application |
+| `GET` | `/` | Admin static application index |
+| `GET` | `/assets/*` | Admin static assets |
+| `GET`, `POST`, `PUT`, `DELETE` | `/admin/api/v1/*` | Admin API and SSE |
 
+No root wildcard SPA fallback is registered. Unsupported protocol, probe, local-control, Admin API, and asset paths return their normal 404 response rather than Admin HTML. `/admin`, `/admin/`, and static `/admin/*` are not aliases for the application.
 No unversioned, compact, trailing-slash, or legacy route aliases are registered.
 Successful inference responses include the content-free
 `x-ghcg-upstream-protocol: chat|messages|responses` header so operators can verify the
@@ -286,14 +281,13 @@ npm start
 
 This listens on `127.0.0.1:31400` by default and accepts only local connections. Keep the terminal open; press `Ctrl+C` to stop it. Pass startup options after `--`, for example `npm start -- --port 31401`.
 
-In a second terminal, use the built CLI for authentication and the Admin UI:
+In a second terminal, use the built CLI for account authentication when needed:
 
 ```sh
 node dist/src/cli/main.js auth login
-node dist/src/cli/main.js admin open
 ```
 
-Follow the URL and device code printed by `auth login` to authorize your GitHub account before opening the Admin UI. These management commands require the gateway to be running.
+Follow the URL and device code printed by `auth login` to authorize your GitHub account. This management command requires the gateway to be running. Open `http://127.0.0.1:31400/` directly for the Admin UI; opening the UI itself does not require an authenticated account.
 
 OpenAI-compatible clients can use `http://127.0.0.1:31400/v1` as their base URL. The current release does not require a separate gateway API key.
 

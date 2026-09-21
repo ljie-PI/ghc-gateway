@@ -28,7 +28,7 @@ describe("AccountRevisionObserver", () => {
     expect(observer.hasBaseline()).toBe(false);
   });
 
-  it("retains session revisions across view lifetimes and reports each real revision once", () => {
+  it("retains account revisions across view lifetimes and reports each real revision once", () => {
     const observer = new AccountRevisionObserver();
     expect(observer.observe(initial)).toBe(false);
     expect(observer.observe(structuredClone(initial))).toBe(false);
@@ -53,7 +53,7 @@ describe("AccountRevisionObserver", () => {
     expect(observer.observe(structuredClone(removed))).toBe(false);
   });
 
-  it("forgets the previous Admin Session when reset", () => {
+  it("forgets the previous account baseline when reset", () => {
     const observer = new AccountRevisionObserver();
     observer.observe(initial);
     observer.reset();

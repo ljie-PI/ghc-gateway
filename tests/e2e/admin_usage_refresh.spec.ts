@@ -7,7 +7,7 @@ test.use({ locale: "en-US" });
 async function openAccounts(page: Page): Promise<AdminFixture> {
   await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
   const fixture = await installAdminFixture(page);
-  await page.goto("/admin/#bootstrap_token=refresh-fixture");
+  await page.goto("/");
   await page.getByRole("button", { name: "Accounts", exact: true }).click();
   await expect(page.getByText("Octo Admin", { exact: true })).toBeVisible();
   return fixture;
@@ -15,7 +15,7 @@ async function openAccounts(page: Page): Promise<AdminFixture> {
 
 test("Overview, Accounts and Models use the same black Refresh control", async ({ page }) => {
   await installAdminFixture(page);
-  await page.goto("/admin/#bootstrap_token=refresh-controls");
+  await page.goto("/");
   for (const view of ["Overview", "Accounts", "Models"]) {
     await page.getByRole("navigation").getByRole("button", { name: view, exact: true }).click();
     const refresh = page.getByRole("button", { name: "Refresh", exact: true });
@@ -126,7 +126,7 @@ test("Overview shows three cumulative windows from totals and refreshes without 
       ...(empty ? { requestCount: 0, errorCount: 0, inputTokens: 0, outputTokens: 0, cacheTokens: 0 } : totals[window]),
     } } } });
   });
-  await page.goto("/admin/#bootstrap_token=usage-windows");
+  await page.goto("/");
   const expectations = [
     ["Last 24 hours", ["42", "2", "2,000,000", "300,000", "987,654"]],
     ["Last 7 days", ["99", "4", "4,000,000", "500,000", "1,987,654"]],
@@ -158,7 +158,7 @@ test("Overview shows three cumulative windows from totals and refreshes without 
 
 test("Overview waits for every usage window before enabling another refresh", async ({ page }) => {
   await installAdminFixture(page);
-  await page.goto("/admin/#bootstrap_token=usage-pending");
+  await page.goto("/");
   const refresh = page.getByRole("button", { name: "Refresh", exact: true });
   await expect(refresh).toBeEnabled();
   let release!: () => void;
@@ -184,7 +184,7 @@ for (const [exit, endpoint] of [
 ] as const) {
   test(`Overview cancels unfinished ${endpoint} on ${exit} without blocking later loads`, async ({ page }) => {
     const fixture = await installAdminFixture(page);
-    await page.goto("/admin/#bootstrap_token=usage-cancellation");
+    await page.goto("/");
     const refresh = page.getByRole("button", { name: "Refresh", exact: true });
     await expect(refresh).toBeEnabled();
     let release!: () => void;
@@ -249,7 +249,7 @@ for (const width of [1440, 900, 390]) {
       await page.setViewportSize({ width, height: 900 });
       const fixture = await installAdminFixture(page);
       await page.route(/\/admin\/api\/v1\/usage(?:\?|$)/u, (route) => route.fulfill({ json: { data: usage(cacheTokens) } }));
-      await page.goto("/admin/#bootstrap_token=usage-fixture");
+      await page.goto("/");
       const stats = page.getByRole("region", { name: "Last 24 hours", exact: true }).locator(".stat-row");
       await expect(stats.locator(":scope > div")).toHaveCount(5);
       const cache = stats.locator("div").filter({ has: page.getByText("Cache tokens", { exact: true }) });
@@ -283,7 +283,7 @@ test("Overview refresh clears a previous failure while retaining genuine state w
   fixture.state.failStatus = true;
   fixture.state.status = status("degraded");
   fixture.state.streamBodies = [sse("performance", { kind: "performance", status: fixture.state.status })];
-  await page.goto("/admin/#bootstrap_token=overview-refresh");
+  await page.goto("/");
   await expect(page.getByRole("alert")).toContainText("Overview unavailable");
   fixture.state.failStatus = false;
   await page.getByRole("button", { name: "Refresh", exact: true }).click();

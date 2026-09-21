@@ -7,8 +7,7 @@ export type ParsedCliCommand =
   | { readonly kind: "help"; readonly text: string }
   | { readonly kind: "serve"; readonly startup: StartupConfig }
   | { readonly kind: "lifecycle"; readonly action: LifecycleAction; readonly startup?: StartupConfig }
-  | { readonly kind: "control"; readonly operation: keyof ControlOperationMap; readonly args: ControlOperationMap[keyof ControlOperationMap]["args"] }
-  | { readonly kind: "admin.open" };
+  | { readonly kind: "control"; readonly operation: keyof ControlOperationMap; readonly args: ControlOperationMap[keyof ControlOperationMap]["args"] };
 
 export interface ParsedCli {
   readonly json: boolean;
@@ -39,7 +38,6 @@ const ROOT_COMMANDS = [
   "models set <model-id>",
   "config get [key]",
   "config set <key> <value>",
-  "admin open",
 ] as const;
 
 export const ROOT_HELP = [
@@ -264,18 +262,6 @@ function parseCommand(
     }
     if (groupAction === "set" && third === "--help") {
       return { kind: "help", text: commandHelp("config set <key> <value>") };
-    }
-    throw new CliError("usage_error");
-  }
-  if (command === "admin") {
-    if (groupAction === "--help") {
-      return { kind: "help", text: groupHelp("admin") };
-    }
-    if (groupAction === "open" && third === undefined) {
-      return { kind: "admin.open" };
-    }
-    if (groupAction === "open" && third === "--help") {
-      return { kind: "help", text: commandHelp("admin open") };
     }
     throw new CliError("usage_error");
   }

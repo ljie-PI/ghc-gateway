@@ -138,8 +138,8 @@ export function createHonoApp(
       dependencies,
       (signal) => dependencies.adminStatic!.handle(request, signal),
     );
-    app.get("/admin", (context) => handleStatic(context.req.raw));
-    app.get("/admin/*", (context) => handleStatic(context.req.raw));
+    app.get("/", (context) => handleStatic(context.req.raw));
+    app.get("/assets/*", (context) => handleStatic(context.req.raw));
   }
 
   return app;

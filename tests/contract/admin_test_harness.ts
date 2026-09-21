@@ -1,10 +1,7 @@
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import type { AdminModuleDependencies } from "../../src/admin/routes.js";
 import type { AdminMonitorEvent, AdminTelemetry } from "../../src/telemetry/admin.js";
-import type { AdminModule, Gateway } from "../../src/gateway/create_gateway.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
-
-const ORIGIN = "http://127.0.0.1:31400";
 
 export interface TestAdminDependencies extends AdminModuleDependencies {
   readonly now: { value: number };
@@ -31,6 +28,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
   };
   let defaultRevision = 2;
   let defaultAccountId: string | null = account.accountId;
+  const deviceFlowIds = new Set<string>();
   let preference: {
     readonly accountId: string;
     readonly revision: number;
@@ -128,6 +126,7 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       async start(host, signal) {
         signal?.throwIfAborted();
         calls.push(`device-start:${host}`);
+        deviceFlowIds.add("flow-1");
         return {
           flowId: "flow-1",
           userCode: "ABCD-1234",
@@ -139,14 +138,15 @@ export function adminDependencies(now = { value: 1_800_000_000_000 }): TestAdmin
       },
       async poll(flowId, signal) {
         signal?.throwIfAborted();
+        if (!deviceFlowIds.has(flowId)) throw coded("not_found");
         calls.push(`device-poll:${flowId}`);
         return { status: "pending", pollIntervalSeconds: 5, nextPollAtMs: now.value + 5_000 };
       },
       async cancel(flowId) {
         calls.push(`device-cancel:${flowId}`);
+        if (!deviceFlowIds.delete(flowId)) return { status: "not_found" };
         return { status: "canceled" };
       },
-      has: () => true,
     },
     registry: {
       async get(bound, signal) {
@@ -283,19 +283,6 @@ function capabilityModel(modelId: string) {
 
 export function operationalEvent(eventId: string) {
   return { eventId, occurredAt: "2027-01-15T08:00:00.000Z", kind: "gateway_started" as const, severity: "info" as const, metadata: { status: "ready" } };
-}
-
-export async function login(gateway: Gateway, admin: AdminModule): Promise<{ readonly cookie: string; readonly csrf: string }> {
-  const minted = admin.mintBootstrap();
-  if (minted.kind !== "issued") throw new Error("bootstrap was not issued");
-  const response = await gateway.fetch(new Request(`${ORIGIN}/admin/api/v1/auth/bootstrap`, {
-    method: "POST",
-    headers: { "content-type": "application/json", origin: ORIGIN },
-    body: JSON.stringify({ token: minted.token }),
-  }));
-  if (response.status !== 200) throw new Error("bootstrap exchange failed");
-  const body = await response.json() as { data: { csrfToken: string } };
-  return { cookie: response.headers.get("set-cookie") ?? "", csrf: body.data.csrfToken };
 }
 
 function coded(code: string): Error & { code: string } {

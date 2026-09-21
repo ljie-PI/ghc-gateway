@@ -184,7 +184,7 @@
       }
     } catch (error: unknown) {
       if (generation !== pollGeneration || isAbort(error)) return;
-      if (error instanceof ApiError && (error.status === 401 || error.status === 404)) {
+      if (error instanceof ApiError && error.status === 404) {
         failure = errorMessage(error);
         clearFlow();
         return;

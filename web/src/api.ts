@@ -7,7 +7,6 @@ import type {
   AdminHistorySummary,
   AdminModels,
   AdminRuntimeConfig,
-  AdminSessionMetadata,
   AdminStatus,
   AdminUsagePage,
   DeviceFlow,
@@ -25,28 +24,6 @@ export class ApiError extends Error {
 }
 
 export class AdminClient {
-  private csrfToken: string | null = null;
-
-  constructor(private readonly onUnauthorized: () => void) {}
-
-  clear(): void { this.csrfToken = null; }
-
-  async bootstrap(token: string): Promise<AdminSessionMetadata> {
-    const session = await this.request<AdminSessionMetadata>("/auth/bootstrap", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
-    });
-    this.csrfToken = session.csrfToken;
-    return session;
-  }
-
-  async session(): Promise<AdminSessionMetadata> {
-    const session = await this.request<AdminSessionMetadata>("/auth/session");
-    this.csrfToken = session.csrfToken;
-    return session;
-  }
-
   status(signal?: AbortSignal): Promise<AdminStatus> {
     return this.request("/status", signal === undefined ? undefined : { signal });
   }
@@ -82,7 +59,7 @@ export class AdminClient {
     return this.request(`/device-flows/${encodeURIComponent(flowId)}`, signal === undefined ? undefined : { signal });
   }
   cancelDeviceFlow(flowId: string, signal?: AbortSignal): Promise<
-    | { readonly state: "canceled" | "not_found" }
+    | { readonly state: "canceled" }
     | { readonly state: "complete"; readonly account: AdminAccount }
   > {
     return this.mutate(`/device-flows/${encodeURIComponent(flowId)}`, "DELETE", undefined, signal);
@@ -102,7 +79,6 @@ export class AdminClient {
   clearHistory(expectedRevision: number): Promise<AdminHistorySummary> {
     return this.mutate("/history", "DELETE", { expectedRevision });
   }
-  async logout(): Promise<void> { await this.mutate("/auth/logout", "POST"); }
 
   private mutate<T>(
     path: string,
@@ -110,10 +86,7 @@ export class AdminClient {
     body?: object,
     signal?: AbortSignal,
   ): Promise<T> {
-    if (this.csrfToken === null) {
-      return Promise.reject(new ApiError(401, "unauthenticated", null));
-    }
-    const headers: Record<string, string> = { "X-GHCG-CSRF": this.csrfToken };
+    const headers: Record<string, string> = {};
     if (body !== undefined) headers["Content-Type"] = "application/json";
     return this.request(path, {
       method,
@@ -126,13 +99,9 @@ export class AdminClient {
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     let response: Response;
     try {
-      response = await fetch(`/admin/api/v1${path}`, { ...init, cache: "no-store", credentials: "same-origin" });
+      response = await fetch(`/admin/api/v1${path}`, { ...init, cache: "no-store" });
     } catch (error: unknown) {
       throw new ApiError(0, error instanceof Error ? "network_failure" : "request_failed", null);
-    }
-    if (response.status === 401) {
-      this.clear();
-      this.onUnauthorized();
     }
     if (!response.ok) {
       let failure: Failure | null = null;
@@ -142,13 +111,6 @@ export class AdminClient {
     if (response.status === 204) return undefined as T;
     return ((await response.json()) as Success<T>).data;
   }
-}
-
-export function takeBootstrapToken(): string | null {
-  const fragment = new URLSearchParams(location.hash.slice(1));
-  const token = fragment.get("bootstrap_token");
-  if (location.hash !== "") history.replaceState(null, "", `${location.pathname}${location.search}`);
-  return token;
 }
 
 export function errorMessage(error: unknown): string {

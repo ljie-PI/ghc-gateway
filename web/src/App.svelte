@@ -1,13 +1,12 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { AdminClient, errorMessage, takeBootstrapToken } from "./api.js";
+  import { AdminClient } from "./api.js";
   import type { AgentStatus, AgentsView } from "../../src/agents/types.js";
   import type { AdminAccounts, AdminAgentModels } from "../../src/admin/api.js";
   import { AccountRevisionObserver } from "./account_revisions.js";
-  import { SessionResource } from "./session_resource.js";
+  import { CachedResource } from "./cached_resource.js";
   import type {
     AdminOperationalEvent,
-    AdminSessionMetadata,
     AdminStatus,
     StreamState,
   } from "./types.js";
@@ -23,9 +22,6 @@
   type View = typeof views[number];
 
   let view: View = $state("Overview");
-  let session: AdminSessionMetadata | null = $state(null);
-  let phase: "loading" | "ready" | "signed-out" = $state("loading");
-  let authError = $state("");
   let streamState: StreamState = $state("connecting");
   let liveStatus: AdminStatus | null = $state(null);
   let liveEvents: AdminOperationalEvent[] = $state([]);
@@ -33,7 +29,6 @@
   let navOpen = $state(false);
   let mobileNavigation = $state(false);
   let stream: EventSource | null = null;
-  let signedOutPanel: HTMLElement | null = $state(null);
   let workspace: HTMLElement | null = $state(null);
   let menuButton: HTMLButtonElement | null = $state(null);
   let navigation: HTMLElement | null = $state(null);
@@ -41,42 +36,26 @@
   let agentModelsSnapshot: AdminAgentModels | null = $state(null);
   let agentModelsGeneration = $state(0);
   let pageNumber = $derived(String(views.indexOf(view) + 1).padStart(2, "0"));
-  const client = new AdminClient(teardown);
-  const agentsResource = new SessionResource((signal) => client.agents(signal), (value) => { agentsSnapshot = value; });
-  const agentModelsResource = new SessionResource((signal) => client.agentModels(signal), (value) => { agentModelsSnapshot = value; });
+  const client = new AdminClient();
+  const agentsResource = new CachedResource((signal) => client.agents(signal), (value) => { agentsSnapshot = value; });
+  const agentModelsResource = new CachedResource((signal) => client.agentModels(signal), (value) => { agentModelsSnapshot = value; });
   const accountRevisions = new AccountRevisionObserver();
 
   onMount(() => {
     updateNavigationMode();
     window.addEventListener("resize", updateNavigationMode);
-    void authenticate();
+    openStream();
     return () => {
       window.removeEventListener("resize", updateNavigationMode);
       closeStream();
       clearAgentsSnapshot();
+      accountRevisions.reset();
     };
   });
 
   function updateNavigationMode(): void {
     mobileNavigation = menuButton !== null && getComputedStyle(menuButton).display !== "none";
     if (!mobileNavigation) navOpen = false;
-  }
-
-  async function authenticate(): Promise<void> {
-    phase = "loading";
-    authError = "";
-    const token = takeBootstrapToken();
-    try {
-      session = token === null ? await client.session() : await client.bootstrap(token);
-      phase = "ready";
-      await tick();
-      updateNavigationMode();
-      openStream();
-    } catch (error: unknown) {
-      phase = "signed-out";
-      authError = token === null ? "Open Admin with `ghcg admin open`." : errorMessage(error);
-      requestAnimationFrame(() => signedOutPanel?.focus());
-    }
   }
 
   function openStream(): void {
@@ -88,7 +67,6 @@
     };
     stream.onerror = () => {
       streamState = "reconnecting";
-      void client.session().catch(() => undefined);
     };
     stream.addEventListener("performance", (event) => {
       const value = JSON.parse((event as MessageEvent<string>).data) as { status: AdminStatus };
@@ -110,20 +88,6 @@
   function closeStream(): void {
     stream?.close();
     stream = null;
-  }
-
-  function teardown(): void {
-    closeStream();
-    client.clear();
-    clearAgentsSnapshot();
-    accountRevisions.reset();
-    session = null;
-    liveStatus = null;
-    liveEvents = [];
-    navOpen = false;
-    phase = "signed-out";
-    authError = "Your admin session ended. Run `ghcg admin open` to reconnect.";
-    requestAnimationFrame(() => signedOutPanel?.focus());
   }
 
   function clearAgentsSnapshot(): void {
@@ -158,15 +122,6 @@
     });
   }
 
-  async function logout(): Promise<void> {
-    try {
-      await client.logout();
-    } catch {
-      // Local teardown is mandatory even if the daemon stopped.
-    }
-    teardown();
-  }
-
   async function navigate(next: View): Promise<void> {
     view = next;
     navOpen = false;
@@ -197,26 +152,8 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if phase === "loading"}
-  <main class="auth-stage" aria-busy="true">
-    <TerminalMark class="auth-mark" />
-    <p class="eyebrow">LOCAL ADMINISTRATION</p>
-    <h1>Establishing a secure session</h1>
-    <p class="muted">The one-time bootstrap is being exchanged in memory.</p>
-  </main>
-{:else if phase === "signed-out"}
-  <main class="auth-stage">
-    <section class="signed-out" aria-labelledby="signed-out-title">
-      <span class="status-dot stopped" aria-hidden="true"></span>
-      <p class="eyebrow">SESSION CLOSED</p>
-      <h1 id="signed-out-title" tabindex="-1" bind:this={signedOutPanel}>Admin session closed</h1>
-      <p>{authError}</p>
-      <button class="primary" onclick={authenticate}>Try current session</button>
-    </section>
-  </main>
-{:else}
-  <a class="skip-link" href="#admin-content">Skip to content</a>
-  <div class="shell">
+<a class="skip-link" href="#admin-content">Skip to content</a>
+<div class="shell">
     <aside
       id="admin-navigation"
       class:open={navOpen}
@@ -249,16 +186,6 @@
           <span class:reconnecting={streamState !== "live"} class="status-dot"></span>
           {streamState}
         </span>
-        <span>Admin Session</span>
-        <time datetime={session?.idleExpiresAt}>
-          idle until {session
-            ? new Date(session.idleExpiresAt).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })
-            : "-"}
-        </time>
-        <button class="text-button" onclick={logout}>End session</button>
       </div>
     </aside>
     {#if navOpen}
@@ -301,5 +228,4 @@
         </main>
       </div>
     </div>
-  </div>
-{/if}
+</div>

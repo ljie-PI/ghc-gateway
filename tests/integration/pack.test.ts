@@ -31,7 +31,10 @@ describe("package evidence", () => {
     const root = await temporaryDirectory("ghc-gateway-pack-");
     await mkdir(path.join(root, ".vite"));
     await mkdir(path.join(root, "assets"));
-    await writeFile(path.join(root, "index.html"), "<script src=\"/admin/assets/index-AbCd1234.js\"></script>");
+    await writeFile(path.join(root, "index.html"), [
+      "<link rel=\"stylesheet\" href=\"/assets/index-EfGh5678.css\">",
+      "<script src=\"/assets/index-AbCd1234.js\"></script>",
+    ].join(""));
     await writeFile(path.join(root, "assets", "index-AbCd1234.js"), "export {};\n");
     await writeFile(path.join(root, "assets", "index-EfGh5678.css"), "body{}\n");
     await writeFile(path.join(root, ".vite", "manifest.json"), JSON.stringify({
@@ -56,11 +59,41 @@ describe("package evidence", () => {
     expect(evidence.bytes).toBeGreaterThan(0);
   });
 
+  it("rejects a built Admin index that retains the removed /admin asset base", async () => {
+    const root = await temporaryDirectory("ghc-gateway-pack-base-");
+    await mkdir(path.join(root, ".vite"));
+    await mkdir(path.join(root, "assets"));
+    await writeFile(path.join(root, "index.html"), [
+      "<link rel=\"stylesheet\" href=\"/admin/assets/index-EfGh5678.css\">",
+      "<script src=\"/admin/assets/index-AbCd1234.js\"></script>",
+    ].join(""));
+    await writeFile(path.join(root, "assets", "index-AbCd1234.js"), "export {};\n");
+    await writeFile(path.join(root, "assets", "index-EfGh5678.css"), "body{}\n");
+    await writeFile(path.join(root, ".vite", "manifest.json"), JSON.stringify({
+      "index.html": {
+        file: "assets/index-AbCd1234.js",
+        css: ["assets/index-EfGh5678.css"],
+        isEntry: true,
+      },
+    }));
+    const files = [
+      "index.html",
+      ".vite/manifest.json",
+      "assets/index-AbCd1234.js",
+      "assets/index-EfGh5678.css",
+    ].map((file) => ({ path: `dist/admin/${file}`, size: 1 }));
+
+    await expect(inspectAdminBundle({ files }, root)).rejects.toThrow("Admin index must reference root /assets URLs");
+  });
+
   it("fails when npm dry-run omits a required built asset", async () => {
     const root = await temporaryDirectory("ghc-gateway-pack-missing-");
     await mkdir(path.join(root, ".vite"));
     await mkdir(path.join(root, "assets"));
-    await writeFile(path.join(root, "index.html"), "admin");
+    await writeFile(path.join(root, "index.html"), [
+      "<link rel=\"stylesheet\" href=\"/assets/index-EfGh5678.css\">",
+      "<script src=\"/assets/index-AbCd1234.js\"></script>",
+    ].join(""));
     await writeFile(path.join(root, "assets", "index-AbCd1234.js"), "export {};\n");
     await writeFile(path.join(root, "assets", "index-EfGh5678.css"), "body{}\n");
     await writeFile(path.join(root, ".vite", "manifest.json"), JSON.stringify({

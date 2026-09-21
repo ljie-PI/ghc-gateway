@@ -33,29 +33,22 @@ export function createAdminStaticModule(assetRoot: string): AdminStaticModule {
     async handle(request, signal) {
       signal.throwIfAborted();
       const pathname = new URL(request.url).pathname;
-      if (request.method !== "GET" || (pathname !== "/admin" && !pathname.startsWith("/admin/"))) {
+      if (request.method !== "GET") {
         return notFound();
       }
-      const relativePath = decodeAssetPath(pathname);
-      if (relativePath === undefined) {
-        return notFound();
-      }
-      if (relativePath === "api/v1" || relativePath.startsWith("api/v1/")) {
-        return notFound();
-      }
-
-      if (relativePath !== "") {
+      if (pathname.startsWith("/assets/")) {
+        const relativePath = decodeAssetPath(pathname);
+        if (relativePath === undefined) {
+          return notFound();
+        }
         const asset = await readAsset(root, relativePath, signal);
         if (asset !== undefined) {
           return assetResponse(asset, relativePath);
         }
-        if (
-          relativePath === "assets"
-          || relativePath.startsWith("assets/")
-          || path.posix.extname(relativePath) !== ""
-        ) {
-          return notFound();
-        }
+        return notFound();
+      }
+      if (pathname !== "/") {
+        return notFound();
       }
 
       const index = await readAsset(root, "index.html", signal);
@@ -68,7 +61,7 @@ export function createAdminStaticModule(assetRoot: string): AdminStaticModule {
 }
 
 function decodeAssetPath(pathname: string): string | undefined {
-  const encoded = pathname === "/admin" ? "" : pathname.slice("/admin/".length);
+  const encoded = pathname.slice(1);
   if (/%(?:00|2f|5c|25)/i.test(encoded)) {
     return undefined;
   }
@@ -79,10 +72,11 @@ function decodeAssetPath(pathname: string): string | undefined {
     return undefined;
   }
   const segments = decoded.split("/");
-  if (decoded.includes("\0") || decoded.includes("\\") || decoded.includes("%") || segments.some((part) => part === "." || part === "..")) {
+  if (decoded.includes("\0") || decoded.includes("\\") || decoded.includes("%")
+    || segments.some((part) => part === "" || part === "." || part === "..")) {
     return undefined;
   }
-  return segments.filter((part) => part !== "").join("/");
+  return segments.join("/");
 }
 
 async function readAsset(root: string, relativePath: string, signal: AbortSignal): Promise<Uint8Array | undefined> {

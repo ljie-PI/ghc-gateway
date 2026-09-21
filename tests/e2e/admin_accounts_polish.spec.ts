@@ -8,7 +8,7 @@ import {
 async function openAccounts(page: Page): Promise<AdminFixture> {
   await page.clock.install({ time: ADMIN_FIXTURE_NOW_MS });
   const fixture = await installAdminFixture(page);
-  await page.goto("/admin/#bootstrap_token=synthetic-accounts-bootstrap");
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
   const menu = page.getByRole("button", { name: "Open navigation" });
   if (await menu.isVisible()) await menu.click();

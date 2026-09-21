@@ -1,26 +1,14 @@
 import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { DEVICE_FLOW_TERMINAL_TTL_MS } from "../accounts/device_flow.js";
 import { RuntimeConfigSchema } from "../config/schema.js";
 import type {
-  AdminBootstrapResult,
   AdminModule,
   AdminRequestContext,
 } from "../gateway/create_gateway.js";
 import type { AdminEventQuery, AdminUsageQuery } from "../telemetry/admin.js";
 import { AdminManagementApi, AdminApiError, mapAdminError, type AdminApiDependencies } from "./api.js";
-import {
-  AdminAuth,
-  AdminAuthError,
-  readSessionCookie,
-  serializeExpiredSessionCookie,
-  serializeSessionCookie,
-} from "./auth.js";
 import { AdminEventStreamHub } from "./events.js";
 
-const BootstrapSchema = Type.Object({
-  token: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" }),
-}, { additionalProperties: false });
 const DeviceFlowStartSchema = Type.Object({ host: Type.String({ minLength: 1 }) }, { additionalProperties: false });
 const ExpectedRevisionSchema = Type.Object({ expectedRevision: Type.Integer({ minimum: 0 }) }, { additionalProperties: false });
 const DefaultAccountSchema = Type.Object({
@@ -78,28 +66,12 @@ const SEVERITIES = new Set(["info", "warning", "error"]);
 
 export interface AdminModuleDependencies extends AdminApiDependencies {
   readonly nowMs?: () => number;
-  readonly createToken?: () => string;
   readonly setInterval?: typeof setInterval;
   readonly clearInterval?: typeof clearInterval;
-  readonly setTimeout?: typeof setTimeout;
-  readonly clearTimeout?: typeof clearTimeout;
 }
 
 export function createAdminModule(dependencies: Readonly<AdminModuleDependencies>): AdminModule {
   const api = new AdminManagementApi(dependencies);
-  const auth = new AdminAuth(
-    dependencies.nowMs ?? Date.now,
-    dependencies.createToken,
-    dependencies.setTimeout,
-    dependencies.clearTimeout,
-  );
-  const flowOwners = new AdminDeviceFlowOwners(
-    auth,
-    api,
-    dependencies.setTimeout,
-    dependencies.clearTimeout,
-    dependencies.nowMs,
-  );
   const eventHub = new AdminEventStreamHub(
     dependencies.telemetry,
     api,
@@ -111,7 +83,7 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
   return {
     async handle(request, context) {
       if (closed) {
-        return failure(new AdminApiError("unauthenticated"), context.requestId);
+        return failure(new AdminApiError("not_ready"), context.requestId);
       }
       try {
         const bodyLimit = dependencies.runtimeConfig.read().config.limits.requestBodyBytes;
@@ -119,9 +91,7 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
           request,
           context,
           bodyLimit,
-          auth,
           api,
-          flowOwners,
           eventHub,
           dependencies.nowMs ?? Date.now,
         );
@@ -129,11 +99,8 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
         if (context.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
           return new Response(null);
         }
-        return failure(mapRouteError(error), context.requestId);
+        return failure(mapAdminError(error), context.requestId);
       }
-    },
-    mintBootstrap(): AdminBootstrapResult {
-      return closed ? { kind: "closed" } : auth.mintBootstrap();
     },
     close(): void {
       if (closed) {
@@ -142,8 +109,6 @@ export function createAdminModule(dependencies: Readonly<AdminModuleDependencies
       closed = true;
       dependencies.agents?.close();
       eventHub.close();
-      flowOwners.close();
-      auth.close();
     },
   };
 }
@@ -152,9 +117,7 @@ async function dispatch(
   request: Request,
   context: Readonly<AdminRequestContext>,
   bodyLimit: number,
-  auth: AdminAuth,
   api: AdminManagementApi,
-  flowOwners: AdminDeviceFlowOwners,
   events: AdminEventStreamHub,
   nowMs: () => number,
 ): Promise<Response> {
@@ -165,23 +128,8 @@ async function dispatch(
     throw new AdminApiError("not_found");
   }
   rejectQuery(url, route.query);
-
-  if (route.id === "bootstrap") {
-    requireOrigin(request.headers, context.listenerOrigin);
-    const body = checked(BootstrapSchema, await readJsonObject(request, bodyLimit, context.signal));
-    const session = auth.exchange(body.token);
-    const headers = responseHeaders(context.requestId);
-    headers.set("Set-Cookie", serializeSessionCookie(session.sessionId, session.absoluteExpiresAtMs));
-    return json(200, { data: auth.metadata(session) }, headers);
-  }
-
-  const sessionId = readSessionCookie(request.headers);
-  const session = auth.requireSession(sessionId);
   if (route.mutation) {
     requireOrigin(request.headers, context.listenerOrigin);
-    if (!auth.verifyCsrf(session, request.headers.get("x-ghcg-csrf"))) {
-      throw new AdminApiError("forbidden");
-    }
   }
 
   if (!route.body) {
@@ -190,16 +138,6 @@ async function dispatch(
   const body = route.body ? await readJsonObject(request, bodyLimit, context.signal) : undefined;
   let response: Response;
   switch (route.id) {
-  case "session":
-    response = json(200, { data: auth.metadata(session) }, responseHeaders(context.requestId));
-    break;
-  case "logout": {
-    auth.logout(sessionId);
-    const headers = responseHeaders(context.requestId, false);
-    headers.set("Set-Cookie", serializeExpiredSessionCookie());
-    response = new Response(null, { status: 204, headers });
-    break;
-  }
   case "status":
     response = success(api.status(context.activity), context.requestId);
     break;
@@ -212,25 +150,14 @@ async function dispatch(
   case "deviceStart": {
     const value = checked(DeviceFlowStartSchema, body);
     const flow = await api.startDeviceFlow(value.host, context.signal);
-    flowOwners.own(session.sessionId, flow.flowId, Date.parse(flow.expiresAt));
-    if (context.signal.aborted) {
-      await flowOwners.cancel(session.sessionId, flow.flowId);
-      context.signal.throwIfAborted();
-    }
     response = success(flow, context.requestId, 201);
     break;
   }
-  case "devicePoll": {
-    flowOwners.requireOwner(session.sessionId, route.parameter);
-    const result = await api.pollDeviceFlow(route.parameter, context.signal);
-    if (result.state !== "pending") {
-      flowOwners.retainTerminal(route.parameter);
-    }
-    response = success(result, context.requestId);
+  case "devicePoll":
+    response = success(await api.pollDeviceFlow(route.parameter, context.signal), context.requestId);
     break;
-  }
   case "deviceCancel":
-    response = success(await flowOwners.cancel(session.sessionId, route.parameter), context.requestId);
+    response = success(await api.cancelDeviceFlow(route.parameter), context.requestId);
     break;
   case "accountDelete": {
     const value = checked(ExpectedRevisionSchema, body);
@@ -292,7 +219,6 @@ async function dispatch(
       request.headers.get("last-event-id"),
       context.signal,
       context.activity,
-      (listener) => auth.watchSession(session.sessionId, listener),
     );
     response.headers.set("x-request-id", context.requestId);
     break;
@@ -303,94 +229,7 @@ async function dispatch(
   return response;
 }
 
-class AdminDeviceFlowOwners {
-  private readonly flows = new Map<string, {
-    readonly sessionId: string;
-    readonly unsubscribe: () => void;
-    expiryTimer: ReturnType<typeof setTimeout>;
-  }>();
-
-  constructor(
-    private readonly auth: AdminAuth,
-    private readonly api: AdminManagementApi,
-    private readonly setTimer: typeof setTimeout = setTimeout,
-    private readonly clearTimer: typeof clearTimeout = clearTimeout,
-    private readonly nowMs: () => number = Date.now,
-  ) {}
-
-  own(sessionId: string, flowId: string, expiresAtMs: number): void {
-    for (const ownedFlowId of this.flows.keys()) {
-      if (!this.api.hasDeviceFlow(ownedFlowId)) this.release(ownedFlowId);
-    }
-    try {
-      const unsubscribe = this.auth.watchSession(sessionId, () => {
-        void this.api.cancelDeviceFlow(flowId).then(
-          () => this.release(flowId, false),
-          () => this.release(flowId, false),
-        );
-      });
-      const expiryTimer = this.setTimer(() => {
-        void this.api.cancelDeviceFlow(flowId).then(
-          () => this.release(flowId),
-          () => this.release(flowId),
-        );
-      }, Math.max(0, expiresAtMs + DEVICE_FLOW_TERMINAL_TTL_MS - this.nowMs()));
-      this.flows.set(flowId, { sessionId, unsubscribe, expiryTimer });
-    } catch (error: unknown) {
-      void this.api.cancelDeviceFlow(flowId);
-      throw error;
-    }
-  }
-
-  async cancel(sessionId: string, flowId: string): ReturnType<AdminManagementApi["cancelDeviceFlow"]> {
-    this.requireOwner(sessionId, flowId);
-    const result = await this.api.cancelDeviceFlow(flowId);
-    if (result.state === "complete") {
-      this.retainTerminal(flowId);
-    } else {
-      this.release(flowId);
-    }
-    return result;
-  }
-
-  requireOwner(sessionId: string, flowId: string): void {
-    const owner = this.flows.get(flowId);
-    if (owner === undefined) throw new AdminApiError("not_found");
-    if (owner.sessionId !== sessionId) throw new AdminApiError("forbidden");
-  }
-
-  retainTerminal(flowId: string): void {
-    const owner = this.flows.get(flowId);
-    if (owner === undefined) return;
-    this.clearTimer(owner.expiryTimer);
-    owner.expiryTimer = this.setTimer(() => {
-      void this.api.cancelDeviceFlow(flowId).then(
-        () => this.release(flowId),
-        () => this.release(flowId),
-      );
-    }, DEVICE_FLOW_TERMINAL_TTL_MS);
-  }
-
-  release(flowId: string, unsubscribe = true): void {
-    const owner = this.flows.get(flowId);
-    this.flows.delete(flowId);
-    if (owner !== undefined) {
-      this.clearTimer(owner.expiryTimer);
-      if (unsubscribe) owner.unsubscribe();
-    }
-  }
-
-  close(): void {
-    for (const [flowId, owner] of this.flows) {
-      this.clearTimer(owner.expiryTimer);
-      owner.unsubscribe();
-      void this.api.cancelDeviceFlow(flowId);
-    }
-    this.flows.clear();
-  }
-}
-
-type RouteId = "bootstrap" | "session" | "logout" | "status" | "usage" | "accounts" | "deviceStart"
+type RouteId = "status" | "usage" | "accounts" | "deviceStart"
   | "devicePoll" | "deviceCancel" | "accountDelete" | "accountDefault" | "models" | "modelsRefresh" | "modelsPreferred"
   | "agentsGet" | "agentModels" | "agentsApply" | "agentsTakeover"
   | "configGet" | "configPut" | "historyGet" | "historyDelete" | "events" | "eventStream";
@@ -436,9 +275,6 @@ function parameterRoute(id: "devicePoll" | "deviceCancel" | "accountDelete", enc
 }
 
 const ROUTES = new Map<string, Omit<MatchedRoute, "parameter">>([
-  route("POST", "/admin/api/v1/auth/bootstrap", "bootstrap", true, true),
-  route("GET", "/admin/api/v1/auth/session", "session"),
-  route("POST", "/admin/api/v1/auth/logout", "logout", false, true),
   route("GET", "/admin/api/v1/status", "status"),
   route("GET", "/admin/api/v1/usage", "usage", false, false, ["window", "from", "to", "limit", "cursor", "accountId", "protocol", "resolvedModel", "outcome"]),
   route("GET", "/admin/api/v1/accounts", "accounts"),
@@ -690,13 +526,6 @@ function requireOrigin(headers: Headers, origin: string): void {
   }
 }
 
-function mapRouteError(error: unknown): AdminApiError {
-  if (error instanceof AdminAuthError) {
-    return new AdminApiError(error.code === "capacity" ? "capacity_exceeded" : "unauthenticated");
-  }
-  return mapAdminError(error);
-}
-
 function success(data: unknown, requestId: string, status = 200): Response {
   return json(status, { data }, responseHeaders(requestId));
 }
@@ -716,7 +545,7 @@ function statusFor(code: AdminApiError["code"]): number {
     agent_models_unavailable: 400,
     agent_busy: 409,
     validation_failed: 400,
-    unauthenticated: 401,
+    not_ready: 503,
     forbidden: 403,
     not_found: 404,
     revision_conflict: 409,
@@ -725,11 +554,9 @@ function statusFor(code: AdminApiError["code"]): number {
   }[code];
 }
 
-function responseHeaders(requestId: string, jsonContent = true): Headers {
+function responseHeaders(requestId: string): Headers {
   const headers = new Headers({ "Cache-Control": "no-store", "x-request-id": requestId });
-  if (jsonContent) {
-    headers.set("Content-Type", "application/json; charset=utf-8");
-  }
+  headers.set("Content-Type", "application/json; charset=utf-8");
   return headers;
 }
 

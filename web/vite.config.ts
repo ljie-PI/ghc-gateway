@@ -3,7 +3,7 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   root: "web",
-  base: "/admin/",
+  base: "/",
   plugins: [svelte()],
   build: {
     outDir: "../dist/admin",

@@ -24,7 +24,7 @@ async function navigateTo(page: Page, view: "Overview" | "Models"): Promise<void
 async function openModels(page: Page, configure?: (fixture: AdminFixture) => void): Promise<AdminFixture> {
   const fixture = await installAdminFixture(page);
   configure?.(fixture);
-  await page.goto("/admin/#bootstrap_token=synthetic-models-bootstrap");
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
   await navigateTo(page, "Models");
   await expect(page.getByRole("table")).toBeVisible();

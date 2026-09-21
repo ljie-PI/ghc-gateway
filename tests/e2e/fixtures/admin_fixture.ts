@@ -47,7 +47,6 @@ export interface AdminFixture {
   holdNextDevicePoll(): DevicePollHold;
   holdNextAgentsRead(): AgentsReadHold;
   readonly state: {
-    authenticated: boolean;
     accounts: AdminAccounts;
     models: AdminModels;
     config: AdminRuntimeConfig;
@@ -55,7 +54,6 @@ export interface AdminFixture {
     status: AdminStatus;
     events: AdminOperationalEvent[];
     failStatus: boolean;
-    rejectSecurity: boolean;
     conflictAccount: boolean;
     conflictConfig: boolean;
     conflictHistory: boolean;
@@ -115,7 +113,6 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       return { started, responseFinished, release };
     },
     state: {
-      authenticated: false,
       accounts: { defaultRevision: 1, defaultAccountId: github.accountId, items: [github] },
       models: {
         accountId: github.accountId,
@@ -156,7 +153,6 @@ export async function installAdminFixture(page: Page): Promise<AdminFixture> {
       status: status("healthy"),
       events: [operationalEvent(40, "gateway_started")],
       failStatus: false,
-      rejectSecurity: false,
       conflictAccount: false,
       conflictConfig: false,
       conflictHistory: false,
@@ -306,22 +302,6 @@ async function handle(
   const url = new URL(request.url());
   const path = url.pathname.slice("/admin/api/v1".length);
 
-  if (path === "/auth/bootstrap") {
-    fixture.state.authenticated = true;
-    return json(route, 200, session());
-  }
-  if (!fixture.state.authenticated) return failure(route, 401, "unauthenticated");
-  if (path === "/auth/session") return json(route, 200, session());
-  if (
-    request.method() !== "GET"
-    && (fixture.state.rejectSecurity || request.headers()["x-ghcg-csrf"] !== "csrf-memory-only")
-  ) {
-    return failure(route, 403, "forbidden");
-  }
-  if (path === "/auth/logout") {
-    fixture.state.authenticated = false;
-    return route.fulfill({ status: 204 });
-  }
   if (path === "/status") {
     if (fixture.state.failStatus) return failure(route, 500, "internal_error");
     return json(route, 200, fixture.state.status);
@@ -564,14 +544,6 @@ async function handle(
     });
   }
   return failure(route, 404, "not_found");
-}
-
-function session() {
-  return {
-    csrfToken: "csrf-memory-only",
-    idleExpiresAt: "2026-09-03T12:30:00.000Z",
-    absoluteExpiresAt: "2026-09-04T00:00:00.000Z",
-  };
 }
 
 function account(accountId: string, host: string, login: string): AdminAccount {

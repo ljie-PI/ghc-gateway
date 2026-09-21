@@ -10,7 +10,6 @@ export type {
   AdminRuntimeConfig,
   AdminStatus,
 } from "../../src/admin/api.js";
-export type { AdminSessionMetadata } from "../../src/admin/auth.js";
 export type {
   AdminEventPage,
   AdminOperationalEvent,

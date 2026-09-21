@@ -809,7 +809,7 @@ describe("device flow", () => {
         accountId: "github.com/42",
       });
       await closing;
-      expect(flows.has(started.flowId)).toBe(false);
+      await expect(flows.cancel(started.flowId)).resolves.toEqual({ status: "not_found" });
 
       await expect(flows.start("github.com")).rejects.toMatchObject({ name: "AbortError" });
     } finally {
@@ -891,7 +891,7 @@ describe("device flow", () => {
 
       await expect(poll).rejects.toMatchObject({ name: "AbortError" });
       await closing;
-      expect(flows.has(started.flowId)).toBe(false);
+      await expect(flows.cancel(started.flowId)).resolves.toEqual({ status: "not_found" });
     } finally {
       closeDatabase(database);
     }

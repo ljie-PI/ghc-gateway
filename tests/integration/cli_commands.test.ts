@@ -219,7 +219,6 @@ describe("CLI commands", () => {
   it("sends exact control operations to the selected data directory", async () => {
     const client = new ScriptedControlClient({
       "auth.login.start": [{ flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5, nextPollAt: "2026-09-01T23:45:05.000Z" }],
-      "admin.open": [{ opened: true }],
     });
     const stdout = new CaptureStream();
     const stderr = new CaptureStream();
@@ -227,11 +226,23 @@ describe("CLI commands", () => {
     expect(JSON.parse(stdout.chunks)).toEqual({ ok: true, data: { flowId: "flow", userCode: "ABCD-1234", verificationUri: "https://github.com/login/device", expiresAt: "2026-09-02T00:00:00.000Z", pollIntervalSeconds: 5, nextPollAt: "2026-09-01T23:45:05.000Z" } });
     expect(stderr.chunks).toBe("");
     expect(client.calls[0]).toEqual({ kind: "control", operation: "auth.login.start", args: { host: "ghe.example.com" }, dataDir: expect.stringContaining("selected") });
+  });
 
-    const adminOut = new CaptureStream();
-    expect(await runCli({ argv: ["--data-dir", "selected", "admin", "open"], homedir: "Q:/tmp/home", stdout: adminOut, stderr, controlClient: client })).toBe(0);
-    expect(adminOut.chunks).toBe(`${JSON.stringify({ opened: true }, null, 2)}\n`);
-    expect(client.calls[1]).toEqual({ kind: "admin.open", operation: "admin.open", args: {}, dataDir: expect.stringContaining("selected") });
+  it("rejects the removed Admin browser command without contacting local control", async () => {
+    const client = new ScriptedControlClient();
+    const stdout = new CaptureStream();
+    const stderr = new CaptureStream();
+
+    expect(await runCli({
+      argv: ["--data-dir", "selected", "admin", "open"],
+      homedir: "Q:/tmp/home",
+      stdout,
+      stderr,
+      controlClient: client,
+    })).toBe(2);
+    expect(stdout.chunks).toBe("");
+    expect(stderr.chunks).toBe("error: usage error\n");
+    expect(client.calls).toEqual([]);
   });
 
   it("polls interactive login until terminal and handles interruption without leaking tokens", async () => {
@@ -515,19 +526,12 @@ describe("CLI commands", () => {
 
   it("uses the protected loopback control transport when an identity exists", async () => {
     const calls: Array<{ readonly url: string; readonly init?: RequestInit }> = [];
-    const opened: string[] = [];
     const client = new HttpControlClient(async (url, init) => {
       calls.push({ url: String(url), ...(init === undefined ? {} : { init }) });
       const body = init?.body;
       if (typeof body === "string" && body.includes("\"operation\":\"config.set\"")) {
         return new Response(JSON.stringify({ error: { code: "revision_conflict", message: "revision conflict" } }), {
           status: 409,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      if (String(url).endsWith("/admin-bootstrap")) {
-        return new Response(JSON.stringify({ data: { token: "bootstrap-secret", expiresAt: "2026-09-02T00:01:00.000Z" } }), {
-          status: 200,
           headers: { "content-type": "application/json" },
         });
       }
@@ -542,9 +546,7 @@ describe("CLI commands", () => {
       instanceNonce: "nonce",
       controlToken: "control-token",
       port: 31_400,
-    }), async (url) => {
-      opened.push(url);
-    }, async () => "start");
+    }), async () => "start");
     await client.request("config.get", {}, { dataDir: "selected" });
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("http://127.0.0.1:31400/__ghcg/control/v1/command");
@@ -555,8 +557,6 @@ describe("CLI commands", () => {
     expect(calls[0]?.init?.body).toBe(JSON.stringify({ operation: "config.get", arguments: {} }));
 
     await expect(client.request("config.set", { key: "admission.activeMax", value: "2" }, { dataDir: "selected" })).rejects.toMatchObject({ code: "revision_conflict" });
-    expect(await client.adminOpen({ dataDir: "selected" })).toEqual({ opened: true });
-    expect(opened).toEqual(["http://127.0.0.1:31400/admin/#bootstrap_token=bootstrap-secret"]);
 
     const unavailable = new HttpControlClient(fetch, async () => null);
     await expect(unavailable.request("config.get", {}, { dataDir: "missing" })).rejects.toMatchObject({ code: "unavailable" });
@@ -568,7 +568,7 @@ describe("CLI commands", () => {
       controlToken: "control-token",
       instanceNonce: "nonce",
       port: 31_400,
-    }), undefined, async () => "start");
+    }), async () => "start");
     await expect(foreground.lifecycle("stop", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
     await expect(foreground.lifecycle("restart", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
 
@@ -581,7 +581,7 @@ describe("CLI commands", () => {
       controlToken: "control-token",
       instanceNonce: "nonce",
       port: 31_400,
-    }), undefined, async () => "start");
+    }), async () => "start");
     await expect(unreachable.lifecycle("status", { dataDir: "selected" })).resolves.toMatchObject({ state: "unreachable" });
   });
 
@@ -596,18 +596,18 @@ describe("CLI commands", () => {
     });
     const never = new HttpControlClient(async (_url, init) => await new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
-    }), endpoint, undefined, async () => "start");
+    }), endpoint, async () => "start");
     await expect(never.request("config.get", {}, { dataDir: "selected", timeoutMs: 1 })).rejects.toMatchObject({ code: "timeout" });
 
     const abort = new AbortController();
     const aborted = new HttpControlClient(async (_url, init) => await new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
       abort.abort();
-    }), endpoint, undefined, async () => "start");
+    }), endpoint, async () => "start");
     await expect(aborted.request("config.get", {}, { dataDir: "selected", signal: abort.signal })).rejects.toMatchObject({ code: "interrupted" });
   });
 
-  it("verifies process identity before sending management or admin secrets", async () => {
+  it("verifies process identity before sending management credentials", async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: {} })));
     const endpoint = async () => ({
       managed: true,
@@ -617,10 +617,9 @@ describe("CLI commands", () => {
       instanceNonce: "nonce",
       port: 31_400,
     });
-    const client = new HttpControlClient(fetchImpl, endpoint, undefined, async () => "windows:2");
+    const client = new HttpControlClient(fetchImpl, endpoint, async () => "windows:2");
 
     await expect(client.request("config.get", {}, { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
-    await expect(client.adminOpen({ dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
     await expect(client.lifecycle("status", { dataDir: "selected" })).rejects.toMatchObject({ code: "daemon_conflict" });
     expect(fetchImpl).not.toHaveBeenCalled();
   });

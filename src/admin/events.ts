@@ -27,7 +27,6 @@ interface Subscriber {
   readonly onAbort: () => void;
   readonly wake: () => void;
   readonly heartbeat: ReturnType<typeof setInterval>;
-  unsubscribeSession: (() => void) | undefined;
   replay: Uint8Array[];
   replayBytes: number;
   replayCursor: string | null;
@@ -65,7 +64,6 @@ export class AdminEventStreamHub {
     lastEventId: string | null,
     signal: AbortSignal,
     activity: GatewayActivity,
-    watchSession: (listener: () => void) => () => void,
   ): Promise<Response> {
     if (this.closed || this.subscribers.size >= ADMIN_EVENT_SUBSCRIBER_CAP) {
       throw new AdminApiError("capacity_exceeded");
@@ -77,7 +75,6 @@ export class AdminEventStreamHub {
     signal.throwIfAborted();
 
     let subscriber: Subscriber | undefined;
-    const unsubscribeSession = watchSession(() => this.closeSubscriber(subscriber));
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         const wake = (): void => {
@@ -106,7 +103,6 @@ export class AdminEventStreamHub {
           onAbort,
           wake,
           heartbeat: this.setTimer(() => this.enqueue(subscriber, encoder.encode(": keep-alive\n\n"), false, null), ADMIN_EVENT_HEARTBEAT_MS),
-          unsubscribeSession,
           queuedBytes: 0,
           queuedEvents: 0,
           waiting: undefined,
@@ -248,8 +244,6 @@ export class AdminEventStreamHub {
     if (!subscriber.signal.aborted) {
       subscriber.abortController.abort();
     }
-    subscriber.unsubscribeSession?.();
-    subscriber.unsubscribeSession = undefined;
     subscriber.queue.length = 0;
     subscriber.replay.length = 0;
     subscriber.replayBytes = 0;

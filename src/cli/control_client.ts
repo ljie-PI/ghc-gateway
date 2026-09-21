@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import path from "node:path";
 import { UNSUPPORTED_RUNTIME_MESSAGE } from "../runtime_support.js";
 import type { AccountSummary } from "../accounts/account_directory.js";
@@ -94,10 +93,6 @@ export interface CliLifecycleResult {
   readonly startedAt: string | null;
   readonly port: number | null;
   readonly dataDir: string;
-}
-
-export interface CliAdminOpenResult {
-  readonly opened: true;
 }
 
 export interface AdminAccount {
@@ -239,7 +234,6 @@ export interface ControlClient {
     args: ControlOperationMap[Operation]["args"],
     context: CliLifecycleContext,
   ): Promise<ControlOperationMap[Operation]["result"]>;
-  adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult>;
   close?(): Promise<void> | void;
 }
 
@@ -256,7 +250,7 @@ export type AuthenticatedControlIdentity = DaemonIdentity;
 
 export class ScriptedControlClient implements ControlClient {
   readonly calls: Array<{
-    readonly kind: "lifecycle" | "control" | "admin.open";
+    readonly kind: "lifecycle" | "control";
     readonly operation: string;
     readonly args: unknown;
     readonly dataDir?: string;
@@ -290,11 +284,6 @@ export class ScriptedControlClient implements ControlClient {
     return this.pop(operation) as ControlOperationMap[Operation]["result"];
   }
 
-  async adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult> {
-    this.calls.push({ kind: "admin.open", operation: "admin.open", args: {}, dataDir: context.dataDir });
-    return this.pop("admin.open") as CliAdminOpenResult;
-  }
-
   private pop(key: string): unknown {
     const values = this.script.get(key);
     if (values === undefined || values.length === 0) {
@@ -312,7 +301,6 @@ export class HttpControlClient implements ControlClient {
   constructor(
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly locateEndpoint: (dataDir: string) => Promise<ControlEndpoint | null> = readControlEndpoint,
-    private readonly openBrowser: (url: string) => Promise<void> | void = defaultOpenBrowser,
     private readonly processIdentity: (pid: number) => Promise<string | null> = captureProcessStartIdentity,
   ) {}
 
@@ -359,18 +347,6 @@ export class HttpControlClient implements ControlClient {
     return context.timeoutMs === undefined
       ? await request()
       : await withCliTimeout(request(), context.timeoutMs);
-  }
-
-  async adminOpen(context: CliLifecycleContext): Promise<CliAdminOpenResult> {
-    const endpoint = await this.requireEndpoint(context.dataDir);
-    await this.verifyEndpoint(endpoint);
-    const data = await this.controlRequest(endpoint, "POST", "/__ghcg/control/v1/admin-bootstrap", undefined, context);
-    const token = isObject(data) && typeof data.token === "string" ? data.token : null;
-    if (token === null) {
-      throw new CliError("remote_error");
-    }
-    await this.openBrowser(`http://127.0.0.1:${endpoint.port}/admin/#bootstrap_token=${encodeURIComponent(token)}`);
-    return { opened: true };
   }
 
   private async requireEndpoint(dataDir: string): Promise<ControlEndpoint> {
@@ -575,34 +551,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isNodeNotFound(error: unknown): boolean {
   return isObject(error) && error.code === "ENOENT";
-}
-
-async function defaultOpenBrowser(url: string): Promise<void> {
-  const command = browserCommand(url);
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command.file, command.args, {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    child.once("error", reject);
-    child.once("spawn", () => {
-      child.unref();
-      resolve();
-    });
-  }).catch(() => {
-    throw new CliError("unavailable");
-  });
-}
-
-function browserCommand(url: string): { readonly file: string; readonly args: readonly string[] } {
-  if (process.platform === "win32") {
-    return { file: "cmd", args: ["/c", "start", "", url] };
-  }
-  if (process.platform === "darwin") {
-    return { file: "open", args: [url] };
-  }
-  return { file: "xdg-open", args: [url] };
 }
 
 export function stoppedLifecycle(dataDir: string): CliLifecycleResult {

@@ -28,9 +28,9 @@ _Avoid_: Session, conversation log
 One live inference stream between a client and an upstream model.
 _Avoid_: Session, resumable stream
 
-**Admin Session**:
-The authenticated browser state used to access local management functions.
-_Avoid_: Session
+**Admin Management Interface**:
+The unauthenticated loopback management surface served by the listener root and `/admin/api/v1`; any local process that can connect may use it.
+_Avoid_: Admin Session, browser authentication
 
 **Semantic Checkpoint**:
 A completed Responses output item whose minimal history is safe to commit durably.

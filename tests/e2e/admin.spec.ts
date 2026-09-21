@@ -11,7 +11,7 @@ import {
 
 async function openAdmin(page: Page) {
   const fixture = await installAdminFixture(page);
-  await page.goto("/admin/#bootstrap_token=one-time-secret");
+  await page.goto("/");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   return fixture;
 }
@@ -71,23 +71,13 @@ function devicePollRequests(fixture: Awaited<ReturnType<typeof installAdminFixtu
   ));
 }
 
-test("bootstrap-and-session-expiry", async ({ page }) => {
-  const fixture = await openAdmin(page);
-  await expect(page).toHaveURL(/\/admin\/$/);
+test("workspace starts directly at the listener root and opens its event stream", async ({ page }) => {
+  const fixture = await installAdminFixture(page);
+  await page.goto("/");
+  await expect(page).toHaveURL((url) => url.pathname === "/" && url.search === "" && url.hash === "");
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+  await expect.poll(() => fixture.streamRequests.length).toBe(1);
   await recordAccessibilityEvidence(page);
-  expect(await page.evaluate(() => ({
-    local: localStorage.length,
-    session: sessionStorage.length,
-    body: document.body.textContent,
-  }))).toEqual(expect.objectContaining({ local: 0, session: 0 }));
-  fixture.state.authenticated = false;
-  await page.getByRole("button", { name: "Refresh" }).click();
-  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
-  await expect(page.getByText("admin session ended")).toBeVisible();
-  expect(fixture.requests.some((request) => request.url().endsWith("/auth/logout"))).toBe(false);
-  expect(fixture.requests.filter((request) => request.url().endsWith("/status"))).toHaveLength(2);
-  expect(fixture.requests.find((request) => request.url().endsWith("/auth/bootstrap"))?.postData())
-    .toBe("{\"token\":\"one-time-secret\"}");
 });
 
 test("github-and-ghes-account-lifecycle", async ({ page }) => {
@@ -110,8 +100,6 @@ test("github-and-ghes-account-lifecycle", async ({ page }) => {
   await expect(page.getByRole("alert")).toContainText("changed elsewhere");
   await expect(page.getByText("Enterprise Admin")).toBeVisible();
   await page.getByRole("button", { name: "Use this account" }).click();
-  expect(fixture.requests.find((request) => request.url().endsWith("/accounts/default"))?.headers()["x-ghcg-csrf"])
-    .toBe("csrf-memory-only");
   fixture.state.failAccountRemoval = true;
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("row")
@@ -158,13 +146,6 @@ test("device-flow disposal and terminal failures clean up polling", async ({ pag
   await advanceDeviceClock(page, fixture, 5_000);
   await expect(page.getByRole("alert")).toContainText("Authorization expired");
 
-  fixture.state.devicePollStates = ["pending"];
-  await page.getByRole("button", { name: "Start login" }).click();
-  fixture.state.authenticated = false;
-  await advanceDeviceClock(page, fixture, 5_000);
-  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
-  await advanceDeviceClock(page, fixture, 20_000);
-  expect(devicePollRequests(fixture)).toHaveLength(4);
 });
 
 test("device-flow keeps transient retry failures in progress without accepting stale responses", async ({ page }) => {
@@ -333,7 +314,7 @@ test("models view renders duplicate catalog IDs without crashing", async ({ page
   await expect(page.getByText("Duplicate Alpha", { exact: true })).toBeVisible();
 });
 
-test("config-revision-and-security-rejection", async ({ page }) => {
+test("config-revision-conflict", async ({ page }) => {
   const fixture = await openAdmin(page);
   await page.getByRole("button", { name: "Configuration" }).click();
   await expect(page.getByRole("heading", { name: "Configuration", exact: true })).toBeFocused();
@@ -343,9 +324,6 @@ test("config-revision-and-security-rejection", async ({ page }) => {
   fixture.state.conflictConfig = true;
   await page.getByRole("button", { name: "Apply configuration" }).click();
   await expect(page.getByRole("alert")).toContainText("changed elsewhere");
-  fixture.state.rejectSecurity = true;
-  await page.getByRole("button", { name: "Apply configuration" }).click();
-  await expect(page.getByRole("alert")).toContainText("security check rejected");
 });
 
 test("events-and-degraded-recovery", async ({ page }) => {
@@ -369,7 +347,7 @@ test("events-and-degraded-recovery", async ({ page }) => {
       + `id: 523\n${sse("operational", { kind: "operational", event: recovered })}`,
   ];
 
-  await page.goto("/admin/#bootstrap_token=event-secret");
+  await page.goto("/");
   await expect(page.getByRole("complementary", { name: "Primary navigation" }).getByText("connecting", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Gateway is degraded" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "Primary navigation" }).getByText("live", { exact: true })).toBeVisible();
@@ -394,15 +372,6 @@ test("events-and-degraded-recovery", async ({ page }) => {
   await page.getByRole("button", { name: "Overview" }).click();
   await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeFocused();
   await expect(page.getByRole("heading", { name: "Gateway is degraded" })).toHaveCount(0);
-});
-
-test("daemon-restart-invalidates-session", async ({ page }) => {
-  const fixture = await openAdmin(page);
-  fixture.state.authenticated = false;
-  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
-  await expect(page.getByText("admin session ended")).toBeVisible();
-  expect(fixture.requests.some((request) => request.url().endsWith("/auth/session"))).toBe(true);
-  expect(await page.evaluate(() => localStorage.length + sessionStorage.length)).toBe(0);
 });
 
 test("responsive shell centers the right column and contains long content", async ({ page }) => {
@@ -454,7 +423,7 @@ test("responsive shell centers the right column and contains long content", asyn
 
   await assertDocumentShape();
   const menu = page.getByRole("button", { name: "Open navigation" });
-  const sidebar = page.locator('[data-layout-region="navigation"]');
+  const sidebar = page.locator("[data-layout-region=\"navigation\"]");
   await expect(sidebar).toHaveAttribute("aria-hidden", "true");
   await expect(sidebar).toHaveAttribute("inert", "");
   await menu.click();
@@ -478,9 +447,9 @@ test("responsive shell centers the right column and contains long content", asyn
       await page.getByRole("button", { name: view }).click();
       await expect(page.getByRole("heading", { name: view, exact: true })).toBeFocused();
       const gaps = await page.evaluate(() => {
-        const column = document.querySelector<HTMLElement>('[data-layout-region="main-column"]')!
+        const column = document.querySelector<HTMLElement>("[data-layout-region=\"main-column\"]")!
           .getBoundingClientRect();
-        const frame = document.querySelector<HTMLElement>('[data-layout-region="content-frame"]')!
+        const frame = document.querySelector<HTMLElement>("[data-layout-region=\"content-frame\"]")!
           .getBoundingClientRect();
         return {
           left: frame.left - column.left,
@@ -493,19 +462,14 @@ test("responsive shell centers the right column and contains long content", asyn
   }
 });
 
-test("responsive authentication, empty, and error states stay contained", async ({ page }) => {
+test("responsive empty and error states stay contained", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 900 });
   const fixture = await installAdminFixture(page);
-  await page.goto("/admin/");
-  await expect(page.getByRole("heading", { name: "Admin session closed" })).toBeFocused();
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
   await expect(page.getByRole("main")).toHaveCount(1);
   await expect(page.locator("h1")).toHaveCount(1);
 
-  await page.evaluate(() => {
-    location.hash = "bootstrap_token=state-secret";
-  });
-  await page.getByRole("button", { name: "Try current session" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   fixture.state.accounts = { ...fixture.state.accounts, defaultAccountId: null, items: [] };
   await page.getByRole("button", { name: "Open navigation" }).click();
   await page.getByRole("button", { name: "Accounts" }).click();
@@ -536,7 +500,7 @@ test("live SSE deduplicates replay before applying the 512 event bound", async (
   ];
   fixture.state.streamHoldsMs = [1_000];
 
-  await page.goto("/admin/#bootstrap_token=dedupe-secret");
+  await page.goto("/");
   await page.getByRole("button", { name: "Events" }).click();
   const eventList = page.getByRole("list", { name: "Operational events" });
   await expect(eventList.getByRole("listitem")).toHaveCount(512);

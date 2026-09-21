@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AdminModule, LoopbackOrigin } from "../../src/gateway/create_gateway.js";
+import type { LoopbackOrigin } from "../../src/gateway/create_gateway.js";
 import { CliError, type ControlOperation, type ControlOperationMap } from "../../src/cli/control_client.js";
 import {
   createLocalControlModule,
@@ -19,17 +19,17 @@ const identity: LocalControlIdentity = Object.freeze({
 });
 
 describe("LocalControlModule", () => {
-  it("owns only the four exact route and method pairs", async () => {
+  it("owns only the three exact route and method pairs", async () => {
     const { control } = harness();
 
     expect((await handle(control, "GET", "/status")).status).toBe(200);
     expect((await handle(control, "POST", "/stop")).status).toBe(202);
-    expect((await handle(control, "POST", "/admin-bootstrap")).status).toBe(200);
     expect((await handle(control, "POST", "/command", commandBody("accounts.list", {}))).status).toBe(200);
 
     for (const [method, path] of [
       ["POST", "/status"],
       ["GET", "/stop"],
+      ["POST", "/admin-bootstrap"],
       ["GET", "/admin-bootstrap"],
       ["GET", "/command"],
       ["GET", "/status/"],
@@ -100,20 +100,6 @@ describe("LocalControlModule", () => {
     expect(fixture.stop).not.toHaveBeenCalled();
   });
 
-  it("uses the shared Admin bootstrap seam and hides capacity or closure", async () => {
-    const fixture = harness();
-    const issued = await handle(fixture.control, "POST", "/admin-bootstrap");
-    expect(await issued.json()).toEqual({ data: { token: "bootstrap-token", expiresAt: "2026-09-03T00:01:00.000Z" } });
-    expect(fixture.admin.mintBootstrap).toHaveBeenCalledOnce();
-
-    for (const result of [{ kind: "capacity" }, { kind: "closed" }] as const) {
-      vi.mocked(fixture.admin.mintBootstrap).mockReturnValueOnce(result);
-      const response = await handle(fixture.control, "POST", "/admin-bootstrap");
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ error: { code: "not_ready", message: "not ready" } });
-    }
-  });
-
   it("validates the command object and operation arguments with TypeBox without coercion", async () => {
     const fixture = harness();
     const invalid = [
@@ -169,7 +155,7 @@ describe("LocalControlModule", () => {
 
   it("rejects nonempty bodies on no-body routes and cancels their readers", async () => {
     const fixture = harness();
-    for (const [method, path] of [["GET", "/status"], ["POST", "/stop"], ["POST", "/admin-bootstrap"]] as const) {
+    for (const [method, path] of [["GET", "/status"], ["POST", "/stop"]] as const) {
       let cancelled = false;
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -184,7 +170,6 @@ describe("LocalControlModule", () => {
       expect(cancelled).toBe(true);
     }
     expect(fixture.stop).not.toHaveBeenCalled();
-    expect(fixture.admin.mintBootstrap).not.toHaveBeenCalled();
   });
 
   it("returns safe application error categories and uniform response headers", async () => {
@@ -260,14 +245,9 @@ function harness(options: {
   readonly identity?: LocalControlIdentity;
 } = {}) {
   const dispatcher = options.dispatcher ?? new ScriptedDispatcher();
-  const admin: AdminModule = {
-    handle: async () => new Response(null),
-    mintBootstrap: vi.fn(() => ({ kind: "issued", token: "bootstrap-token", expiresAt: "2026-09-03T00:01:00.000Z" } as const)),
-    close() {},
-  };
   const stop = vi.fn(async (_signal: AbortSignal) => undefined);
-  const control = createLocalControlModule({ identity: options.identity ?? identity, admin, dispatcher, requestStop: stop });
-  return { control, admin, dispatcher: dispatcher as ScriptedDispatcher, stop };
+  const control = createLocalControlModule({ identity: options.identity ?? identity, dispatcher, requestStop: stop });
+  return { control, dispatcher: dispatcher as ScriptedDispatcher, stop };
 }
 
 function commandBody<Operation extends ControlOperation>(operation: Operation, args: ControlOperationMap[Operation]["args"]): string {

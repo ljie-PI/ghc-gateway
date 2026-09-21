@@ -51,6 +51,18 @@ async function capabilityModels(entries: readonly { readonly id: string; readonl
 }
 
 describe("agent configuration projection", () => {
+  it("accepts the canonical loopback origin for default HTTP port", () => {
+    const projected = projectAgent(
+      "claude",
+      null,
+      mappings,
+      "http://127.0.0.1",
+      "unused",
+      models,
+      null,
+    );
+    expect(JSON.parse(projected.config.toString()).env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1");
+  });
   it("exports extra Claude mappings as menu options, not a Subagent override", () => {
     const rows = [...mappings, { modelId: "extra-one", displayName: "Extra" }, { modelId: "extra-two", displayName: "Other" }];
     const available = [...models, ...["extra-one", "extra-two"].map((modelId) => ({ ...models[1]!, modelId }))];

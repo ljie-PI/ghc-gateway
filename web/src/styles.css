@@ -37,7 +37,6 @@ button:disabled { color: #8d8585; background: var(--soft); cursor: default; }
 button.primary, .button.primary { background: var(--ink); border-color: var(--ink); color: var(--canvas); }
 button.primary:hover, .button.primary:hover { background: #0f0000; }
 button.primary:disabled { background: var(--panel); border-color: var(--line); color: var(--muted); }
-button.text-button { min-height: 36px; padding: 2px 5px; border-color: transparent; background: transparent; }
 button:focus-visible, .button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
 textarea:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--focus);
@@ -137,9 +136,8 @@ small, .small { font-size: 14px; }
   color: var(--muted);
   font-size: 13px;
 }
-.sidebar-foot .text-button { justify-self: start; margin-top: 8px; padding-inline: 0; }
 .status-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
-.status-dot.reconnecting, .status-dot.stopped { background: var(--amber); }
+.status-dot.reconnecting { background: var(--amber); }
 .main-column { min-width: 0; padding: 30px clamp(24px, 3vw, 56px) 48px; }
 .content-frame { width: 100%; max-width: 1100px; min-width: 0; margin-inline: auto; }
 .mobile-menu { display: none; min-height: 44px; margin-bottom: 20px; padding: 4px 9px; }
@@ -342,11 +340,6 @@ tr.current-row > td:last-child, .account-table tr > td:last-child { padding-righ
 .event-row summary { font-weight: 700; text-transform: capitalize; }
 .event-row pre { margin-top: 10px; padding: 12px; background: var(--soft); color: var(--muted); font-size: 13px; }
 .load-more { margin-top: 18px; }
-
-.auth-stage { display: grid; min-height: 100vh; place-content: center; padding: 32px; text-align: center; }
-.auth-mark { width: 46px; height: 46px; margin: 0 auto 22px; color: var(--ink); }
-.signed-out { max-width: 540px; padding: 30px; border: 1px solid var(--line); background: var(--soft); }
-.signed-out .status-dot { margin-bottom: 15px; }
 
 @media (max-width: 1100px) {
   :root { --sidebar-width: 256px; }

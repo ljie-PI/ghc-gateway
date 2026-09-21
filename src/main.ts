@@ -383,7 +383,6 @@ export async function composeProductionDaemonGateway(
     });
     const control = createLocalControlModule({
       identity: composition.identity,
-      admin,
       dispatcher,
       requestStop: composition.requestStop,
     });
