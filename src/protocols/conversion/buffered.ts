@@ -331,11 +331,13 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
   }
   flushMessage();
   const finishReason = messagesFinishReason(singleMember(payload, "stop_reason"));
-  for (let index = 0; index < items.length; index += 1) {
+  let hasFollower = false;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
     if (item?.type === "reasoning") {
-      const hasFollower = items.slice(index + 1).some((candidate) => candidate.type === "message" || candidate.type === "tool_call");
       items[index] = { ...item, status: hasFollower || finishReason === "stop" || finishReason === "tool_calls" ? "completed" : "incomplete" };
+    } else if (item?.type === "message" || item?.type === "tool_call") {
+      hasFollower = true;
     }
   }
   const responseItems = finishReason === "refusal"

@@ -80,6 +80,7 @@ async function* decodeChatStream(
   let reasoningOpen = false;
   let reasoningClosed = false;
   const observedThinkingBlocks = new Map<number, ChatThinkingBlock>();
+  const pendingThinkingKeys: string[] = [];
   let toolObserved = false;
   const pendingPostTool: SemanticStreamEvent[] = [];
   const reasoningKey = "chat:reasoning:generic";
@@ -87,6 +88,22 @@ async function* decodeChatStream(
   const observeThinkingBlocks = function* (
     blocks: readonly ChatThinkingBlock[],
   ): Iterable<SemanticStreamEvent> {
+    if (observedThinkingBlocks.size === 0 && chatReasoning.length > 0 && blocks.length === 1) {
+      const block = blocks[0] as ChatThinkingBlock;
+      if (block.type !== "thinking" || block.thinking !== chatReasoning) invalid();
+      if (reasoningClosed || chatText.length > 0 || chatRefusal.length > 0 || toolObserved) invalid();
+      budget.reserveEntry();
+      observedThinkingBlocks.set(0, block);
+      if (block.signature !== undefined && block.signature.length > 0) {
+        budget.reserve(block.signature);
+        yield {
+          kind: "reasoning_start",
+          key: reasoningKey,
+          messagesState: { type: "thinking", signature: block.signature },
+        };
+      }
+      return;
+    }
     for (let index = 0; index < blocks.length; index += 1) {
       const block = blocks[index] as ChatThinkingBlock;
       const existing = observedThinkingBlocks.get(index);
@@ -108,7 +125,7 @@ async function* decodeChatStream(
           messagesState: { type: "redacted_thinking", data: block.data },
         };
         yield { kind: "semantic_progress" };
-        yield { kind: "reasoning_done", key, status: "completed" };
+        pendingThinkingKeys.push(key);
         continue;
       }
       if (block.thinking.length === 0 && (block.signature === undefined || block.signature.length === 0)) continue;
@@ -133,16 +150,24 @@ async function* decodeChatStream(
       } else {
         yield { kind: "semantic_progress" };
       }
-      yield { kind: "reasoning_done", key, status: "completed" };
+      pendingThinkingKeys.push(key);
     }
   };
   const closeReasoning = function* (
     status: "completed" | "incomplete" = "completed",
   ): Iterable<SemanticStreamEvent> {
-    if (!reasoningOpen) return;
-    reasoningOpen = false;
-    reasoningClosed = true;
-    yield { kind: "reasoning_done", key: reasoningKey, status };
+    if (!reasoningOpen && pendingThinkingKeys.length === 0) return;
+    let closed = false;
+    if (reasoningOpen) {
+      reasoningOpen = false;
+      yield { kind: "reasoning_done", key: reasoningKey, status };
+      closed = true;
+    }
+    for (const key of pendingThinkingKeys.splice(0)) {
+      yield { kind: "reasoning_done", key, status };
+      closed = true;
+    }
+    reasoningClosed ||= closed;
   };
   const startReadyTools = function* (): Iterable<SemanticStreamEvent> {
     for (;;) {
@@ -965,6 +990,7 @@ async function* decodeResponsesStream(
   const observedContent = new Map<string, "output_text" | "refusal">();
   const addedOutputIndexes = new Set<number>();
   const doneOutputIndexes = new Set<number>();
+  const completedReasoningText = new Set<string>();
   const completedReasoningParts = new Set<string>();
   let pendingStatuslessReasoning: { readonly outputIndex: number; readonly key: string } | undefined;
   const finishPendingStatuslessReasoning = function* (
@@ -1329,7 +1355,7 @@ async function* decodeResponsesStream(
         const text = stringMember(part, "text");
         if (text === undefined) invalid();
         const partKey = responseReasoningPartKey(identity.key, "content", contentIndex);
-        if (completedReasoningParts.has(partKey)) invalid();
+        if (type === "response.content_part.added" && completedReasoningParts.has(partKey)) invalid();
         observeResponseReasoningPart(identity, partKey, budget);
         yield { kind: "reasoning_start", key: identity.key, itemId: identity.itemId };
         yield {
@@ -1383,7 +1409,11 @@ async function* decodeResponsesStream(
       );
       const summaryIndex = requiredReasoningPartIndex(payload, "summary_index");
       const partKey = responseReasoningPartKey(identity.key, "summary", summaryIndex);
-      if (doneOutputIndexes.has(requiredOutputIndex(payload)) || completedReasoningParts.has(partKey)) invalid();
+      if (
+        doneOutputIndexes.has(requiredOutputIndex(payload))
+        || completedReasoningParts.has(partKey)
+        || (type === "response.reasoning_summary_part.added" && completedReasoningText.has(partKey))
+      ) invalid();
       observeResponseReasoningPart(identity, partKey, budget);
       const part = objectMember(payload, "part");
       if (part === undefined || stringMember(part, "type") !== "summary_text") invalid();
@@ -1420,10 +1450,15 @@ async function* decodeResponsesStream(
       const presentation = summary ? "summary" as const : "content" as const;
       const partIndex = requiredReasoningPartIndex(payload, summary ? "summary_index" : "content_index");
       const partKey = responseReasoningPartKey(identity.key, presentation, partIndex);
-      if (doneOutputIndexes.has(requiredOutputIndex(payload)) || completedReasoningParts.has(partKey)) invalid();
+      if (
+        doneOutputIndexes.has(requiredOutputIndex(payload))
+        || completedReasoningParts.has(partKey)
+        || completedReasoningText.has(partKey)
+      ) invalid();
       observeResponseReasoningPart(identity, partKey, budget);
       const text = singleMember(payload, done ? "text" : "delta");
       if (typeof text !== "string") invalid();
+      if (done) completedReasoningText.add(partKey);
       yield {
         kind: done ? "reasoning_snapshot" : "reasoning_delta",
         key: identity.key,

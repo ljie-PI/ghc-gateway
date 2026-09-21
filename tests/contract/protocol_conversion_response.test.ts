@@ -185,6 +185,49 @@ describe("shared conversion response codecs", () => {
     expect(wire).toContain("\"data\": \"opaque2\"");
   });
 
+  it("upgrades streamed Chat reasoning with an identical final signed snapshot without duplication", async () => {
+    const source = [
+      chatSse({
+        id: "chat_signed_upgrade",
+        choices: [{ index: 0, delta: { reasoning_content: "plan" }, finish_reason: null }],
+      }),
+      chatSse({
+        id: "chat_signed_upgrade",
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: "answer",
+            thinking_blocks: [{ type: "thinking", thinking: "plan", signature: "sig" }],
+          },
+          finish_reason: "stop",
+        }],
+      }),
+      "data: [DONE]\n\n",
+    ].join("");
+    const wire = wireText(await collectStream("chat", "messages", chunks(encoder.encode(source))));
+    expect(wire.match(/"thinking": "plan"/gu)).toHaveLength(1);
+    expect(wire).toContain("\"signature\": \"sig\"");
+  });
+
+  it("marks signed Chat reasoning-only truncation incomplete", async () => {
+    const source = chatSse({
+      id: "chat_signed_incomplete",
+      choices: [{
+        index: 0,
+        delta: { thinking_blocks: [{ type: "thinking", thinking: "partial", signature: "sig" }] },
+        finish_reason: "length",
+      }],
+    }) + "data: [DONE]\n\n";
+    const events = responseDataEvents(wireText(await collectStream(
+      "chat", "responses", chunks(encoder.encode(source)),
+    )));
+    const terminal = events.find((event) => event.type === "response.incomplete") as {
+      response?: { output?: Array<Record<string, unknown>> };
+    };
+    expect(terminal.response?.output).toMatchObject([{ type: "reasoning", status: "incomplete" }]);
+  });
+
   it("rejects a signed Chat thinking block first observed after answer text", async () => {
     const source = [
       chatSse({ id: "chat_late_signed", choices: [{ index: 0, delta: { content: "answer" }, finish_reason: null }] }),
@@ -591,7 +634,22 @@ describe("shared conversion response codecs", () => {
         item_id: "rs_part", output_index: 0, content_index: 0, delta: "late",
       }),
     ].join("");
-    for (const source of [doneThenDelta, partDoneThenDelta]) {
+    const textDoneThenDelta = [
+      responseEvent(0, "response.output_item.added", {
+        output_index: 0,
+        item: { id: "rs_text_done", type: "reasoning", status: "in_progress", summary: [], content: [] },
+      }),
+      responseEvent(1, "response.reasoning_text.delta", {
+        item_id: "rs_text_done", output_index: 0, content_index: 0, delta: "done",
+      }),
+      responseEvent(2, "response.reasoning_text.done", {
+        item_id: "rs_text_done", output_index: 0, content_index: 0, text: "done",
+      }),
+      responseEvent(3, "response.reasoning_text.delta", {
+        item_id: "rs_text_done", output_index: 0, content_index: 0, delta: "late",
+      }),
+    ].join("");
+    for (const source of [doneThenDelta, partDoneThenDelta, textDoneThenDelta]) {
       await expect(async () => {
         for await (const _emission of convertProtocolStream(
           chunks(encoder.encode(source)), streamContext("responses", "chat"),
