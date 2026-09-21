@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { convertBufferedPlannedResponse, convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
 import { planProtocolExecution } from "../../src/protocols/conversion/planner.js";
@@ -650,6 +650,8 @@ describe("shared conversion response codecs", () => {
   it.each([
     "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
     "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":{\"invalid\":true}},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":{\"invalid\":true}},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_text\":{\"invalid\":true}},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
   ])("rejects malformed Chat streams instead of returning empty success", async (source) => {
     await expect(async () => {
       for await (const _emission of convertProtocolStream(
@@ -3814,64 +3816,139 @@ describe("shared conversion response codecs", () => {
     })).rejects.toMatchObject({ failure: { kind: "upstream_timeout" } });
   });
 
-  it("treats omitted reasoning as semantic progress for the first-semantic deadline", async () => {
-    async function* reasoningThenAnswer(): AsyncIterable<Uint8Array> {
-      yield encoder.encode(
-        "data: {\"id\":\"reasoning\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"plan\"},\"finish_reason\":null}]}\n\n",
-      );
-      await new Promise((resolve) => setTimeout(resolve, 80));
-      yield encoder.encode([
-        "data: {\"id\":\"answer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: [DONE]\n\n",
-      ].join(""));
-    }
-    const config = defaultRuntimeConfigSnapshot();
-    const signal = new AbortController().signal;
-    const response = await createConvertedStreamResponse({
-      upstream: {
-        status: 200,
-        headers: new Headers({ "content-type": "text/event-stream" }),
-        bytes: reasoningThenAnswer(),
-        async cancel() {},
-      },
-      plan: {
-        kind: "converted",
-        source: "messages",
-        target: "chat",
-        stream: true,
-        requestModel: "target",
-        request: {
-          body: { kind: "object", members: [] },
-          bytes: encoder.encode("{}"),
-          stream: true,
-          hasVisionInput: false,
-          initiator: "user",
-          messagesBetaFeatures: [],
-          degradations: ["reasoning.presentation_omitted"],
-        },
-      },
-      scope: {
-        requestId: "req_reasoning_progress",
-        signal,
-        deliverySignal: signal,
-        config: {
-          ...config,
-          timeouts: { ...config.timeouts, firstByteMs: 50 },
-        },
-        attempt: createRequestAttempt({
-          requestId: "req_reasoning_progress",
-          protocol: "anthropic",
-          abortedErrorCount: 1,
-        }),
-      },
-      model: "target",
-      createUuid: () => "00000000-0000-4000-8000-000000000104",
-      nowUnixSeconds: () => 1_700_000_000,
-      headers: {},
-      onTerminal: () => undefined,
-    });
-    expect(await response.text()).toContain("\"text\": \"ok\"");
-  });
+  it.each(["reasoning_content", "reasoning_text"])(
+    "treats omitted Chat %s as semantic progress for the first-semantic deadline",
+    async (field) => {
+      vi.useFakeTimers();
+      async function* reasoningThenAnswer(): AsyncIterable<Uint8Array> {
+        yield encoder.encode(capturedChatReasoningEvent(field, "plan"));
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        yield encoder.encode([
+          "data: {\"id\":\"answer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+          "data: [DONE]\n\n",
+        ].join(""));
+      }
+      try {
+        const config = defaultRuntimeConfigSnapshot();
+        const signal = new AbortController().signal;
+        const response = await createConvertedStreamResponse({
+          upstream: {
+            status: 200,
+            headers: new Headers({ "content-type": "text/event-stream" }),
+            bytes: reasoningThenAnswer(),
+            async cancel() {},
+          },
+          plan: {
+            kind: "converted",
+            source: "messages",
+            target: "chat",
+            stream: true,
+            requestModel: "target",
+            request: {
+              body: { kind: "object", members: [] },
+              bytes: encoder.encode("{}"),
+              stream: true,
+              hasVisionInput: false,
+              initiator: "user",
+              messagesBetaFeatures: [],
+              degradations: ["reasoning.presentation_omitted"],
+            },
+          },
+          scope: {
+            requestId: "req_reasoning_progress",
+            signal,
+            deliverySignal: signal,
+            config: {
+              ...config,
+              timeouts: { ...config.timeouts, firstByteMs: 50 },
+            },
+            attempt: createRequestAttempt({
+              requestId: "req_reasoning_progress",
+              protocol: "anthropic",
+              abortedErrorCount: 1,
+            }),
+          },
+          model: "target",
+          createUuid: () => "00000000-0000-4000-8000-000000000104",
+          nowUnixSeconds: () => 1_700_000_000,
+          headers: {},
+          onTerminal: () => undefined,
+        });
+        const responseText = response.text();
+        await vi.advanceTimersByTimeAsync(80);
+        expect(await responseText).toContain("\"text\": \"ok\"");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["reasoning_content", "reasoning_text"])(
+    "does not let empty Chat %s satisfy the first-semantic deadline",
+    async (field) => {
+      vi.useFakeTimers();
+      async function* emptyReasoningThenAnswer(): AsyncIterable<Uint8Array> {
+        yield encoder.encode(capturedChatReasoningEvent(field, ""));
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        yield encoder.encode([
+          "data: {\"id\":\"answer\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\n",
+          "data: [DONE]\n\n",
+        ].join(""));
+      }
+      try {
+        const config = defaultRuntimeConfigSnapshot();
+        const signal = new AbortController().signal;
+        const response = createConvertedStreamResponse({
+          upstream: {
+            status: 200,
+            headers: new Headers({ "content-type": "text/event-stream" }),
+            bytes: emptyReasoningThenAnswer(),
+            async cancel() {},
+          },
+          plan: {
+            kind: "converted",
+            source: "responses",
+            target: "chat",
+            stream: true,
+            requestModel: "target",
+            request: {
+              body: { kind: "object", members: [] },
+              bytes: encoder.encode("{}"),
+              stream: true,
+              hasVisionInput: false,
+              initiator: "user",
+              messagesBetaFeatures: [],
+              degradations: ["reasoning.presentation_omitted"],
+            },
+          },
+          scope: {
+            requestId: `req_empty_${field}`,
+            signal,
+            deliverySignal: signal,
+            config: {
+              ...config,
+              timeouts: { ...config.timeouts, firstByteMs: 30 },
+            },
+            attempt: createRequestAttempt({
+              requestId: `req_empty_${field}`,
+              protocol: "openai_responses_bridge",
+              abortedErrorCount: 1,
+            }),
+          },
+          model: "target",
+          createUuid: () => "00000000-0000-4000-8000-000000000104",
+          nowUnixSeconds: () => 1_700_000_000,
+          headers: {},
+          onTerminal: () => undefined,
+        });
+        const assertion = expect(response).rejects.toMatchObject({ failure: { kind: "upstream_timeout" } });
+        await vi.advanceTimersByTimeAsync(80);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("treats substantive Responses reasoning done snapshots as first-semantic progress", async () => {
     async function* reasoningThenAnswer(): AsyncIterable<Uint8Array> {
@@ -4881,6 +4958,22 @@ function decoded(bytes: Uint8Array): Record<string, unknown> {
 
 function chatSse(payload: Readonly<Record<string, unknown>>): string {
   return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+function capturedChatReasoningEvent(field: string, value: string): string {
+  return chatSse({
+    choices: [{ index: 0, delta: { content: null, role: "assistant", [field]: value } }],
+    created: 1_788_875_433,
+    id: "captured_reasoning",
+    usage: {
+      completion_tokens: 0,
+      prompt_tokens: 0,
+      prompt_tokens_details: { cached_tokens: 0 },
+      total_tokens: 0,
+    },
+    model: "gemini-3.5-flash",
+    copilot_usage: { token_details: [], total_nano_aiu: 0 },
+  });
 }
 
 function messageEvent(type: string, payload: Readonly<Record<string, unknown>>): string {
