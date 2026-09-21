@@ -491,8 +491,15 @@ export class SemanticItemLedger {
       reasoning.messagesState = messagesState;
     }
     if (opaqueState !== undefined) {
-      if (reasoning.opaqueState !== undefined && !sameOpaqueState(reasoning.opaqueState, opaqueState)) invalid();
-      if (reasoning.opaqueState === undefined) this.reserveOpaqueState(opaqueState);
+      if (reasoning.opaqueState !== undefined && !sameOpaqueState(reasoning.opaqueState, opaqueState)) {
+        if (reasoning.frozen && opaqueState.kind === "responses_item") {
+          this.reserveOpaqueState(opaqueState);
+        } else {
+          invalid();
+        }
+      } else if (reasoning.opaqueState === undefined) {
+        this.reserveOpaqueState(opaqueState);
+      }
       reasoning.opaqueState = opaqueState;
     }
     return reasoning;

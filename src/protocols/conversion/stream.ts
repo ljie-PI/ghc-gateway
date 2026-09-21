@@ -334,6 +334,7 @@ class ChatEmitter implements StreamEmitter {
   }>();
   private readonly responseFrontier = new ResponseEmissionFrontier();
   private readonly carrierTokens = new Map<string, string>();
+  private readonly emittedReasoningItems = new Set<string>();
 
   constructor(private readonly context: Readonly<StreamConversionContext>) {
     this.id = `chatcmpl_${context.createUuid()}`;
@@ -453,7 +454,10 @@ class ChatEmitter implements StreamEmitter {
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
     if (this.sourceResponses) {
-      yield* this.emitBufferedResponseItems(items);
+      yield* this.emitBufferedResponseItems(
+        items,
+        terminal.status === "completed" && items.some((item) => item.type === "tool_call"),
+      );
     }
     if (!this.roleSent) {
       yield this.chunk(wireObject([["role", "assistant"], ["content", ""]]));
@@ -474,10 +478,13 @@ class ChatEmitter implements StreamEmitter {
     yield { kind: "wire", bytes: encodeOpenaiChatCompletionsDone() };
   }
 
-  private *emitBufferedResponseItems(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
+  private *emitBufferedResponseItems(
+    items: readonly SemanticResponseItem[],
+    allowCarriers = true,
+  ): Iterable<ConvertedStreamEmission> {
     for (const item of items) {
       if (item.type === "reasoning") {
-        yield* this.emitReasoningItem(item);
+        yield* this.emitReasoningItem(item, allowCarriers);
         continue;
       }
       if (item.type === "message") {
@@ -562,7 +569,7 @@ class ChatEmitter implements StreamEmitter {
       const reasoning = this.pendingReasoning.get(reasoningKey);
       if (reasoning !== undefined) {
         this.pendingReasoning.delete(reasoningKey);
-        yield* this.emitReasoningItem(reasoning);
+        yield* this.emitReasoningItem(reasoning, false);
       }
       const toolKey = responseToolKey(this.responseFrontier.currentItemIndex());
       const readyTool = this.pendingTools.get(toolKey);
@@ -624,6 +631,7 @@ class ChatEmitter implements StreamEmitter {
 
   private *emitReasoningItem(
     item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+    allowCarrier = true,
   ): Iterable<ConvertedStreamEmission> {
     for (const part of item.parts) {
       const key = part.key ?? `${item.key ?? "reasoning"}:${part.presentation}:${part.index}`;
@@ -632,10 +640,18 @@ class ChatEmitter implements StreamEmitter {
       const remaining = part.text.slice(streamed.length);
       if (remaining.length > 0) yield* this.emitReasoningDelta(key, remaining);
     }
-    if (this.context.carrier !== undefined && item.opaqueState?.kind === "responses_item") {
+    const identity = item.key ?? item.itemId;
+    if (
+      allowCarrier
+      && identity !== undefined
+      && !this.emittedReasoningItems.has(identity)
+      && this.context.carrier !== undefined
+      && item.opaqueState?.kind === "responses_item"
+    ) {
       const token = this.carrierToken(item, "chat");
       const state = replaceEncryptedContent(item.opaqueState.item, token);
       yield this.chunk(wireObject([["reasoning_items", wireArray([state])]]));
+      this.emittedReasoningItems.add(identity);
     }
   }
 
@@ -959,6 +975,7 @@ class MessagesEmitter implements StreamEmitter {
 
   private *emitReasoning(
     item: Extract<SemanticResponseItem, { readonly type: "reasoning" }>,
+    allowCarrier = true,
   ): Iterable<ConvertedStreamEmission> {
     if (item.key === undefined || this.emittedReasoning.has(item.key)) return;
     if (
@@ -967,7 +984,7 @@ class MessagesEmitter implements StreamEmitter {
     ) return;
     yield* this.closeActiveText();
     const index = this.nextIndex++;
-    if (this.context.carrier !== undefined && item.opaqueState?.kind === "responses_item") {
+    if (allowCarrier && this.context.carrier !== undefined && item.opaqueState?.kind === "responses_item") {
       let token = this.carrierTokens.get(item.key);
       if (token === undefined) {
         token = createStreamCarrier(item, this.context, "messages");
@@ -1052,7 +1069,7 @@ class MessagesEmitter implements StreamEmitter {
       const reasoning = this.pendingReasoning.get(reasoningKey);
       if (reasoning !== undefined) {
         this.pendingReasoning.delete(reasoningKey);
-        yield* this.emitReasoning(reasoning);
+        yield* this.emitReasoning(reasoning, false);
       }
       const toolKey = responseToolKey(this.responseFrontier.currentItemIndex());
       const tool = this.tools.get(toolKey);

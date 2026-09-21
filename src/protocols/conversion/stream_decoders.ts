@@ -2135,6 +2135,15 @@ function* responseReasoningItemEvents(
   if (alreadyDone) {
     const observed = identity.finalItem ?? identity.doneItem;
     if (observed === undefined || !sameSemanticReasoning(observed, reasoning)) invalid();
+    if (reasoning.opaqueState !== undefined) {
+      yield {
+        kind: "reasoning_start",
+        key: identity.key,
+        itemId: identity.itemId,
+        opaqueState: reasoning.opaqueState,
+      };
+    }
+    identity.finalItem = reasoning;
     return;
   }
   if (complete && reasoning.opaqueState !== undefined) {

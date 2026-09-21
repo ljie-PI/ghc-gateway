@@ -95,8 +95,11 @@ presented to Anthropic as native ciphertext. Reported reasoning-token details ar
 estimating them from text.
 
 Opaque carriers use `ghcg-rsn-v1:<source_kind>:<wire_protocol>:<uuid>` in documented reasoning-state
-slots. They are scoped to the bound account, model, upstream origin, source protocol, wire protocol,
-and conversion version. Each carrier is limited to 4 MiB, aggregate carrier and Responses replay
+slots. Responses-origin state uses Chat `assistant.reasoning_items[].encrypted_content` or Messages
+`thinking.signature`/`redacted_thinking.data`; Chat- and Messages-origin state uses a Responses
+reasoning item's `encrypted_content`. The restored state always returns to its original source
+protocol. Carriers are scoped to the bound account, model, upstream origin, source protocol, wire
+protocol, and conversion version. Each carrier is limited to 4 MiB, aggregate carrier and Responses replay
 storage is limited to 32 MiB with oldest-first eviction, and the default retention is 7 days.
 Converted Responses History v2 retains only ordered reasoning-and-call groups needed for tool results;
 existing v1 call-only checkpoints remain readable.

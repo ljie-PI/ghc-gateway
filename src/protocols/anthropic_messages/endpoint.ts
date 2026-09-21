@@ -124,6 +124,7 @@ async function executeAnthropicMessages(
   }
   usage.setResolvedModel(resolved.upstreamModel);
   const stream = readStream(request.body);
+  scope.diagnostics?.stage("account_binding");
   const copilot = await bindCopilot(dependencies.copilot, account, scope.signal);
   const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
     accountId: account.accountId,

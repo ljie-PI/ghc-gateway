@@ -131,6 +131,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         ...(requestedModel === undefined ? {} : { requestedModel }),
       }, catalog, preference);
       usage.setResolvedModel(resolved.upstreamModel);
+      scope.diagnostics?.stage("account_binding");
       const copilot = await bindCopilot(dependencies.copilot, account, scope);
       const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
         accountId: account.accountId,

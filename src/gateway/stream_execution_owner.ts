@@ -98,8 +98,6 @@ export async function createStreamExecutionResponseOwner<T>(
       return;
     }
     cause = terminalCause;
-    input.diagnostics?.terminal(terminalCause);
-    if (result.kind === "failure") input.diagnostics?.failure(result.error);
     state = "terminating";
     barrier = (async () => {
       let effectiveResult = result;
@@ -115,6 +113,8 @@ export async function createStreamExecutionResponseOwner<T>(
             effectiveWriterMode = "abort";
           }
         }
+        input.diagnostics?.terminal(cause ?? terminalCause);
+        if (effectiveResult.kind === "failure") input.diagnostics?.failure(effectiveResult.error);
         observe(effectiveResult);
         if (effectiveWriterMode === "abort") {
           const error = effectiveResult.kind === "failure"
