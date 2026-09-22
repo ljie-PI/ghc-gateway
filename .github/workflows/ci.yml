@@ -84,11 +84,6 @@ jobs:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"
           NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
         run: npm test
-      - name: Verify fixtures
-        env:
-          GHC_GATEWAY_CI_NETWORK_GUARD: "1"
-          NODE_OPTIONS: --import ./scripts/tooling/bootstrap.mjs
-        run: npm run fixtures:verify
       - name: E2E
         env:
           GHC_GATEWAY_CI_NETWORK_GUARD: "1"

@@ -57,11 +57,13 @@ describe("fixture family closure", () => {
 
   it("rejects a stale expected object instead of only parsing its manifest", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "ghc-gateway-fixtures-test-"));
-    await cp(FIXTURE_ROOT, root, { recursive: true });
-    const expectedPath = path.join(root, "responses-native", "request", "preservation.expected.json");
+    const familyRoot = path.join(root, "anthropic");
+    await cp(path.join(FIXTURE_ROOT, "anthropic"), familyRoot, { recursive: true });
+    const expectedPath = path.join(familyRoot, "presenter", "rate-limit.expected.json");
     try {
+      await expect(verifyFixtureManifests(root)).resolves.toHaveLength(1);
       const original = await readFile(expectedPath, "utf8");
-      await writeFile(expectedPath, original.replace("resolved", "stale"), "utf8");
+      await writeFile(expectedPath, original.replace("req_fixture", "req_stale"), "utf8");
       await expect(verifyFixtureManifests(root)).rejects.toThrow(/expected bytes are stale/u);
     } finally {
       await rm(root, { recursive: true, force: true });

@@ -1,20 +1,6 @@
 import type { CapabilityCatalogSnapshot } from "../../copilot/capability_registry.js";
 import { DEFAULT_MODEL_CREATED_AT_TIME } from "../../copilot/model_catalog.js";
 
-export function coerceTokenLimit(value: unknown): number | undefined {
-  if (typeof value === "boolean" || value === null || typeof value === "object") {
-    return undefined;
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.trunc(value);
-  }
-  if (typeof value === "string") {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
-}
-
 export function serializeOpenaiModels(
   catalog: CapabilityCatalogSnapshot,
   created = DEFAULT_MODEL_CREATED_AT_TIME,

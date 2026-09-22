@@ -17,7 +17,6 @@ export const SESSION_SYSTEM = [
   "Never invent weather values. Reuse exact tool values in later turns.",
   "When asked for analysis, write concrete production guidance rather than generic praise.",
 ].join(" ");
-export const SESSION_MARKER = "one coherent outdoor cosplay photo shoot";
 export const SESSION_IMAGE_PROMPT = [
   "We are planning a Vergil-inspired outdoor photo shoot using this reference image.",
   "Analyze the visible production cues: likely character, dominant color palette, coat silhouette, prop, and mood.",
