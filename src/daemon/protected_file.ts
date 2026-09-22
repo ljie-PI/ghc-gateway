@@ -3,13 +3,11 @@ import {
   chmodSync,
   closeSync,
   constants,
-  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
   unlinkSync,
-  writeSync,
   type BigIntStats,
   type Stats,
 } from "node:fs";
@@ -97,25 +95,6 @@ export class ProtectedFileSystem {
     this.assertOwner(stat);
     if (this.platform !== "win32" && (stat.mode & 0o777) !== 0o700) {
       throw new DaemonIdentityFileError("unsafe_permissions", "daemon directory permissions must be 0700");
-    }
-  }
-
-  createExclusiveFile(filePath: string, contents: string): number {
-    const fd = openSync(filePath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600);
-    try {
-      writeSync(fd, contents, 0, "utf8");
-      fsyncSync(fd);
-      this.protectFile(filePath);
-      this.assertProtectedRegularFile(filePath);
-      return fd;
-    } catch (error: unknown) {
-      const held = fstatSync(fd);
-      closeSync(fd);
-      if (this.pathExists(filePath)) {
-        const current = lstatSync(filePath);
-        if (sameFile(held, current)) this.unlinkIfExists(filePath);
-      }
-      throw error;
     }
   }
 
@@ -221,10 +200,6 @@ export class ProtectedFileSystem {
       chmodSync(filePath, 0o600);
     }
   }
-}
-
-function sameFile(left: Stats, right: Stats): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function isNotFound(error: unknown): boolean {

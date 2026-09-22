@@ -53,25 +53,6 @@ export class InvalidUpstreamResponseError extends Error {
   }
 }
 
-export type CopilotTransportFailureKind =
-  | "aborted"
-  | "invalid_upstream_response"
-  | "upstream_timeout"
-  | "upstream_network";
-
-export function classifyCopilotTransportError(error: unknown): CopilotTransportFailureKind {
-  if (error instanceof Error && error.name === "AbortError") {
-    return "aborted";
-  }
-  if (error instanceof UpstreamBodyLimitError || error instanceof InvalidUpstreamResponseError) {
-    return "invalid_upstream_response";
-  }
-  if (error instanceof UpstreamTimeoutError) {
-    return "upstream_timeout";
-  }
-  return "upstream_network";
-}
-
 export interface CopilotTransportDeps {
   readonly credentials: CredentialStore;
   readonly accountCoordinator: AccountCoordinator;

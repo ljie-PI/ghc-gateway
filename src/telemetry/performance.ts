@@ -1,4 +1,3 @@
-export const WINDOW_MS = 5 * 60 * 1000;
 export const MIN_OBSERVATIONS = 20;
 export const MAX_WINDOW_SAMPLES = 4_096;
 export const THRESHOLDS = {

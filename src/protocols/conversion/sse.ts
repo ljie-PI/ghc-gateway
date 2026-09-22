@@ -141,43 +141,6 @@ class FragmentAccumulator {
   }
 }
 
-export function takeSseRecord(value: string, final = false, startIndex = 0): {
-  readonly raw: string;
-  readonly consumed: string;
-  readonly rest: string;
-} | undefined {
-  for (let index = startIndex; index < value.length; index += 1) {
-    const first = lineBreakLength(value, index, final);
-    if (first === 0) {
-      continue;
-    }
-    const second = lineBreakLength(value, index + first, final);
-    if (second === 0) {
-      continue;
-    }
-    const end = index + first + second;
-    return {
-      raw: value.slice(0, index),
-      consumed: value.slice(0, end),
-      rest: value.slice(end),
-    };
-  }
-  return undefined;
-}
-
-function lineBreakLength(value: string, index: number, final: boolean): number {
-  if (value[index] === "\n") {
-    return 1;
-  }
-  if (value[index] !== "\r") {
-    return 0;
-  }
-  if (index + 1 >= value.length) {
-    return final ? 1 : 0;
-  }
-  return value[index + 1] === "\n" ? 2 : 1;
-}
-
 function parseRecordLines(lines: readonly string[]): SseRecord | undefined {
   let eventName: string | undefined;
   const data: string[] = [];

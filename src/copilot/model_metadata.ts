@@ -1,57 +1,7 @@
 import type { ModelInfoLookup } from "./model_catalog.js";
 import { builtinCapabilitiesFromModelInfo, type BuiltinModelCapabilityLookup } from "./model_capabilities.js";
 
-export interface NormalizedModelInfo {
-  readonly mode?: string;
-  readonly maxInputTokens?: number;
-  readonly maxOutputTokens?: number;
-  readonly supportedEndpoints?: readonly string[];
-  readonly defaultOutputTokens?: number;
-  readonly chatOutputTokenField?: "max_tokens" | "max_completion_tokens";
-}
-
 type RawModelInfo = NonNullable<ReturnType<ModelInfoLookup["get"]>>;
-
-export function normalizeModelInfo(value: RawModelInfo | null): NormalizedModelInfo | null {
-  if (value === null) {
-    return null;
-  }
-  const mode = typeof value.mode === "string" ? value.mode : undefined;
-  const maxInputTokens = coerceTokenLimit(value.max_input_tokens);
-  const maxOutputTokens = coerceTokenLimit(value.max_output_tokens);
-  const supportedEndpoints = Array.isArray(value.supported_endpoints)
-    ? value.supported_endpoints.filter((item): item is string => typeof item === "string")
-    : undefined;
-  const defaultOutputTokens = coerceTokenLimit(value.default_output_tokens);
-  const chatOutputTokenField = value.chat_output_token_field === "max_tokens"
-    || value.chat_output_token_field === "max_completion_tokens"
-    ? value.chat_output_token_field
-    : undefined;
-  if (mode === undefined && maxInputTokens === undefined && maxOutputTokens === undefined
-    && supportedEndpoints === undefined && defaultOutputTokens === undefined
-    && chatOutputTokenField === undefined) {
-    return null;
-  }
-  return {
-    ...(mode === undefined ? {} : { mode }),
-    ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
-    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
-    ...(supportedEndpoints === undefined ? {} : { supportedEndpoints }),
-    ...(defaultOutputTokens === undefined ? {} : { defaultOutputTokens }),
-    ...(chatOutputTokenField === undefined ? {} : { chatOutputTokenField }),
-  };
-}
-
-function coerceTokenLimit(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.trunc(value);
-  }
-  if (typeof value === "string" && /^\s*[+-]?\d+\s*$/u.test(value)) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? Math.trunc(parsed) : undefined;
-  }
-  return undefined;
-}
 
 // Pinned model metadata snapshot for the built-in GitHub Copilot models.
 const PRODUCTION_MODEL_INFO: Readonly<Record<string, RawModelInfo>> = {
