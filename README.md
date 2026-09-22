@@ -222,6 +222,10 @@ npm run e2e
 npm run pack
 ```
 
+`npm test` already includes full verification of every fixture manifest and expected byte. Use
+`npm run fixtures:verify` as an independent fixture-only check when the rest of the test suite is
+not needed.
+
 Use `node dist/src/cli/main.js` instead of `ghcg` when exercising the built CLI. Automated tests use scripted remotes and local fixed-response replay.
 Official-client suites require explicit opt-in and remain offline:
 
