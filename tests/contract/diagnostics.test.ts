@@ -18,9 +18,8 @@ function collector() {
 describe("diagnostic failure contracts", () => {
   it.each([
     { headers: { "anthropic-version": "PRIVATE_VERSION" }, input: body, code: "anthropic_version_unsupported", rule: undefined },
-    { headers: { "anthropic-beta": "PRIVATE_BETA" }, input: body, code: "anthropic_beta_unsupported", rule: undefined },
+    { headers: { "anthropic-beta": "PRIVATE_BETA," }, input: body, code: "anthropic_beta_unsupported", rule: undefined },
     { headers: {}, input: { ...body, max_tokens: "PRIVATE_LIMIT" }, code: undefined, rule: "REQ-M-LIMIT" },
-    { headers: {}, input: { ...body, PRIVATE_EXTENSION: "PRIVATE_DATA" }, code: undefined, rule: "REQ-M-TOP" },
   ])("identifies local rejection without exposing input: $code $rule", async ({ headers, input, code, rule }) => {
     const { diagnostics, records } = collector();
     const harness = await anthropicGateway({ gatewayDependencies: { diagnostics }, expectations: [] });
@@ -73,6 +72,32 @@ describe("diagnostic failure contracts", () => {
       await diagnostics.close();
       expect(records.at(-1)?.messagesBetas).toEqual(["prompt-caching-2024-07-31"]);
       expect(records.some((record) => record.degradations?.includes("cache.control_omitted"))).toBe(true);
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
+  it("records only allowlisted beta values and a finite unknown count", async () => {
+    const { diagnostics, records } = collector();
+    const harness = await anthropicGateway({ gatewayDependencies: { diagnostics } });
+    try {
+      const response = await harness.gw.fetch(anthropicRequest({
+        ...body,
+        context_management: { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
+        PRIVATE_EXTENSION: "PRIVATE_DATA",
+      }, {
+        "anthropic-beta": "claude-code-20250219,PRIVATE_BETA,interleaved-thinking-2025-05-14,PRIVATE_OTHER",
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      await diagnostics.close();
+      expect(records.at(-1)).toMatchObject({
+        messagesBetas: ["claude-code-20250219", "interleaved-thinking-2025-05-14"],
+        unknownBetaCount: 2,
+      });
+      expect(records.some((record) => record.degradations?.includes("messages.extensions_omitted"))).toBe(true);
+      expect(JSON.stringify(records)).not.toContain("PRIVATE");
     } finally {
       await harness.close();
       await diagnostics.close();

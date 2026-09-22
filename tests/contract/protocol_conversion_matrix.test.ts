@@ -1051,6 +1051,27 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("forwards native Messages beta tokens exactly in client order, including duplicates and unknown values", async () => {
+    const harness = await matrixGateway();
+    try {
+      const request = protocolRequest("messages", "native-messages", { native_extension: { z: 2 } });
+      request.headers.set(
+        "anthropic-beta",
+        "unknown-first-2026-01-01,claude-code-20250219,unknown-first-2026-01-01,prompt-caching-2024-07-31",
+      );
+      const response = await harness.gw.fetch(request);
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(harness.upstream.requests[0]?.headers.get("anthropic-version")).toBe("2023-06-01");
+      expect(harness.upstream.requests[0]?.headers.get("anthropic-beta")).toBe(
+        "unknown-first-2026-01-01,claude-code-20250219,unknown-first-2026-01-01,prompt-caching-2024-07-31",
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("pins a Responses continuation to Messages and consumes previous_response_id locally", async () => {
     const harness = await matrixGateway();
     try {
