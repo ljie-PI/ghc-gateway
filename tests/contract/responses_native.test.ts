@@ -29,12 +29,15 @@ describe("native Responses execution", () => {
     });
   });
 
-  it("serializes only the resolved model change while preserving native fields and number lexemes", () => {
-    const plan = nativePlan("{\"previous_response_id\":\"resp_1\",\"model\":\"requested\",\"store\":false,\"temperature\":1.20,\"reasoning\":{\"encrypted_content\":\"abc\"}}");
-    expect(new TextDecoder().decode(serializeNativeResponsesRequest(plan))).toBe(
-      "{\"previous_response_id\":\"resp_1\",\"model\":\"resolved\",\"store\":false,\"temperature\":1.20,\"reasoning\":{\"encrypted_content\":\"abc\"}}",
-    );
-  });
+  it.each(["concise", "detailed"] as const)(
+    "serializes only the resolved model change while preserving native reasoning summary=%s and number lexemes",
+    (summary) => {
+      const plan = nativePlan(`{"previous_response_id":"resp_1","model":"requested","store":false,"temperature":1.20,"reasoning":{"effort":"high","summary":"${summary}","encrypted_content":"abc"}}`);
+      expect(new TextDecoder().decode(serializeNativeResponsesRequest(plan))).toBe(
+        `{"previous_response_id":"resp_1","model":"resolved","store":false,"temperature":1.20,"reasoning":{"effort":"high","summary":"${summary}","encrypted_content":"abc"}}`,
+      );
+    },
+  );
 
   it("builds upstream request metadata for native transport without invoking Chat", async () => {
     const http = await nativeHttp();

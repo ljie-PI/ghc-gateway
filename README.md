@@ -63,6 +63,7 @@ The Agents view configures this machine's Claude Code and Codex clients to use t
 
 - Claude Code keeps its Sonnet, Opus, and Haiku roles and supports additional menu models through `modelPicker` with Claude Code 2.1.243 or newer.
 - Codex writes the selected catalog to `models.json` and references it from `config.toml`. Restart Codex after applying changes.
+- Responses models with verified reasoning-effort support advertise reasoning summaries unless the upstream explicitly disables them. Summary defaults to `none`; select concise or detailed in the client to request visible summary text.
 - Apply updates Gateway-owned routing and model fields while preserving unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude credentials.
 
 Every Apply, including a no-change Apply, and every confirmed Codex Take over snapshots the current Agent files before replacement. Codex snapshots `config.toml` and `models.json`; Claude Code snapshots `settings.json`. Backups use local-time names such as `config.toml.ghcg.20260921T163015`, with `.1`, `.2`, and so on for same-second collisions. Up to 365 Gateway-owned backups are retained per source file; legacy `.ghcg.bak` and unrelated files are left untouched.

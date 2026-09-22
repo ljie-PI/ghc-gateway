@@ -584,6 +584,7 @@ interface AgentConfigFixtureInput {
     readonly contextWindowTokens: number | null;
     readonly supportedParameters: readonly string[] | null;
     readonly reasoningEfforts: readonly ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
+    readonly reasoningSummaries: boolean;
   }[];
 }
 
@@ -600,26 +601,29 @@ export async function projectAgentConfigFixture(
 }> {
   const input = JSON.parse(await readFile(inputPath, "utf8")) as AgentConfigFixtureInput;
   const source = Buffer.from(typeof input.source === "string" ? input.source : JSON.stringify(input.source));
-  const models: readonly AgentModel[] = input.models.map((model) => ({
-    modelId: model.modelId,
-    protocols: fixtureAgentField(model.protocols),
-    capabilities: {
-      contextWindowTokens: model.maxInputTokens === null ? null
-        : model.contextWindowTokens === null ? model.maxInputTokens : Math.min(model.maxInputTokens, model.contextWindowTokens),
-      maxContextWindowTokens: model.contextWindowTokens ?? model.maxInputTokens,
-      reasoningLevels: model.reasoningEfforts ?? [],
-      reasoningProtocols: model.supportedParameters === null || model.protocols === null ? []
-        : model.protocols.filter((protocol) => ({
-          chat: ["reasoning_effort"], messages: ["output_config.effort", "output_config"], responses: ["reasoning", "reasoning.effort"],
-        })[protocol].some((parameter) => model.supportedParameters?.includes(parameter))),
-      inputModalities: ["text"],
-      toolCalling: false,
-      parallelToolCalling: false,
-      reasoningSummaries: false,
-      verbosity: false,
-      search: false,
-    },
-  }));
+  const models: readonly AgentModel[] = input.models.map((model) => {
+    const reasoningProtocols = model.supportedParameters === null || model.protocols === null ? []
+      : model.protocols.filter((protocol) => ({
+        chat: ["reasoning_effort"], messages: ["output_config.effort", "output_config"], responses: ["reasoning", "reasoning.effort"],
+      })[protocol].some((parameter) => model.supportedParameters?.includes(parameter)));
+    return {
+      modelId: model.modelId,
+      protocols: fixtureAgentField(model.protocols),
+      capabilities: {
+        contextWindowTokens: model.maxInputTokens === null ? null
+          : model.contextWindowTokens === null ? model.maxInputTokens : Math.min(model.maxInputTokens, model.contextWindowTokens),
+        maxContextWindowTokens: model.contextWindowTokens ?? model.maxInputTokens,
+        reasoningLevels: model.reasoningEfforts ?? [],
+        reasoningProtocols,
+        inputModalities: ["text"],
+        toolCalling: false,
+        parallelToolCalling: false,
+        reasoningSummaries: model.reasoningSummaries,
+        verbosity: false,
+        search: false,
+      },
+    };
+  });
   const catalogPath = catalogPathOverride ?? input.catalogPath;
   const first = projectAgent(
     input.agent, source, input.firstMappings, input.origin, catalogPath, models, null, input.agent === "codex",
