@@ -1,6 +1,7 @@
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { supportsModelReasoning } from "../copilot/model_capabilities.js";
 import { protocolTargets } from "../protocols/conversion/routing.js";
+import { CODEX_BASE_INSTRUCTIONS } from "./codex_instructions.js";
 import { AgentError, validateMappings, type AgentId, type AgentMapping, type AgentModel } from "./types.js";
 
 export interface AgentProjection {
@@ -155,7 +156,7 @@ function projectCodex(
       : [];
     return {
       slug: mapping.modelId, display_name: mapping.displayName, description: mapping.displayName,
-      base_instructions: "You are Codex, a coding agent. Help the user with their coding tasks.",
+      base_instructions: CODEX_BASE_INSTRUCTIONS,
       supported_reasoning_levels: reasoningLevels.map((effort) => ({
         effort, description: effort.charAt(0).toUpperCase() + effort.slice(1),
       })),

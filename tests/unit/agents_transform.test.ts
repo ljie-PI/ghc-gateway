@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parse } from "smol-toml";
+import { CODEX_BASE_INSTRUCTIONS } from "../../src/agents/codex_instructions.js";
 import { projectAgent } from "../../src/agents/transform.js";
 import { parseLiveModelCapabilities } from "../../src/copilot/model_capabilities.js";
 import { registrySnapshotFromDiscovery } from "../contract/model_capability_registry_harness.js";
@@ -102,6 +103,22 @@ describe("agent configuration projection", () => {
     expect(catalog.models[0].default_reasoning_summary).toBeUndefined();
     expect(catalog.models[1].context_window).toBeUndefined();
     expect(catalog.models[1].default_reasoning_level).toBeUndefined();
+  });
+  it("uses one bounded implementation-agnostic behavior contract for every Codex model", () => {
+    const result = projectAgent("codex", null, mappings, origin, "models.json", models, null);
+    const catalog = JSON.parse(result.catalog!.toString()) as { models: { base_instructions: string }[] };
+    expect(catalog.models.map(({ base_instructions }) => base_instructions))
+      .toEqual(mappings.map(() => CODEX_BASE_INSTRUCTIONS));
+    expect(Buffer.byteLength(CODEX_BASE_INSTRUCTIONS, "utf8")).toBeLessThanOrEqual(4_500);
+    for (const required of [
+      "## Commentary", "## Completing Work", "## Engineering Judgment", "## Workspace Safety", "## Final Response",
+      "without revealing hidden chain-of-thought", "Preserve unrelated user changes", "Lead with the outcome",
+    ]) {
+      expect(CODEX_BASE_INSTRUCTIONS).toContain(required);
+    }
+    for (const excluded of ["apply_patch", "PowerShell", "ripgrep", "frontend", "Skills", "OpenAI", "Anthropic"]) {
+      expect(CODEX_BASE_INSTRUCTIONS).not.toContain(excluded);
+    }
   });
   it("refuses to replace an unmanaged Codex provider reserved by another owner", () => {
     const source = "model = \"external\"\n[model_providers.ghc_gateway]\nbase_url = \"https://external.example/v1\"\nwire_api = \"responses\"\n";
