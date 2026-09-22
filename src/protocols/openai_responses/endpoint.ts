@@ -632,7 +632,9 @@ function attemptUsage(value: Readonly<SemanticUsage>): AttemptUsage {
     inputTokens: value.inputTokens,
     outputTokens: value.outputTokens,
     cacheTokens: value.cacheReadTokens + value.cacheWriteTokens,
-    reasoningTokens: value.reasoningTokens,
+    ...(value.reportedReasoningTokens === undefined
+      ? {}
+      : { reasoningTokens: value.reportedReasoningTokens }),
   };
 }
 

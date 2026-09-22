@@ -85,7 +85,14 @@ describe("content-free protocol usage accounting", () => {
       prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
       cache_read_input_tokens: 3, cache_creation_input_tokens: 5,
     }), context("chat", "responses"));
-    expect(result.observations.usage).toEqual({ inputTokens: 11, outputTokens: 7, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: reasoning });
+    expect(result.observations.usage).toEqual({
+      inputTokens: 11,
+      outputTokens: 7,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: reasoning,
+      reportedReasoningTokens: reasoning,
+    });
   });
 
   it.each(protocols)("preserves %s partial cache snapshots, updates and zero without adding inclusive subsets", async (source) => {
@@ -111,7 +118,14 @@ describe("content-free protocol usage accounting", () => {
   it.each(protocols)("maps buffered and streamed %s source usage independently of target wire", async (source) => {
     for (const target of protocols.filter((protocol) => protocol !== source)) {
       const result = convertBufferedResponse(buffered(source, completeUsage[source]), context(source, target));
-      const expected = { inputTokens: 31, outputTokens: 22, cacheReadTokens: 3, cacheWriteTokens: 5, reasoningTokens: 13 };
+      const expected = {
+        inputTokens: 31,
+        outputTokens: 22,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 5,
+        reasoningTokens: 13,
+        reportedReasoningTokens: 13,
+      };
       expect(result.observations.usage).toEqual(expected);
       const streamed = await convertStream(source, target, snapshots[source]);
       expect(streamed.usage.at(-1)).toEqual(expected);

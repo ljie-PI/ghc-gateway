@@ -2384,12 +2384,18 @@ function messagesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>):
 function responsesUsage(value: WireJsonObject, current: Readonly<SemanticUsage>): SemanticUsage {
   const inputDetails = objectMember(value, "input_tokens_details");
   const outputDetails = objectMember(value, "output_tokens_details");
+  const reportedReasoningTokens = optionalNonnegativeIntegerMember(outputDetails, "reasoning_tokens");
   return {
     inputTokens: optionalNonnegativeIntegerMember(value, "input_tokens") ?? current.inputTokens,
     outputTokens: optionalNonnegativeIntegerMember(value, "output_tokens") ?? current.outputTokens,
     cacheReadTokens: optionalNonnegativeIntegerMember(inputDetails, "cached_tokens") ?? current.cacheReadTokens,
     cacheWriteTokens: optionalNonnegativeIntegerMember(inputDetails, "cache_write_tokens") ?? current.cacheWriteTokens,
-    reasoningTokens: optionalNonnegativeIntegerMember(outputDetails, "reasoning_tokens") ?? current.reasoningTokens,
+    reasoningTokens: reportedReasoningTokens ?? current.reasoningTokens,
+    ...(reportedReasoningTokens !== undefined
+      ? { reportedReasoningTokens }
+      : current.reportedReasoningTokens === undefined
+        ? {}
+        : { reportedReasoningTokens: current.reportedReasoningTokens }),
   };
 }
 

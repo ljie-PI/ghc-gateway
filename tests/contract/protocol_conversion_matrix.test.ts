@@ -275,9 +275,22 @@ describe("protocol conversion matrix", () => {
     }
   });
 
-  it.each([false, true])("records converted Responses reasoning tokens (stream=%s)", async (stream) => {
+  it.each([false, true].flatMap((stream) => (
+    [undefined, 0, 7].map((reasoningTokens) => ({ stream, reasoningTokens }))
+  )))("records converted Responses reported reasoning tokens (stream=$stream, tokens=$reasoningTokens)", async ({
+    stream,
+    reasoningTokens,
+  }) => {
     const records: DiagnosticRecord[] = [];
     const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const usage = {
+      prompt_tokens: 3,
+      completion_tokens: 8,
+      ...(reasoningTokens === undefined
+        ? {}
+        : { completion_tokens_details: { reasoning_tokens: reasoningTokens } }),
+      total_tokens: 11,
+    };
     const chatBody = encoder.encode(JSON.stringify({
       id: "chatcmpl_diagnostic",
       choices: [{
@@ -285,12 +298,7 @@ describe("protocol conversion matrix", () => {
         message: { role: "assistant", reasoning_content: "PRIVATE_REASONING", content: "PRIVATE_OUTPUT" },
         finish_reason: "stop",
       }],
-      usage: {
-        prompt_tokens: 3,
-        completion_tokens: 8,
-        completion_tokens_details: { reasoning_tokens: 7 },
-        total_tokens: 11,
-      },
+      usage,
     }));
     const chatStreamBody = Buffer.concat([
       encoder.encode(`data: ${JSON.stringify({
@@ -302,12 +310,7 @@ describe("protocol conversion matrix", () => {
         id: "chatcmpl_diagnostic", choices: [{
           index: 0, delta: { content: "PRIVATE_OUTPUT" }, finish_reason: "stop",
         }],
-        usage: {
-          prompt_tokens: 3,
-          completion_tokens: 8,
-          completion_tokens_details: { reasoning_tokens: 7 },
-          total_tokens: 11,
-        },
+        usage,
       })}\n\n`),
       encoder.encode("data: [DONE]\n\n"),
     ]);
@@ -323,8 +326,9 @@ describe("protocol conversion matrix", () => {
       expect(records.at(-1)).toMatchObject({
         reasoningEffort: "high",
         reasoningSummary: "missing",
-        reasoningTokens: 7,
       });
+      if (reasoningTokens === undefined) expect(records.at(-1)).not.toHaveProperty("reasoningTokens");
+      else expect(records.at(-1)?.reasoningTokens).toBe(reasoningTokens);
       expect(JSON.stringify(records)).not.toContain("PRIVATE");
     } finally {
       await harness.close();
