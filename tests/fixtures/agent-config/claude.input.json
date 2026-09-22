@@ -115,7 +115,8 @@
       "maxInputTokens": 200000,
       "contextWindowTokens": 200000,
       "supportedParameters": null,
-      "reasoningEfforts": null
+      "reasoningEfforts": null,
+      "reasoningSummaries": false
     },
     {
       "modelId": "claude-opus-live",
@@ -123,7 +124,8 @@
       "maxInputTokens": 128000,
       "contextWindowTokens": 144000,
       "supportedParameters": null,
-      "reasoningEfforts": null
+      "reasoningEfforts": null,
+      "reasoningSummaries": false
     },
     {
       "modelId": "claude-haiku-live",
@@ -131,7 +133,8 @@
       "maxInputTokens": 64000,
       "contextWindowTokens": 64000,
       "supportedParameters": null,
-      "reasoningEfforts": null
+      "reasoningEfforts": null,
+      "reasoningSummaries": false
     },
     {
       "modelId": "gpt-extra-live",
@@ -139,7 +142,8 @@
       "maxInputTokens": 128000,
       "contextWindowTokens": 144000,
       "supportedParameters": ["reasoning"],
-      "reasoningEfforts": ["low", "high"]
+      "reasoningEfforts": ["low", "high"],
+      "reasoningSummaries": true
     }
   ]
 }

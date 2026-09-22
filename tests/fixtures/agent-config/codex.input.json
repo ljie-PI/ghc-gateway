@@ -51,7 +51,8 @@
       "maxInputTokens": 128000,
       "contextWindowTokens": 144000,
       "supportedParameters": ["reasoning"],
-      "reasoningEfforts": ["low", "high", "max"]
+      "reasoningEfforts": ["low", "high", "max"],
+      "reasoningSummaries": true
     },
     {
       "modelId": "claude-beta-live",
@@ -59,7 +60,8 @@
       "maxInputTokens": 200000,
       "contextWindowTokens": 220000,
       "supportedParameters": ["reasoning_effort"],
-      "reasoningEfforts": ["medium"]
+      "reasoningEfforts": ["medium"],
+      "reasoningSummaries": false
     },
     {
       "modelId": "unknown-gamma-live",
@@ -67,7 +69,8 @@
       "maxInputTokens": null,
       "contextWindowTokens": null,
       "supportedParameters": ["reasoning"],
-      "reasoningEfforts": ["high"]
+      "reasoningEfforts": ["high"],
+      "reasoningSummaries": false
     }
   ]
 }

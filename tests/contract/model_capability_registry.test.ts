@@ -218,6 +218,12 @@ describe("model capability registry", () => {
           capabilities: { supports: { reasoning_effort: ["low"] } },
         },
         {
+          id: "messages-only-summary-missing", name: "Messages only summary missing", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/messages"],
+          supported_parameters: ["output_config.effort"],
+          supported_reasoning_efforts: ["low"],
+        },
+        {
           id: "malformed-future", name: "Malformed future", vendor: "test", model_picker_enabled: true,
           supported_endpoints: ["/responses"],
           capabilities: { supports: { reasoning_effort: ["low", ""] } },
@@ -252,6 +258,10 @@ describe("model capability registry", () => {
     expect(capability(snapshot, "malformed-summary").capabilities.reasoningSummaries).toBe(false);
     expect(capability(snapshot, "chat-only-summary-missing").capabilities).toMatchObject({
       reasoningProtocols: ["chat"],
+      reasoningSummaries: false,
+    });
+    expect(capability(snapshot, "messages-only-summary-missing").capabilities).toMatchObject({
+      reasoningProtocols: ["messages"],
       reasoningSummaries: false,
     });
     expect(capability(snapshot, "future-only").profile).toMatchObject({

@@ -584,6 +584,7 @@ interface AgentConfigFixtureInput {
     readonly contextWindowTokens: number | null;
     readonly supportedParameters: readonly string[] | null;
     readonly reasoningEfforts: readonly ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
+    readonly reasoningSummaries: boolean;
   }[];
 }
 
@@ -617,7 +618,7 @@ export async function projectAgentConfigFixture(
         inputModalities: ["text"],
         toolCalling: false,
         parallelToolCalling: false,
-        reasoningSummaries: reasoningProtocols.includes("responses"),
+        reasoningSummaries: model.reasoningSummaries,
         verbosity: false,
         search: false,
       },
