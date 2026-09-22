@@ -1,8 +1,11 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  createSdkClients,
+  type SdkClients,
+  type SdkProtocol,
+} from "./client.js";
 import {
   CHAT_MODEL,
   MESSAGES_MODEL,
@@ -50,27 +53,45 @@ const WEATHER_TOOL_ANTHROPIC = {
   },
 };
 
+type MatrixTarget =
+  | { readonly title: string; readonly upstream: "chat"; readonly model: typeof CHAT_MODEL }
+  | { readonly title: string; readonly upstream: "messages"; readonly model: typeof MESSAGES_MODEL }
+  | { readonly title: string; readonly upstream: "responses"; readonly model: typeof NATIVE_RESPONSES_MODEL };
+
+type ChatMatrixCell = MatrixTarget & { readonly client: "chat" };
+type MessagesMatrixCell = MatrixTarget & { readonly client: "messages" };
+type ResponsesMatrixCell = MatrixTarget & { readonly client: "responses" };
+
+const CHAT_CELLS = [
+  { title: "C -> C", client: "chat", upstream: "chat", model: CHAT_MODEL },
+  { title: "C -> R", client: "chat", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
+  { title: "C -> M", client: "chat", upstream: "messages", model: MESSAGES_MODEL },
+] as const satisfies readonly ChatMatrixCell[];
+
+const MESSAGES_CELLS = [
+  { title: "M -> C", client: "messages", upstream: "chat", model: CHAT_MODEL },
+  { title: "M -> R", client: "messages", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
+  { title: "M -> M", client: "messages", upstream: "messages", model: MESSAGES_MODEL },
+] as const satisfies readonly MessagesMatrixCell[];
+
+const RESPONSES_CELLS = [
+  { title: "R -> C", client: "responses", upstream: "chat", model: CHAT_MODEL },
+  { title: "R -> M", client: "responses", upstream: "messages", model: MESSAGES_MODEL },
+  { title: "R -> R", client: "responses", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
+] as const satisfies readonly ResponsesMatrixCell[];
+
+const PARALLEL_PROMPT = "Get weather for Tokyo and Paris simultaneously using get_weather twice.";
+const MIXED_PROMPT = "What is the weather in the city where this character resides? Call get_weather.";
+
 describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock Copilot Replay", () => {
   let harness: ReplaySdkHarness;
-  let openai: OpenAI;
-  let anthropic: Anthropic;
+  let clients: SdkClients;
   let imgBase64: string;
   let dataUrl: string;
 
   beforeAll(async () => {
     harness = await startReplaySdkHarness();
-    openai = new OpenAI({
-      apiKey: "local-gateway",
-      baseURL: harness.openAiBaseUrl,
-      fetch: harness.fetch,
-      maxRetries: 0,
-    });
-    anthropic = new Anthropic({
-      apiKey: "local-gateway",
-      baseURL: harness.baseUrl,
-      fetch: harness.fetch,
-      maxRetries: 0,
-    });
+    clients = createSdkClients(harness);
 
     const imgBuf = await readFile(path.resolve("tests/sdk/images/vergil.jpg"));
     imgBase64 = imgBuf.toString("base64");
@@ -83,248 +104,94 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
   afterEach(() => { harness.replayServer.abortScenario(); });
 
   describe("Parallel Tools Execution across Matrix Cells", () => {
-    it("C -> C parallel tools", async () => {
-      const receiptStart = select("chat", "parallel-tools");
-      const resp = await openai.chat.completions.create({
-        model: CHAT_MODEL,
-        messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
+    it.each(CHAT_CELLS)("$title parallel tools", async (cell: ChatMatrixCell) => {
+      const receiptStart = select(harness, cell.upstream, "parallel-tools");
+      const response = await clients.openai.chat.completions.create({
+        model: cell.model,
+        messages: [{ role: "user", content: PARALLEL_PROMPT }],
         tools: [WEATHER_TOOL_OPENAI],
       });
-      const calls = resp.choices[0]?.message.tool_calls;
+      const calls = response.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(2);
       expect(calls![0]?.id).not.toBe(calls![1]?.id);
-      finish("chat", "parallel-tools", receiptStart);
+      finish(harness, cell.upstream, "parallel-tools", receiptStart);
     });
 
-    it("C -> R parallel tools", async () => {
-      const receiptStart = select("responses", "parallel-tools");
-      const resp = await openai.chat.completions.create({
-        model: NATIVE_RESPONSES_MODEL,
-        messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
-        tools: [WEATHER_TOOL_OPENAI],
-      });
-      const calls = resp.choices[0]?.message.tool_calls;
-      expect(calls?.length).toBe(2);
-      expect(calls![0]?.id).not.toBe(calls![1]?.id);
-      finish("responses", "parallel-tools", receiptStart);
-    });
-
-    it("C -> M parallel tools", async () => {
-      const receiptStart = select("messages", "parallel-tools");
-      const resp = await openai.chat.completions.create({
-        model: MESSAGES_MODEL,
-        messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
-        tools: [WEATHER_TOOL_OPENAI],
-      });
-      const calls = resp.choices[0]?.message.tool_calls;
-      expect(calls?.length).toBe(2);
-      expect(calls![0]?.id).not.toBe(calls![1]?.id);
-      finish("messages", "parallel-tools", receiptStart);
-    });
-
-    it("M -> C parallel tools", async () => {
-      const receiptStart = select("chat", "parallel-tools");
-      const resp = await anthropic.messages.create({
-        model: CHAT_MODEL,
+    it.each(MESSAGES_CELLS)("$title parallel tools", async (cell: MessagesMatrixCell) => {
+      const receiptStart = select(harness, cell.upstream, "parallel-tools");
+      const response = await clients.anthropic.messages.create({
+        model: cell.model,
         max_tokens: 256,
-        messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
+        messages: [{ role: "user", content: PARALLEL_PROMPT }],
         tools: [WEATHER_TOOL_ANTHROPIC],
       });
-      const calls = resp.content.filter((b) => b.type === "tool_use");
+      const calls = response.content.filter((block) => block.type === "tool_use");
       expect(calls.length).toBe(2);
       expect(calls[0]?.id).not.toBe(calls[1]?.id);
-      finish("chat", "parallel-tools", receiptStart);
+      finish(harness, cell.upstream, "parallel-tools", receiptStart);
     });
 
-    it("M -> R parallel tools", async () => {
-      const receiptStart = select("responses", "parallel-tools");
-      const resp = await anthropic.messages.create({
-        model: NATIVE_RESPONSES_MODEL,
-        max_tokens: 256,
-        messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
-        tools: [WEATHER_TOOL_ANTHROPIC],
-      });
-      const calls = resp.content.filter((b) => b.type === "tool_use");
-      expect(calls.length).toBe(2);
-      expect(calls[0]?.id).not.toBe(calls[1]?.id);
-      finish("responses", "parallel-tools", receiptStart);
-    });
-
-    it("M -> M parallel tools", async () => {
-      const receiptStart = select("messages", "parallel-tools");
-      const resp = await anthropic.messages.create({
-        model: MESSAGES_MODEL,
-        max_tokens: 256,
-        messages: [{ role: "user", content: "Get weather for Tokyo and Paris simultaneously using get_weather twice." }],
-        tools: [WEATHER_TOOL_ANTHROPIC],
-      });
-      const calls = resp.content.filter((b) => b.type === "tool_use");
-      expect(calls.length).toBe(2);
-      expect(calls[0]?.id).not.toBe(calls[1]?.id);
-      finish("messages", "parallel-tools", receiptStart);
-    });
-
-    it("R -> C parallel tools", async () => {
-      const receiptStart = select("chat", "parallel-tools");
-      const resp = await openai.responses.create({
-        model: CHAT_MODEL,
-        input: "Get weather for Tokyo and Paris simultaneously using get_weather twice.",
+    it.each(RESPONSES_CELLS)("$title parallel tools", async (cell: ResponsesMatrixCell) => {
+      const receiptStart = select(harness, cell.upstream, "parallel-tools");
+      const response = await clients.openai.responses.create({
+        model: cell.model,
+        input: PARALLEL_PROMPT,
         tools: [WEATHER_TOOL_RESPONSES],
       });
-      const calls = resp.output.filter((i) => i.type === "function_call");
+      const calls = response.output.filter((item) => item.type === "function_call");
       expect(calls.length).toBe(2);
       expect(calls[0]?.call_id).not.toBe(calls[1]?.call_id);
-      finish("chat", "parallel-tools", receiptStart);
-    });
-
-    it("R -> M parallel tools", async () => {
-      const receiptStart = select("messages", "parallel-tools");
-      const resp = await openai.responses.create({
-        model: MESSAGES_MODEL,
-        input: "Get weather for Tokyo and Paris simultaneously using get_weather twice.",
-        tools: [WEATHER_TOOL_RESPONSES],
-      });
-      const calls = resp.output.filter((i) => i.type === "function_call");
-      expect(calls.length).toBe(2);
-      expect(calls[0]?.call_id).not.toBe(calls[1]?.call_id);
-      finish("messages", "parallel-tools", receiptStart);
-    });
-
-    it("R -> R parallel tools", async () => {
-      const receiptStart = select("responses", "parallel-tools");
-      const resp = await openai.responses.create({
-        model: NATIVE_RESPONSES_MODEL,
-        input: "Get weather for Tokyo and Paris simultaneously using get_weather twice.",
-        tools: [WEATHER_TOOL_RESPONSES],
-      });
-      const calls = resp.output.filter((i) => i.type === "function_call");
-      expect(calls.length).toBe(2);
-      expect(calls[0]?.call_id).not.toBe(calls[1]?.call_id);
-      finish("responses", "parallel-tools", receiptStart);
+      finish(harness, cell.upstream, "parallel-tools", receiptStart);
     });
   });
 
   describe("Mixed Image & Tool Execution across Matrix Cells", () => {
-    it("C -> C mixed image and tool", async () => {
-      const receiptStart = select("chat", "mixed-image-tool");
-      const resp = await openai.chat.completions.create({
-        model: CHAT_MODEL,
+    it.each(CHAT_CELLS)("$title mixed image and tool", async (cell: ChatMatrixCell) => {
+      const receiptStart = select(harness, cell.upstream, "mixed-image-tool");
+      const response = await clients.openai.chat.completions.create({
+        model: cell.model,
         messages: [{
           role: "user",
           content: [
-            { type: "text", text: "What is the weather in the city where this character resides? Call get_weather." },
+            { type: "text", text: MIXED_PROMPT },
             { type: "image_url", image_url: { url: dataUrl } },
           ],
         }],
         tools: [WEATHER_TOOL_OPENAI],
       });
-      const calls = resp.choices[0]?.message.tool_calls;
+      const calls = response.choices[0]?.message.tool_calls;
       expect(calls?.length).toBe(1);
-      finish("chat", "mixed-image-tool", receiptStart);
+      finish(harness, cell.upstream, "mixed-image-tool", receiptStart);
     });
 
-    it("C -> R mixed image and tool", async () => {
-      const receiptStart = select("responses", "mixed-image-tool");
-      const resp = await openai.chat.completions.create({
-        model: NATIVE_RESPONSES_MODEL,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: "What is the weather in the city where this character resides? Call get_weather." },
-            { type: "image_url", image_url: { url: dataUrl } },
-          ],
-        }],
-        tools: [WEATHER_TOOL_OPENAI],
-      });
-      const calls = resp.choices[0]?.message.tool_calls;
-      expect(calls?.length).toBe(1);
-      finish("responses", "mixed-image-tool", receiptStart);
-    });
-
-    it("C -> M mixed image and tool", async () => {
-      const receiptStart = select("messages", "mixed-image-tool");
-      const resp = await openai.chat.completions.create({
-        model: MESSAGES_MODEL,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: "What is the weather in the city where this character resides? Call get_weather." },
-            { type: "image_url", image_url: { url: dataUrl } },
-          ],
-        }],
-        tools: [WEATHER_TOOL_OPENAI],
-      });
-      const calls = resp.choices[0]?.message.tool_calls;
-      expect(calls?.length).toBe(1);
-      finish("messages", "mixed-image-tool", receiptStart);
-    });
-
-    it("M -> C mixed image and tool", async () => {
-      const receiptStart = select("chat", "mixed-image-tool");
-      const resp = await anthropic.messages.create({
-        model: CHAT_MODEL,
+    it.each(MESSAGES_CELLS)("$title mixed image and tool", async (cell: MessagesMatrixCell) => {
+      const receiptStart = select(harness, cell.upstream, "mixed-image-tool");
+      const response = await clients.anthropic.messages.create({
+        model: cell.model,
         max_tokens: 256,
         messages: [{
           role: "user",
           content: [
-            { type: "text", text: "What is the weather in the city where this character resides? Call get_weather." },
+            { type: "text", text: MIXED_PROMPT },
             { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imgBase64 } },
           ],
         }],
         tools: [WEATHER_TOOL_ANTHROPIC],
       });
-      const calls = resp.content.filter((b) => b.type === "tool_use");
+      const calls = response.content.filter((block) => block.type === "tool_use");
       expect(calls.length).toBe(1);
-      finish("chat", "mixed-image-tool", receiptStart);
+      finish(harness, cell.upstream, "mixed-image-tool", receiptStart);
     });
 
-    it("M -> R mixed image and tool", async () => {
-      const receiptStart = select("responses", "mixed-image-tool");
-      const resp = await anthropic.messages.create({
-        model: NATIVE_RESPONSES_MODEL,
-        max_tokens: 256,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: "What is the weather in the city where this character resides? Call get_weather." },
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imgBase64 } },
-          ],
-        }],
-        tools: [WEATHER_TOOL_ANTHROPIC],
-      });
-      const calls = resp.content.filter((b) => b.type === "tool_use");
-      expect(calls.length).toBe(1);
-      finish("responses", "mixed-image-tool", receiptStart);
-    });
-
-    it("M -> M mixed image and tool", async () => {
-      const receiptStart = select("messages", "mixed-image-tool");
-      const resp = await anthropic.messages.create({
-        model: MESSAGES_MODEL,
-        max_tokens: 256,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: "What is the weather in the city where this character resides? Call get_weather." },
-            { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imgBase64 } },
-          ],
-        }],
-        tools: [WEATHER_TOOL_ANTHROPIC],
-      });
-      const calls = resp.content.filter((b) => b.type === "tool_use");
-      expect(calls.length).toBe(1);
-      finish("messages", "mixed-image-tool", receiptStart);
-    });
-
-    it("R -> C mixed image and tool", async () => {
-      const receiptStart = select("chat", "mixed-image-tool");
-      const resp = await openai.responses.create({
-        model: CHAT_MODEL,
+    it.each(RESPONSES_CELLS)("$title mixed image and tool", async (cell: ResponsesMatrixCell) => {
+      const receiptStart = select(harness, cell.upstream, "mixed-image-tool");
+      const response = await clients.openai.responses.create({
+        model: cell.model,
         input: [
           {
             role: "user",
             content: [
-              { type: "input_text", text: "What is the weather in the city where this character resides? Call get_weather." },
+              { type: "input_text", text: MIXED_PROMPT },
               { type: "input_image", image_url: dataUrl, detail: "auto" },
             ],
           },
@@ -332,66 +199,30 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
         tools: [WEATHER_TOOL_RESPONSES],
         tool_choice: { type: "function", name: "get_weather" },
       });
-      const call = resp.output.find((i) => i.type === "function_call");
+      const call = response.output.find((item) => item.type === "function_call");
       expect(call).toBeDefined();
-      finish("chat", "mixed-image-tool", receiptStart);
-    });
-
-    it("R -> M mixed image and tool", async () => {
-      const receiptStart = select("messages", "mixed-image-tool");
-      const resp = await openai.responses.create({
-        model: MESSAGES_MODEL,
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text", text: "What is the weather in the city where this character resides? Call get_weather." },
-              { type: "input_image", image_url: dataUrl, detail: "auto" },
-            ],
-          },
-        ],
-        tools: [WEATHER_TOOL_RESPONSES],
-        tool_choice: { type: "function", name: "get_weather" },
-      });
-      const call = resp.output.find((i) => i.type === "function_call");
-      expect(call).toBeDefined();
-      finish("messages", "mixed-image-tool", receiptStart);
-    });
-
-    it("R -> R mixed image and tool", async () => {
-      const receiptStart = select("responses", "mixed-image-tool");
-      const resp = await openai.responses.create({
-        model: NATIVE_RESPONSES_MODEL,
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text", text: "What is the weather in the city where this character resides? Call get_weather." },
-              { type: "input_image", image_url: dataUrl, detail: "auto" },
-            ],
-          },
-        ],
-        tools: [WEATHER_TOOL_RESPONSES],
-        tool_choice: { type: "function", name: "get_weather" },
-      });
-      const call = resp.output.find((i) => i.type === "function_call");
-      expect(call).toBeDefined();
-      finish("responses", "mixed-image-tool", receiptStart);
+      finish(harness, cell.upstream, "mixed-image-tool", receiptStart);
     });
   });
-
-  function select(protocol: "chat" | "messages" | "responses", family: "parallel-tools" | "mixed-image-tool"): number {
-    const receiptStart = harness.receipts.length;
-    harness.replayServer.selectScenario(`replay.${protocol}.${family}.nonstream`);
-    return receiptStart;
-  }
-
-  function finish(protocol: "chat" | "messages" | "responses", family: "parallel-tools" | "mixed-image-tool", receiptStart: number): void {
-    const scenarioId = `replay.${protocol}.${family}.nonstream`;
-    harness.replayServer.finishScenario();
-    expect(harness.receipts.slice(receiptStart)).toEqual([
-      { scenarioId, scenarioStep: 1, matchedCaseId: scenarioId },
-    ]);
-  }
-
 });
+
+type ScenarioFamily = "parallel-tools" | "mixed-image-tool";
+
+function select(harness: ReplaySdkHarness, protocol: SdkProtocol, family: ScenarioFamily): number {
+  const receiptStart = harness.receipts.length;
+  harness.replayServer.selectScenario(`replay.${protocol}.${family}.nonstream`);
+  return receiptStart;
+}
+
+function finish(
+  harness: ReplaySdkHarness,
+  protocol: SdkProtocol,
+  family: ScenarioFamily,
+  receiptStart: number,
+): void {
+  const scenarioId = `replay.${protocol}.${family}.nonstream`;
+  harness.replayServer.finishScenario();
+  expect(harness.receipts.slice(receiptStart)).toEqual([
+    { scenarioId, scenarioStep: 1, matchedCaseId: scenarioId },
+  ]);
+}
