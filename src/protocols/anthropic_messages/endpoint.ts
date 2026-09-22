@@ -3,6 +3,7 @@ import type { AccountModelPreferences } from "../../accounts/model_preferences.j
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import {
+  MESSAGES_BETA_FEATURES,
   MESSAGES_VERSION,
   type MessagesBetaFeature,
 } from "../../copilot/upstream_types.js";
@@ -148,7 +149,8 @@ async function executeAnthropicMessages(
   });
   if (plan.kind === "converted") {
     if (betaFeatures.some((feature) => (
-      feature !== "prompt-caching-2024-07-31"
+      feature !== "claude-code-20250219"
+      && feature !== "prompt-caching-2024-07-31"
       && feature !== "interleaved-thinking-2025-05-14"
     ))) {
       scope.diagnostics?.stage("request_validation", { code: "anthropic_beta_conversion_unsupported" });
@@ -375,11 +377,7 @@ function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagno
   if (values === null || values.trim().length === 0) {
     return [];
   }
-  const supported = new Set<MessagesBetaFeature>([
-    "prompt-caching-2024-07-31",
-    "interleaved-thinking-2025-05-14",
-    "context-1m-2025-08-07",
-  ]);
+  const supported = new Set<MessagesBetaFeature>(MESSAGES_BETA_FEATURES);
   const features: MessagesBetaFeature[] = [];
   for (const raw of values.split(",")) {
     const value = raw.trim();

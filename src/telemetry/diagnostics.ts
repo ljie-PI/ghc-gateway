@@ -46,7 +46,7 @@ const CODES = [
   "anthropic_version_missing", "anthropic_version_unsupported", "anthropic_beta_unsupported",
   "anthropic_beta_conversion_unsupported", "status_only",
 ] as const;
-const MESSAGE_BETAS = ["prompt-caching-2024-07-31", "interleaved-thinking-2025-05-14", "context-1m-2025-08-07"] as const;
+const MESSAGE_BETAS = ["claude-code-20250219", "prompt-caching-2024-07-31", "interleaved-thinking-2025-05-14", "context-1m-2025-08-07"] as const;
 const DEGRADATIONS = [
   "cache.control_omitted", "reasoning.budget_coarsened", "reasoning.presentation_omitted",
   "reasoning.state_omitted", "sampling.top_k_omitted",
@@ -406,7 +406,7 @@ function sanitizeDiagnosticFields(value: Readonly<DiagnosticFields>): Diagnostic
     ...(member(CODES, value.code) === undefined ? {} : { code: member(CODES, value.code)! }),
     ...(member(["missing", "supported", "unsupported"] as const, value.messagesVersion) === undefined
       ? {} : { messagesVersion: value.messagesVersion }),
-    ...(value.messagesBetas === undefined ? {} : { messagesBetas: MESSAGE_BETAS.filter((item) => value.messagesBetas?.slice(0, 3).includes(item)) }),
+    ...(value.messagesBetas === undefined ? {} : { messagesBetas: MESSAGE_BETAS.filter((item) => value.messagesBetas?.slice(0, MESSAGE_BETAS.length).includes(item)) }),
     ...(value.unknownBetaCount === undefined ? {} : { unknownBetaCount: finite(value.unknownBetaCount) }),
     ...(value.degradations === undefined ? {} : { degradations: DEGRADATIONS.filter((item) => value.degradations?.slice(0, 5).includes(item)) }),
     ...(member(PROTOCOL_STATUSES, value.protocolStatus) === undefined ? {} : { protocolStatus: member(PROTOCOL_STATUSES, value.protocolStatus)! }),

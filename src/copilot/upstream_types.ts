@@ -23,10 +23,14 @@ export const MESSAGES_VERSION = "2023-06-01" as const;
 
 export type MessagesVersion = typeof MESSAGES_VERSION;
 
-export type MessagesBetaFeature =
-  | "prompt-caching-2024-07-31"
-  | "interleaved-thinking-2025-05-14"
-  | "context-1m-2025-08-07";
+export const MESSAGES_BETA_FEATURES = [
+  "claude-code-20250219",
+  "prompt-caching-2024-07-31",
+  "interleaved-thinking-2025-05-14",
+  "context-1m-2025-08-07",
+] as const;
+
+export type MessagesBetaFeature = typeof MESSAGES_BETA_FEATURES[number];
 
 export interface MessagesUpstreamRequest extends UpstreamRequestLimits {
   readonly body: Uint8Array;
