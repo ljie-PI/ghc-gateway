@@ -1231,7 +1231,10 @@ describe("shared conversion request codecs", () => {
     )).toThrow();
   });
 
-  it("ignores an ordinary nested Messages tool-result extension", () => {
+  it.each(["image", "input_image"] as const)("ignores an ordinary nested Messages %s tool-result extension", (type) => {
+    const image = type === "image"
+      ? { type, source: { type: "base64", media_type: "image/png", data: "QUJD" }, optional_extension: null }
+      : { type, image_url: "https://example.com/image.png", optional_extension: null };
     const converted = prepareConvertedRequest("messages", "chat", body({
       model: "source",
       messages: [
@@ -1241,11 +1244,7 @@ describe("shared conversion request codecs", () => {
           content: [{
             type: "tool_result",
             tool_use_id: "call_1",
-            content: [{
-              type: "image",
-              source: { type: "base64", media_type: "image/png", data: "QUJD" },
-              optional_extension: null,
-            }],
+            content: [image],
           }],
         },
       ],

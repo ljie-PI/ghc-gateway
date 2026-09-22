@@ -9,6 +9,7 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { isReasoningCarrier } from "../conversion/reasoning_carriers.js";
+import { RequestSequenceTracker } from "../conversion/request_sequence.js";
 
 const TOP_LEVEL_CORE = [
   "model", "messages", "system", "max_tokens", "stream", "temperature", "top_p", "top_k",
@@ -83,10 +84,7 @@ export function validateNativeMessagesRequestEnvelope(body: WireJsonObject): voi
   const messages = exactlyOne(body, "messages");
   if (!isWireJsonArray(messages)) invalid();
 
-  const openCalls = new Map<string, NativeCallBinding>();
-  const calls = new Map<string, NativeCallBinding>();
-  const results = new Set<string>();
-  const round = { resultsStarted: false };
+  const sequence = new RequestSequenceTracker<NativeCallBinding>(() => invalid());
   for (const value of messages.items) {
     const message = object(value);
     rejectDuplicates(message, ["role", "content", ...OWNERSHIP_FIELDS]);
@@ -95,7 +93,7 @@ export function validateNativeMessagesRequestEnvelope(body: WireJsonObject): voi
     if (role !== "user" && role !== "assistant") invalid();
     const content = exactlyOne(message, "content");
     if (typeof content === "string") {
-      observeItem("message", role, openCalls, round);
+      sequence.observeMessage(role);
       continue;
     }
     if (!isWireJsonArray(content)) invalid();
@@ -106,29 +104,26 @@ export function validateNativeMessagesRequestEnvelope(body: WireJsonObject): voi
       const type = exactlyOne(block, "type");
       if (typeof type !== "string" || type.length === 0) invalid();
       if (type === "text" || type === "image") {
-        validateContentBlock(block, type, role, calls, results, openCalls, round, tools);
+        validateContentBlock(block, type, role, sequence, tools);
         ordinary = true;
         continue;
       }
       if (ordinary) {
-        observeItem("message", role, openCalls, round);
+        sequence.observeMessage(role);
         ordinary = false;
       }
-      validateContentBlock(block, type, role, calls, results, openCalls, round, tools);
+      validateContentBlock(block, type, role, sequence, tools);
     }
-    if (ordinary) observeItem("message", role, openCalls, round);
+    if (ordinary) sequence.observeMessage(role);
   }
-  if (openCalls.size > 0) invalid();
+  sequence.finish();
 }
 
 function validateContentBlock(
   block: WireJsonObject,
   type: string,
   role: "user" | "assistant",
-  calls: Map<string, NativeCallBinding>,
-  results: Set<string>,
-  openCalls: Map<string, NativeCallBinding>,
-  round: { resultsStarted: boolean },
+  sequence: RequestSequenceTracker<NativeCallBinding>,
   tools: NativeToolRegistry,
 ): void {
   if (type === "text") {
@@ -159,7 +154,6 @@ function validateContentBlock(
       || typeof name !== "string"
       || name.length === 0
       || !isWireJsonObject(input)
-      || calls.has(id)
     ) invalid();
     rejectDuplicates(input, []);
     const toolsetName = optionalOne(block, "toolset_name");
@@ -171,9 +165,7 @@ function validateContentBlock(
       resultType: browser ? "browser_tool_result" : "tool_result",
       ...(typeof toolsetName === "string" ? { toolsetName } : {}),
     };
-    calls.set(id, binding);
-    observeItem("tool_call", role, openCalls, round);
-    openCalls.set(id, binding);
+    sequence.observeToolCall(id, binding);
     validateCacheControl(optionalOne(block, "cache_control"));
     return;
   }
@@ -181,31 +173,29 @@ function validateContentBlock(
     rejectDuplicates(block, ["type", "tool_use_id", "content", "is_error", "toolset_name", ...OWNERSHIP_FIELDS]);
     rejectUnexpectedOwnership(block, new Set(["tool_use_id"]));
     const id = exactlyOne(block, "tool_use_id");
-    const expected = typeof id === "string" ? openCalls.get(id) : undefined;
     const toolsetName = optionalOne(block, "toolset_name");
     if (toolsetName !== undefined && toolsetName !== null && typeof toolsetName !== "string") invalid();
-    if (expected?.toolsetName !== (toolsetName ?? undefined)) invalid();
-    if (role !== "user" || expected === undefined || results.has(id as string)) invalid();
+    if (role !== "user" || typeof id !== "string") invalid();
     const content = optionalOne(block, "content");
     const isError = optionalOne(block, "is_error");
     if (isError !== undefined && typeof isError !== "boolean") invalid();
     validateCacheControl(optionalOne(block, "cache_control"));
     if (content !== undefined && typeof content !== "string" && !isWireJsonArray(content)) invalid();
-    if (isWireJsonArray(content)) {
-      let browserStates = 0;
-      const downloadIds = new Set<string>();
-      for (const item of content.items) {
-        const itemType = isWireJsonObject(item) ? optionalOne(item, "type") : undefined;
-        if (itemType === "browser_state") {
-          browserStates += 1;
-          if (expected.resultType !== "browser_tool_result" || browserStates > 1 || isError === true) invalid();
+    sequence.observeToolResult(id, (expected) => {
+      if (expected.toolsetName !== (toolsetName ?? undefined)) invalid();
+      if (isWireJsonArray(content)) {
+        let browserStates = 0;
+        const downloadIds = new Set<string>();
+        for (const item of content.items) {
+          const itemType = isWireJsonObject(item) ? optionalOne(item, "type") : undefined;
+          if (itemType === "browser_state") {
+            browserStates += 1;
+            if (expected.resultType !== "browser_tool_result" || browserStates > 1 || isError === true) invalid();
+          }
+          validateToolResultPart(item, downloadIds);
         }
-        validateToolResultPart(item, downloadIds);
       }
-    }
-    results.add(id as string);
-    openCalls.delete(id as string);
-    round.resultsStarted = openCalls.size > 0;
+    });
     return;
   }
   if (type === "server_tool_use" || type === "mcp_tool_use") {
@@ -213,16 +203,14 @@ function validateContentBlock(
     rejectUnexpectedOwnership(block, new Set());
     const id = exactlyOne(block, "id");
     const name = exactlyOne(block, "name");
-    if (role !== "assistant" || typeof id !== "string" || id.length === 0 || typeof name !== "string" || name.length === 0 || calls.has(id)) invalid();
+    if (role !== "assistant" || typeof id !== "string" || id.length === 0 || typeof name !== "string" || name.length === 0) invalid();
     if (type === "mcp_tool_use") {
       const serverName = exactlyOne(block, "server_name");
       if (typeof serverName !== "string" || serverName.length === 0) invalid();
     }
     exactlyOne(block, "input");
     const binding: NativeCallBinding = { resultType: managedResultType(type, name) };
-    calls.set(id, binding);
-    observeItem("tool_call", role, openCalls, round);
-    openCalls.set(id, binding);
+    sequence.observeToolCall(id, binding);
     validateCacheControl(optionalOne(block, "cache_control"));
     return;
   }
@@ -230,15 +218,15 @@ function validateContentBlock(
     rejectDuplicates(block, ["type", "tool_use_id", "content", ...OWNERSHIP_FIELDS]);
     rejectUnexpectedOwnership(block, new Set(["tool_use_id"]));
     const id = exactlyOne(block, "tool_use_id");
-    if (role !== "assistant" || typeof id !== "string" || openCalls.get(id)?.resultType !== type || results.has(id)) invalid();
+    if (role !== "assistant" || typeof id !== "string") invalid();
     const content = optionalOne(block, "content");
     if (type !== "mcp_tool_result" && content === undefined) invalid();
     const isError = optionalOne(block, "is_error");
     if (isError !== undefined && typeof isError !== "boolean") invalid();
-    validateManagedResultContent(type, content);
-    results.add(id);
-    openCalls.delete(id);
-    round.resultsStarted = openCalls.size > 0;
+    sequence.observeToolResult(id, (expected) => {
+      if (expected.resultType !== type) invalid();
+      validateManagedResultContent(type, content);
+    });
     validateCacheControl(optionalOne(block, "cache_control"));
     return;
   }
@@ -248,14 +236,14 @@ function validateContentBlock(
     if (typeof exactlyOne(block, "thinking") !== "string") invalid();
     const signature = optionalOne(block, "signature");
     if (signature !== undefined && (typeof signature !== "string" || signature.length === 0)) invalid();
-    observeItem("reasoning", role, openCalls, round);
+    sequence.observeReasoning();
     return;
   }
   if (type === "redacted_thinking") {
     rejectDuplicates(block, ["type", "data", ...OWNERSHIP_FIELDS]);
     rejectUnexpectedOwnership(block, new Set(["data"]));
     if (typeof exactlyOne(block, "data") !== "string") invalid();
-    observeItem("reasoning", role, openCalls, round);
+    sequence.observeReasoning();
     return;
   }
   rejectDuplicates(block, ["type", ...OWNERSHIP_FIELDS]);
@@ -263,7 +251,7 @@ function validateContentBlock(
   if (type === "browser_state") invalid();
   if (type === "document") validateDocumentBlock(block, role);
   if (type === "search_result") validateSearchResultBlock(block);
-  observeItem("message", role, openCalls, round);
+  sequence.observeMessage(role);
 }
 
 function validateToolResultPart(value: WireJson, downloadIds: Set<string>): void {
@@ -490,17 +478,6 @@ function validateTextCitations(value: WireJson): void {
       invalid();
     }
   }
-}
-
-function observeItem(
-  kind: "message" | "reasoning" | "tool_call" | "tool_result",
-  role: "user" | "assistant",
-  openCalls: ReadonlyMap<string, NativeCallBinding>,
-  round: Readonly<{ resultsStarted: boolean }>,
-): void {
-  if (kind === "reasoning" && round.resultsStarted) invalid();
-  if (kind === "message" && openCalls.size > 0 && (role !== "assistant" || round.resultsStarted)) invalid();
-  if (kind === "tool_call" && openCalls.size > 0 && round.resultsStarted) invalid();
 }
 
 function managedResultType(type: string, name: string): string {

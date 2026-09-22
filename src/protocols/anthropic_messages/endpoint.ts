@@ -3,8 +3,10 @@ import type { AccountModelPreferences } from "../../accounts/model_preferences.j
 import type { BoundCopilot, CopilotBackend } from "../../copilot/backend.js";
 import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "../../copilot/capability_registry.js";
 import {
+  isMessagesBetaToken,
   MESSAGES_BETA_FEATURES,
   MESSAGES_VERSION,
+  type MessagesBetaToken,
 } from "../../copilot/upstream_types.js";
 import {
   normalizeAccountBindingFailure,
@@ -72,7 +74,6 @@ const ANTHROPIC_BETA_LIMITS = {
   bytes: 8 * 1024,
   tokens: 64,
 } as const;
-const ANTHROPIC_BETA_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 
 export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRouteDependencies): RouteRegistration {
   requireModelCapabilityRegistry(dependencies.registry);
@@ -222,7 +223,7 @@ async function executeNativeMessages(
   clientHeaderFields: DecodedHttpRequest["headerFields"],
   model: string,
   stream: boolean,
-  betaFeatures: readonly string[],
+  betaFeatures: readonly MessagesBetaToken[],
   scope: Readonly<RequestScope>,
   usage: ReturnType<typeof createRequestAttempt>,
 ): Promise<Response> {
@@ -377,7 +378,7 @@ function assertAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnosti
   }
 }
 
-function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagnostics): readonly string[] {
+function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagnostics): readonly MessagesBetaToken[] {
   const values = headers.get("anthropic-beta");
   if (values === null) {
     return [];
@@ -394,7 +395,7 @@ function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagno
   const features = values.split(",").map((value) => value.trim());
   if (
     features.length > ANTHROPIC_BETA_LIMITS.tokens
-    || features.some((feature) => !ANTHROPIC_BETA_TOKEN.test(feature))
+    || !features.every(isMessagesBetaToken)
   ) {
     diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
     throw new GatewayFailureError({ kind: "invalid_request" });

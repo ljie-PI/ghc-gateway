@@ -36,10 +36,20 @@ export const MESSAGES_BETA_FEATURES = [
 
 export type MessagesBetaFeature = typeof MESSAGES_BETA_FEATURES[number];
 
+declare const messagesBetaTokenBrand: unique symbol;
+
+export type MessagesBetaToken = MessagesBetaFeature | (string & {
+  readonly [messagesBetaTokenBrand]: true;
+});
+
+export function isMessagesBetaToken(value: string): value is MessagesBetaToken {
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(value);
+}
+
 export interface MessagesUpstreamRequest extends UpstreamRequestLimits {
   readonly body: Uint8Array;
   readonly version: MessagesVersion;
-  readonly betaFeatures: readonly string[];
+  readonly betaFeatures: readonly MessagesBetaToken[];
   readonly clientHeaderFields?: OrderedHeaderFields;
 }
 

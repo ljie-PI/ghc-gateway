@@ -8,6 +8,7 @@ import type { WireJsonObject } from "../../serialization/wire_json.js";
 import { PROTOCOL_REQUEST_CODECS } from "./request_codecs.js";
 import { protocolTargets } from "./routing.js";
 import { diagnosticShape } from "./diagnostics.js";
+import { validateSemanticBindings } from "./request_sequence.js";
 import {
   ConversionContractError,
   type ConversionPlanningInput,
@@ -139,66 +140,6 @@ export function prepareConvertedRequest(
     return PROTOCOL_REQUEST_CODECS[target].encode(decoded, { resolvedModel, capability });
   } catch (error: unknown) {
     throw contractFailure(error);
-  }
-}
-
-function validateSemanticBindings(request: Readonly<SemanticRequest>): void {
-  const names = new Set<string>();
-  for (const tool of request.tools) {
-    if (names.has(tool.name)) {
-      throw new ConversionContractError("invalid_request", "REQ-TOOL-DUPLICATE-NAME");
-    }
-    names.add(tool.name);
-  }
-  if (request.toolChoice?.kind === "tool" && !names.has(request.toolChoice.name)) {
-    throw new ConversionContractError("invalid_request", "REQ-TOOL-CHOICE-MISSING");
-  }
-  if ((request.toolChoice?.kind === "required" || request.toolChoice?.kind === "tool") && names.size === 0) {
-    throw new ConversionContractError("invalid_request", "REQ-TOOL-CHOICE-EMPTY");
-  }
-  if (request.parallelToolCalls !== undefined && names.size === 0) {
-    throw new ConversionContractError("invalid_request", "REQ-TOOL-PARALLEL-EMPTY");
-  }
-
-  const calls = new Set<string>();
-  const results = new Set<string>();
-  const openCalls = new Set<string>();
-  let resultsStarted = false;
-  for (const item of request.items) {
-    if (item.type === "reasoning") {
-      if (resultsStarted) {
-        throw new ConversionContractError("invalid_request", "REQ-REASONING-ROUND-ORDER");
-      }
-      continue;
-    }
-    if (item.type === "message") {
-      if (openCalls.size > 0 && (item.role !== "assistant" || resultsStarted)) {
-        throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-ORDER");
-      }
-      continue;
-    }
-    if (item.type === "tool_call") {
-      if (openCalls.size > 0 && resultsStarted) {
-        throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-ORDER");
-      }
-      if (calls.has(item.callId)) {
-        throw new ConversionContractError("invalid_request", "REQ-TOOL-DUPLICATE-CALL-ID");
-      }
-      calls.add(item.callId);
-      openCalls.add(item.callId);
-      continue;
-    }
-    if (item.type === "tool_result") {
-      if (!calls.has(item.callId) || results.has(item.callId)) {
-        throw new ConversionContractError("invalid_request", "REQ-TOOL-RESULT-BINDING");
-      }
-      results.add(item.callId);
-      openCalls.delete(item.callId);
-      resultsStarted = openCalls.size > 0;
-    }
-  }
-  if (openCalls.size > 0) {
-    throw new ConversionContractError("invalid_request", "REQ-TOOL-ROUND-INCOMPLETE");
   }
 }
 

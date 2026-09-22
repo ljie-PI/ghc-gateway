@@ -186,6 +186,31 @@ describe("Anthropic request route", () => {
     ["numeric content", { messages: [{ role: "user", content: 1 }] }],
     ["missing tool input", { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup" }] }] }],
     ["unclosed tool call", { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] }] }],
+    ["duplicate tool call ID", {
+      messages: [{ role: "assistant", content: [
+        { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+        { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      ] }],
+    }],
+    ["duplicate tool result", {
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        { role: "user", content: [
+          { type: "tool_result", tool_use_id: "call_1", content: "ok" },
+          { type: "tool_result", tool_use_id: "call_1", content: "again" },
+        ] },
+      ],
+    }],
+    ["new call after a partial parallel result", {
+      messages: [
+        { role: "assistant", content: [
+          { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+          { type: "tool_use", id: "call_2", name: "lookup", input: {} },
+        ] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "call_3", name: "lookup", input: {} }] },
+      ],
+    }],
     ["interleaved tool round", {
       messages: [
         { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
@@ -445,14 +470,15 @@ describe("Anthropic request route", () => {
       }],
     });
     try {
-      const response = await gw.fetch(anthropicRequest({
+      const body = {
         model: "native-messages",
         max_tokens: 16,
         messages: [{ role: "user", content: [block] }],
-      }));
+      };
+      const response = await gw.fetch(anthropicRequest(body));
       expect(response.status).toBe(200);
       await response.text();
-      expect(new TextDecoder().decode(upstream.requests[0]?.body)).toContain(`"type":"${block.type}"`);
+      expect(new TextDecoder().decode(upstream.requests[0]?.body)).toBe(JSON.stringify(body));
     } finally {
       await close();
     }
@@ -470,7 +496,7 @@ describe("Anthropic request route", () => {
       }],
     });
     try {
-      const response = await gw.fetch(anthropicRequest({
+      const body = {
         model: "native-messages",
         max_tokens: 16,
         messages: [
@@ -491,10 +517,11 @@ describe("Anthropic request route", () => {
             ],
           },
         ],
-      }));
+      };
+      const response = await gw.fetch(anthropicRequest(body));
       expect(response.status).toBe(200);
       await response.text();
-      expect(upstream.requests).toHaveLength(1);
+      expect(new TextDecoder().decode(upstream.requests[0]?.body)).toBe(JSON.stringify(body));
     } finally {
       await close();
     }
@@ -546,12 +573,13 @@ describe("Anthropic request route", () => {
       }],
     });
     try {
-      const response = await gw.fetch(anthropicRequest({
+      const body = {
         model: "native-messages", max_tokens: 16, messages: [{ role: "assistant", content: [call, result] }],
-      }));
+      };
+      const response = await gw.fetch(anthropicRequest(body));
       expect(response.status).toBe(200);
       await response.text();
-      expect(upstream.requests).toHaveLength(1);
+      expect(new TextDecoder().decode(upstream.requests[0]?.body)).toBe(JSON.stringify(body));
     } finally {
       await close();
     }

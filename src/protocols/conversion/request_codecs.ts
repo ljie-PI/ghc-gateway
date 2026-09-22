@@ -1217,7 +1217,12 @@ function decodeToolResultContent(
       );
     }
     if (type === "input_image") {
-      assertAllowedKeys(block, new Set(["type", "image_url", "detail"]), "REQ-TOOL-RESULT-IMAGE");
+      const allowed = new Set(["type", "image_url", "detail"]);
+      if (messagesProjection) {
+        assertMessagesProjection(block, allowed, "REQ-TOOL-RESULT-IMAGE", degradations);
+      } else {
+        assertAllowedKeys(block, allowed, "REQ-TOOL-RESULT-IMAGE");
+      }
       return imageContent(
         requiredString(
           oneMember(block, "image_url", "REQ-TOOL-RESULT-IMAGE-URL"),
