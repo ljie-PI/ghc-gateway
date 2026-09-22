@@ -63,6 +63,7 @@ The Agents view configures this machine's Claude Code and Codex clients to use t
 
 - Claude Code keeps its Sonnet, Opus, and Haiku roles and supports additional menu models through `modelPicker` with Claude Code 2.1.243 or newer.
 - Codex writes the selected catalog to `models.json` and references it from `config.toml`. Restart Codex after applying changes.
+- Generated Codex models share a compact behavior contract for brief phase-based commentary, task completion, conservative engineering judgment, workspace safety, and concise final responses. It does not expose reasoning or replace more specific client, user, or repository instructions.
 - Responses models with verified reasoning-effort support advertise reasoning summaries unless the upstream explicitly disables them. Summary defaults to `none`; select concise or detailed in the client to request visible summary text.
 - Apply updates Gateway-owned routing and model fields while preserving unrelated settings, hooks, MCP servers, Codex `auth.json`, and Claude credentials.
 
