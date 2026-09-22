@@ -197,6 +197,27 @@ describe("model capability registry", () => {
           supported_reasoning_efforts: ["ultra"],
         },
         {
+          id: "explicit-summary-false", name: "Explicit summary false", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: { supports: {
+            reasoning_effort: ["low"],
+            reasoning_summaries: false,
+          } },
+        },
+        {
+          id: "malformed-summary", name: "Malformed summary", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: { supports: {
+            reasoning_effort: ["low"],
+            reasoning_summaries: "yes",
+          } },
+        },
+        {
+          id: "chat-only-summary-missing", name: "Chat only summary missing", vendor: "test", model_picker_enabled: true,
+          supported_endpoints: ["/chat/completions"],
+          capabilities: { supports: { reasoning_effort: ["low"] } },
+        },
+        {
           id: "malformed-future", name: "Malformed future", vendor: "test", model_picker_enabled: true,
           supported_endpoints: ["/responses"],
           capabilities: { supports: { reasoning_effort: ["low", ""] } },
@@ -213,16 +234,25 @@ describe("model capability registry", () => {
     expect(capability(snapshot, "gpt-5.6-sol").capabilities).toMatchObject({
       reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"],
       reasoningProtocols: ["responses"],
+      reasoningSummaries: true,
     });
     expect(capability(snapshot, "gpt-5.6-sol").profile.unrecognizedReasoningEfforts.value).toEqual([]);
     expect(capability(snapshot, "future-mixed").capabilities).toMatchObject({
       reasoningLevels: ["none", "low"],
       reasoningProtocols: ["responses"],
+      reasoningSummaries: true,
     });
     expect(capability(snapshot, "future-mixed").profile.unrecognizedReasoningEfforts.value).toEqual(["ultra"]);
     expect(capability(snapshot, "future-only").capabilities).toMatchObject({
       reasoningLevels: [],
       reasoningProtocols: [],
+      reasoningSummaries: false,
+    });
+    expect(capability(snapshot, "explicit-summary-false").capabilities.reasoningSummaries).toBe(false);
+    expect(capability(snapshot, "malformed-summary").capabilities.reasoningSummaries).toBe(false);
+    expect(capability(snapshot, "chat-only-summary-missing").capabilities).toMatchObject({
+      reasoningProtocols: ["chat"],
+      reasoningSummaries: false,
     });
     expect(capability(snapshot, "future-only").profile).toMatchObject({
       reasoningEfforts: { value: [] },

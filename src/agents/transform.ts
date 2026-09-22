@@ -163,6 +163,7 @@ function projectCodex(
       priority: index, support_verbosity: model.capabilities.verbosity,
       supports_reasoning_summaries: model.capabilities.reasoningSummaries,
       supports_reasoning_summary_parameter: model.capabilities.reasoningSummaries,
+      ...(model.capabilities.reasoningSummaries ? { default_reasoning_summary: "none" } : {}),
       supports_parallel_tool_calls: model.capabilities.parallelToolCalling,
       supports_image_detail_original: model.capabilities.inputModalities.includes("image"),
       supports_search_tool: model.capabilities.search,

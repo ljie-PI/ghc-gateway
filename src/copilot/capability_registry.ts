@@ -157,6 +157,11 @@ export class ModelCapabilityRegistry {
     const reasoningLevels = reasoningProtocols.length === 0
       ? []
       : reasoningEfforts.value?.recognized ?? [];
+    const reasoningSummaries = supportsReasoningSummaries(
+      live.reasoningSummaries,
+      fallback.reasoningSummaries,
+      reasoningProtocols,
+    );
     const toolCalling = supportedBoolean(live.toolCalls, fallback.toolCalls);
     const parallelToolCalling = toolCalling
       && supportedBoolean(live.parallelToolCalls, fallback.parallelToolCalls);
@@ -187,7 +192,7 @@ export class ModelCapabilityRegistry {
           : ["text"],
         toolCalling,
         parallelToolCalling,
-        reasoningSummaries: supportedBoolean(live.reasoningSummaries, fallback.reasoningSummaries),
+        reasoningSummaries,
         verbosity: supportedBoolean(live.verbosity, fallback.verbosity),
         search: supportedBoolean(live.search, fallback.search),
       },
@@ -222,6 +227,18 @@ function deepFreeze<T>(value: T): T {
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function supportsReasoningSummaries(
+  live: DeclaredModelCapabilities["reasoningSummaries"],
+  builtin: DeclaredModelCapabilities["reasoningSummaries"],
+  reasoningProtocols: readonly NativeModelProtocol[],
+): boolean {
+  const declaration = effectiveField(live, builtin);
+  if (declaration.conflict || declaration.liveState === "malformed") {
+    return false;
+  }
+  return declaration.value ?? reasoningProtocols.includes("responses");
 }
 
 function sameReasoningDeclarations(
