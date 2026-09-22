@@ -45,7 +45,12 @@ import {
   type ResponsesHistory,
   type ResponsesRouteReceipt,
 } from "./history.js";
-import { completeNativeResponses, normalizeNativeResponsesStream, openNativeResponsesStream } from "./native.js";
+import {
+  completeNativeResponses,
+  createNativeResponsesPlan,
+  normalizeNativeResponsesStream,
+  openNativeResponsesStream,
+} from "./native.js";
 import { OPENAI_RESPONSES_JSON_HEADERS, OPENAI_RESPONSES_STREAM_HEADERS } from "./wire.js";
 import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
@@ -229,13 +234,7 @@ async function executeOpenaiResponses(
     plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
   );
   if (plan.kind === "native") {
-    const nativePlan = {
-      kind: "native_responses" as const,
-      originalRequest: decoded,
-      resolvedModel: resolved,
-      upstreamUrl: `${bound.target.endpoint.replace(/\/+$/u, "")}/responses`,
-      stream: decoded.stream,
-    };
+    const nativePlan = createNativeResponsesPlan(decoded, resolved, bound.target.endpoint);
     return withUpstreamProtocol(decoded.stream
       ? await nativeStreamResponse(
         dependencies.history,

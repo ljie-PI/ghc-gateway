@@ -31,15 +31,16 @@ import { migration as reasoningCarriersMigration } from "../../src/persistence/m
 import { serializeAnthropicMessagesErrorBody } from "../../src/protocols/anthropic_messages/wire.js";
 import { decodeOpenaiChatCompletionsRequest, prepareOpenaiChatCompletionsRequest } from "../../src/protocols/openai_chat_completions/endpoint.js";
 import { encodeOpenaiChatCompletionsDone, encodeOpenaiChatCompletionsSseChunk, serializeOpenaiChatCompletionsErrorBody } from "../../src/protocols/openai_chat_completions/wire.js";
-import { convertResponsesRequest, buildChatBridgeRequest, type ReasoningConfig } from "../../src/protocols/openai_responses/bridge_request.js";
-import { convertChatResponseToResponses } from "../../src/protocols/openai_responses/bridge_nonstream.js";
 import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
-import type { ResponsesRequest } from "../../src/protocols/openai_responses/dto.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
-import { SqliteResponsesHistory, type ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
-import { normalizeNativeResponsesStream, serializeNativeResponsesRequest, validatedNativeResponsesBody } from "../../src/protocols/openai_responses/native.js";
-import { planResponsesExecution, type ChatBridgePlan, type NativeResponsesPlan } from "../../src/protocols/openai_responses/planner.js";
-import { buildRequestToolContext } from "../../src/protocols/openai_responses/tool_context.js";
+import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
+import {
+  createNativeResponsesPlan,
+  normalizeNativeResponsesStream,
+  serializeNativeResponsesRequest,
+  type NativeResponsesPlan,
+  validatedNativeResponsesBody,
+} from "../../src/protocols/openai_responses/native.js";
 import { canonicalizeWireJson } from "../../src/serialization/canonical_json.js";
 import { isWireJsonObject, memberValues, parseWireJson, serializeWireJson, WireJsonError, type WireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
@@ -72,8 +73,6 @@ const fixtureVerifiers: ReadonlyMap<string, FixtureVerifier> = new Map<string, F
   ["anthropic", expectedAnthropicFixture],
   ["responses-history", expectedResponsesHistoryFixture],
   ["responses-native", expectedResponsesNativeFixture],
-  ["responses-bridge-request", expectedResponsesBridgeRequestFixture],
-  ["responses-bridge-nonstream", expectedResponsesBridgeNonstreamFixture],
   ["responses-endpoint", expectedResponsesEndpointFixture],
   ["protocol-conversion", expectedProtocolConversionFixture],
   ["agent-config", expectedAgentConfigFixture],
@@ -507,17 +506,6 @@ async function expectedAnthropicFixture(entry: FixtureManifestEntry): Promise<st
 async function expectedResponsesNativeFixture(entry: FixtureManifestEntry): Promise<string | Uint8Array | undefined> {
   const inputPath = path.join(fixtureFamilyRoot(entry), entry.input);
   switch (entry.caseId) {
-  case "responses-native.routing.matrix": {
-    const matrix = JSON.parse(await readFile(inputPath, "utf8")) as Array<{
-      readonly name: string;
-      readonly protocols: readonly ("chat" | "messages" | "responses")[] | null;
-    }>;
-    const request = responsesRequestFromJson("{\"model\":\"requested\",\"input\":\"hi\"}");
-    return JSON.stringify(matrix.map((item) => ({
-      name: item.name,
-      plan: planKind(request, item.protocols),
-    })));
-  }
   case "responses-native.request.preservation":
     return serializeNativeResponsesRequest(nativeFixturePlan(await readWireObject(inputPath)));
   case "responses-native.nonstream.object": {
@@ -531,73 +519,6 @@ async function expectedResponsesNativeFixture(entry: FixtureManifestEntry): Prom
   default:
     return undefined;
   }
-}
-
-async function expectedResponsesBridgeRequestFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
-  const inputPath = path.join(fixtureFamilyRoot(entry), entry.input);
-  const request = decodeResponsesRequest(await readWireObject(inputPath));
-  if (entry.caseId === "responses-bridge-request.history.enrichment") {
-    const plan: ChatBridgePlan = {
-      kind: "chat_bridge",
-      originalRequest: request,
-      resolvedModel: responsesResolvedModel("gpt", ["chat"]),
-      continuation: {
-        accountId: "github.com/1",
-        responseId: request.previousResponseId ?? "resp_previous",
-        modelId: "gpt",
-        upstreamOrigin: "https://api.githubcopilot.com",
-        owner: "converted",
-        upstreamProtocol: "chat",
-        conversionVersion: "responses-chat-v1",
-        checkpointState: "complete",
-        expiresAt: 1_700_604_800_000,
-      },
-    };
-    const history: ResponsesHistory = {
-      async enrich() {
-        return responsesRequestFromJson("{\"model\":\"gpt\",\"input\":[{\"type\":\"function_call\",\"call_id\":\"call_restored\",\"name\":\"lookup\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_restored\",\"output\":\"ok\"}],\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{}}]}");
-      },
-      async resolve() { return { kind: "none" }; },
-      async recordReceipt() {},
-      async recordCheckpoint() {},
-    };
-    return decodeBytes(serializeWireJson(await buildChatBridgeRequest(plan, history, {
-      reasoningConfig: null,
-    }, new AbortController().signal)));
-  }
-  const reasoningConfig: ReasoningConfig | null = entry.caseId === "responses-bridge-request.reasoning-canonical"
-    ? { supportsEffort: true, effortValueMode: "openrouter" }
-    : null;
-  return decodeBytes(serializeWireJson(convertResponsesRequest(request, {
-    resolvedModel: request.model ?? "gpt",
-    toolContext: buildRequestToolContext(request),
-    reasoningConfig,
-    chatOutputTokenField: entry.caseId === "responses-bridge-request.reasoning-canonical"
-      ? "max_completion_tokens"
-      : "max_tokens",
-    upstreamHost: "api.openai.com",
-  })));
-}
-
-async function expectedResponsesBridgeNonstreamFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
-  if (entry.caseId !== "responses-bridge-nonstream.envelope-items-tools-usage"
-    && entry.caseId !== "responses-bridge-nonstream.images-managed-id") {
-    return undefined;
-  }
-  const fixture = JSON.parse(await readFile(path.join(fixtureFamilyRoot(entry), entry.input), "utf8")) as {
-    readonly request: Record<string, unknown>;
-    readonly chat: Record<string, unknown>;
-  };
-  const request = responsesRequestFromValue(fixture.request);
-  let uuid = 0;
-  const result = convertChatResponseToResponses(wireObjectFromValue(fixture.chat), {
-    originalRequest: request,
-    toolContext: buildRequestToolContext(request),
-    customLlmProvider: "github_copilot",
-    modelId: "gpt",
-    createUuid: () => `00000000-0000-4000-8000-${(++uuid).toString().padStart(12, "0")}`,
-  });
-  return decodeBytes(serializeWireJson(result.response));
 }
 
 async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): Promise<string | undefined> {
@@ -972,41 +893,12 @@ async function createResponsesFixtureGateway(expectations: readonly HttpExpectat
 
 function nativeFixturePlan(body: WireJsonObject): NativeResponsesPlan {
   const request = decodeResponsesRequest(body);
-  const plan = planResponsesExecution(request, responsesResolvedModel("resolved", ["responses"]), {
-    endpoint: "https://api.githubcopilot.com/",
-    token: "fixture",
-  });
-  if (plan.kind !== "native_responses") {
-    throw new Error("native fixture did not create a native plan");
-  }
-  return plan;
-}
-
-function responsesResolvedModel(
-  upstreamModel: string,
-  protocols: readonly ("chat" | "messages" | "responses")[] | null,
-): ResolvedModel {
-  return {
-    requestedModel: upstreamModel,
-    upstreamModel,
+  return createNativeResponsesPlan(request, {
+    ...(request.model === undefined ? {} : { requestedModel: request.model }),
+    upstreamModel: "resolved",
     source: "explicit",
-    capability: fixtureCapability(upstreamModel, protocols),
-  };
-}
-
-function planKind(
-  request: ResponsesRequest,
-  protocols: readonly ("chat" | "messages" | "responses")[] | null,
-): string {
-  try {
-    return planResponsesExecution(
-      request,
-      responsesResolvedModel("resolved", protocols),
-      { endpoint: "https://api.githubcopilot.com/", token: "fixture" },
-    ).kind;
-  } catch {
-    return "invalid_request";
-  }
+    capability: fixtureCapability("resolved", ["responses"]),
+  }, "https://api.githubcopilot.com/");
 }
 
 function fixtureCapability(
@@ -1073,18 +965,6 @@ function fixtureModelCapabilities(protocols: readonly InferenceProtocol[]) {
     verbosity: false,
     search: false,
   };
-}
-
-function responsesRequestFromJson(source: string): ResponsesRequest {
-  const parsed = parseWireJson(new TextEncoder().encode(source), { maxBytes: 65_536, maxDepth: 64 });
-  if (!isWireJsonObject(parsed)) {
-    throw new Error("Responses fixture request must be an object");
-  }
-  return decodeResponsesRequest(parsed);
-}
-
-function responsesRequestFromValue(value: Record<string, unknown>): ResponsesRequest {
-  return decodeResponsesRequest(wireObjectFromValue(value));
 }
 
 function wireObjectFromValue(value: Record<string, unknown>): WireJsonObject {

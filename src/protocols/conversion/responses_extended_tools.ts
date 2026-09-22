@@ -203,71 +203,6 @@ function projectValidatedChatTools(state: MutableState): readonly WireJsonObject
   }));
 }
 
-export interface CompatibilityResponsesToolBinding {
-  readonly kind: ResponsesToolSourceBinding["kind"];
-  readonly originalName: string;
-  readonly namespace?: string;
-}
-
-export function restoredResponsesToolNameForCompatibility(
-  binding: CompatibilityResponsesToolBinding | undefined,
-  chatName: string,
-): string {
-  if (binding?.kind === "namespace") {
-    return binding.originalName;
-  }
-  if (binding?.kind === "tool_search") {
-    return "tool_search";
-  }
-  return binding?.originalName ?? chatName;
-}
-
-export function projectRestoredResponsesToolCallForCompatibility(
-  binding: CompatibilityResponsesToolBinding,
-  callId: string,
-  argumentsJson: string,
-  itemStatus: string,
-  responseStatus: "completed" | "incomplete",
-  includeToolSearchItemId = false,
-): WireJsonObject | undefined {
-  if (binding.kind === "function") {
-    return undefined;
-  }
-  if (binding.kind === "namespace") {
-    return object([
-      ["type", "function_call"],
-      ["id", callId],
-      ["call_id", callId],
-      ["name", binding.originalName],
-      ...(binding.namespace === undefined ? [] : [["namespace", binding.namespace] as const]),
-      ["arguments", argumentsJson],
-      ["status", itemStatus],
-    ]);
-  }
-  const restored = includeToolSearchItemId && itemStatus === "in_progress"
-    ? {}
-    : restoreResponsesExtendedToolArguments(binding.kind, argumentsJson, responseStatus);
-  if (binding.kind === "custom") {
-    return object([
-      ["type", "custom_tool_call"],
-      ["id", callId],
-      ["call_id", callId],
-      ["name", binding.originalName],
-      ...(includeToolSearchItemId
-        ? [["input", restored.rawCustomInput ?? ""] as const, ["status", itemStatus] as const]
-        : [["status", itemStatus] as const, ["input", restored.rawCustomInput ?? ""] as const]),
-    ]);
-  }
-  return object([
-    ["type", "tool_search_call"],
-    ...(includeToolSearchItemId ? [["id", callId] as const] : []),
-    ["call_id", callId],
-    ["status", itemStatus],
-    ["execution", "client"],
-    ["arguments", restored.toolSearchArguments ?? object([])],
-  ]);
-}
-
 export interface RestoredExtendedToolArguments {
   readonly rawCustomInput?: string;
   readonly toolSearchArguments?: WireJsonObject;
@@ -349,12 +284,6 @@ export function restoreResponsesExtendedTools(
 interface ExtendedMessageState {
   readonly output: WireJsonObject[];
   readonly pendingReasoning: string[];
-}
-
-export function projectResponsesMessagesForCompatibility(body: WireJsonObject): readonly WireJsonObject[] {
-  const projection = projectResponsesToolsForCompatibility(body);
-  const bySource = new Map(projection.bindings.map((binding) => [sourceKey(binding.namespace, binding.sourceName), binding.chatName]));
-  return projectResponsesMessages(body, (namespace, name) => bySource.get(sourceKey(namespace, name)));
 }
 
 function projectExtendedChatMessages(body: WireJsonObject, state: MutableState): WireJsonObject[] {
@@ -1338,37 +1267,6 @@ export function projectResponsesToolResultContentForCompatibility(item: WireJson
   return `${TOOL_RESULT_ERROR_MARKER}${content.length === 0 ? "" : `\n${content}`}`;
 }
 
-export function projectResponsesToolChoiceForCompatibility(
-  value: WireJson | undefined,
-  chatNameForSource: (namespace: string | undefined, name: string) => string | undefined,
-  target: "chat" | "responses" = "chat",
-): WireJson | undefined {
-  if (!isWireJsonObject(value)) {
-    return value;
-  }
-  const type = compatibilityString(value, "type");
-  if (type === "function") {
-    const sourceName = compatibilityString(value, "name") ?? "";
-    if (target === "responses") {
-      return object([["type", "function"], ["name", sourceName]]);
-    }
-    const chatName = chatNameForSource(compatibilityString(value, "namespace"), sourceName) ?? sourceName;
-    return object([["type", "function"], ["function", object([["name", chatName]])]]);
-  }
-  if (type === "tool_search") {
-    return target === "responses"
-      ? object([["type", "tool_search"]])
-      : object([["type", "function"], ["function", object([["name", "tool_search"]])]]);
-  }
-  if (type === "custom") {
-    const name = compatibilityString(value, "name") ?? "";
-    return target === "responses"
-      ? object([["type", "custom"], ["name", name]])
-      : object([["type", "function"], ["function", object([["name", name]])]]);
-  }
-  return value;
-}
-
 export function projectResponsesToolCallForCompatibility(
   item: WireJsonObject,
   chatNameForSource: (namespace: string | undefined, name: string) => string | undefined,
@@ -1421,66 +1319,6 @@ function compatibilityArguments(value: WireJson | undefined): string {
   } catch {
     return value;
   }
-}
-
-export function projectResponsesToolsForCompatibility(body: WireJsonObject): ResponsesToolCompatibilityProjection {
-  const decoded = decodeResponsesExtendedToolProjection(body);
-  if (decoded !== undefined) {
-    return decoded.projection;
-  }
-  return projectOrdinaryResponsesToolsForCompatibility(body);
-}
-
-/**
- * Retained only for ordinary function-only #182 bridge fixtures. Any custom,
- * namespace, tool-search, malformed, or discovered declaration is routed to
- * decodeResponsesExtendedToolProjection above.
- */
-function projectOrdinaryResponsesToolsForCompatibility(
-  body: WireJsonObject,
-): ResponsesToolCompatibilityProjection {
-  const chatTools: WireJsonObject[] = [];
-  const bindings: ResponsesToolSourceBinding[] = [];
-  const seenChatNames = new Set<string>();
-  const declared = memberValues(body, "tools")[0];
-  if (!isWireJsonArray(declared)) {
-    return { chatTools, bindings };
-  }
-  for (const value of declared.items) {
-    if (!isWireJsonObject(value) || memberValues(value, "type")[0] !== "function") {
-      continue;
-    }
-    const nested = memberValues(value, "function")[0];
-    const shape = isWireJsonObject(nested) ? nested : value;
-    const sourceName = compatibilityString(shape, "name")?.trim() ?? "";
-    if (sourceName.length === 0 || seenChatNames.has(sourceName)) {
-      continue;
-    }
-    seenChatNames.add(sourceName);
-    const parametersValue = memberValues(shape, "parameters")[0];
-    const parameters = isWireJsonObject(parametersValue)
-      ? normalizedParameters(parametersValue)
-      : object([["type", "object"], ["properties", object([])]]);
-    const strictValue = memberValues(shape, "strict")[0] ?? memberValues(value, "strict")[0];
-    const functionMembers: Array<readonly [string, WireJson]> = [
-      ["name", sourceName],
-      ["description", memberValues(shape, "description")[0] ?? null],
-      ["parameters", parameters],
-    ];
-    if (strictValue === true || strictValue === false) {
-      functionMembers.push(["strict", strictValue]);
-    } else if (isOpenaiStrictSchemaCompatible(parameters)) {
-      functionMembers.push(["strict", true]);
-    }
-    const binding: ResponsesToolSourceBinding = {
-      kind: "function",
-      chatName: sourceName,
-      sourceName,
-    };
-    bindings.push(binding);
-    chatTools.push(object([["type", "function"], ["function", object(functionMembers)]]));
-  }
-  return { chatTools, bindings };
 }
 
 function compatibilityString(value: WireJsonObject, key: string): string | undefined {

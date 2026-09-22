@@ -1,1 +1,0 @@
-{"model":"gpt","messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call_restored","type":"function","function":{"name":"lookup","arguments":"{}"}}],"reasoning_content":"tool call"},{"role":"tool","tool_call_id":"call_restored","content":"ok"}],"tools":[{"type":"function","function":{"name":"lookup","description":null,"parameters":{"type":"object"}}}]}

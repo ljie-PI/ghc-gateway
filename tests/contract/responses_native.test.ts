@@ -6,16 +6,29 @@ import { startHttpCopilot, jsonStream, waitForHttp, assertTransportReleased } fr
 import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
 import {
   completeNativeResponses,
+  createNativeResponsesPlan,
   nativeResponsesUpstreamRequest,
   openNativeResponsesStream,
   serializeNativeResponsesRequest,
+  type NativeResponsesPlan,
   validatedNativeResponsesBody,
 } from "../../src/protocols/openai_responses/native.js";
-import { planResponsesExecution, type NativeResponsesPlan } from "../../src/protocols/openai_responses/planner.js";
 import { isWireJsonObject, parseWireJson } from "../../src/serialization/wire_json.js";
 import type { ResolvedModel } from "../../src/protocols/model_catalog/resolver.js";
 
 describe("native Responses execution", () => {
+  it("owns the immutable native plan shape and normalizes the upstream URL", () => {
+    const request = decode("{\"stream\":true,\"model\":\"requested\",\"input\":\"hi\"}");
+    const resolvedModel = nativeResolvedModel(request.model);
+    expect(createNativeResponsesPlan(request, resolvedModel, "https://api.githubcopilot.com/")).toEqual({
+      kind: "native_responses",
+      originalRequest: request,
+      resolvedModel,
+      upstreamUrl: "https://api.githubcopilot.com/responses",
+      stream: true,
+    });
+  });
+
   it("serializes only the resolved model change while preserving native fields and number lexemes", () => {
     const plan = nativePlan("{\"previous_response_id\":\"resp_1\",\"model\":\"requested\",\"store\":false,\"temperature\":1.20,\"reasoning\":{\"encrypted_content\":\"abc\"}}");
     expect(new TextDecoder().decode(serializeNativeResponsesRequest(plan))).toBe(
@@ -94,8 +107,16 @@ describe("native Responses execution", () => {
 
   function nativePlan(json: string): NativeResponsesPlan {
     const request = decode(json);
-    const resolvedModel: ResolvedModel = {
-      ...(request.model === undefined ? {} : { requestedModel: request.model }),
+    return createNativeResponsesPlan(
+      request,
+      nativeResolvedModel(request.model),
+      "https://api.githubcopilot.com/",
+    );
+  }
+
+  function nativeResolvedModel(requestedModel: string | undefined): ResolvedModel {
+    return {
+      ...(requestedModel === undefined ? {} : { requestedModel }),
       upstreamModel: "resolved",
       source: "explicit",
       capability: {
@@ -122,14 +143,6 @@ describe("native Responses execution", () => {
         revision: { credentialGeneration: 0, catalogGeneration: 0, builtinRevision: null },
       },
     };
-    const plan = planResponsesExecution(request, resolvedModel, {
-      endpoint: "https://api.githubcopilot.com/",
-      token: "secret",
-    });
-    if (plan.kind !== "native_responses") {
-      throw new Error("expected native plan");
-    }
-    return plan;
   }
 
   function decode(json: string) {

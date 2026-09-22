@@ -23,15 +23,13 @@ describe("fixture family closure", () => {
     const entries = await verifyFixtureManifests();
     const count = (family: string): number => entries.filter((entry) => entry.family === family).length;
 
-    expect(entries).toHaveLength(71);
+    expect(entries).toHaveLength(65);
     for (const entry of entries) {
       expect(entry).not.toHaveProperty("source");
       expect(entry).not.toHaveProperty("owner");
     }
     expect(count("anthropic")).toBe(1);
-    expect(count("responses-native")).toBe(4);
-    expect(count("responses-bridge-request")).toBe(3);
-    expect(count("responses-bridge-nonstream")).toBe(2);
+    expect(count("responses-native")).toBe(3);
     expect(count("responses-bridge-stream")).toBe(0);
     expect(count("responses-endpoint")).toBe(3);
     expect(count("protocol-conversion")).toBe(20);
