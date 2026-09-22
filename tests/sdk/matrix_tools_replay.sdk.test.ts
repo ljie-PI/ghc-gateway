@@ -48,28 +48,63 @@ const WEATHER_TOOL_ANTHROPIC = {
   },
 };
 
-type ToolMatrixCell =
+type ToolTarget =
   | { readonly title: string; readonly upstream: "chat"; readonly model: typeof CHAT_MODEL }
   | { readonly title: string; readonly upstream: "messages"; readonly model: typeof MESSAGES_MODEL }
   | { readonly title: string; readonly upstream: "responses"; readonly model: typeof NATIVE_RESPONSES_MODEL };
 
+type ChatToolCell = ToolTarget & { readonly client: "chat" };
+type MessagesToolCell = ToolTarget & { readonly client: "messages" };
+type ResponsesToolCell = ToolTarget & { readonly client: "responses" };
+
+interface ToolCellsByClient {
+  readonly chat: ChatToolCell;
+  readonly messages: MessagesToolCell;
+  readonly responses: ResponsesToolCell;
+}
+
 const CHAT_TOOL_CELLS = [
-  { title: "C -> C (Chat -> Chat tools roundtrip)", upstream: "chat", model: CHAT_MODEL },
-  { title: "C -> R (Chat -> Responses tools roundtrip)", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
-  { title: "C -> M (Chat -> Messages tools roundtrip)", upstream: "messages", model: MESSAGES_MODEL },
-] as const satisfies readonly ToolMatrixCell[];
+  { title: "C -> C (Chat -> Chat tools roundtrip)", client: "chat", upstream: "chat", model: CHAT_MODEL },
+  {
+    title: "C -> R (Chat -> Responses tools roundtrip)",
+    client: "chat",
+    upstream: "responses",
+    model: NATIVE_RESPONSES_MODEL,
+  },
+  { title: "C -> M (Chat -> Messages tools roundtrip)", client: "chat", upstream: "messages", model: MESSAGES_MODEL },
+] as const satisfies readonly ChatToolCell[];
 
 const MESSAGES_TOOL_CELLS = [
-  { title: "M -> C (Messages -> Chat tools roundtrip)", upstream: "chat", model: CHAT_MODEL },
-  { title: "M -> M (Messages -> Messages tools roundtrip)", upstream: "messages", model: MESSAGES_MODEL },
-  { title: "M -> R (Messages -> Responses tools roundtrip)", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
-] as const satisfies readonly ToolMatrixCell[];
+  { title: "M -> C (Messages -> Chat tools roundtrip)", client: "messages", upstream: "chat", model: CHAT_MODEL },
+  {
+    title: "M -> M (Messages -> Messages tools roundtrip)",
+    client: "messages",
+    upstream: "messages",
+    model: MESSAGES_MODEL,
+  },
+  {
+    title: "M -> R (Messages -> Responses tools roundtrip)",
+    client: "messages",
+    upstream: "responses",
+    model: NATIVE_RESPONSES_MODEL,
+  },
+] as const satisfies readonly MessagesToolCell[];
 
 const RESPONSES_TOOL_CELLS = [
-  { title: "R -> C (Responses -> Chat tools & continuation)", upstream: "chat", model: CHAT_MODEL },
-  { title: "R -> M (Responses -> Messages tools & continuation)", upstream: "messages", model: MESSAGES_MODEL },
-  { title: "R -> R (Responses -> Responses native tools & continuation)", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
-] as const satisfies readonly ToolMatrixCell[];
+  { title: "R -> C (Responses -> Chat tools & continuation)", client: "responses", upstream: "chat", model: CHAT_MODEL },
+  {
+    title: "R -> M (Responses -> Messages tools & continuation)",
+    client: "responses",
+    upstream: "messages",
+    model: MESSAGES_MODEL,
+  },
+  {
+    title: "R -> R (Responses -> Responses native tools & continuation)",
+    client: "responses",
+    upstream: "responses",
+    model: NATIVE_RESPONSES_MODEL,
+  },
+] as const satisfies readonly ResponsesToolCell[];
 
 interface ToolCellContext {
   readonly harness: ReplaySdkHarness;
@@ -82,10 +117,10 @@ describe("nine-cell matrix tools & continuation execution via Mock Copilot Repla
   describeToolCells("responses", RESPONSES_TOOL_CELLS, executeResponsesRoundtrip);
 });
 
-function describeToolCells<Cell extends ToolMatrixCell>(
-  clientProtocol: SdkProtocol,
-  cells: readonly Cell[],
-  execute: (cell: Cell, context: ToolCellContext) => Promise<void>,
+function describeToolCells<Client extends keyof ToolCellsByClient>(
+  clientProtocol: Client,
+  cells: readonly ToolCellsByClient[NoInfer<Client>][],
+  execute: (cell: ToolCellsByClient[NoInfer<Client>], context: ToolCellContext) => Promise<void>,
 ): void {
   describe.each(cells)("$title", (cell) => {
     let harness: ReplaySdkHarness;
@@ -107,7 +142,7 @@ function describeToolCells<Cell extends ToolMatrixCell>(
   });
 }
 
-async function executeChatRoundtrip(cell: ToolMatrixCell, { harness, clients }: ToolCellContext): Promise<void> {
+async function executeChatRoundtrip(cell: ChatToolCell, { harness, clients }: ToolCellContext): Promise<void> {
   const receiptStart = select(harness, cell.upstream);
   const first = await clients.openai.chat.completions.create({
     model: cell.model,
@@ -133,7 +168,7 @@ async function executeChatRoundtrip(cell: ToolMatrixCell, { harness, clients }: 
   finish(harness, cell.upstream, receiptStart);
 }
 
-async function executeMessagesRoundtrip(cell: ToolMatrixCell, { harness, clients }: ToolCellContext): Promise<void> {
+async function executeMessagesRoundtrip(cell: MessagesToolCell, { harness, clients }: ToolCellContext): Promise<void> {
   const receiptStart = select(harness, cell.upstream);
   const first = await clients.anthropic.messages.create({
     model: cell.model,
@@ -164,7 +199,7 @@ async function executeMessagesRoundtrip(cell: ToolMatrixCell, { harness, clients
   finish(harness, cell.upstream, receiptStart);
 }
 
-async function executeResponsesRoundtrip(cell: ToolMatrixCell, { harness, clients }: ToolCellContext): Promise<void> {
+async function executeResponsesRoundtrip(cell: ResponsesToolCell, { harness, clients }: ToolCellContext): Promise<void> {
   const receiptStart = select(harness, cell.upstream);
   const first = cell.upstream === "responses"
     ? await clients.openai.responses.create({

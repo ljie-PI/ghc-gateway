@@ -53,28 +53,32 @@ const WEATHER_TOOL_ANTHROPIC = {
   },
 };
 
-type MatrixCell =
+type MatrixTarget =
   | { readonly title: string; readonly upstream: "chat"; readonly model: typeof CHAT_MODEL }
   | { readonly title: string; readonly upstream: "messages"; readonly model: typeof MESSAGES_MODEL }
   | { readonly title: string; readonly upstream: "responses"; readonly model: typeof NATIVE_RESPONSES_MODEL };
 
+type ChatMatrixCell = MatrixTarget & { readonly client: "chat" };
+type MessagesMatrixCell = MatrixTarget & { readonly client: "messages" };
+type ResponsesMatrixCell = MatrixTarget & { readonly client: "responses" };
+
 const CHAT_CELLS = [
-  { title: "C -> C", upstream: "chat", model: CHAT_MODEL },
-  { title: "C -> R", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
-  { title: "C -> M", upstream: "messages", model: MESSAGES_MODEL },
-] as const satisfies readonly MatrixCell[];
+  { title: "C -> C", client: "chat", upstream: "chat", model: CHAT_MODEL },
+  { title: "C -> R", client: "chat", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
+  { title: "C -> M", client: "chat", upstream: "messages", model: MESSAGES_MODEL },
+] as const satisfies readonly ChatMatrixCell[];
 
 const MESSAGES_CELLS = [
-  { title: "M -> C", upstream: "chat", model: CHAT_MODEL },
-  { title: "M -> R", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
-  { title: "M -> M", upstream: "messages", model: MESSAGES_MODEL },
-] as const satisfies readonly MatrixCell[];
+  { title: "M -> C", client: "messages", upstream: "chat", model: CHAT_MODEL },
+  { title: "M -> R", client: "messages", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
+  { title: "M -> M", client: "messages", upstream: "messages", model: MESSAGES_MODEL },
+] as const satisfies readonly MessagesMatrixCell[];
 
 const RESPONSES_CELLS = [
-  { title: "R -> C", upstream: "chat", model: CHAT_MODEL },
-  { title: "R -> M", upstream: "messages", model: MESSAGES_MODEL },
-  { title: "R -> R", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
-] as const satisfies readonly MatrixCell[];
+  { title: "R -> C", client: "responses", upstream: "chat", model: CHAT_MODEL },
+  { title: "R -> M", client: "responses", upstream: "messages", model: MESSAGES_MODEL },
+  { title: "R -> R", client: "responses", upstream: "responses", model: NATIVE_RESPONSES_MODEL },
+] as const satisfies readonly ResponsesMatrixCell[];
 
 const PARALLEL_PROMPT = "Get weather for Tokyo and Paris simultaneously using get_weather twice.";
 const MIXED_PROMPT = "What is the weather in the city where this character resides? Call get_weather.";
@@ -100,7 +104,7 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
   afterEach(() => { harness.replayServer.abortScenario(); });
 
   describe("Parallel Tools Execution across Matrix Cells", () => {
-    it.each(CHAT_CELLS)("$title parallel tools", async (cell) => {
+    it.each(CHAT_CELLS)("$title parallel tools", async (cell: ChatMatrixCell) => {
       const receiptStart = select(harness, cell.upstream, "parallel-tools");
       const response = await clients.openai.chat.completions.create({
         model: cell.model,
@@ -113,7 +117,7 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       finish(harness, cell.upstream, "parallel-tools", receiptStart);
     });
 
-    it.each(MESSAGES_CELLS)("$title parallel tools", async (cell) => {
+    it.each(MESSAGES_CELLS)("$title parallel tools", async (cell: MessagesMatrixCell) => {
       const receiptStart = select(harness, cell.upstream, "parallel-tools");
       const response = await clients.anthropic.messages.create({
         model: cell.model,
@@ -127,7 +131,7 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       finish(harness, cell.upstream, "parallel-tools", receiptStart);
     });
 
-    it.each(RESPONSES_CELLS)("$title parallel tools", async (cell) => {
+    it.each(RESPONSES_CELLS)("$title parallel tools", async (cell: ResponsesMatrixCell) => {
       const receiptStart = select(harness, cell.upstream, "parallel-tools");
       const response = await clients.openai.responses.create({
         model: cell.model,
@@ -142,7 +146,7 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
   });
 
   describe("Mixed Image & Tool Execution across Matrix Cells", () => {
-    it.each(CHAT_CELLS)("$title mixed image and tool", async (cell) => {
+    it.each(CHAT_CELLS)("$title mixed image and tool", async (cell: ChatMatrixCell) => {
       const receiptStart = select(harness, cell.upstream, "mixed-image-tool");
       const response = await clients.openai.chat.completions.create({
         model: cell.model,
@@ -160,7 +164,7 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       finish(harness, cell.upstream, "mixed-image-tool", receiptStart);
     });
 
-    it.each(MESSAGES_CELLS)("$title mixed image and tool", async (cell) => {
+    it.each(MESSAGES_CELLS)("$title mixed image and tool", async (cell: MessagesMatrixCell) => {
       const receiptStart = select(harness, cell.upstream, "mixed-image-tool");
       const response = await clients.anthropic.messages.create({
         model: cell.model,
@@ -179,7 +183,7 @@ describe("nine-cell matrix parallel tools & mixed image-tool execution via Mock 
       finish(harness, cell.upstream, "mixed-image-tool", receiptStart);
     });
 
-    it.each(RESPONSES_CELLS)("$title mixed image and tool", async (cell) => {
+    it.each(RESPONSES_CELLS)("$title mixed image and tool", async (cell: ResponsesMatrixCell) => {
       const receiptStart = select(harness, cell.upstream, "mixed-image-tool");
       const response = await clients.openai.responses.create({
         model: cell.model,
