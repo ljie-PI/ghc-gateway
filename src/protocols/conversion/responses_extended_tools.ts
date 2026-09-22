@@ -209,19 +209,6 @@ export interface CompatibilityResponsesToolBinding {
   readonly namespace?: string;
 }
 
-export function restoredResponsesToolNameForCompatibility(
-  binding: CompatibilityResponsesToolBinding | undefined,
-  chatName: string,
-): string {
-  if (binding?.kind === "namespace") {
-    return binding.originalName;
-  }
-  if (binding?.kind === "tool_search") {
-    return "tool_search";
-  }
-  return binding?.originalName ?? chatName;
-}
-
 export function projectRestoredResponsesToolCallForCompatibility(
   binding: CompatibilityResponsesToolBinding,
   callId: string,

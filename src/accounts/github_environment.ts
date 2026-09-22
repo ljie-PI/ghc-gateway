@@ -65,11 +65,6 @@ export function normalizeGitHubHost(input: string): string {
   return `${ascii}:${port}`;
 }
 
-export const GitHubEnvironmentResolver = {
-  normalize: normalizeGitHubHost,
-  resolve: resolveGitHubEnvironment,
-};
-
 export function resolveGitHubEnvironment(input: string): GitHubEnvironment {
   const host = normalizeGitHubHost(input);
   if (host === "github.com") {

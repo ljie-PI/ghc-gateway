@@ -1,7 +1,6 @@
 import {
   duplicateMemberNames,
   memberValues,
-  type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import type { ResponsesRequest } from "./dto.js";
@@ -85,8 +84,4 @@ function optionalBoolean(body: WireJsonObject, field: string, defaultValue: bool
     throw new ResponsesRequestDecodeError(field, `Responses request field ${field} must be a boolean or null`);
   }
   return value;
-}
-
-export function wireJsonString(value: WireJson | undefined): string | undefined {
-  return typeof value === "string" ? value : undefined;
 }

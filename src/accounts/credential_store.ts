@@ -358,13 +358,3 @@ function syncDirectory(directory: string): void {
     closeSync(fd);
   }
 }
-
-export function unlinkIfExists(filePath: string): void {
-  try {
-    unlinkSync(filePath);
-  } catch (error: unknown) {
-    if (!isNotFound(error)) {
-      throw error;
-    }
-  }
-}

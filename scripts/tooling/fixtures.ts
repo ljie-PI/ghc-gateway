@@ -2,7 +2,6 @@ import { withSetupCleanup, startHttpCopilot, closeAll, jsonStream } from "./test
 import type { HttpExpectation, HttpStreamControl } from "./test_support/copilot_http.js";
 import { mkdir, mkdtemp, rm, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -167,20 +166,6 @@ export async function verifyFixtureManifests(root = FIXTURE_ROOT, verifyExpected
     }
   }
   return entries;
-}
-
-export async function writeFixtureReport(entries: readonly FixtureManifestEntry[]): Promise<string> {
-  const reportPath = path.resolve("artifacts", "fixtures-report.json");
-  const payload = {
-    generatedAt: new Date(0).toISOString(),
-    count: entries.length,
-    checksum: createHash("sha256")
-      .update(entries.map((entry) => entry.caseId).join("\n"))
-      .digest("hex"),
-  };
-  await mkdir(path.dirname(reportPath), { recursive: true });
-  await writeFile(reportPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  return reportPath;
 }
 
 function throwFixtureGenerationError(caseId: string, entries: readonly FixtureManifestEntry[]): never {
