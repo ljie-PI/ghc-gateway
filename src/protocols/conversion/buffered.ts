@@ -872,12 +872,14 @@ function messagesUsage(value: WireJsonObject | undefined): SemanticUsage {
   const cacheReadTokens = nonnegativeIntegerMember(value, "cache_read_input_tokens");
   const cacheWriteTokens = nonnegativeIntegerMember(value, "cache_creation_input_tokens");
   const outputDetails = nullableObjectMember(value, "output_tokens_details");
+  const reportedReasoningTokens = optionalNonnegativeIntegerMember(outputDetails, "thinking_tokens");
   return {
     inputTokens: nonnegativeIntegerMember(value, "input_tokens") + cacheReadTokens + cacheWriteTokens,
     outputTokens: nonnegativeIntegerMember(value, "output_tokens"),
     cacheReadTokens,
     cacheWriteTokens,
-    reasoningTokens: nonnegativeIntegerMember(outputDetails, "thinking_tokens"),
+    reasoningTokens: reportedReasoningTokens ?? 0,
+    ...(reportedReasoningTokens === undefined ? {} : { reportedReasoningTokens }),
   };
 }
 
@@ -887,12 +889,14 @@ function responsesUsage(value: WireJsonObject | undefined): SemanticUsage {
   }
   const inputDetails = objectMember(value, "input_tokens_details");
   const outputDetails = objectMember(value, "output_tokens_details");
+  const reportedReasoningTokens = optionalNonnegativeIntegerMember(outputDetails, "reasoning_tokens");
   return {
     inputTokens: nonnegativeIntegerMember(value, "input_tokens"),
     outputTokens: nonnegativeIntegerMember(value, "output_tokens"),
     cacheReadTokens: nonnegativeIntegerMember(inputDetails, "cached_tokens"),
     cacheWriteTokens: nonnegativeIntegerMember(inputDetails, "cache_write_tokens"),
-    reasoningTokens: nonnegativeIntegerMember(outputDetails, "reasoning_tokens"),
+    reasoningTokens: reportedReasoningTokens ?? 0,
+    ...(reportedReasoningTokens === undefined ? {} : { reportedReasoningTokens }),
   };
 }
 

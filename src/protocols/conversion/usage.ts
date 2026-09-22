@@ -24,5 +24,10 @@ export function mergeMessagesUsage(
     cacheReadTokens,
     cacheWriteTokens,
     reasoningTokens: update.thinkingTokens ?? current.reasoningTokens,
+    ...(update.thinkingTokens !== undefined
+      ? { reportedReasoningTokens: update.thinkingTokens }
+      : current.reportedReasoningTokens === undefined
+        ? {}
+        : { reportedReasoningTokens: current.reportedReasoningTokens }),
   };
 }

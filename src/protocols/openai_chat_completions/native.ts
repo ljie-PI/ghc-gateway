@@ -73,12 +73,14 @@ export function chatCompletionsUsageFromCounters(
   const separateReasoning = counters.detailedReasoningTokens === undefined
     ? counters.separateReasoningTokens ?? 0
     : 0;
+  const reportedReasoningTokens = counters.detailedReasoningTokens ?? counters.separateReasoningTokens;
   return {
     inputTokens: counters.promptTokens ?? 0,
     outputTokens: (counters.completionTokens ?? 0) + separateReasoning,
     cacheReadTokens: counters.cacheReadTokens ?? 0,
     cacheWriteTokens: counters.cacheWriteTokens ?? 0,
     reasoningTokens: counters.detailedReasoningTokens ?? separateReasoning,
+    ...(reportedReasoningTokens === undefined ? {} : { reportedReasoningTokens }),
   };
 }
 

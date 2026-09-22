@@ -15,6 +15,7 @@ export interface AttemptUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly cacheTokens: number;
+  readonly reasoningTokens?: number;
 }
 
 export interface RequestAttempt {
@@ -72,6 +73,9 @@ export function createRequestAttempt(options: Readonly<RequestAttemptOptions>): 
       return;
     }
     finalized = true;
+    if (usage.reasoningTokens !== undefined) {
+      options.diagnostics?.set({ reasoningTokens: usage.reasoningTokens });
+    }
     options.diagnostics?.outcome(outcome);
     const occurredAtMs = nowMs();
     try {
@@ -83,7 +87,9 @@ export function createRequestAttempt(options: Readonly<RequestAttemptOptions>): 
         outcome,
         requestCount: 1,
         errorCount: errorCount(outcome, options.abortedErrorCount),
-        ...usage,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheTokens: usage.cacheTokens,
         latencyMs: Math.max(0, occurredAtMs - startedAtMs),
       });
     } catch (_error: unknown) {

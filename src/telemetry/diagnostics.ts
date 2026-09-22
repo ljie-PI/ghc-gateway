@@ -51,6 +51,8 @@ const DEGRADATIONS = [
   "cache.control_omitted", "reasoning.budget_coarsened", "reasoning.presentation_omitted",
   "reasoning.state_omitted", "sampling.top_k_omitted",
 ] as const;
+const REASONING_EFFORTS = ["missing", "unknown", "none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const REASONING_SUMMARIES = ["missing", "unknown", "auto", "concise", "detailed"] as const;
 const PROTOCOL_STATUSES = ["completed", "incomplete", "failed", "error", "in_progress", "queued", "cancelled", "unknown"] as const;
 const SSE_TYPES = [
   "chunk", "done", "error", "ping", "message_start", "message_delta", "message_stop",
@@ -59,7 +61,9 @@ const SSE_TYPES = [
   "response.output_item.added", "response.output_item.done", "response.content_part.added",
   "response.content_part.done", "response.output_text.delta", "response.output_text.done",
   "response.function_call_arguments.delta", "response.function_call_arguments.done",
+  "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
   "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done", "unknown",
+  "response.reasoning_text.delta", "response.reasoning_text.done",
 ] as const;
 
 export interface DiagnosticShape {
@@ -91,6 +95,9 @@ export interface DiagnosticFields {
   readonly messagesBetas?: readonly typeof MESSAGE_BETAS[number][];
   readonly unknownBetaCount?: number;
   readonly degradations?: readonly typeof DEGRADATIONS[number][];
+  readonly reasoningEffort?: typeof REASONING_EFFORTS[number];
+  readonly reasoningSummary?: typeof REASONING_SUMMARIES[number];
+  readonly reasoningTokens?: number;
   readonly protocolStatus?: typeof PROTOCOL_STATUSES[number];
   readonly shape?: DiagnosticShape;
 }
@@ -409,6 +416,9 @@ function sanitizeDiagnosticFields(value: Readonly<DiagnosticFields>): Diagnostic
     ...(value.messagesBetas === undefined ? {} : { messagesBetas: MESSAGE_BETAS.filter((item) => value.messagesBetas?.slice(0, MESSAGE_BETAS.length).includes(item)) }),
     ...(value.unknownBetaCount === undefined ? {} : { unknownBetaCount: finite(value.unknownBetaCount) }),
     ...(value.degradations === undefined ? {} : { degradations: DEGRADATIONS.filter((item) => value.degradations?.slice(0, 5).includes(item)) }),
+    ...(member(REASONING_EFFORTS, value.reasoningEffort) === undefined ? {} : { reasoningEffort: member(REASONING_EFFORTS, value.reasoningEffort)! }),
+    ...(member(REASONING_SUMMARIES, value.reasoningSummary) === undefined ? {} : { reasoningSummary: member(REASONING_SUMMARIES, value.reasoningSummary)! }),
+    ...(count(value.reasoningTokens) ? { reasoningTokens: value.reasoningTokens } : {}),
     ...(member(PROTOCOL_STATUSES, value.protocolStatus) === undefined ? {} : { protocolStatus: member(PROTOCOL_STATUSES, value.protocolStatus)! }),
     ...(value.shape === undefined ? {} : { shape: {
       fields: Object.fromEntries(DIAGNOSTIC_FIELDS.flatMap((key) => {

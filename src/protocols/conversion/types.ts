@@ -223,6 +223,7 @@ export interface SemanticUsage {
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
   readonly reasoningTokens: number;
+  readonly reportedReasoningTokens?: number;
 }
 
 export type SemanticReasoningPresentation = "summary" | "content";

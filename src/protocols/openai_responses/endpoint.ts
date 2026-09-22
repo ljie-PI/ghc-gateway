@@ -56,7 +56,11 @@ import type { TelemetryRecorder, UsageUpdate } from "../../telemetry/recorder.js
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { presentOpenaiResponsesFailure } from "./failure_presenter.js";
 import { withUpstreamProtocol } from "../../gateway/execution_evidence.js";
-import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
+import {
+  diagnosticResponsesReasoning,
+  diagnosticShape,
+  observeDiagnosticProtocolStatus,
+} from "../conversion/diagnostics.js";
 import { planProtocolExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedPlannedResponse } from "../conversion/buffered.js";
@@ -119,6 +123,7 @@ async function executeOpenaiResponses(
   }
   scope.diagnostics?.stage("request_validation");
   const decoded = decodeRequest(request.body);
+  scope.diagnostics?.set(diagnosticResponsesReasoning(decoded.body));
   if (decoded.model !== undefined) {
     usage.setRequestedModel(decoded.model);
   }
@@ -627,6 +632,9 @@ function attemptUsage(value: Readonly<SemanticUsage>): AttemptUsage {
     inputTokens: value.inputTokens,
     outputTokens: value.outputTokens,
     cacheTokens: value.cacheReadTokens + value.cacheWriteTokens,
+    ...(value.reportedReasoningTokens === undefined
+      ? {}
+      : { reasoningTokens: value.reportedReasoningTokens }),
   };
 }
 
@@ -729,6 +737,7 @@ interface UsageObservation {
   readonly outputTokens?: number;
   readonly cacheReadTokens?: number;
   readonly cacheWriteTokens?: number;
+  readonly reasoningTokens?: number;
 }
 
 function responsesUsageNumbers(observation: UsageObservation): UsageTokens {
@@ -736,21 +745,25 @@ function responsesUsageNumbers(observation: UsageObservation): UsageTokens {
     inputTokens: observation.inputTokens ?? 0,
     outputTokens: observation.outputTokens ?? 0,
     cacheTokens: (observation.cacheReadTokens ?? 0) + (observation.cacheWriteTokens ?? 0),
+    ...(observation.reasoningTokens === undefined ? {} : { reasoningTokens: observation.reasoningTokens }),
   };
 }
 
 function responsesUsageObservation(payload: WireJsonObject): UsageObservation {
   const usage = objectMember(payload, "usage") ?? objectMember(objectMember(payload, "response"), "usage");
   const details = objectMember(usage, "input_tokens_details");
+  const outputDetails = objectMember(usage, "output_tokens_details");
   const inputTokens = observedInteger(memberValue(usage, "input_tokens"));
   const outputTokens = observedInteger(memberValue(usage, "output_tokens"));
   const cacheReadTokens = observedInteger(memberValue(details, "cached_tokens"));
   const cacheWriteTokens = observedInteger(memberValue(details, "cache_write_tokens"));
+  const reasoningTokens = observedInteger(memberValue(outputDetails, "reasoning_tokens"));
   return {
     ...(inputTokens === undefined ? {} : { inputTokens }),
     ...(outputTokens === undefined ? {} : { outputTokens }),
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
     ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   };
 }
 

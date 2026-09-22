@@ -1,7 +1,8 @@
 import {
-  isWireJsonArray, isWireJsonNumber, isWireJsonObject, type WireJson,
+  isWireJsonArray, isWireJsonNumber, isWireJsonObject, memberValues, type WireJson, type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { DIAGNOSTIC_FIELDS, DIAGNOSTIC_LIMITS, type DiagnosticShape, type RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import type { DiagnosticFields } from "../../telemetry/diagnostics.js";
 import type { InferenceProtocol } from "./types.js";
 
 const KNOWN_FIELDS: ReadonlySet<string> = new Set(DIAGNOSTIC_FIELDS);
@@ -83,6 +84,29 @@ export function diagnosticObjectShape(value: Readonly<Record<string, unknown>>):
   return { fields, counts: {}, blocks, truncated };
 }
 
+export function diagnosticResponsesReasoning(
+  body: WireJsonObject,
+): Pick<DiagnosticFields, "reasoningEffort" | "reasoningSummary"> {
+  const reasoningValues = memberValues(body, "reasoning");
+  if (reasoningValues.length === 0 || reasoningValues[0] === null) {
+    return { reasoningEffort: "missing", reasoningSummary: "missing" };
+  }
+  if (reasoningValues.length !== 1 || !isWireJsonObject(reasoningValues[0])) {
+    return { reasoningEffort: "unknown", reasoningSummary: "unknown" };
+  }
+  const reasoning = reasoningValues[0];
+  return {
+    reasoningEffort: diagnosticEnum(
+      memberValues(reasoning, "effort"),
+      ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const,
+    ),
+    reasoningSummary: diagnosticEnum(
+      memberValues(reasoning, "summary"),
+      ["auto", "concise", "detailed"] as const,
+    ),
+  };
+}
+
 export function observeDiagnosticProtocolStatus(
   diagnostics: RequestDiagnostics | undefined,
   protocol: InferenceProtocol,
@@ -132,4 +156,13 @@ export function observeDiagnosticProtocolStatus(
       diagnostics.set({ protocolStatus: "completed" });
     } else if (remaining <= 0) diagnostics.set({ protocolStatus: "unknown" });
   });
+}
+
+function diagnosticEnum<T extends string>(
+  values: readonly WireJson[],
+  allowed: readonly T[],
+): T | "missing" | "unknown" {
+  if (values.length === 0 || values[0] === null) return "missing";
+  if (values.length !== 1 || typeof values[0] !== "string") return "unknown";
+  return allowed.find((candidate) => candidate === values[0]) ?? "unknown";
 }
