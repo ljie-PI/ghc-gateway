@@ -187,6 +187,151 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it.each([false, true])("records native Responses reasoning diagnostics (stream=%s)", async (stream) => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const reasoningItem = {
+      id: "rs_diagnostic",
+      type: "reasoning",
+      status: "completed",
+      summary: [{ type: "summary_text", text: "PRIVATE_SUMMARY" }],
+      content: [{ type: "reasoning_text", text: "PRIVATE_REASONING" }],
+    };
+    const completed = {
+      id: "resp_diagnostic",
+      object: "response",
+      status: "completed",
+      output: [reasoningItem, {
+        id: "msg_diagnostic", type: "message", status: "completed", role: "assistant",
+        content: [{ type: "output_text", text: "PRIVATE_OUTPUT", annotations: [] }],
+      }],
+      usage: {
+        input_tokens: 3,
+        output_tokens: 19,
+        output_tokens_details: { reasoning_tokens: 17 },
+        total_tokens: 22,
+      },
+    };
+    const streamBody = Buffer.concat([
+      responsesEvent(0, "response.created", { response: { ...completed, status: "in_progress", output: [] } }),
+      responsesEvent(1, "response.output_item.added", {
+        output_index: 0,
+        item: { ...reasoningItem, status: "in_progress", summary: [], content: [] },
+      }),
+      responsesEvent(2, "response.reasoning_summary_part.added", {
+        item_id: "rs_diagnostic", output_index: 0, summary_index: 0,
+        part: { type: "summary_text", text: "" },
+      }),
+      responsesEvent(3, "response.reasoning_summary_text.delta", {
+        item_id: "rs_diagnostic", output_index: 0, summary_index: 0, delta: "PRIVATE_SUMMARY",
+      }),
+      responsesEvent(4, "response.reasoning_summary_text.done", {
+        item_id: "rs_diagnostic", output_index: 0, summary_index: 0, text: "PRIVATE_SUMMARY",
+      }),
+      responsesEvent(5, "response.reasoning_summary_part.done", {
+        item_id: "rs_diagnostic", output_index: 0, summary_index: 0,
+        part: { type: "summary_text", text: "PRIVATE_SUMMARY" },
+      }),
+      responsesEvent(6, "response.reasoning_text.delta", {
+        item_id: "rs_diagnostic", output_index: 0, content_index: 0, delta: "PRIVATE_REASONING",
+      }),
+      responsesEvent(7, "response.reasoning_text.done", {
+        item_id: "rs_diagnostic", output_index: 0, content_index: 0, text: "PRIVATE_REASONING",
+      }),
+      responsesEvent(8, "response.output_item.done", { output_index: 0, item: reasoningItem }),
+      responsesEvent(9, "response.completed", { response: completed }),
+    ]);
+    const harness = await matrixGateway(false, diagnostics, {
+      responsesBody: encoder.encode(JSON.stringify(completed)),
+      responsesStreamBody: streamBody,
+    });
+    try {
+      const response = await harness.gw.fetch(protocolRequest("responses", "native-responses", {
+        stream,
+        reasoning: { effort: "high", summary: "detailed" },
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      await diagnostics.close();
+      expect(records.at(-1)).toMatchObject({
+        reasoningEffort: "high",
+        reasoningSummary: "detailed",
+        reasoningTokens: 17,
+      });
+      if (stream) {
+        expect(records.at(-1)?.sse).toMatchObject({
+          "response.reasoning_summary_part.added": 1,
+          "response.reasoning_summary_text.delta": 1,
+          "response.reasoning_summary_text.done": 1,
+          "response.reasoning_summary_part.done": 1,
+          "response.reasoning_text.delta": 1,
+          "response.reasoning_text.done": 1,
+        });
+      }
+      expect(JSON.stringify(records)).not.toContain("PRIVATE");
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
+  it.each([false, true])("records converted Responses reasoning tokens (stream=%s)", async (stream) => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const chatBody = encoder.encode(JSON.stringify({
+      id: "chatcmpl_diagnostic",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", reasoning_content: "PRIVATE_REASONING", content: "PRIVATE_OUTPUT" },
+        finish_reason: "stop",
+      }],
+      usage: {
+        prompt_tokens: 3,
+        completion_tokens: 8,
+        completion_tokens_details: { reasoning_tokens: 7 },
+        total_tokens: 11,
+      },
+    }));
+    const chatStreamBody = Buffer.concat([
+      encoder.encode(`data: ${JSON.stringify({
+        id: "chatcmpl_diagnostic", choices: [{
+          index: 0, delta: { role: "assistant", reasoning_content: "PRIVATE_REASONING" }, finish_reason: null,
+        }],
+      })}\n\n`),
+      encoder.encode(`data: ${JSON.stringify({
+        id: "chatcmpl_diagnostic", choices: [{
+          index: 0, delta: { content: "PRIVATE_OUTPUT" }, finish_reason: "stop",
+        }],
+        usage: {
+          prompt_tokens: 3,
+          completion_tokens: 8,
+          completion_tokens_details: { reasoning_tokens: 7 },
+          total_tokens: 11,
+        },
+      })}\n\n`),
+      encoder.encode("data: [DONE]\n\n"),
+    ]);
+    const harness = await matrixGateway(false, diagnostics, { chatBody, chatStreamBody });
+    try {
+      const response = await harness.gw.fetch(protocolRequest("responses", "native-chat", {
+        stream,
+        reasoning: { effort: "high" },
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      await diagnostics.close();
+      expect(records.at(-1)).toMatchObject({
+        reasoningEffort: "high",
+        reasoningSummary: "missing",
+        reasoningTokens: 7,
+      });
+      expect(JSON.stringify(records)).not.toContain("PRIVATE");
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
   it("round-trips Responses opaque reasoning through Chat and fails a cross-model carrier before inference", async () => {
     const harness = await matrixGateway(true, undefined, { responsesToolResponse: true });
     try {
@@ -1017,6 +1162,8 @@ async function matrixGateway(
     readonly chatBody?: Uint8Array;
     readonly messagesBody?: Uint8Array;
     readonly responsesBody?: Uint8Array;
+    readonly chatStreamBody?: Uint8Array;
+    readonly responsesStreamBody?: Uint8Array;
     readonly responsesStreamContentType?: string;
     readonly responsesToolResponse?: boolean;
   } = {},
@@ -1138,7 +1285,7 @@ async function matrixGateway(
         {
           method: "POST", path: "/chat/completions", body: jsonStream(true), times: 8,
           reply: {
-            headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+            headers: { "content-type": "text/event-stream" }, body: overrides.chatStreamBody ?? Buffer.concat([
               ...(reasoning ? [encoder.encode(`data: ${JSON.stringify({
                 id: "chatcmpl_matrix_stream",
                 object: "chat.completion.chunk",
@@ -1216,7 +1363,8 @@ async function matrixGateway(
         {
           method: "POST", path: "/responses", body: jsonStream(true), times: 8,
           reply: {
-            headers: { "content-type": overrides.responsesStreamContentType ?? "text/event-stream" }, body: Buffer.concat([
+            headers: { "content-type": overrides.responsesStreamContentType ?? "text/event-stream" },
+            body: overrides.responsesStreamBody ?? Buffer.concat([
               responsesEvent(0, "response.created", { response: { ...response, status: "in_progress", output: [] } }),
               ...(reasoning ? [
                 responsesEvent(1, "response.output_item.added", {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { GatewayFailureError } from "../../src/gateway/failures.js";
 import { ConversionContractError } from "../../src/protocols/conversion/types.js";
-import { diagnosticShape } from "../../src/protocols/conversion/diagnostics.js";
-import { parseWireJson } from "../../src/serialization/wire_json.js";
+import { diagnosticResponsesReasoning, diagnosticShape } from "../../src/protocols/conversion/diagnostics.js";
+import { isWireJsonObject, parseWireJson } from "../../src/serialization/wire_json.js";
 import { DiagnosticRecorder, DIAGNOSTIC_LIMITS, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
 
 function recorder() {
@@ -80,20 +80,55 @@ describe("content-free request diagnostics", () => {
   it("aggregates a long stream using a finite event vocabulary", async () => {
     const { diagnostics, records } = recorder();
     const trace = diagnostics.begin("req_stream", "responses");
+    trace.set({ reasoningEffort: "high", reasoningSummary: "detailed", reasoningTokens: 13 });
     for (let index = 0; index < 10_000; index++) {
       trace.event("response.output_text.delta");
       trace.event(`PRIVATE_EVENT_${index}`);
       trace.bytes("upstream", 20);
     }
+    trace.event("response.reasoning_summary_part.added");
+    trace.event("response.reasoning_summary_text.delta");
+    trace.event("response.reasoning_summary_text.done");
+    trace.event("response.reasoning_summary_part.done");
+    trace.event("response.reasoning_text.delta");
+    trace.event("response.reasoning_text.done");
     trace.terminal("semantic_success");
     trace.finish();
     await diagnostics.close();
     expect(records).toHaveLength(3);
     expect(records.at(-1)).toMatchObject({
       upstreamBytes: 200_000, terminalCause: "semantic_success",
-      sse: { "response.output_text.delta": 10_000, unknown: 10_000 },
+      reasoningEffort: "high", reasoningSummary: "detailed", reasoningTokens: 13,
+      sse: {
+        "response.output_text.delta": 10_000,
+        "response.reasoning_summary_part.added": 1,
+        "response.reasoning_summary_text.delta": 1,
+        "response.reasoning_summary_text.done": 1,
+        "response.reasoning_summary_part.done": 1,
+        "response.reasoning_text.delta": 1,
+        "response.reasoning_text.done": 1,
+        unknown: 10_000,
+      },
     });
     expect(JSON.stringify(records)).not.toContain("PRIVATE");
+  });
+
+  it("records only allowlisted Responses reasoning modes", () => {
+    const recognized = parseWireJson(new TextEncoder().encode(JSON.stringify({
+      reasoning: { effort: "xhigh", summary: "concise" },
+    })), { maxBytes: 1024, maxDepth: 8 });
+    const unknown = parseWireJson(new TextEncoder().encode(JSON.stringify({
+      reasoning: { effort: "PRIVATE_EFFORT", summary: "PRIVATE_SUMMARY" },
+    })), { maxBytes: 1024, maxDepth: 8 });
+    if (!isWireJsonObject(recognized) || !isWireJsonObject(unknown)) throw new Error("expected object");
+
+    expect(diagnosticResponsesReasoning(recognized)).toEqual({
+      reasoningEffort: "xhigh",
+      reasoningSummary: "concise",
+    });
+    const sanitized = diagnosticResponsesReasoning(unknown);
+    expect(sanitized).toEqual({ reasoningEffort: "unknown", reasoningSummary: "unknown" });
+    expect(JSON.stringify(sanitized)).not.toContain("PRIVATE");
   });
 
   it("fails initial writes, but isolates later sink and observer failures with visible status", async () => {
