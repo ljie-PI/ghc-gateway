@@ -33,6 +33,29 @@ const SERVER_TOOL_RESULT_TYPES = new Set([
   "web_search_tool_result",
   "mcp_tool_result",
 ]);
+const BROWSER_TOOL_NAMES = new Set([
+  "close_tab", "double_click", "file_upload", "find", "form_input", "get_page_text", "hold_key", "hover",
+  "javascript_exec", "key", "left_click", "left_click_drag", "left_mouse_down", "left_mouse_up", "list_tabs",
+  "middle_click", "mouse_move", "navigate", "new_tab", "read_console", "read_network", "read_page", "right_click",
+  "screenshot", "scroll", "scroll_to", "switch_tab", "triple_click", "type", "wait", "zoom",
+]);
+const COMPUTER_TOOL_NAMES = new Set([
+  "cursor_position", "double_click", "hold_key", "key", "left_click", "left_click_drag", "left_mouse_down",
+  "left_mouse_up", "middle_click", "mouse_move", "right_click", "screenshot", "scroll", "triple_click", "type", "wait", "zoom",
+]);
+
+interface NativeToolRegistry {
+  readonly names: ReadonlySet<string>;
+  readonly browserMembers: ReadonlySet<string>;
+  readonly computerMembers: ReadonlySet<string>;
+  readonly mcpToolsets: ReadonlySet<string>;
+  readonly hasTools: boolean;
+}
+
+interface NativeCallBinding {
+  readonly resultType: string;
+  readonly toolsetName?: string;
+}
 
 export function validateMessagesRequestSecurity(body: WireJsonObject): void {
   rejectSelectedDuplicates(body, ["model", "messages", "stream", ...OWNERSHIP_FIELDS]);
@@ -52,16 +75,16 @@ export function validateNativeMessagesRequestEnvelope(body: WireJsonObject): voi
   validateStringList(optionalOne(body, "stop_sequences"));
   validateSystem(optionalOne(body, "system"));
   validateThinkingConfig(optionalOne(body, "thinking"));
-  const toolNames = validateTools(optionalOne(body, "tools"));
-  validateToolChoice(optionalOne(body, "tool_choice"), toolNames);
+  const tools = validateTools(optionalOne(body, "tools"));
+  validateToolChoice(optionalOne(body, "tool_choice"), tools);
   validateOutputConfig(optionalOne(body, "output_config"));
   validateObjectCore(optionalOne(body, "metadata"), ["user_id"]);
 
   const messages = exactlyOne(body, "messages");
   if (!isWireJsonArray(messages)) invalid();
 
-  const openCalls = new Map<string, string>();
-  const calls = new Map<string, string>();
+  const openCalls = new Map<string, NativeCallBinding>();
+  const calls = new Map<string, NativeCallBinding>();
   const results = new Set<string>();
   const round = { resultsStarted: false };
   for (const value of messages.items) {
@@ -83,7 +106,7 @@ export function validateNativeMessagesRequestEnvelope(body: WireJsonObject): voi
       const type = exactlyOne(block, "type");
       if (typeof type !== "string" || type.length === 0) invalid();
       if (type === "text" || type === "image") {
-        validateContentBlock(block, type, role, calls, results, openCalls, round);
+        validateContentBlock(block, type, role, calls, results, openCalls, round, tools);
         ordinary = true;
         continue;
       }
@@ -91,7 +114,7 @@ export function validateNativeMessagesRequestEnvelope(body: WireJsonObject): voi
         observeItem("message", role, openCalls, round);
         ordinary = false;
       }
-      validateContentBlock(block, type, role, calls, results, openCalls, round);
+      validateContentBlock(block, type, role, calls, results, openCalls, round, tools);
     }
     if (ordinary) observeItem("message", role, openCalls, round);
   }
@@ -102,10 +125,11 @@ function validateContentBlock(
   block: WireJsonObject,
   type: string,
   role: "user" | "assistant",
-  calls: Map<string, string>,
+  calls: Map<string, NativeCallBinding>,
   results: Set<string>,
-  openCalls: Map<string, string>,
+  openCalls: Map<string, NativeCallBinding>,
   round: { resultsStarted: boolean },
+  tools: NativeToolRegistry,
 ): void {
   if (type === "text") {
     rejectDuplicates(block, ["type", "text", ...OWNERSHIP_FIELDS]);
@@ -123,42 +147,65 @@ function validateContentBlock(
     return;
   }
   if (type === "tool_use") {
-    rejectDuplicates(block, ["type", "id", "name", "input", ...OWNERSHIP_FIELDS]);
+    rejectDuplicates(block, ["type", "id", "name", "input", "toolset_name", ...OWNERSHIP_FIELDS]);
     rejectUnexpectedOwnership(block, new Set());
     const id = exactlyOne(block, "id");
     const input = exactlyOne(block, "input");
+    const name = exactlyOne(block, "name");
     if (
       role !== "assistant"
       || typeof id !== "string"
       || id.length === 0
-      || typeof exactlyOne(block, "name") !== "string"
-      || (exactlyOne(block, "name") as string).length === 0
+      || typeof name !== "string"
+      || name.length === 0
       || !isWireJsonObject(input)
       || calls.has(id)
     ) invalid();
     rejectDuplicates(input, []);
-    calls.set(id, "tool_result");
+    const toolsetName = optionalOne(block, "toolset_name");
+    if (toolsetName !== undefined && toolsetName !== null && typeof toolsetName !== "string") invalid();
+    const browser = toolsetName === "browser_toolset_20260801" && tools.browserMembers.has(name);
+    const computer = toolsetName === "computer_toolset_20260801" && tools.computerMembers.has(name);
+    if (toolsetName !== undefined && toolsetName !== null && !browser && !computer) invalid();
+    const binding: NativeCallBinding = {
+      resultType: browser ? "browser_tool_result" : "tool_result",
+      ...(typeof toolsetName === "string" ? { toolsetName } : {}),
+    };
+    calls.set(id, binding);
     observeItem("tool_call", role, openCalls, round);
-    openCalls.set(id, "tool_result");
+    openCalls.set(id, binding);
     validateCacheControl(optionalOne(block, "cache_control"));
     return;
   }
   if (type === "tool_result") {
-    rejectDuplicates(block, ["type", "tool_use_id", "content", "is_error", ...OWNERSHIP_FIELDS]);
+    rejectDuplicates(block, ["type", "tool_use_id", "content", "is_error", "toolset_name", ...OWNERSHIP_FIELDS]);
     rejectUnexpectedOwnership(block, new Set(["tool_use_id"]));
     const id = exactlyOne(block, "tool_use_id");
-    if (role !== "user" || typeof id !== "string" || openCalls.get(id) !== "tool_result" || results.has(id)) invalid();
-    results.add(id);
-    openCalls.delete(id);
-    round.resultsStarted = openCalls.size > 0;
+    const expected = typeof id === "string" ? openCalls.get(id) : undefined;
+    const toolsetName = optionalOne(block, "toolset_name");
+    if (toolsetName !== undefined && toolsetName !== null && typeof toolsetName !== "string") invalid();
+    if (expected?.toolsetName !== (toolsetName ?? undefined)) invalid();
+    if (role !== "user" || expected === undefined || results.has(id as string)) invalid();
     const content = optionalOne(block, "content");
     const isError = optionalOne(block, "is_error");
     if (isError !== undefined && typeof isError !== "boolean") invalid();
     validateCacheControl(optionalOne(block, "cache_control"));
     if (content !== undefined && typeof content !== "string" && !isWireJsonArray(content)) invalid();
     if (isWireJsonArray(content)) {
-      for (const item of content.items) validateToolResultPart(item);
+      let browserStates = 0;
+      const downloadIds = new Set<string>();
+      for (const item of content.items) {
+        const itemType = isWireJsonObject(item) ? optionalOne(item, "type") : undefined;
+        if (itemType === "browser_state") {
+          browserStates += 1;
+          if (expected.resultType !== "browser_tool_result" || browserStates > 1 || isError === true) invalid();
+        }
+        validateToolResultPart(item, downloadIds);
+      }
     }
+    results.add(id as string);
+    openCalls.delete(id as string);
+    round.resultsStarted = openCalls.size > 0;
     return;
   }
   if (type === "server_tool_use" || type === "mcp_tool_use") {
@@ -172,10 +219,10 @@ function validateContentBlock(
       if (typeof serverName !== "string" || serverName.length === 0) invalid();
     }
     exactlyOne(block, "input");
-    const resultType = managedResultType(type, name);
-    calls.set(id, resultType);
+    const binding: NativeCallBinding = { resultType: managedResultType(type, name) };
+    calls.set(id, binding);
     observeItem("tool_call", role, openCalls, round);
-    openCalls.set(id, resultType);
+    openCalls.set(id, binding);
     validateCacheControl(optionalOne(block, "cache_control"));
     return;
   }
@@ -183,7 +230,7 @@ function validateContentBlock(
     rejectDuplicates(block, ["type", "tool_use_id", "content", ...OWNERSHIP_FIELDS]);
     rejectUnexpectedOwnership(block, new Set(["tool_use_id"]));
     const id = exactlyOne(block, "tool_use_id");
-    if (role !== "assistant" || typeof id !== "string" || openCalls.get(id) !== type || results.has(id)) invalid();
+    if (role !== "assistant" || typeof id !== "string" || openCalls.get(id)?.resultType !== type || results.has(id)) invalid();
     const content = optionalOne(block, "content");
     if (type !== "mcp_tool_result" && content === undefined) invalid();
     const isError = optionalOne(block, "is_error");
@@ -213,11 +260,13 @@ function validateContentBlock(
   }
   rejectDuplicates(block, ["type", ...OWNERSHIP_FIELDS]);
   rejectUnexpectedOwnership(block, new Set());
+  if (type === "browser_state") invalid();
   if (type === "document") validateDocumentBlock(block, role);
+  if (type === "search_result") validateSearchResultBlock(block);
   observeItem("message", role, openCalls, round);
 }
 
-function validateToolResultPart(value: WireJson): void {
+function validateToolResultPart(value: WireJson, downloadIds: Set<string>): void {
   const block = object(value);
   const type = exactlyOne(block, "type");
   rejectDuplicates(block, ["type", ...OWNERSHIP_FIELDS]);
@@ -244,18 +293,7 @@ function validateToolResultPart(value: WireJson): void {
     return;
   }
   if (type === "search_result") {
-    requiredManagedString(block, "source");
-    requiredManagedString(block, "title");
-    const content = exactlyOne(block, "content");
-    if (!isWireJsonArray(content)) invalid();
-    for (const item of content.items) {
-      const text = object(item);
-      rejectDuplicates(text, ["type", "text", ...OWNERSHIP_FIELDS]);
-      rejectUnexpectedOwnership(text, new Set());
-      if (exactlyOne(text, "type") !== "text" || typeof exactlyOne(text, "text") !== "string") invalid();
-      validateCacheControl(optionalOne(text, "cache_control"));
-    }
-    validateCacheControl(optionalOne(block, "cache_control"));
+    validateSearchResultBlock(block);
     return;
   }
   if (type === "tool_reference") {
@@ -266,12 +304,64 @@ function validateToolResultPart(value: WireJson): void {
   if (type === "browser_state") {
     const tabs = exactlyOne(block, "tabs");
     if (!isWireJsonArray(tabs)) invalid();
+    let active = 0;
+    const tabIds = new Set<string>();
+    for (const item of tabs.items) {
+      const tab = object(item);
+      rejectDuplicates(tab, ["tab_id", "title", "url", "active", ...OWNERSHIP_FIELDS]);
+      rejectUnexpectedOwnership(tab, new Set());
+      const tabId = exactlyOne(tab, "tab_id");
+      if (typeof tabId !== "string" || tabId.length === 0 || tabIds.has(tabId)) invalid();
+      tabIds.add(tabId);
+      if (typeof exactlyOne(tab, "title") !== "string" || typeof exactlyOne(tab, "url") !== "string") invalid();
+      const isActive = optionalOne(tab, "active");
+      if (isActive !== undefined && typeof isActive !== "boolean") invalid();
+      if (isActive === true) active += 1;
+    }
+    if (tabs.items.length > 0 && active !== 1) invalid();
     const stateChanges = optionalOne(block, "state_changes");
-    if (stateChanges !== undefined && stateChanges !== null && !isWireJsonArray(stateChanges)) invalid();
+    if (stateChanges !== undefined && stateChanges !== null) {
+      if (!isWireJsonArray(stateChanges) || stateChanges.items.length === 0) invalid();
+      for (const item of stateChanges.items) validateBrowserStateChange(item, tabIds, downloadIds);
+    }
     validateCacheControl(optionalOne(block, "cache_control"));
     return;
   }
   invalid();
+}
+
+function validateCitationsConfig(value: WireJson): void {
+  const citations = object(value);
+  rejectDuplicates(citations, ["enabled", ...OWNERSHIP_FIELDS]);
+  rejectUnexpectedOwnership(citations, new Set());
+  const enabled = optionalOne(citations, "enabled");
+  if (enabled !== undefined && typeof enabled !== "boolean") invalid();
+}
+
+function validateBrowserStateChange(
+  value: WireJson,
+  tabIds: ReadonlySet<string>,
+  downloadIds: Set<string>,
+): void {
+  const change = object(value);
+  rejectDuplicates(change, ["type", "tab_id", "download_id", "url", "path", "size_bytes", "error", ...OWNERSHIP_FIELDS]);
+  rejectUnexpectedOwnership(change, new Set());
+  const type = exactlyOne(change, "type");
+  if (type === "tab_opened") {
+    const tabId = exactlyOne(change, "tab_id");
+    if (typeof tabId !== "string" || !tabIds.has(tabId)) invalid();
+    return;
+  }
+  if (type !== "download_started" && type !== "download_completed" && type !== "download_failed") invalid();
+  const downloadId = exactlyOne(change, "download_id");
+  if (typeof downloadId !== "string" || downloadId.length === 0 || downloadIds.has(downloadId)) invalid();
+  downloadIds.add(downloadId);
+  requiredManagedString(change, "url");
+  if (type === "download_completed") {
+    optionalManagedString(change, "path", true);
+    optionalManagedInteger(change, "size_bytes", true);
+  }
+  if (type === "download_failed") optionalManagedString(change, "error", true);
 }
 
 function validateDocumentBlock(block: WireJsonObject, role: "user" | "assistant"): void {
@@ -340,10 +430,72 @@ function validateDocumentBlock(block: WireJsonObject, role: "user" | "assistant"
   }
 }
 
+function validateSearchResultBlock(block: WireJsonObject): void {
+  requiredManagedString(block, "source");
+  requiredManagedString(block, "title");
+  const content = exactlyOne(block, "content");
+  if (!isWireJsonArray(content)) invalid();
+  for (const item of content.items) {
+    const text = object(item);
+    rejectDuplicates(text, ["type", "text", "citations", ...OWNERSHIP_FIELDS]);
+    rejectUnexpectedOwnership(text, new Set());
+    if (exactlyOne(text, "type") !== "text" || typeof exactlyOne(text, "text") !== "string") invalid();
+    const textCitations = optionalOne(text, "citations");
+    if (textCitations !== undefined && textCitations !== null) validateTextCitations(textCitations);
+    validateCacheControl(optionalOne(text, "cache_control"));
+  }
+  const citations = optionalOne(block, "citations");
+  if (citations !== undefined) validateCitationsConfig(citations);
+  validateCacheControl(optionalOne(block, "cache_control"));
+}
+
+function validateTextCitations(value: WireJson): void {
+  if (!isWireJsonArray(value)) invalid();
+  for (const item of value.items) {
+    const citation = object(item);
+    rejectDuplicates(citation, ["type", ...OWNERSHIP_FIELDS]);
+    rejectUnexpectedOwnership(citation, new Set());
+    const type = exactlyOne(citation, "type");
+    requiredManagedString(citation, "cited_text", true);
+    if (type === "char_location") {
+      requiredManagedNonnegativeInteger(citation, "document_index");
+      const start = requiredManagedNonnegativeInteger(citation, "start_char_index");
+      const end = requiredManagedNonnegativeInteger(citation, "end_char_index");
+      if (end <= start) invalid();
+      requiredManagedNullableString(citation, "document_title");
+    } else if (type === "page_location") {
+      requiredManagedNonnegativeInteger(citation, "document_index");
+      const start = requiredManagedNonnegativeInteger(citation, "start_page_number");
+      const end = requiredManagedNonnegativeInteger(citation, "end_page_number");
+      if (end < start) invalid();
+      requiredManagedNullableString(citation, "document_title");
+    } else if (type === "content_block_location") {
+      requiredManagedNonnegativeInteger(citation, "document_index");
+      const start = requiredManagedNonnegativeInteger(citation, "start_block_index");
+      const end = requiredManagedNonnegativeInteger(citation, "end_block_index");
+      if (end <= start) invalid();
+      requiredManagedNullableString(citation, "document_title");
+    } else if (type === "search_result_location") {
+      requiredManagedNonnegativeInteger(citation, "search_result_index");
+      const start = requiredManagedNonnegativeInteger(citation, "start_block_index");
+      const end = requiredManagedNonnegativeInteger(citation, "end_block_index");
+      if (end <= start) invalid();
+      requiredManagedString(citation, "source");
+      requiredManagedNullableString(citation, "title");
+    } else if (type === "web_search_result_location") {
+      requiredManagedString(citation, "encrypted_index");
+      requiredManagedString(citation, "url");
+      requiredManagedNullableString(citation, "title");
+    } else {
+      invalid();
+    }
+  }
+}
+
 function observeItem(
   kind: "message" | "reasoning" | "tool_call" | "tool_result",
   role: "user" | "assistant",
-  openCalls: ReadonlyMap<string, string>,
+  openCalls: ReadonlyMap<string, NativeCallBinding>,
   round: Readonly<{ resultsStarted: boolean }>,
 ): void {
   if (kind === "reasoning" && round.resultsStarted) invalid();
@@ -555,6 +707,17 @@ function requiredManagedInteger(objectValue: WireJsonObject, key: string): void 
   if (!isWireJsonNumber(value) || !Number.isSafeInteger(Number(value.lexeme))) invalid();
 }
 
+function requiredManagedNonnegativeInteger(objectValue: WireJsonObject, key: string): number {
+  const value = exactlyOne(objectValue, key);
+  if (!isWireJsonNumber(value) || !Number.isSafeInteger(Number(value.lexeme)) || Number(value.lexeme) < 0) invalid();
+  return Number(value.lexeme);
+}
+
+function requiredManagedNullableString(objectValue: WireJsonObject, key: string): void {
+  const value = exactlyOne(objectValue, key);
+  if (value !== null && typeof value !== "string") invalid();
+}
+
 function optionalManagedInteger(objectValue: WireJsonObject, key: string, nullable: boolean): void {
   const value = optionalOne(objectValue, key);
   if (value === undefined || (nullable && value === null)) return;
@@ -623,9 +786,12 @@ function validateThinkingConfig(value: WireJson | undefined): void {
   optionalPositiveInteger(config, "budget_tokens");
 }
 
-function validateTools(value: WireJson | undefined): ReadonlySet<string> {
+function validateTools(value: WireJson | undefined): NativeToolRegistry {
   const names = new Set<string>();
-  if (value === undefined) return names;
+  const browserMembers = new Set<string>();
+  const computerMembers = new Set<string>();
+  const mcpToolsets = new Set<string>();
+  if (value === undefined) return { names, browserMembers, computerMembers, mcpToolsets, hasTools: false };
   if (!isWireJsonArray(value)) invalid();
   for (const item of value.items) {
     const tool = object(item);
@@ -633,7 +799,15 @@ function validateTools(value: WireJson | undefined): ReadonlySet<string> {
     rejectUnexpectedOwnership(tool, new Set());
     const type = optionalOne(tool, "type");
     if (type !== undefined && typeof type !== "string") invalid();
-    if (type === undefined || type === "custom") {
+    if (type === "browser_toolset_20260801") {
+      for (const name of BROWSER_TOOL_NAMES) browserMembers.add(name);
+    } else if (type === "computer_toolset_20260801") {
+      for (const name of COMPUTER_TOOL_NAMES) computerMembers.add(name);
+    } else if (type === "mcp_toolset") {
+      const serverName = exactlyOne(tool, "mcp_server_name");
+      if (typeof serverName !== "string" || serverName.length === 0 || mcpToolsets.has(serverName)) invalid();
+      mcpToolsets.add(serverName);
+    } else if (type === undefined || type === "custom") {
       const name = exactlyOne(tool, "name");
       const schema = exactlyOne(tool, "input_schema");
       if (typeof name !== "string" || name.length === 0 || !isWireJsonObject(schema)) invalid();
@@ -651,10 +825,10 @@ function validateTools(value: WireJson | undefined): ReadonlySet<string> {
     }
     validateCacheControl(optionalOne(tool, "cache_control"));
   }
-  return names;
+  return { names, browserMembers, computerMembers, mcpToolsets, hasTools: value.items.length > 0 };
 }
 
-function validateToolChoice(value: WireJson | undefined, toolNames: ReadonlySet<string>): void {
+function validateToolChoice(value: WireJson | undefined, tools: NativeToolRegistry): void {
   if (value === undefined) return;
   const choice = object(value);
   rejectDuplicates(choice, ["type", "name", "disable_parallel_tool_use", ...OWNERSHIP_FIELDS]);
@@ -663,10 +837,12 @@ function validateToolChoice(value: WireJson | undefined, toolNames: ReadonlySet<
   if (type !== "auto" && type !== "none" && type !== "any" && type !== "tool") invalid();
   const disabled = optionalOne(choice, "disable_parallel_tool_use");
   if (disabled !== undefined && typeof disabled !== "boolean") invalid();
-  if ((type === "any" || type === "tool" || disabled !== undefined) && toolNames.size === 0) invalid();
+  if ((type === "any" || type === "tool" || disabled !== undefined) && !tools.hasTools) invalid();
   if (type === "tool") {
     const name = exactlyOne(choice, "name");
-    if (typeof name !== "string" || !toolNames.has(name)) invalid();
+    if (typeof name !== "string" || (
+      !tools.names.has(name) && !tools.browserMembers.has(name) && !tools.computerMembers.has(name)
+    )) invalid();
   }
 }
 

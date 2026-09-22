@@ -255,6 +255,29 @@ describe("Anthropic request route", () => {
         ],
       }],
     }],
+    ["browser state for non-browser tool", {
+      tools: [{ name: "lookup", input_schema: {} }],
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        { role: "user", content: [{
+          type: "tool_result",
+          tool_use_id: "call_1",
+          content: [{ type: "browser_state", tabs: [] }],
+        }] },
+      ],
+    }],
+    ["browser state with wrong toolset", {
+      tools: [{ type: "browser_toolset_20260801" }],
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "navigate", toolset_name: "computer_toolset_20260801", input: {} }] },
+        { role: "user", content: [{
+          type: "tool_result",
+          tool_use_id: "call_1",
+          toolset_name: "computer_toolset_20260801",
+          content: [{ type: "browser_state", tabs: [] }],
+        }] },
+      ],
+    }],
     ["user thinking carrier", {
       messages: [{
         role: "user",
