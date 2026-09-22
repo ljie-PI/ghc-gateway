@@ -1,1 +1,0 @@
-{"request":{"model":"gpt"},"chat":{"id":"chatcmpl_2","created":1700000000,"model":"gpt","choices":[{"finish_reason":"length","message":{"images":["data:image/png;base64,abc","rawbase64"]}}]}}

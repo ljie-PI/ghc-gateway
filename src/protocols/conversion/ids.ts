@@ -33,18 +33,6 @@ export function managedConvertedResponseId(
   ]);
 }
 
-export function managedUpstreamResponseId(
-  provider: string,
-  model: string,
-  upstreamResponseId: string,
-): string {
-  return encodeManagedResponseId([
-    provider,
-    model,
-    upstreamResponseId,
-  ]);
-}
-
 function encodeManagedResponseId(fields: readonly string[]): string {
   const payload = `${MANAGED_RESPONSE_NAMESPACE}${fields.join(";")}`;
   return `${RESPONSE_ID_PREFIX}${Buffer.from(payload, "utf8").toString("base64")}`;

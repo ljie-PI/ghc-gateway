@@ -1,1 +1,0 @@
-{"model":"o1","input":[{"type":"function_call","call_id":"call_1","name":"lookup","arguments":{"z":1,"a":[true,null]}}],"max_output_tokens":9,"reasoning":{"effort":"max"},"tools":[{"type":"function","name":"lookup","parameters":{"type":"string","z":1,"a":2}}]}

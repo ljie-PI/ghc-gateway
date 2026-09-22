@@ -1,12 +1,5 @@
 [
   {
-    "caseId": "responses-native.routing.matrix",
-    "family": "responses-native",
-    "input": "routing/matrix.input.json",
-    "expected": "routing/matrix.expected.json",
-    "encoder": "responses-plan-object"
-  },
-  {
     "caseId": "responses-native.request.preservation",
     "family": "responses-native",
     "input": "request/preservation.input.json",

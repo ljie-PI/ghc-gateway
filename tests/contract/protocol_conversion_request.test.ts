@@ -12,6 +12,55 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 describe("shared conversion request codecs", () => {
+  it("routes Responses through the current native-first conversion matrix", () => {
+    const request = body({ model: "source", input: "hi", stream: true });
+    expect(planProtocolExecution({
+      source: "responses",
+      body: request,
+      stream: true,
+      resolvedModel: "target",
+      capability: capability(["responses"]),
+    })).toMatchObject({ kind: "native", source: "responses", target: "responses", stream: true });
+    expect(planProtocolExecution({
+      source: "responses",
+      body: request,
+      stream: true,
+      resolvedModel: "target",
+      capability: capability(["chat", "responses"]),
+    })).toMatchObject({ kind: "native", target: "responses" });
+    expect(planProtocolExecution({
+      source: "responses",
+      body: request,
+      stream: true,
+      resolvedModel: "target",
+      capability: capability(["chat"]),
+    })).toMatchObject({ kind: "converted", target: "chat" });
+    expect(planProtocolExecution({
+      source: "responses",
+      body: request,
+      stream: true,
+      resolvedModel: "target",
+      capability: capability(["messages"]),
+    })).toMatchObject({ kind: "converted", target: "messages" });
+
+    const unknown = capability(["chat"]);
+    expect(() => planProtocolExecution({
+      source: "responses",
+      body: request,
+      stream: true,
+      resolvedModel: "target",
+      capability: {
+        ...unknown,
+        protocols: {
+          value: null,
+          source: "unknown",
+          conflict: false,
+          liveState: "missing",
+        },
+      },
+    })).toThrow();
+  });
+
   it("maps Chat to Messages without losing images, tools, format, stop, or parallel constraints", () => {
     const converted = prepareConvertedRequest("chat", "messages", body({
       model: "source",
@@ -969,6 +1018,26 @@ describe("shared conversion request codecs", () => {
       "reasoning.presentation_omitted",
       "reasoning.state_omitted",
     ]);
+  });
+
+  it("rejects a Responses output budget when the Chat token dialect is unavailable", () => {
+    const base = capability(["chat"]);
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "hi",
+      max_output_tokens: 9,
+    }), "target", {
+      ...base,
+      profile: {
+        ...base.profile,
+        chatOutputTokenField: {
+          value: null,
+          source: "unknown",
+          conflict: false,
+          liveState: "missing",
+        },
+      },
+    })).toThrow();
   });
 
   it.each(["chat", "messages"] as const)(

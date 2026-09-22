@@ -19,10 +19,33 @@ import type {
   UpstreamByteStream,
 } from "../../copilot/upstream_types.js";
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
-import type { NativeResponsesPlan } from "./planner.js";
 import { encodeOpenaiResponsesSseEvent } from "./wire.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
+import type { ResolvedModel } from "../model_catalog/resolver.js";
+import type { ResponsesRequest } from "./dto.js";
+
+export interface NativeResponsesPlan {
+  readonly kind: "native_responses";
+  readonly originalRequest: ResponsesRequest;
+  readonly resolvedModel: ResolvedModel;
+  readonly upstreamUrl: string;
+  readonly stream: boolean;
+}
+
+export function createNativeResponsesPlan(
+  originalRequest: ResponsesRequest,
+  resolvedModel: ResolvedModel,
+  endpoint: string,
+): NativeResponsesPlan {
+  return {
+    kind: "native_responses",
+    originalRequest,
+    resolvedModel,
+    upstreamUrl: `${endpoint.replace(/\/+$/u, "")}/responses`,
+    stream: originalRequest.stream,
+  };
+}
 
 export interface NativeResponsesRequestOptions {
   readonly diagnostics?: RequestDiagnostics | undefined;
