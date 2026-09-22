@@ -185,6 +185,7 @@ async function executeAnthropicMessages(
       await executeNativeMessages(
         copilot,
         request.body,
+        request.headerFields,
         resolved.upstreamModel,
         stream,
         betaFeatures,
@@ -216,6 +217,7 @@ async function executeAnthropicMessages(
 async function executeNativeMessages(
   copilot: BoundCopilot,
   body: WireJsonObject,
+  clientHeaderFields: DecodedHttpRequest["headerFields"],
   model: string,
   stream: boolean,
   betaFeatures: readonly MessagesBetaFeature[],
@@ -227,6 +229,7 @@ async function executeNativeMessages(
     body: bytes,
     version: MESSAGES_VERSION,
     betaFeatures,
+    clientHeaderFields,
     nonstreamBodyBytes: scope.config.limits.nonstreamBodyBytes,
     connectTimeoutMs: scope.config.timeouts.connectMs,
     firstByteTimeoutMs: scope.config.timeouts.firstByteMs,

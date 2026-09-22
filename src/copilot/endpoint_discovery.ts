@@ -221,7 +221,9 @@ export function fallbackEndpoint(account: Readonly<BoundAccount>): string {
 export function stripSecretsOnRedirect(fromUrl: string, toUrl: string, headers: Headers): Headers {
   const from = new URL(fromUrl);
   const to = new URL(toUrl);
-  const same = from.hostname === to.hostname && effectivePort(from) === effectivePort(to);
+  const same = from.protocol === to.protocol
+    && from.hostname === to.hostname
+    && effectivePort(from) === effectivePort(to);
   if (same) {
     return headers;
   }

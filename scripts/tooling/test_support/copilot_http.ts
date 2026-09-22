@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Socket } from "node:net";
+import type { OrderedHeaderFields } from "../../../src/gateway/header_fields.js";
 
 /** Synthetic data only. Never point credentials or captured upstream content at this responder. */
 export interface HttpRequestObservation {
   readonly method: string;
   readonly path: string;
   readonly headers: Headers;
+  readonly rawHeaderFields: OrderedHeaderFields;
   readonly body: Uint8Array;
 }
 
@@ -195,11 +197,16 @@ export async function startCopilotHttpMock(options: {
       return;
     }
     retainedBodyBytes += size;
-    const observation: HttpRequestObservation = {
-      method: request.method ?? "", path: request.url ?? "", headers: new Headers(), body: Buffer.concat(chunks, size),
-    };
+    const rawHeaderFields = [] as { name: string; value: string }[];
     for (let i = 0; i < request.rawHeaders.length; i += 2) {
-      observation.headers.append(request.rawHeaders[i]!, request.rawHeaders[i + 1]!);
+      rawHeaderFields.push(Object.freeze({ name: request.rawHeaders[i]!, value: request.rawHeaders[i + 1]! }));
+    }
+    const observation: HttpRequestObservation = {
+      method: request.method ?? "", path: request.url ?? "", headers: new Headers(),
+      rawHeaderFields: Object.freeze(rawHeaderFields), body: Buffer.concat(chunks, size),
+    };
+    for (const field of rawHeaderFields) {
+      observation.headers.append(field.name, field.value);
     }
     requests.push(observation);
     let matched: typeof expectations[number] | undefined;

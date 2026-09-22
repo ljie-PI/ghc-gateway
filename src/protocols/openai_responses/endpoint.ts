@@ -246,11 +246,20 @@ async function executeOpenaiResponses(
         ownership,
         bound,
         nativePlan,
+        request.headerFields,
         scope,
         usage,
         dependencies.performanceObserver,
       )
-      : await nativeNonstreamResponse(dependencies.history, ownership, bound, nativePlan, scope, usage), "responses");
+      : await nativeNonstreamResponse(
+        dependencies.history,
+        ownership,
+        bound,
+        nativePlan,
+        request.headerFields,
+        scope,
+        usage,
+      ), "responses");
   }
   const outputCarrierBinding = dependencies.reasoningCarriers === undefined ? undefined : carrierBinding({
     accountId: account.accountId,
@@ -280,12 +289,13 @@ async function nativeNonstreamResponse(
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Parameters<typeof completeNativeResponses>[1],
+  clientHeaderFields: DecodedHttpRequest["headerFields"],
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
 ): Promise<Response> {
   scope.diagnostics?.stage("upstream_request");
   const upstream = await transportCall(
-    () => completeNativeResponses(bound, plan, nativeOptions(scope)),
+    () => completeNativeResponses(bound, plan, nativeOptions(scope, clientHeaderFields)),
     scope.signal,
   );
   assertUpstreamSuccess(upstream);
@@ -318,13 +328,14 @@ async function nativeStreamResponse(
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Parameters<typeof openNativeResponsesStream>[1],
+  clientHeaderFields: DecodedHttpRequest["headerFields"],
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
   performanceObserver?: ProtocolPerformanceObserver,
 ): Promise<Response> {
   scope.diagnostics?.stage("upstream_request");
   const upstream = await transportCall(
-    () => openNativeResponsesStream(bound, plan, nativeOptions(scope)),
+    () => openNativeResponsesStream(bound, plan, nativeOptions(scope, clientHeaderFields)),
     scope.signal,
   );
   if (upstream.status < 200 || upstream.status >= 300) {
@@ -616,7 +627,10 @@ async function* responseByteEmissions(
   }
 }
 
-function nativeOptions(scope: Readonly<RequestScope>) {
+function nativeOptions(
+  scope: Readonly<RequestScope>,
+  clientHeaderFields?: DecodedHttpRequest["headerFields"],
+) {
   return {
     diagnostics: scope.diagnostics,
     requestId: scope.requestId,
@@ -624,6 +638,7 @@ function nativeOptions(scope: Readonly<RequestScope>) {
     connectTimeoutMs: scope.config.timeouts.connectMs,
     firstByteTimeoutMs: scope.config.timeouts.firstByteMs,
     signal: scope.signal,
+    ...(clientHeaderFields === undefined ? {} : { clientHeaderFields }),
   };
 }
 

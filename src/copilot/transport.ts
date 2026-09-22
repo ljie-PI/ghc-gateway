@@ -4,7 +4,7 @@ import type { Dispatcher } from "undici";
 import type { BoundAccount } from "../accounts/account_directory.js";
 import type { AccountCoordinator } from "../accounts/account_coordinator.js";
 import type { CredentialStore } from "../accounts/credential_store.js";
-import { type EndpointDiscovery, MAX_REDIRECTS, stripSecretsOnRedirect } from "./endpoint_discovery.js";
+import { type EndpointDiscovery, MAX_REDIRECTS } from "./endpoint_discovery.js";
 import {
   BoundedInferencePoolRegistry,
   DEFAULT_INFERENCE_POOL_LIMITS,
@@ -13,7 +13,9 @@ import {
   type InferencePoolInspection,
   type InferencePoolLimits,
 } from "./inference_pool.js";
-import { outboundHeaders } from "./backend.js";
+import { outboundHeaderFields, type OutboundHeaderFields } from "./backend.js";
+import type { OrderedHeaderFields } from "../gateway/header_fields.js";
+import { STRIP_ON_CROSS_HOST } from "./identity.js";
 import type { TokenRefreshError } from "./token_refresh.js";
 import { getValidToken } from "./token_refresh.js";
 import type { BoundCopilot, CopilotBackend, CopilotTarget } from "./backend.js";
@@ -118,6 +120,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         request.connectTimeoutMs,
         request.firstByteTimeoutMs,
         chatExtraHeaders(request.hasVisionInput),
+        request.clientHeaderFields,
       ),
       openChatStream: (request) => this.openStream(
         `${target.endpoint}/chat/completions`,
@@ -128,6 +131,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         request.connectTimeoutMs,
         request.firstByteTimeoutMs,
         chatExtraHeaders(request.hasVisionInput),
+        request.clientHeaderFields,
       ),
       completeResponses: (request) => this.completeJson(
         responsesUrl(target.endpoint),
@@ -139,6 +143,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         request.connectTimeoutMs,
         request.firstByteTimeoutMs,
         responsesExtraHeaders(request),
+        request.clientHeaderFields,
       ),
       openResponsesStream: (request) => this.openStream(
         responsesUrl(target.endpoint),
@@ -149,6 +154,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         request.connectTimeoutMs,
         request.firstByteTimeoutMs,
         responsesExtraHeaders(request),
+        request.clientHeaderFields,
       ),
       completeMessages: (request) => this.completeJson(
         messagesUrl(target.endpoint),
@@ -160,6 +166,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         request.connectTimeoutMs,
         request.firstByteTimeoutMs,
         messagesExtraHeaders(request),
+        request.clientHeaderFields,
       ),
       openMessagesStream: (request) => this.openStream(
         messagesUrl(target.endpoint),
@@ -170,6 +177,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         request.connectTimeoutMs,
         request.firstByteTimeoutMs,
         messagesExtraHeaders(request),
+        request.clientHeaderFields,
       ),
     };
   }
@@ -221,6 +229,7 @@ export class HttpCopilotBackend implements CopilotBackend {
     connectTimeoutMs: number | undefined,
     firstByteTimeoutMs: number | undefined,
     extraHeaders?: Headers,
+    clientHeaderFields?: OrderedHeaderFields,
   ): Promise<UpstreamByteResponse> {
     const response = await this.exchange(
       url,
@@ -231,6 +240,7 @@ export class HttpCopilotBackend implements CopilotBackend {
       connectTimeoutMs,
       firstByteTimeoutMs,
       extraHeaders,
+      clientHeaderFields,
     );
     if (response.status < 200 || response.status >= 300) {
       await response.cancel();
@@ -254,6 +264,7 @@ export class HttpCopilotBackend implements CopilotBackend {
     connectTimeoutMs: number | undefined,
     firstByteTimeoutMs: number | undefined,
     extraHeaders?: Headers,
+    clientHeaderFields?: OrderedHeaderFields,
   ): Promise<UpstreamByteStream> {
     const response = await this.exchange(
       url,
@@ -264,6 +275,7 @@ export class HttpCopilotBackend implements CopilotBackend {
       connectTimeoutMs,
       firstByteTimeoutMs,
       extraHeaders,
+      clientHeaderFields,
     );
     if (response.status < 200 || response.status >= 300) {
       await response.cancel();
@@ -280,6 +292,7 @@ export class HttpCopilotBackend implements CopilotBackend {
     connectTimeoutMs: number | undefined,
     firstByteTimeoutMs: number | undefined,
     extraHeaders?: Headers,
+    clientHeaderFields?: OrderedHeaderFields,
   ): Promise<OwnedResponseLease> {
     if (this.closed) {
       throw closedError();
@@ -313,6 +326,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         connectTimeoutMs,
         firstByteTimeoutMs,
         extraHeaders,
+        clientHeaderFields,
       )
       : await fetchWithRedirects(
         fetchImpl,
@@ -324,6 +338,7 @@ export class HttpCopilotBackend implements CopilotBackend {
         connectTimeoutMs,
         firstByteTimeoutMs,
         extraHeaders,
+        clientHeaderFields,
       );
   }
 }
@@ -451,15 +466,16 @@ async function fetchWithRedirects(
   connectTimeoutMs: number | undefined,
   firstByteTimeoutMs: number | undefined,
   extraHeaders?: Headers,
+  clientHeaderFields?: OrderedHeaderFields,
 ): Promise<OwnedResponseLease> {
   let current = url;
-  let headers = outboundHeaders(token, extraHeaders);
+  let headers = outboundHeaderFields(token, extraHeaders, clientHeaderFields);
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
     const timeout = responseStartTimeout(connectTimeoutMs, firstByteTimeoutMs);
     const fetchSignal = timeout === undefined ? signal : AbortSignal.any([signal, timeout.signal]);
     const fetchPromise = fetchImpl(current, {
       method: "POST",
-      headers,
+      headers: fetchHeaders(headers),
       body: Buffer.from(body),
       signal: fetchSignal,
       redirect: "manual",
@@ -491,7 +507,7 @@ async function fetchWithRedirects(
       throw new InvalidUpstreamResponseError();
     }
     const next = safeRedirectTarget(location, current);
-    headers = stripSecretsOnRedirect(current, next, headers);
+    headers = redirectHeaders(current, next, headers);
     current = next;
   }
   throw new InvalidUpstreamResponseError();
@@ -507,10 +523,11 @@ async function undiciWithRedirects(
   connectTimeoutMs: number | undefined,
   firstByteTimeoutMs: number | undefined,
   extraHeaders?: Headers,
+  clientHeaderFields?: OrderedHeaderFields,
 ): Promise<OwnedResponseLease> {
   const { errors: undiciErrors, request: undiciRequest } = await loadUndici();
   let current = url;
-  let headers = outboundHeaders(token, extraHeaders);
+  let headers = outboundHeaderFields(token, extraHeaders, clientHeaderFields);
   for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt += 1) {
     let dispatcherLease;
     try {
@@ -529,7 +546,7 @@ async function undiciWithRedirects(
     const releasePool = once(dispatcherLease.release);
     const requestPromise = undiciRequest(current, {
       method: "POST",
-      headers: headersToRecord(headers),
+      headers: flatHeaders(headers),
       body: Buffer.from(body),
       signal,
       dispatcher: dispatcherLease.dispatcher,
@@ -570,7 +587,7 @@ async function undiciWithRedirects(
       throw new InvalidUpstreamResponseError();
     }
     const next = safeRedirectTarget(location, current);
-    headers = stripSecretsOnRedirect(current, next, headers);
+    headers = redirectHeaders(current, next, headers);
     current = next;
   }
   throw new InvalidUpstreamResponseError();
@@ -723,6 +740,9 @@ function safeRedirectTarget(location: string, current: string): string {
   try {
     const target = new URL(location, current);
     canonicalOrigin(target.toString());
+    if (new URL(current).protocol === "https:" && target.protocol === "http:") {
+      throw new InvalidUpstreamResponseError();
+    }
     return target.toString();
   } catch (_error: unknown) {
     throw new InvalidUpstreamResponseError();
@@ -823,12 +843,33 @@ function destroyUndiciBody(body: {
   body.destroy();
 }
 
-function headersToRecord(headers: Headers): Record<string, string> {
-  const record: Record<string, string> = {};
-  headers.forEach((value, key) => {
-    record[key] = value;
-  });
-  return record;
+function flatHeaders(headers: Readonly<OutboundHeaderFields>): string[] {
+  return [...headers.gateway, ...headers.client].flatMap(({ name, value }) => [name, value]);
+}
+
+function fetchHeaders(headers: Readonly<OutboundHeaderFields>): Headers {
+  const result = new Headers();
+  for (const { name, value } of [...headers.gateway, ...headers.client]) {
+    result.append(name, value);
+  }
+  return result;
+}
+
+function redirectHeaders(
+  fromUrl: string,
+  toUrl: string,
+  headers: Readonly<OutboundHeaderFields>,
+): OutboundHeaderFields {
+  const from = new URL(fromUrl);
+  const to = new URL(toUrl);
+  if (from.origin === to.origin) {
+    return headers;
+  }
+  const stripped = new Set<string>(STRIP_ON_CROSS_HOST);
+  return {
+    gateway: Object.freeze(headers.gateway.filter(({ name }) => !stripped.has(name.toLowerCase()))),
+    client: Object.freeze([]),
+  };
 }
 
 function incomingHeadersToHeaders(headers: IncomingHttpHeaders): Headers {

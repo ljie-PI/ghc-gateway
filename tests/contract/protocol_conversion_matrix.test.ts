@@ -29,6 +29,39 @@ const decoder = new TextDecoder();
 const nowMs = (): number => 1_700_000_000_000;
 
 describe("protocol conversion matrix", () => {
+  it.each([
+    ["chat", "native-chat", "/chat/completions", true],
+    ["messages", "native-messages", "/v1/messages", true],
+    ["responses", "native-responses", "/responses", true],
+    ["chat", "native-messages", "/v1/messages", false],
+    ["chat", "native-responses", "/responses", false],
+    ["messages", "native-chat", "/chat/completions", false],
+    ["messages", "native-responses", "/responses", false],
+    ["responses", "native-chat", "/chat/completions", false],
+    ["responses", "native-messages", "/v1/messages", false],
+  ] as const)("forwards arbitrary client headers only for native %s -> %s", async (
+    source,
+    model,
+    expectedPath,
+    forwarded,
+  ) => {
+    const harness = await matrixGateway();
+    try {
+      const request = protocolRequest(source, model);
+      request.headers.set("x-vendor-feature", "enabled");
+      request.headers.set("openai-beta", "assistants=v2");
+      const response = await harness.gw.fetch(request);
+      expect(response.status).toBe(200);
+      await response.text();
+      const upstream = harness.upstream.requests.at(-1);
+      expect(upstream?.path).toBe(expectedPath);
+      expect(upstream?.headers.get("x-vendor-feature")).toBe(forwarded ? "enabled" : null);
+      expect(upstream?.headers.get("openai-beta")).toBe(forwarded ? "assistants=v2" : null);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it.each([false, true])("observes native Responses before validation fails (stream=%s)", async (stream) => {
     const records: DiagnosticRecord[] = [];
     const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });

@@ -237,6 +237,70 @@ describe("Copilot transport lifecycle", () => {
     await missing.backend.close();
   });
 
+  it("retains client headers on same-origin redirects and drops them on origin changes", async () => {
+    const sameOriginHeaders: Headers[] = [];
+    const sameOrigin = await backendAt("https://same-origin.test", {
+      fetchImpl: async (_input, init) => {
+        sameOriginHeaders.push(new Headers(init?.headers));
+        return sameOriginHeaders.length === 1
+          ? new Response(null, { status: 302, headers: { location: "/final" } })
+          : new Response("{}", { status: 200 });
+      },
+    });
+    try {
+      await sameOrigin.bound.completeChat(chatRequest({
+        clientHeaderFields: [
+          { name: "x-vendor-feature", value: "first" },
+          { name: "x-vendor-feature", value: "second" },
+        ],
+      }));
+      expect(sameOriginHeaders.map((headers) => headers.get("x-vendor-feature"))).toEqual([
+        "first, second",
+        "first, second",
+      ]);
+    } finally {
+      await sameOrigin.backend.close();
+    }
+
+    const crossOriginHeaders: Headers[] = [];
+    const crossOrigin = await backendAt("https://first-origin.test", {
+      fetchImpl: async (_input, init) => {
+        crossOriginHeaders.push(new Headers(init?.headers));
+        return crossOriginHeaders.length === 1
+          ? new Response(null, { status: 302, headers: { location: "https://second-origin.test/final" } })
+          : new Response("{}", { status: 200 });
+      },
+    });
+    try {
+      await crossOrigin.bound.completeChat(chatRequest({
+        clientHeaderFields: [{ name: "x-vendor-feature", value: "cross" }],
+      }));
+      expect(crossOriginHeaders.map((headers) => headers.get("x-vendor-feature"))).toEqual(["cross", null]);
+      expect(crossOriginHeaders[1]?.get("authorization")).toBeNull();
+    } finally {
+      await crossOrigin.backend.close();
+    }
+  });
+
+  it("rejects HTTPS to HTTP redirects before dispatching the downgraded request", async () => {
+    let calls = 0;
+    const { backend, bound } = await backendAt("https://secure-origin.test", {
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 302,
+          headers: { location: "http://secure-origin.test/final" },
+        });
+      },
+    });
+    try {
+      await expect(bound.completeChat(chatRequest())).rejects.toBeInstanceOf(InvalidUpstreamResponseError);
+      expect(calls).toBe(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("disposes a late Fetch response after the response-start timeout wins", async () => {
     let canceled = false;
     const { backend, bound } = await backendAt("https://late-response.test", {
@@ -260,7 +324,11 @@ describe("Copilot transport lifecycle", () => {
   it("releases a non-ending real redirect body before completing the next hop", async () => {
     const sockets = new Set<Socket>();
     let redirectClosed = false;
+    const observedClientHeaders: Array<Array<{ readonly name: string; readonly value: string }>> = [];
     const server = createServer((request, response) => {
+      observedClientHeaders.push(rawFields(request.rawHeaders).filter(({ name }) => (
+        name.toLowerCase() === "x-vendor-feature" || name.toLowerCase() === "openai-beta"
+      )));
       if (request.url === "/chat/completions") {
         response.on("close", () => {
           redirectClosed = true;
@@ -281,12 +349,66 @@ describe("Copilot transport lifecycle", () => {
     const origin = await listen(server);
     const { backend, bound } = await backendAt(origin);
     try {
-      const response = await bound.completeChat(chatRequest());
+      const response = await bound.completeChat(chatRequest({
+        clientHeaderFields: [
+          { name: "X-Vendor-Feature", value: "first" },
+          { name: "openai-beta", value: "assistants=v2" },
+          { name: "x-vendor-feature", value: "second" },
+        ],
+      }));
       expect(response.status).toBe(200);
       expect(redirectClosed).toBe(true);
+      expect(observedClientHeaders.map((fields) => fields.map(({ name, value }) => ({
+        name: name.toLowerCase(), value,
+      })))).toEqual(Array.from({ length: 2 }, () => [
+        { name: "x-vendor-feature", value: "first" },
+        { name: "openai-beta", value: "assistants=v2" },
+        { name: "x-vendor-feature", value: "second" },
+      ]));
     } finally {
       await backend.close();
       await closeServer(server, sockets);
+    }
+  });
+
+  it("drops client and credential headers on a real cross-origin redirect", async () => {
+    const firstSockets = new Set<Socket>();
+    const targetSockets = new Set<Socket>();
+    let targetHeaders: string[] = [];
+    const target = createServer((request, response) => {
+      targetHeaders = request.rawHeaders;
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    target.on("connection", (socket) => {
+      targetSockets.add(socket);
+      socket.on("close", () => targetSockets.delete(socket));
+    });
+    const targetOrigin = await listen(target);
+    const first = createServer((request, response) => {
+      request.resume();
+      response.writeHead(302, { location: `${targetOrigin}/final` });
+      response.end();
+    });
+    first.on("connection", (socket) => {
+      firstSockets.add(socket);
+      socket.on("close", () => firstSockets.delete(socket));
+    });
+    const firstOrigin = await listen(first);
+    const { backend, bound } = await backendAt(firstOrigin);
+    try {
+      const response = await bound.completeChat(chatRequest({
+        clientHeaderFields: [{ name: "x-vendor-feature", value: "private" }],
+      }));
+      expect(response.status).toBe(200);
+      const names = rawFields(targetHeaders).map(({ name }) => name.toLowerCase());
+      expect(names).not.toContain("x-vendor-feature");
+      expect(names).not.toContain("authorization");
+    } finally {
+      await backend.close();
+      await closeServer(first, firstSockets);
+      await closeServer(target, targetSockets);
     }
   });
 
@@ -351,6 +473,39 @@ describe("Copilot transport lifecycle", () => {
       expect(capturedHeaders.get("content-type")).toBe("application/json");
     } finally {
       await backend.close();
+    }
+  });
+
+  it("preserves the established gateway header order before client fields", async () => {
+    const raw: Array<{ readonly name: string; readonly value: string }> = [];
+    const server = createServer((request, response) => {
+      raw.push(...rawFields(request.rawHeaders));
+      request.resume();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const sockets = new Set<Socket>();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    const origin = await listen(server);
+    const { backend, bound } = await backendAt(origin);
+    try {
+      await bound.completeChat(chatRequest({
+        clientHeaderFields: [{ name: "x-vendor-feature", value: "client" }],
+      }));
+      const observed = raw.filter(({ name }) => [
+        "authorization", "content-type", "copilot-integration-id", "editor-plugin-version",
+        "editor-version", "user-agent", "x-github-api-version", "x-vendor-feature",
+      ].includes(name.toLowerCase())).map(({ name }) => name.toLowerCase());
+      expect(observed).toEqual([
+        "authorization", "content-type", "copilot-integration-id", "editor-plugin-version",
+        "editor-version", "user-agent", "x-github-api-version", "x-vendor-feature",
+      ]);
+    } finally {
+      await backend.close();
+      await closeServer(server, sockets);
     }
   });
 
@@ -727,6 +882,16 @@ function chatRequest(overrides: Partial<ChatCompletionsUpstreamRequest> = {}): C
     signal: new AbortController().signal,
     ...overrides,
   };
+}
+
+function rawFields(rawHeaders: readonly string[]): Array<{ readonly name: string; readonly value: string }> {
+  const fields: Array<{ readonly name: string; readonly value: string }> = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1];
+    if (name !== undefined && value !== undefined) fields.push({ name, value });
+  }
+  return fields;
 }
 
 async function listen(server: Server): Promise<string> {

@@ -23,12 +23,18 @@ import type {
   LocalControlModule,
   LoopbackOrigin,
 } from "./create_gateway.js";
+import {
+  captureNormalizedHeaderFields,
+  type CapturedHeaderFields,
+  type OrderedHeaderFields,
+} from "./header_fields.js";
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
 export interface DecodedHttpRequest {
   readonly url: URL;
   readonly headers: Headers;
+  readonly headerFields: OrderedHeaderFields;
   readonly body?: WireJsonObject;
 }
 
@@ -80,6 +86,10 @@ export interface HonoAppDependencies {
   readonly streamFinished?: () => void;
 }
 
+export interface GatewayBindings {
+  readonly capturedHeaderFields?: CapturedHeaderFields;
+}
+
 const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
@@ -89,8 +99,8 @@ const RESPONSE_BODY_CLEANUP_MS = 2_500;
 export function createHonoApp(
   routes: readonly RouteRegistration[],
   dependencies: HonoAppDependencies,
-): Hono {
-  const app = new Hono();
+): Hono<{ Bindings: GatewayBindings }> {
+  const app = new Hono<{ Bindings: GatewayBindings }>();
 
   if (dependencies.control !== undefined) {
     const handleControl = (request: Request): Promise<Response> => handleMountedRequest(
@@ -133,7 +143,12 @@ export function createHonoApp(
   });
 
   for (const route of routes) {
-    app.on(route.method, route.path, (context) => handleRoute(context.req.raw, route, dependencies));
+    app.on(route.method, route.path, (context) => handleRoute(
+      context.req.raw,
+      route,
+      dependencies,
+      context.env?.capturedHeaderFields,
+    ));
   }
 
   if (dependencies.adminStatic !== undefined) {
@@ -153,6 +168,7 @@ async function handleRoute(
   request: Request,
   route: RouteRegistration,
   dependencies: HonoAppDependencies,
+  capturedHeaderFields?: CapturedHeaderFields,
 ): Promise<Response> {
   if (dependencies.isClosed()) {
     return new Response(null, { status: 503 });
@@ -248,6 +264,16 @@ async function handleRoute(
   };
 
   try {
+    const capture = route.admission === "inference"
+      ? capturedHeaderFields ?? captureNormalizedHeaderFields(request.headers)
+      : { ok: true as const, fields: [] };
+    if (!capture.ok) {
+      diagnostics?.stage("request_validation");
+      throw new GatewayFailureError({ kind: "invalid_request", source: "request", phase: "headers" });
+    }
+    const url = new URL(request.url);
+    let decoded: DecodedHttpRequest = { url, headers: request.headers, headerFields: capture.fields };
+
     if (route.admission === "inference") {
       diagnostics?.stage("admission");
       release = await dependencies.admission.acquire(snapshot, workController.signal);
@@ -257,12 +283,10 @@ async function handleRoute(
       });
     }
 
-    const url = new URL(request.url);
-    let decoded: DecodedHttpRequest = { url, headers: request.headers };
     if (route.body === "wire-json-object") {
       diagnostics?.stage("request_decode");
       const body = await readWireJsonObjectBody(request, snapshot.limits.requestBodyBytes, workController.signal);
-      decoded = { url, headers: request.headers, body };
+      decoded = { url, headers: request.headers, headerFields: capture.fields, body };
       diagnostics?.shape("request_decoded", () => diagnosticShape(body));
     }
 
