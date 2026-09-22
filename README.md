@@ -86,6 +86,8 @@ All routes share the loopback listener:
 
 The gateway selects one compatible native or converted upstream protocol for each request. It does not probe paid inference routes or retry a rejected request through a different protocol.
 
+Native same-protocol requests forward safe unrecognized end-to-end request headers, including duplicate values in their received order. Gateway-owned identity, credentials, protocol, framing, hop-by-hop, forwarding, browser-security, tracing, and private gateway headers are removed or replaced. Converted requests do not forward arbitrary client headers, and cross-origin upstream redirects drop all forwarded client headers. Inference requests with more than 128 header fields or more than 16 KiB of aggregate UTF-8 header names and values are rejected.
+
 Converted Chat and Responses output keeps visible reasoning separate from answer text. Chat uses
 the untyped `reasoning_content` compatibility extension; Responses uses reasoning items and summary
 events. Messages output preserves native Anthropic signatures and redacted data exactly. When a

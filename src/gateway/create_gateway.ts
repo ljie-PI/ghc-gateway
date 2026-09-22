@@ -9,6 +9,11 @@ import { AdmissionController, defaultDelay, type DelayFn } from "./admission.js"
 import { createHonoApp, type InflightRequest, type RouteRegistration } from "./hono_app.js";
 import type { TimeoutScheduler } from "./timeouts.js";
 import type { DiagnosticRecorder } from "../telemetry/diagnostics.js";
+import {
+  captureNormalizedHeaderFields,
+  captureRawHeaderFields,
+  NODE_MAX_HEADER_BYTES,
+} from "./header_fields.js";
 
 export interface GatewayListener {
   readonly listening: boolean;
@@ -22,9 +27,13 @@ export interface GatewayListener {
 }
 
 export type GatewayListen = (options: Readonly<{
-  fetch: (request: Request) => Response | Promise<Response>;
+  fetch: (
+    request: Request,
+    environment?: Readonly<{ incoming: Readonly<{ rawHeaders: readonly string[] }> }>,
+  ) => Response | Promise<Response>;
   hostname: typeof LOOPBACK_HOST;
   port: number;
+  serverOptions?: Readonly<{ maxHeaderSize: number }>;
 }>) => GatewayListener;
 
 export interface Gateway {
@@ -160,7 +169,9 @@ export async function createGateway(
       if (closed) {
         return Promise.resolve(new Response(null, { status: 503 }));
       }
-      return Promise.resolve(app.fetch(request));
+      return Promise.resolve(app.fetch(request, {
+        capturedHeaderFields: captureNormalizedHeaderFields(request.headers),
+      }));
     },
     async listen(): Promise<{ host: typeof LOOPBACK_HOST; port: number }> {
       assertLoopbackBindHost(config.startup.host);
@@ -169,9 +180,15 @@ export async function createGateway(
       }
       const listen: GatewayListen = dependencies.listen ?? ((options) => serve(options));
       const current = listen({
-        fetch: app.fetch,
+        fetch: (request, environment) => app.fetch(request, {
+          ...environment,
+          capturedHeaderFields: environment === undefined
+            ? captureNormalizedHeaderFields(request.headers)
+            : captureRawHeaderFields(environment.incoming.rawHeaders),
+        }),
         hostname: LOOPBACK_HOST,
         port: config.startup.port,
+        serverOptions: { maxHeaderSize: NODE_MAX_HEADER_BYTES },
       });
       listener = current;
       listenPromise = current.listening

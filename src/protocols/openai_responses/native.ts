@@ -21,6 +21,7 @@ import type {
 import type { ProtocolPerformanceObserver } from "../../telemetry/runtime.js";
 import { encodeOpenaiResponsesSseEvent } from "./wire.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
+import type { OrderedHeaderFields } from "../../gateway/header_fields.js";
 import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/diagnostics.js";
 import type { ResolvedModel } from "../model_catalog/resolver.js";
 import type { ResponsesRequest } from "./dto.js";
@@ -54,6 +55,7 @@ export interface NativeResponsesRequestOptions {
   readonly connectTimeoutMs: number;
   readonly firstByteTimeoutMs: number;
   readonly signal: AbortSignal;
+  readonly clientHeaderFields?: OrderedHeaderFields;
 }
 
 interface ParsedSseEvent {
@@ -72,6 +74,7 @@ export function nativeResponsesUpstreamRequest(
     hasVisionInput: hasNativeVisionInput(plan.originalRequest.input),
     initiator: nativeInitiator(plan.originalRequest.input),
     requestId: options.requestId,
+    ...(options.clientHeaderFields === undefined ? {} : { clientHeaderFields: options.clientHeaderFields }),
     nonstreamBodyBytes: options.nonstreamBodyBytes,
     connectTimeoutMs: options.connectTimeoutMs,
     firstByteTimeoutMs: options.firstByteTimeoutMs,

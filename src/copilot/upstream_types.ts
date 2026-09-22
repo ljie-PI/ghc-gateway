@@ -1,3 +1,5 @@
+import type { OrderedHeaderFields } from "../gateway/header_fields.js";
+
 export interface UpstreamRequestLimits {
   readonly nonstreamBodyBytes: number;
   readonly connectTimeoutMs: number;
@@ -10,6 +12,7 @@ export interface ChatCompletionsUpstreamRequest extends UpstreamRequestLimits {
   readonly body: Uint8Array;
   readonly stream: boolean;
   readonly hasVisionInput: boolean;
+  readonly clientHeaderFields?: OrderedHeaderFields;
 }
 
 export interface NativeResponsesUpstreamRequest extends UpstreamRequestLimits {
@@ -17,6 +20,7 @@ export interface NativeResponsesUpstreamRequest extends UpstreamRequestLimits {
   readonly hasVisionInput: boolean;
   readonly initiator: "user" | "agent";
   readonly requestId: string;
+  readonly clientHeaderFields?: OrderedHeaderFields;
 }
 
 export const MESSAGES_VERSION = "2023-06-01" as const;
@@ -36,6 +40,7 @@ export interface MessagesUpstreamRequest extends UpstreamRequestLimits {
   readonly body: Uint8Array;
   readonly version: MessagesVersion;
   readonly betaFeatures: readonly MessagesBetaFeature[];
+  readonly clientHeaderFields?: OrderedHeaderFields;
 }
 
 export interface UpstreamByteResponse {
