@@ -15,7 +15,8 @@ export type ConversionDegradationRule =
   | "reasoning.budget_coarsened"
   | "reasoning.presentation_omitted"
   | "reasoning.state_omitted"
-  | "sampling.top_k_omitted";
+  | "sampling.top_k_omitted"
+  | "messages.extensions_omitted";
 
 export interface SemanticText {
   readonly type: "text";

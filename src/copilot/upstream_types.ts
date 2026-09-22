@@ -39,7 +39,7 @@ export type MessagesBetaFeature = typeof MESSAGES_BETA_FEATURES[number];
 export interface MessagesUpstreamRequest extends UpstreamRequestLimits {
   readonly body: Uint8Array;
   readonly version: MessagesVersion;
-  readonly betaFeatures: readonly MessagesBetaFeature[];
+  readonly betaFeatures: readonly string[];
   readonly clientHeaderFields?: OrderedHeaderFields;
 }
 

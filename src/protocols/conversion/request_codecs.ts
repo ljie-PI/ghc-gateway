@@ -27,6 +27,7 @@ import {
 } from "./types.js";
 import {
   assertAllowedKeys,
+  assertNoDuplicates,
   encodeWireObject,
   finiteNumber,
   invalid,
@@ -89,6 +90,26 @@ const MESSAGES_TOP_LEVEL = new Set([
   "thinking",
   "output_config",
   "metadata",
+]);
+const MESSAGES_CONTINUATION_FIELDS = new Set(["previous_response_id"]);
+const MESSAGES_TOOL_OWNERSHIP_FIELDS = new Set(["call_id", "tool_call_id", "tool_use_id"]);
+const MESSAGES_REASONING_CARRIER_FIELDS = new Set([
+  "data",
+  "encrypted_content",
+  "reasoning",
+  "reasoning_items",
+  "reasoning_content",
+  "reasoning_details",
+  "reasoning_text",
+  "redacted_thinking",
+  "signature",
+  "thinking",
+  "thinking_blocks",
+]);
+const MESSAGES_SENSITIVE_EXTENSION_FIELDS = new Set([
+  ...MESSAGES_CONTINUATION_FIELDS,
+  ...MESSAGES_TOOL_OWNERSHIP_FIELDS,
+  ...MESSAGES_REASONING_CARRIER_FIELDS,
 ]);
 
 const RESPONSES_TOP_LEVEL = new Set([
@@ -368,8 +389,14 @@ function decodeChatToolCall(value: WireJson) {
 }
 
 function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest {
-  assertAllowedKeys(body, MESSAGES_TOP_LEVEL, "REQ-M-TOP");
   const degradations = new Set<ConversionDegradationRule>();
+  assertMessagesProjection(
+    body,
+    MESSAGES_TOP_LEVEL,
+    "REQ-M-TOP",
+    degradations,
+    MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+  );
   const instructions = decodeMessagesSystem(oneMember(body, "system", "REQ-M-SYSTEM"), degradations);
   const items: SemanticRequestItem[] = [];
   for (const value of requiredArray(oneMember(body, "messages", "REQ-M-MESSAGES"), "REQ-M-MESSAGES").items) {
@@ -384,7 +411,7 @@ function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMa
     "REQ-M-OUTPUT-CONFIG",
   );
   if (outputConfig !== undefined) {
-    assertAllowedKeys(outputConfig, new Set(["effort", "format"]), "REQ-M-OUTPUT-CONFIG");
+    assertMessagesProjection(outputConfig, new Set(["effort", "format"]), "REQ-M-OUTPUT-CONFIG", degradations);
   }
   const reasoning = mergeReasoning(
     reasoningFromEffort(
@@ -403,7 +430,7 @@ function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMa
     instructions,
     items,
     tools: decodeMessagesTools(oneMember(body, "tools", "REQ-M-TOOLS"), degradations),
-    toolChoice: decodeMessagesToolChoice(oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE")),
+    toolChoice: decodeMessagesToolChoice(oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE"), degradations),
     parallelToolCalls: messagesParallelToolCalls(oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE")),
     maxOutputTokens: positiveInteger(oneMember(body, "max_tokens", "REQ-M-LIMIT"), "REQ-M-LIMIT"),
     temperature: finiteNumber(
@@ -416,9 +443,10 @@ function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMa
     stop: parseStringList(oneMember(body, "stop_sequences", "REQ-M-STOP"), "REQ-M-STOP"),
     outputFormat: decodeMessagesOutputFormat(
       outputConfig === undefined ? undefined : oneMember(outputConfig, "format", "REQ-M-FORMAT"),
+      degradations,
     ),
     reasoning,
-    metadata: validatedMetadata(oneMember(body, "metadata", "REQ-M-METADATA"), "messages"),
+    metadata: validatedMetadata(oneMember(body, "metadata", "REQ-M-METADATA"), "messages", degradations),
     degradations: [...degradations],
     ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
@@ -436,12 +464,18 @@ function decodeMessagesSystem(
   }
   return requiredArray(value, "REQ-M-SYSTEM").items.map((item) => {
     const block = requiredObject(item, "REQ-M-SYSTEM-BLOCK");
-    assertAllowedKeys(block, new Set(["type", "text", "cache_control"]), "REQ-M-SYSTEM-BLOCK");
+    assertMessagesProjection(
+      block,
+      new Set(["type", "text", "cache_control"]),
+      "REQ-M-SYSTEM-BLOCK",
+      degradations,
+      MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+    );
     if (requiredString(oneMember(block, "type", "REQ-M-SYSTEM-TYPE"), "REQ-M-SYSTEM-TYPE") !== "text") {
       unsupported("REQ-M-SYSTEM-TYPE");
     }
     if (oneMember(block, "cache_control", "REQ-M-SYSTEM-CACHE") !== undefined) {
-      validateCacheControl(oneMember(block, "cache_control", "REQ-M-SYSTEM-CACHE"));
+      validateCacheControl(oneMember(block, "cache_control", "REQ-M-SYSTEM-CACHE"), degradations);
       degradations.add("cache.control_omitted");
     }
     return {
@@ -458,7 +492,13 @@ function decodeMessagesMessage(
   carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>,
 ): void {
   const message = requiredObject(value, "REQ-M-MESSAGE");
-  assertAllowedKeys(message, new Set(["role", "content"]), "REQ-M-MESSAGE");
+  assertMessagesProjection(
+    message,
+    new Set(["role", "content"]),
+    "REQ-M-MESSAGE",
+    degradations,
+    MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+  );
   const role = requiredString(oneMember(message, "role", "REQ-M-MESSAGE-ROLE"), "REQ-M-MESSAGE-ROLE");
   if (role !== "user" && role !== "assistant") {
     invalid("REQ-M-MESSAGE-ROLE");
@@ -479,9 +519,15 @@ function decodeMessagesMessage(
     const block = requiredObject(item, "REQ-M-CONTENT-BLOCK");
     const type = requiredString(oneMember(block, "type", "REQ-M-CONTENT-TYPE"), "REQ-M-CONTENT-TYPE");
     if (type === "text") {
-      assertAllowedKeys(block, new Set(["type", "text", "cache_control"]), "REQ-M-TEXT");
+      assertMessagesProjection(
+        block,
+        new Set(["type", "text", "cache_control"]),
+        "REQ-M-TEXT",
+        degradations,
+        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+      );
       if (oneMember(block, "cache_control", "REQ-M-TEXT-CACHE") !== undefined) {
-        validateCacheControl(oneMember(block, "cache_control", "REQ-M-TEXT-CACHE"));
+        validateCacheControl(oneMember(block, "cache_control", "REQ-M-TEXT-CACHE"), degradations);
         degradations.add("cache.control_omitted");
       }
       ordinary.push({
@@ -494,12 +540,18 @@ function decodeMessagesMessage(
       if (role !== "user") {
         invalid("REQ-M-IMAGE-ROLE");
       }
-      assertAllowedKeys(block, new Set(["type", "source", "cache_control"]), "REQ-M-IMAGE");
+      assertMessagesProjection(
+        block,
+        new Set(["type", "source", "cache_control"]),
+        "REQ-M-IMAGE",
+        degradations,
+        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+      );
       if (oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE") !== undefined) {
-        validateCacheControl(oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE"));
+        validateCacheControl(oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE"), degradations);
         degradations.add("cache.control_omitted");
       }
-      ordinary.push(decodeMessagesImage(oneMember(block, "source", "REQ-M-IMAGE-SOURCE")));
+      ordinary.push(decodeMessagesImage(oneMember(block, "source", "REQ-M-IMAGE-SOURCE"), degradations));
       continue;
     }
     flushOrdinary();
@@ -519,7 +571,12 @@ function decodeMessagesMessage(
     }
     if (type === "thinking" || type === "redacted_thinking") {
       if (type === "thinking") {
-        assertAllowedKeys(block, new Set(["type", "thinking", "signature"]), "REQ-M-THINKING-BLOCK");
+        assertMessagesProjection(
+          block,
+          new Set(["type", "thinking", "signature"]),
+          "REQ-M-THINKING-BLOCK",
+          degradations,
+        );
         requiredString(oneMember(block, "thinking", "REQ-M-THINKING-TEXT"), "REQ-M-THINKING-TEXT", true);
         const signature = optionalString(oneMember(block, "signature", "REQ-M-THINKING-SIGNATURE"), "REQ-M-THINKING-SIGNATURE");
         if (signature !== undefined && isReasoningCarrier(signature)) {
@@ -531,7 +588,7 @@ function decodeMessagesMessage(
           continue;
         }
       } else {
-        assertAllowedKeys(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING");
+        assertMessagesProjection(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING", degradations);
         const data = requiredString(oneMember(block, "data", "REQ-M-REDACTED-DATA"), "REQ-M-REDACTED-DATA", true);
         if (isReasoningCarrier(data)) {
           const record = requiredCarrier(carrierRecords, data, "responses_item", "REQ-M-REDACTED-DATA");
@@ -550,11 +607,25 @@ function decodeMessagesMessage(
   flushOrdinary();
 }
 
-function decodeMessagesImage(value: WireJson | undefined): SemanticImage {
+function decodeMessagesImage(
+  value: WireJson | undefined,
+  degradations?: Set<ConversionDegradationRule>,
+): SemanticImage {
   const source = requiredObject(value, "REQ-M-IMAGE-SOURCE");
   const type = requiredString(oneMember(source, "type", "REQ-M-IMAGE-SOURCE-TYPE"), "REQ-M-IMAGE-SOURCE-TYPE");
   if (type === "base64") {
-    assertAllowedKeys(source, new Set(["type", "media_type", "data"]), "REQ-M-IMAGE-SOURCE");
+    const allowed = new Set(["type", "media_type", "data"]);
+    if (degradations === undefined) {
+      assertAllowedKeys(source, allowed, "REQ-M-IMAGE-SOURCE");
+    } else {
+      assertMessagesProjection(
+        source,
+        allowed,
+        "REQ-M-IMAGE-SOURCE",
+        degradations,
+        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+      );
+    }
     const mediaType = requiredString(
       oneMember(source, "media_type", "REQ-M-IMAGE-MIME"),
       "REQ-M-IMAGE-MIME",
@@ -563,7 +634,18 @@ function decodeMessagesImage(value: WireJson | undefined): SemanticImage {
     return imageContent(`data:${mediaType};base64,${data}`, undefined, "REQ-M-IMAGE");
   }
   if (type === "url") {
-    assertAllowedKeys(source, new Set(["type", "url"]), "REQ-M-IMAGE-SOURCE");
+    const allowed = new Set(["type", "url"]);
+    if (degradations === undefined) {
+      assertAllowedKeys(source, allowed, "REQ-M-IMAGE-SOURCE");
+    } else {
+      assertMessagesProjection(
+        source,
+        allowed,
+        "REQ-M-IMAGE-SOURCE",
+        degradations,
+        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+      );
+    }
     return imageContent(
       requiredString(oneMember(source, "url", "REQ-M-IMAGE-URL"), "REQ-M-IMAGE-URL"),
       undefined,
@@ -577,9 +659,15 @@ function decodeMessagesToolUse(
   value: WireJsonObject,
   degradations: Set<ConversionDegradationRule>,
 ) {
-  assertAllowedKeys(value, new Set(["type", "id", "name", "input", "cache_control"]), "REQ-M-TOOL-USE");
+  assertMessagesProjection(
+    value,
+    new Set(["type", "id", "name", "input", "cache_control"]),
+    "REQ-M-TOOL-USE",
+    degradations,
+    MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+  );
   if (oneMember(value, "cache_control", "REQ-M-TOOL-USE-CACHE") !== undefined) {
-    validateCacheControl(oneMember(value, "cache_control", "REQ-M-TOOL-USE-CACHE"));
+    validateCacheControl(oneMember(value, "cache_control", "REQ-M-TOOL-USE-CACHE"), degradations);
     degradations.add("cache.control_omitted");
   }
   const input = requiredObject(oneMember(value, "input", "REQ-M-TOOL-USE-INPUT"), "REQ-M-TOOL-USE-INPUT");
@@ -595,13 +683,15 @@ function decodeMessagesToolResult(
   value: WireJsonObject,
   degradations: Set<ConversionDegradationRule>,
 ): SemanticToolResultItem {
-  assertAllowedKeys(
+  assertMessagesProjection(
     value,
     new Set(["type", "tool_use_id", "content", "is_error", "cache_control"]),
     "REQ-M-TOOL-RESULT",
+    degradations,
+    MESSAGES_SENSITIVE_EXTENSION_FIELDS,
   );
   if (oneMember(value, "cache_control", "REQ-M-TOOL-RESULT-CACHE") !== undefined) {
-    validateCacheControl(oneMember(value, "cache_control", "REQ-M-TOOL-RESULT-CACHE"));
+    validateCacheControl(oneMember(value, "cache_control", "REQ-M-TOOL-RESULT-CACHE"), degradations);
     degradations.add("cache.control_omitted");
   }
   const rawContent = oneMember(value, "content", "REQ-M-TOOL-RESULT-CONTENT");
@@ -614,7 +704,7 @@ function decodeMessagesToolResult(
       oneMember(value, "tool_use_id", "REQ-M-TOOL-RESULT-ID"),
       "REQ-M-TOOL-RESULT-ID",
     ),
-    content: rawContent === undefined ? [] : decodeToolResultContent(rawContent, degradations),
+    content: rawContent === undefined ? [] : decodeToolResultContent(rawContent, degradations, true),
     isError: optionalBoolean(
       oneMember(value, "is_error", "REQ-M-TOOL-RESULT-ERROR"),
       "REQ-M-TOOL-RESULT-ERROR",
@@ -889,6 +979,7 @@ function decodeResponsesContent(value: WireJson | undefined, allowImage: boolean
 function decodeToolResultContent(
   value: WireJson | undefined,
   degradations: Set<ConversionDegradationRule>,
+  messagesProjection = false,
 ): readonly SemanticContent[] {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -1084,9 +1175,17 @@ function decodeToolResultContent(
       "REQ-TOOL-RESULT-TYPE",
     );
     if (type === "text" || type === "input_text") {
-      assertAllowedKeys(block, new Set(["type", "text", "cache_control"]), "REQ-TOOL-RESULT-TEXT");
+      const allowed = new Set(["type", "text", "cache_control"]);
+      if (messagesProjection) {
+        assertMessagesProjection(block, allowed, "REQ-TOOL-RESULT-TEXT", degradations);
+      } else {
+        assertAllowedKeys(block, allowed, "REQ-TOOL-RESULT-TEXT");
+      }
       if (oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE") !== undefined) {
-        validateCacheControl(oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE"));
+        validateCacheControl(
+          oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE"),
+          messagesProjection ? degradations : undefined,
+        );
         degradations.add("cache.control_omitted");
       }
       return {
@@ -1099,12 +1198,23 @@ function decodeToolResultContent(
       } as const;
     }
     if (type === "image") {
-      assertAllowedKeys(block, new Set(["type", "source", "cache_control"]), "REQ-TOOL-RESULT-IMAGE");
+      const allowed = new Set(["type", "source", "cache_control"]);
+      if (messagesProjection) {
+        assertMessagesProjection(block, allowed, "REQ-TOOL-RESULT-IMAGE", degradations);
+      } else {
+        assertAllowedKeys(block, allowed, "REQ-TOOL-RESULT-IMAGE");
+      }
       if (oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE") !== undefined) {
-        validateCacheControl(oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE"));
+        validateCacheControl(
+          oneMember(block, "cache_control", "REQ-TOOL-RESULT-CACHE"),
+          messagesProjection ? degradations : undefined,
+        );
         degradations.add("cache.control_omitted");
       }
-      return decodeMessagesImage(oneMember(block, "source", "REQ-TOOL-RESULT-IMAGE"));
+      return decodeMessagesImage(
+        oneMember(block, "source", "REQ-TOOL-RESULT-IMAGE"),
+        messagesProjection ? degradations : undefined,
+      );
     }
     if (type === "input_image") {
       assertAllowedKeys(block, new Set(["type", "image_url", "detail"]), "REQ-TOOL-RESULT-IMAGE");
@@ -1149,14 +1259,16 @@ function decodeMessagesTools(
   }
   return requiredArray(value, "REQ-M-TOOLS").items.map((item) => {
     const tool = requiredObject(item, "REQ-M-TOOL");
-    assertAllowedKeys(
+    assertMessagesProjection(
       tool,
       new Set(["name", "description", "input_schema", "strict", "type", "cache_control"]),
       "REQ-M-TOOL",
+      degradations,
+      MESSAGES_SENSITIVE_EXTENSION_FIELDS,
     );
     const cacheControl = oneMember(tool, "cache_control", "REQ-M-TOOL-CACHE");
     if (cacheControl !== undefined) {
-      validateCacheControl(cacheControl);
+      validateCacheControl(cacheControl, degradations);
       degradations.add("cache.control_omitted");
     }
     const type = optionalString(oneMember(tool, "type", "REQ-M-TOOL-TYPE"), "REQ-M-TOOL-TYPE");
@@ -1245,12 +1357,21 @@ function decodeChatToolChoice(value: WireJson | undefined): SemanticToolChoice |
   };
 }
 
-function decodeMessagesToolChoice(value: WireJson | undefined): SemanticToolChoice | undefined {
+function decodeMessagesToolChoice(
+  value: WireJson | undefined,
+  degradations?: Set<ConversionDegradationRule>,
+): SemanticToolChoice | undefined {
   if (value === undefined) {
     return undefined;
   }
   const object = requiredObject(value, "REQ-M-TOOL-CHOICE");
-  assertAllowedKeys(object, new Set(["type", "name", "disable_parallel_tool_use"]), "REQ-M-TOOL-CHOICE");
+  assertMessagesProjection(
+    object,
+    new Set(["type", "name", "disable_parallel_tool_use"]),
+    "REQ-M-TOOL-CHOICE",
+    degradations,
+    MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+  );
   const type = requiredString(oneMember(object, "type", "REQ-M-TOOL-CHOICE-TYPE"), "REQ-M-TOOL-CHOICE-TYPE");
   if (type === "auto") {
     return { kind: "auto" };
@@ -1322,12 +1443,20 @@ function decodeChatOutputFormat(value: WireJson | undefined): SemanticOutputForm
   );
 }
 
-function decodeMessagesOutputFormat(value: WireJson | undefined): SemanticOutputFormat | undefined {
+function decodeMessagesOutputFormat(
+  value: WireJson | undefined,
+  degradations?: Set<ConversionDegradationRule>,
+): SemanticOutputFormat | undefined {
   if (value === undefined) {
     return undefined;
   }
   const object = requiredObject(value, "REQ-M-FORMAT");
-  assertAllowedKeys(object, new Set(["type", "name", "description", "schema", "strict"]), "REQ-M-FORMAT");
+  assertMessagesProjection(
+    object,
+    new Set(["type", "name", "description", "schema", "strict"]),
+    "REQ-M-FORMAT",
+    degradations,
+  );
   const type = requiredString(oneMember(object, "type", "REQ-M-FORMAT-TYPE"), "REQ-M-FORMAT-TYPE");
   if (type === "json_object") {
     return { kind: "json_object" };
@@ -1407,7 +1536,7 @@ function decodeMessagesThinking(
     return undefined;
   }
   const object = requiredObject(value, "REQ-M-THINKING");
-  assertAllowedKeys(object, new Set(["type", "budget_tokens"]), "REQ-M-THINKING");
+  assertMessagesProjection(object, new Set(["type", "budget_tokens"]), "REQ-M-THINKING", degradations);
   const type = requiredString(oneMember(object, "type", "REQ-M-THINKING-TYPE"), "REQ-M-THINKING-TYPE");
   if (type === "disabled") {
     return undefined;
@@ -2253,9 +2382,22 @@ function validateArgumentsJson(value: string, ruleId: string): void {
   parseArgumentsObject(value, ruleId);
 }
 
-function validateCacheControl(value: WireJson | undefined): void {
+function validateCacheControl(
+  value: WireJson | undefined,
+  degradations?: Set<ConversionDegradationRule>,
+): void {
   const object = requiredObject(value, "REQ-M-CACHE-CONTROL");
-  assertAllowedKeys(object, new Set(["type", "ttl"]), "REQ-M-CACHE-CONTROL");
+  if (degradations === undefined) {
+    assertAllowedKeys(object, new Set(["type", "ttl"]), "REQ-M-CACHE-CONTROL");
+  } else {
+    assertMessagesProjection(
+      object,
+      new Set(["type", "ttl"]),
+      "REQ-M-CACHE-CONTROL",
+      degradations,
+      MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+    );
+  }
   if (oneMember(object, "type", "REQ-M-CACHE-CONTROL-TYPE") !== "ephemeral") {
     invalid("REQ-M-CACHE-CONTROL-TYPE");
   }
@@ -2265,16 +2407,68 @@ function validateCacheControl(value: WireJson | undefined): void {
   }
 }
 
+function assertMessagesProjection(
+  object: WireJsonObject,
+  allowed: ReadonlySet<string>,
+  ruleId: string,
+  degradations?: Set<ConversionDegradationRule>,
+  forbidden: ReadonlySet<string> = MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+): void {
+  assertNoDuplicates(object, ruleId);
+  const unknown = object.members.filter((member) => !allowed.has(member.key));
+  if (
+    forbidden !== undefined
+    && unknown.some((member) => forbidden.has(member.key))
+  ) {
+    invalid(ruleId);
+  }
+  if (unknown.some((member) => containsReasoningCarrier(member.value))) {
+    invalid(ruleId);
+  }
+  recordMessagesExtensions(object, allowed, degradations);
+}
+
+function containsReasoningCarrier(value: WireJson): boolean {
+  if (typeof value === "string") {
+    return isReasoningCarrier(value);
+  }
+  if (isWireJsonArray(value)) {
+    return value.items.some(containsReasoningCarrier);
+  }
+  if (isWireJsonObject(value)) {
+    return value.members.some((member) => containsReasoningCarrier(member.value));
+  }
+  return false;
+}
+
+function recordMessagesExtensions(
+  object: WireJsonObject,
+  allowed: ReadonlySet<string>,
+  degradations?: Set<ConversionDegradationRule>,
+): void {
+  if (object.members.some((member) => !allowed.has(member.key))) {
+    degradations?.add("messages.extensions_omitted");
+  }
+}
+
 function validatedMetadata(
   value: WireJson | undefined,
   source: InferenceProtocol,
+  degradations?: Set<ConversionDegradationRule>,
 ): WireJson | undefined {
   if (value === undefined) {
     return undefined;
   }
   const object = requiredObject(value, `REQ-${source.toUpperCase()}-METADATA`);
   if (source === "messages") {
-    assertAllowedKeys(object, new Set(["user_id"]), "REQ-M-METADATA");
+    assertMessagesProjection(object, new Set(["user_id"]), "REQ-M-METADATA", degradations);
+    const userId = object.members.filter((member) => member.key === "user_id");
+    for (const member of userId) {
+      if (typeof member.value !== "string") {
+        invalid("REQ-M-METADATA");
+      }
+    }
+    return userId.length === 0 ? undefined : { kind: "object", members: userId };
   }
   for (const member of object.members) {
     if (typeof member.value !== "string") {

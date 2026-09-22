@@ -7,11 +7,24 @@ import {
   type WireJsonObject,
 } from "../../src/serialization/wire_json.js";
 import type { ReasoningCarrierRecord } from "../../src/protocols/conversion/reasoning_carriers.js";
+import { validateMessagesRequestSecurity } from "../../src/protocols/anthropic_messages/request_validation.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 describe("shared conversion request codecs", () => {
+  it("rejects one gateway carrier reused across Messages reasoning slots", () => {
+    expect(() => validateMessagesRequestSecurity(body({
+      messages: [{
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "one", signature: "ghcg-rsn-v1:synthetic" },
+          { type: "thinking", thinking: "two", signature: "ghcg-rsn-v1:synthetic" },
+        ],
+      }],
+    }))).toThrow();
+  });
+
   it("routes Responses through the current native-first conversion matrix", () => {
     const request = body({ model: "source", input: "hi", stream: true });
     expect(planProtocolExecution({
@@ -244,6 +257,58 @@ describe("shared conversion request codecs", () => {
       "cache.control_omitted",
       "reasoning.budget_coarsened",
     ]);
+  });
+
+  it.each(["chat", "responses"] as const)(
+    "omits ordinary Messages extensions but validates known core fields for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: "hi", block_extension: { enabled: true } }],
+          message_extension: true,
+        }],
+        max_tokens: 8,
+        context_management: { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
+        metadata: { user_id: "user-1", optional_extension: { enabled: true } },
+        top_level_extension: { enabled: true },
+      }), "target", capability([target]));
+
+      expect(converted.degradations).toContain("messages.extensions_omitted");
+      expect(decoded(converted.bytes)).toMatchObject({ metadata: { user_id: "user-1" } });
+      expect(decoded(converted.bytes)).not.toHaveProperty("context_management");
+      expect(() => prepareConvertedRequest("messages", target, body({
+        model: "source",
+        messages: [{ role: "user", content: "hi" }],
+        max_tokens: "wrong",
+        context_management: {},
+      }), "target", capability([target]))).toThrow();
+    },
+  );
+
+  it.each([
+    ["top-level thinking", { thinking: { type: "adaptive", optional_extension: true } }],
+    ["thinking block", {
+      messages: [{
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "plan", signature: "opaque", optional_extension: true }],
+      }],
+    }],
+    ["redacted thinking block", {
+      messages: [{
+        role: "assistant",
+        content: [{ type: "redacted_thinking", data: "opaque", optional_extension: true }],
+      }],
+    }],
+  ] as const)("omits ordinary Messages %s extensions", (_name, extra) => {
+    const converted = prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      ...extra,
+    }), "target", capability(["chat"]));
+    expect(converted.degradations).toContain("messages.extensions_omitted");
   });
 
   it.each(["chat", "responses"] as const)(
@@ -1155,7 +1220,19 @@ describe("shared conversion request codecs", () => {
       model: "source",
       input: [{ type: "reasoning", summary: [], unknown: null }],
     }],
-    ["unknown tool-result image key", {
+  ])("rejects strict nested protocol shape: %s", (_name, request) => {
+    const source = "input" in request ? "responses" : "messages";
+    expect(() => prepareConvertedRequest(
+      source,
+      source === "messages" ? "chat" : "messages",
+      body(request),
+      "target",
+      capability([source === "messages" ? "chat" : "messages"]),
+    )).toThrow();
+  });
+
+  it("ignores an ordinary nested Messages tool-result extension", () => {
+    const converted = prepareConvertedRequest("messages", "chat", body({
       model: "source",
       messages: [
         { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
@@ -1167,22 +1244,14 @@ describe("shared conversion request codecs", () => {
             content: [{
               type: "image",
               source: { type: "base64", media_type: "image/png", data: "QUJD" },
-              unknown: null,
+              optional_extension: null,
             }],
           }],
         },
       ],
       max_tokens: 8,
-    }],
-  ])("rejects strict nested protocol shape: %s", (_name, request) => {
-    const source = "input" in request ? "responses" : "messages";
-    expect(() => prepareConvertedRequest(
-      source,
-      source === "messages" ? "chat" : "messages",
-      body(request),
-      "target",
-      capability([source === "messages" ? "chat" : "messages"]),
-    )).toThrow();
+    }), "target", capability(["chat"]));
+    expect(converted.degradations).toContain("messages.extensions_omitted");
   });
 
   it("rejects an unclosed Responses tool round before converting to Messages", () => {

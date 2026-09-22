@@ -5,7 +5,6 @@ import { requireModelCapabilityRegistry, type ModelCapabilityRegistry } from "..
 import {
   MESSAGES_BETA_FEATURES,
   MESSAGES_VERSION,
-  type MessagesBetaFeature,
 } from "../../copilot/upstream_types.js";
 import {
   normalizeAccountBindingFailure,
@@ -39,6 +38,7 @@ import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversi
 import {
   carrierBinding,
   claimReasoningCarriers,
+  reasoningCarrierTokens,
   resolveReasoningCarriers,
 } from "../conversion/reasoning_carrier_preflight.js";
 import {
@@ -47,6 +47,10 @@ import {
   serializeNativeMessagesRequest,
   validatedNativeMessagesBody,
 } from "./native.js";
+import {
+  validateMessagesRequestSecurity,
+  validateNativeMessagesRequestEnvelope,
+} from "./request_validation.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -64,6 +68,11 @@ const JSON_HEADERS = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
 } as const;
+const ANTHROPIC_BETA_LIMITS = {
+  bytes: 8 * 1024,
+  tokens: 64,
+} as const;
+const ANTHROPIC_BETA_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u;
 
 export function createAnthropicMessagesRoute(dependencies: AnthropicMessagesRouteDependencies): RouteRegistration {
   requireModelCapabilityRegistry(dependencies.registry);
@@ -98,6 +107,7 @@ async function executeAnthropicMessages(
   scope.diagnostics?.stage("request_validation");
   assertAnthropicVersion(request.headers, scope.diagnostics);
   const betaFeatures = readAnthropicBetaFeatures(request.headers, scope.diagnostics);
+  validateMessagesRequestSecurity(request.body);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
     usage.setRequestedModel(requestedModel.value);
@@ -105,6 +115,9 @@ async function executeAnthropicMessages(
   scope.diagnostics?.stage("account_binding");
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
+  if (dependencies.reasoningCarriers === undefined && reasoningCarrierTokens(request.body, "messages").length > 0) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
   const carrierClaim = dependencies.reasoningCarriers === undefined
     ? undefined
     : claimReasoningCarriers(request.body, "messages", account.accountId, dependencies.reasoningCarriers);
@@ -148,18 +161,6 @@ async function executeAnthropicMessages(
     ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
   if (plan.kind === "converted") {
-    if (betaFeatures.some((feature) => (
-      feature !== "claude-code-20250219"
-      && feature !== "prompt-caching-2024-07-31"
-      && feature !== "interleaved-thinking-2025-05-14"
-    ))) {
-      scope.diagnostics?.stage("request_validation", { code: "anthropic_beta_conversion_unsupported" });
-      throw new GatewayFailureError({
-        kind: "unsupported_semantics",
-        source: "converter",
-        phase: "convert",
-      });
-    }
     const existingDegradations = plan.request.degradations;
     const betaDegradations = [
       ...(betaFeatures.includes("prompt-caching-2024-07-31")
@@ -181,6 +182,7 @@ async function executeAnthropicMessages(
     scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
   if (plan.kind === "native") {
+    validateNativeMessagesRequestEnvelope(request.body);
     return withUpstreamProtocol(
       await executeNativeMessages(
         copilot,
@@ -220,7 +222,7 @@ async function executeNativeMessages(
   clientHeaderFields: DecodedHttpRequest["headerFields"],
   model: string,
   stream: boolean,
-  betaFeatures: readonly MessagesBetaFeature[],
+  betaFeatures: readonly string[],
   scope: Readonly<RequestScope>,
   usage: ReturnType<typeof createRequestAttempt>,
 ): Promise<Response> {
@@ -375,26 +377,33 @@ function assertAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnosti
   }
 }
 
-function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagnostics): readonly MessagesBetaFeature[] {
+function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagnostics): readonly string[] {
   const values = headers.get("anthropic-beta");
-  if (values === null || values.trim().length === 0) {
+  if (values === null) {
     return [];
   }
-  const supported = new Set<MessagesBetaFeature>(MESSAGES_BETA_FEATURES);
-  const features: MessagesBetaFeature[] = [];
-  for (const raw of values.split(",")) {
-    const value = raw.trim();
-    if (!supported.has(value as MessagesBetaFeature)) {
-      diagnostics?.set({ messagesBetas: features, unknownBetaCount: 1 });
-      diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-      throw new GatewayFailureError({ kind: "invalid_request" });
-    }
-    const feature = value as MessagesBetaFeature;
-    if (!features.includes(feature)) {
-      features.push(feature);
-    }
+  const encodedBytes = new TextEncoder().encode(values).byteLength;
+  if (encodedBytes > ANTHROPIC_BETA_LIMITS.bytes) {
+    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
+    throw new GatewayFailureError({ kind: "invalid_request" });
   }
-  diagnostics?.set({ messagesBetas: features });
+  if (values.trim().length === 0) {
+    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const features = values.split(",").map((value) => value.trim());
+  if (
+    features.length > ANTHROPIC_BETA_LIMITS.tokens
+    || features.some((feature) => !ANTHROPIC_BETA_TOKEN.test(feature))
+  ) {
+    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const supported = new Set<string>(MESSAGES_BETA_FEATURES);
+  diagnostics?.set({
+    messagesBetas: features.filter((feature): feature is typeof MESSAGES_BETA_FEATURES[number] => supported.has(feature)),
+    unknownBetaCount: features.filter((feature) => !supported.has(feature)).length,
+  });
   return features;
 }
 

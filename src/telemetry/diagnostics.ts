@@ -49,7 +49,7 @@ const CODES = [
 const MESSAGE_BETAS = ["claude-code-20250219", "prompt-caching-2024-07-31", "interleaved-thinking-2025-05-14", "context-1m-2025-08-07"] as const;
 const DEGRADATIONS = [
   "cache.control_omitted", "reasoning.budget_coarsened", "reasoning.presentation_omitted",
-  "reasoning.state_omitted", "sampling.top_k_omitted",
+  "reasoning.state_omitted", "sampling.top_k_omitted", "messages.extensions_omitted",
 ] as const;
 const REASONING_EFFORTS = ["missing", "unknown", "none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const REASONING_SUMMARIES = ["missing", "unknown", "auto", "concise", "detailed"] as const;
@@ -415,7 +415,7 @@ function sanitizeDiagnosticFields(value: Readonly<DiagnosticFields>): Diagnostic
       ? {} : { messagesVersion: value.messagesVersion }),
     ...(value.messagesBetas === undefined ? {} : { messagesBetas: MESSAGE_BETAS.filter((item) => value.messagesBetas?.slice(0, MESSAGE_BETAS.length).includes(item)) }),
     ...(value.unknownBetaCount === undefined ? {} : { unknownBetaCount: finite(value.unknownBetaCount) }),
-    ...(value.degradations === undefined ? {} : { degradations: DEGRADATIONS.filter((item) => value.degradations?.slice(0, 5).includes(item)) }),
+    ...(value.degradations === undefined ? {} : { degradations: DEGRADATIONS.filter((item) => value.degradations?.slice(0, DEGRADATIONS.length).includes(item)) }),
     ...(member(REASONING_EFFORTS, value.reasoningEffort) === undefined ? {} : { reasoningEffort: member(REASONING_EFFORTS, value.reasoningEffort)! }),
     ...(member(REASONING_SUMMARIES, value.reasoningSummary) === undefined ? {} : { reasoningSummary: member(REASONING_SUMMARIES, value.reasoningSummary)! }),
     ...(count(value.reasoningTokens) ? { reasoningTokens: value.reasoningTokens } : {}),
