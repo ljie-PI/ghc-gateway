@@ -53,6 +53,7 @@ import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
 import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 import { isReasoningCarrier, type ReasoningCarrierRecord } from "./reasoning_carriers.js";
+import { withMessagesCacheBreakpoints } from "./messages_cache_breakpoints.js";
 import {
   projectIndependentOption,
   projectKnownObject,
@@ -2042,7 +2043,7 @@ function encodeMessagesRequest(
     }
     targetDegradations.push("messages.leading_user_synthesized");
   }
-  const body = wireObject([
+  const body = withMessagesCacheBreakpoints(wireObject([
     ["model", context.resolvedModel],
     ["system", encodeMessagesSystem(split.instructions)],
     ["messages", wireArray(messages)],
@@ -2055,7 +2056,7 @@ function encodeMessagesRequest(
     ["tool_choice", encodeMessagesToolChoice(request.toolChoice, targetParallel.value)],
     ["output_config", encodeMessagesOutputConfig(request.outputFormat, targetReasoning)],
     ["metadata", request.metadata],
-  ]);
+  ]));
   return encodedRequest(request, body, targetDegradations);
 }
 

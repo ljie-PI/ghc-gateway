@@ -126,7 +126,7 @@ describe("shared conversion request codecs", () => {
 
     expect(decoded(converted.bytes)).toEqual({
       model: "target",
-      system: [{ type: "text", text: "system" }],
+      system: [{ type: "text", text: "system", cache_control: { type: "ephemeral" } }],
       messages: [
         {
           role: "user",
@@ -141,7 +141,12 @@ describe("shared conversion request codecs", () => {
         },
         {
           role: "user",
-          content: [{ type: "tool_result", tool_use_id: "call_1", content: [{ type: "text", text: "result" }] }],
+          content: [{
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: [{ type: "text", text: "result" }],
+            cache_control: { type: "ephemeral" },
+          }],
         },
       ],
       max_tokens: 64,
@@ -154,6 +159,7 @@ describe("shared conversion request codecs", () => {
           properties: { _business: { type: "integer" } },
         },
         strict: true,
+        cache_control: { type: "ephemeral" },
       }],
       tool_choice: { type: "tool", name: "lookup", disable_parallel_tool_use: true },
       output_config: {
@@ -1224,9 +1230,10 @@ describe("shared conversion request codecs", () => {
         : [
           { role: "user", content: [{ type: "text", text: "question" }] },
           { role: "assistant", content: [{ type: "text", text: "first" }] },
-          { role: "user", content: [{ type: "text", text: "follow up" }] },
+          // The newest message and the second-newest user message carry cache breakpoints.
+          { role: "user", content: [{ type: "text", text: "follow up", cache_control: { type: "ephemeral" } }] },
           { role: "assistant", content: [{ type: "text", text: "second" }] },
-          { role: "user", content: [{ type: "text", text: "next" }] },
+          { role: "user", content: [{ type: "text", text: "next", cache_control: { type: "ephemeral" } }] },
         ]);
       expect(converted.degradations).toEqual(["request.option_omitted"]);
     },

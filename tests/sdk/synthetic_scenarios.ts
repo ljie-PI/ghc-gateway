@@ -381,7 +381,9 @@ export function syntheticSdkFixtureCatalog(): readonly HttpExpectation[] {
   responses({ model: NATIVE_RESPONSES_MODEL, input: [responseImage("Describe this image.")] });
   responses({ model: NATIVE_RESPONSES_MODEL, input: "Stream the Tokyo weather call.", tools: [responseTool], stream: true });
   responses({ model: NATIVE_RESPONSES_MODEL, input: "Reason natively.", reasoning: { effort: "high" } });
-  for (const text of ["chat-to-messages", "responses-to-messages"]) messages({ model: MESSAGES_MODEL, max_tokens: 4096, messages: [user([{ type: "text", text }])] });
+  for (const text of ["chat-to-messages", "responses-to-messages"]) {
+    messages({ model: MESSAGES_MODEL, max_tokens: 4096, messages: [user([{ type: "text", text, cache_control: { type: "ephemeral" } }])] });
+  }
   messages({ model: MESSAGES_MODEL, max_tokens: 8, messages: [user("messages-native")] });
   return [
     { method: "GET", path: "/models", body: new Uint8Array(), reply: { headers: { "content-type": "application/json" }, body: jsonBytes(SYNTHETIC_MODELS) } },
