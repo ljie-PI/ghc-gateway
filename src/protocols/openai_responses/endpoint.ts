@@ -9,7 +9,6 @@ import {
   normalizeTransportFailure,
 } from "../../copilot/failures.js";
 import {
-  failureFromSignal,
   GatewayFailureError,
   safeRetryAfter,
 } from "../../gateway/failures.js";
@@ -28,16 +27,17 @@ import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/ups
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import {
+  continuationFailure,
   continuationModel,
   continuationOwnership,
-  convertedResponsePreviousResponseId,
   isTerminalResponsesEvent,
+  isUnrestorableHistory,
   ownedContinuationReceipt,
   persistContinuation,
   resolveResponsesContinuation,
   responseIdFromPayload,
+  shouldDropUnresolvedPreviousResponseId,
   validateContinuationTarget,
-  validateExternalContinuation,
 } from "./continuation.js";
 import {
   decodeResponsesPlanningRequest,
@@ -66,7 +66,7 @@ import {
   diagnosticShape,
   observeDiagnosticProtocolStatus,
 } from "../conversion/diagnostics.js";
-import { planProtocolExecution } from "../conversion/planner.js";
+import { planProtocolExecution, plansNativeExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedPlannedResponse } from "../conversion/buffered.js";
 import type {
@@ -141,10 +141,10 @@ async function executeOpenaiResponses(
     if (strictFailure !== undefined) throw strictFailure;
     throw error;
   }
-  const { account, bound, continuationReceipt, ownership, plan, resolved } = prepared;
+  const { account, bound, ownership, plan, planningRequest, resolved } = prepared;
   if (plan.kind === "native") {
     if (strictFailure !== undefined) throw strictFailure;
-    const nativePlan = createNativeResponsesPlan(decoded, resolved, bound.target.endpoint);
+    const nativePlan = createNativeResponsesPlan(planningRequest, resolved, bound.target.endpoint);
     return withUpstreamProtocol(decoded.stream
       ? await nativeStreamResponse(
         dependencies.history, ownership, bound, nativePlan, request.headerFields, scope, usage,
@@ -161,11 +161,7 @@ async function executeOpenaiResponses(
     sourceProtocol: plan.target,
     wireProtocol: "responses",
   });
-  const previousResponseId = convertedResponsePreviousResponseId(
-    decoded.previousResponseId,
-    continuationReceipt,
-    plan.target === "messages" ? "messages" : "chat",
-  );
+  const previousResponseId = decoded.previousResponseId ?? null;
   return withUpstreamProtocol(decoded.stream
     ? await convertedStreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding)
     : await convertedNonstreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding), plan.target);
@@ -210,20 +206,18 @@ async function prepareResponsesExecution(
   usage.setResolvedModel(resolved.upstreamModel);
   scope.diagnostics?.stage("account_binding");
   const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
-  validateContinuationTarget(continuationReceipt, bound.target.endpoint);
+  validateContinuationTarget(continuationReceipt, bound.target.endpoint, resolved.capability.protocols.value);
   let planningRequest = decoded;
+  let historyOmitted = false;
   if (continuationReceipt !== undefined && continuationReceipt.upstreamProtocol !== "responses") {
     try {
       planningRequest = consumeResponsesPreviousResponseId(
         await dependencies.history.enrich(decoded, continuationReceipt, scope.signal),
       );
     } catch (error: unknown) {
-      if (scope.signal.aborted) {
-        throw new GatewayFailureError(failureFromSignal(scope.signal, { source: "continuation", phase: "resume" }));
-      }
-      throw new GatewayFailureError({
-        kind: "continuation_unavailable", source: "continuation", phase: "resume", cause: error,
-      });
+      if (scope.signal.aborted || !isUnrestorableHistory(error)) throw continuationFailure(error, scope.signal);
+      planningRequest = consumeResponsesPreviousResponseId(decoded);
+      historyOmitted = true;
     }
   }
   const carrierClaim = dependencies.reasoningCarriers === undefined
@@ -238,30 +232,27 @@ async function prepareResponsesExecution(
   const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
     ? undefined
     : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
-  validateExternalContinuation(
-    decoded.previousResponseId,
+  if (shouldDropUnresolvedPreviousResponseId(
+    planningRequest.previousResponseId,
     continuation,
-    forcedTarget === undefined && resolved.capability.protocols.value?.includes("responses") === true
-      ? "native_responses"
-      : forcedTarget === "messages" ? "messages_bridge" : "chat_bridge",
-  );
+    plansNativeExecution(resolved.capability.protocols.value, "responses", forcedTarget),
+  )) {
+    planningRequest = consumeResponsesPreviousResponseId(planningRequest);
+    historyOmitted = true;
+  }
+  if (historyOmitted) scope.diagnostics?.stage("continuation", { degradations: ["continuation.history_omitted"] });
   const plan = planProtocolExecution({
     diagnostics: scope.diagnostics, source: "responses", body: planningRequest.body, stream: decoded.stream,
     capability: resolved.capability, resolvedModel: resolved.upstreamModel,
     ...(forcedTarget === undefined ? {} : { forcedTarget }),
     ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
-  validateExternalContinuation(
-    decoded.previousResponseId,
-    continuation,
-    plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
-  );
   usage.setProtocol(plan.kind === "native" ? "openai_responses_native" : "openai_responses_bridge");
   const ownership = continuationOwnership(
     account.accountId, resolved.upstreamModel, bound.target.endpoint,
     plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
   );
-  return { account, bound, continuationReceipt, ownership, plan, resolved };
+  return { account, bound, ownership, plan, planningRequest, resolved };
 }
 
 function decodeRequest(body: WireJsonObject) {

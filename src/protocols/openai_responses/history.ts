@@ -369,15 +369,8 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     if (originalItems === undefined) {
       throw new ResponsesContinuationError("checkpoint_unavailable", "continuation input is not replayable");
     }
-    let scoped: StoredResponse | undefined;
-    try {
-      scoped = this.readResponse(receipt.accountId, receipt.responseId);
-    } catch (error: unknown) {
-      if (error instanceof ResponsesContinuationError) {
-        throw error;
-      }
-      unavailableCheckpoint();
-    }
+    // Corrupt replay data surfaces as ResponsesContinuationError; storage errors propagate as failures.
+    const scoped = this.readResponse(receipt.accountId, receipt.responseId);
     if (scoped === undefined || scoped.formatVersion !== expectedFormatVersion) {
       unavailableCheckpoint();
     }
@@ -387,6 +380,9 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       .filter((carrier): carrier is string => carrier !== undefined));
     const originalCallsById = new Map<string, WireJsonObject>();
     const originalReasoningByCarrier = new Map<string, WireJsonObject>();
+    const originalCarriers = new Set<string>();
+    let knownOutputs = 0;
+    let knownCalls = 0;
     for (const item of originalItems) {
       if (isDeclaredReplayItem(item) && !isCallItem(item) && !isReasoningItem(item)) {
         unavailableCheckpoint();
@@ -394,8 +390,10 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       if (isDeclaredOutputItem(item) && !isOutputItem(item)) {
         unavailableCheckpoint();
       }
-      if (isOutputItem(item) && strictCallIdFromItem(item) === undefined) {
-        unavailableCheckpoint();
+      if (isOutputItem(item)) {
+        const outputCallId = strictCallIdFromItem(item);
+        if (outputCallId === undefined) unavailableCheckpoint();
+        if (scoped.byCallId.has(outputCallId)) knownOutputs += 1;
       }
       if (isCallItem(item)) {
         const callId = strictCallIdFromItem(item);
@@ -403,14 +401,20 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
           unavailableCheckpoint();
         }
         originalCallsById.set(callId, item);
+        if (scoped.byCallId.has(callId)) knownCalls += 1;
       } else if (isReasoningItem(item)) {
         const carrier = reasoningCarrier(item);
         if (carrier !== undefined) {
-          if (!scopedReasoningCarriers.has(carrier) || originalReasoningByCarrier.has(carrier)) unavailableCheckpoint();
-          originalReasoningByCarrier.set(carrier, item);
+          if (originalCarriers.has(carrier)) unavailableCheckpoint();
+          originalCarriers.add(carrier);
+          // Carriers from earlier responses stay where the client put them.
+          if (scopedReasoningCarriers.has(carrier)) originalReasoningByCarrier.set(carrier, item);
         }
       }
     }
+    // Report "not restored" when no output belongs to a checkpointed call. V2 would otherwise drop
+    // the client's checkpointed calls without reinserting them; v1 restores by field fill only.
+    if (knownOutputs === 0 && (scoped.formatVersion === 2 || knownCalls === 0)) unavailableCheckpoint();
 
     let changed = false;
     let sawOutput = false;
@@ -419,9 +423,12 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     const enrichedItems: WireJson[] = [];
 
     for (const item of originalItems) {
-      if (isReasoningItem(item) && reasoningCarrier(item) !== undefined) {
-        changed = true;
-        continue;
+      if (isReasoningItem(item)) {
+        const carrier = reasoningCarrier(item);
+        if (carrier !== undefined && originalReasoningByCarrier.has(carrier)) {
+          changed = true;
+          continue;
+        }
       }
       if (isCallItem(item)) {
         const callId = strictCallIdFromItem(item);
@@ -450,43 +457,33 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
           throw new ResponsesContinuationError("checkpoint_unavailable", "tool output has no call id");
         }
         if (scoped.formatVersion === 1) {
-          if (!emittedCallIds.has(outputCallId)) {
-            if (!scoped.byCallId.has(outputCallId)) {
-              throw new ResponsesContinuationError("checkpoint_unavailable", "tool checkpoint is unavailable");
-            }
-            if (!scopedGroupInserted) {
-              for (const call of scoped.calls) {
-                if (!emittedCallIds.has(call.callId)) {
-                  enrichedItems.push(restoreCall(call, originalCallsById.get(call.callId)));
-                  emittedCallIds.add(call.callId);
-                  changed = true;
-                }
-              }
-              scopedGroupInserted = true;
-            }
-          }
-        } else {
-          if (!scoped.byCallId.has(outputCallId)) {
-            throw new ResponsesContinuationError("checkpoint_unavailable", "tool checkpoint is unavailable");
-          }
-          if (!scopedGroupInserted) {
-            for (const replayItem of scoped.items) {
-              if (replayItem.kind === "reasoning") {
-                const carrier = reasoningCarrier(replayItem.item);
-                enrichedItems.push(
-                  carrier === undefined
-                    ? replayItem.item
-                    : originalReasoningByCarrier.get(carrier) ?? replayItem.item,
-                );
-                changed = true;
-              } else if (!emittedCallIds.has(replayItem.callId)) {
-                enrichedItems.push(restoreCall(replayItem, originalCallsById.get(replayItem.callId)));
-                emittedCallIds.add(replayItem.callId);
+          if (!emittedCallIds.has(outputCallId) && scoped.byCallId.has(outputCallId) && !scopedGroupInserted) {
+            for (const call of scoped.calls) {
+              if (!emittedCallIds.has(call.callId)) {
+                enrichedItems.push(restoreCall(call, originalCallsById.get(call.callId)));
+                emittedCallIds.add(call.callId);
                 changed = true;
               }
             }
             scopedGroupInserted = true;
           }
+        } else if (scoped.byCallId.has(outputCallId) && !scopedGroupInserted) {
+          for (const replayItem of scoped.items) {
+            if (replayItem.kind === "reasoning") {
+              const carrier = reasoningCarrier(replayItem.item);
+              enrichedItems.push(
+                carrier === undefined
+                  ? replayItem.item
+                  : originalReasoningByCarrier.get(carrier) ?? replayItem.item,
+              );
+              changed = true;
+            } else if (!emittedCallIds.has(replayItem.callId)) {
+              enrichedItems.push(restoreCall(replayItem, originalCallsById.get(replayItem.callId)));
+              emittedCallIds.add(replayItem.callId);
+              changed = true;
+            }
+          }
+          scopedGroupInserted = true;
         }
       }
 

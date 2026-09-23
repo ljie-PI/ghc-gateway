@@ -17,8 +17,11 @@ import {
 } from "../../src/protocols/openai_responses/history.js";
 import {
   continuationOwnership,
+  resolveResponsesContinuation,
+  shouldDropUnresolvedPreviousResponseId,
   validateContinuationTarget,
 } from "../../src/protocols/openai_responses/continuation.js";
+import type { ResponsesContinuationResolution, ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import {
   isWireJsonArray,
   isWireJsonObject,
@@ -306,7 +309,7 @@ describe("Responses continuation history", () => {
     }
   });
 
-  it("rejects an explicit carrier without a persisted v2 replay slot", async () => {
+  it("keeps an explicit carrier from an earlier response where the client placed it", async () => {
     const { database, store } = history();
     try {
       const stored = "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef";
@@ -318,11 +321,44 @@ describe("Responses continuation history", () => {
       const request = decodeResponsesRequest(objectFromJson(
         `{"model":"gpt","input":[{"type":"reasoning","summary":[],"encrypted_content":"${extra}"},{"type":"function_call_output","call_id":"call_unmatched","output":"ok"}]}`,
       ));
-      await expect(store.enrich(
+      expect(inputJson((await store.enrich(
         request,
         await owned(store, "resp_unmatched_carrier", "github.com/1"),
         SIGNAL,
-      )).rejects.toMatchObject({ code: "checkpoint_unavailable" });
+      )).input)).toEqual([
+        { type: "reasoning", summary: [], encrypted_content: extra },
+        { type: "reasoning", summary: [], encrypted_content: stored },
+        { type: "function_call", call_id: "call_unmatched", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_unmatched", output: "ok" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("restores checkpointed calls and leaves outputs for other calls unchanged", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint(
+        callRecord("resp_partial_outputs", "call_known", "lookup"),
+        ownership("github.com/1"),
+        "complete",
+        SIGNAL,
+      );
+      const receipt = await owned(store, "resp_partial_outputs", "github.com/1");
+      const mixed = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"call_other\",\"output\":\"x\"},{\"type\":\"function_call_output\",\"call_id\":\"call_known\",\"output\":\"ok\"}]}",
+      ));
+      expect(inputJson((await store.enrich(mixed, receipt, SIGNAL)).input)).toEqual([
+        { type: "function_call_output", call_id: "call_other", output: "x" },
+        { type: "function_call", call_id: "call_known", name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call_known", output: "ok" },
+      ]);
+      const unrelated = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"call_other\",\"output\":\"x\"}]}",
+      ));
+      await expect(store.enrich(unrelated, receipt, SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
     } finally {
       database.close();
     }
@@ -1157,7 +1193,7 @@ describe("Responses continuation history", () => {
         responseId: "resp_known",
         checkpointState: "complete",
         expiresAt: 1_700_604_800_000,
-      }, "https://api.githubcopilot.com/v1")).not.toThrow();
+      }, "https://api.githubcopilot.com/v1", ["chat", "messages"])).not.toThrow();
     }
     expect(() => validateContinuationTarget({
       ...ownership("github.com/1", "gpt", "messages"),
@@ -1165,7 +1201,70 @@ describe("Responses continuation history", () => {
       conversionVersion: "responses-messages-v3",
       checkpointState: "complete",
       expiresAt: 1_700_604_800_000,
-    }, "https://api.githubcopilot.com/v1")).toThrow();
+    }, "https://api.githubcopilot.com/v1", ["messages"])).toThrow();
+    expect(() => validateContinuationTarget({
+      ...ownership("github.com/1", "gpt", "messages"),
+      responseId: "resp_unsupported_route",
+      checkpointState: "complete",
+      expiresAt: 1_700_604_800_000,
+    }, "https://api.githubcopilot.com/v1", ["chat"])).toThrow();
+    expect(() => validateContinuationTarget({
+      ...ownership("github.com/1", "gpt", "messages"),
+      responseId: "resp_unknown_capability",
+      checkpointState: "complete",
+      expiresAt: 1_700_604_800_000,
+    }, "https://api.githubcopilot.com/v1", null)).not.toThrow();
+  });
+
+  it("resolves every unrestorable continuation as unknown instead of failing", async () => {
+    const receipt: ResponsesRouteReceipt = {
+      ...ownership("github.com/1"),
+      responseId: "resp_owned",
+      checkpointState: "complete",
+      expiresAt: 1_700_604_800_000,
+    };
+    const resolving = (result: ResponsesContinuationResolution | Error): ResponsesHistory => ({
+      resolve: async () => {
+        if (result instanceof Error) throw result;
+        return result;
+      },
+      enrich: async () => { throw new Error("unused"); },
+      recordReceipt: async () => undefined,
+      recordCheckpoint: async () => undefined,
+    });
+    for (const result of [
+      { kind: "expired" },
+      { kind: "legacy_unowned" },
+      { kind: "untracked_blocked" },
+      { kind: "owned_by_another_account" },
+      new ResponsesContinuationError("checkpoint_unavailable", "unreadable"),
+    ] as const) {
+      await expect(resolveResponsesContinuation(resolving(result), "resp_x", "github.com/1", SIGNAL))
+        .resolves.toEqual({ kind: "none" });
+    }
+    await expect(resolveResponsesContinuation(resolving(new Error("storage failure")), "resp_x", "github.com/1", SIGNAL))
+      .rejects.toMatchObject({ failure: { kind: "continuation_persistence" } });
+    await expect(resolveResponsesContinuation(resolving({ kind: "owned", receipt }), "resp_owned", "github.com/1", SIGNAL))
+      .resolves.toEqual({ kind: "owned", receipt });
+    await expect(resolveResponsesContinuation(resolving(new Error("unused")), undefined, "github.com/1", SIGNAL))
+      .resolves.toEqual({ kind: "none" });
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(resolveResponsesContinuation(resolving(new Error("aborted")), "resp_x", "github.com/1", aborted.signal))
+      .rejects.toThrow();
+  });
+
+  it("drops only unresolved IDs that the selected upstream cannot use", () => {
+    const managed = "resp_Z2hjLWdhdGV3YXk6Z2l0aHViX2NvcGlsb3Q7bmF0aXZlO3Jlc3BfdW5rbm93bg==";
+    const none = { kind: "none" } as const;
+    expect(shouldDropUnresolvedPreviousResponseId(undefined, none, false)).toBe(false);
+    expect(shouldDropUnresolvedPreviousResponseId("external", none, false)).toBe(true);
+    expect(shouldDropUnresolvedPreviousResponseId("external", none, true)).toBe(false);
+    expect(shouldDropUnresolvedPreviousResponseId(managed, none, true)).toBe(true);
+    expect(shouldDropUnresolvedPreviousResponseId("external", {
+      kind: "owned",
+      receipt: { ...ownership("github.com/1"), responseId: "external", checkpointState: "complete", expiresAt: 1 },
+    }, false)).toBe(false);
   });
 
   it("preserves legacy rows as unowned and unusable", async () => {

@@ -1,5 +1,6 @@
 export const CONVERSION_DEGRADATION_RULES = [
   "cache.control_omitted",
+  "continuation.history_omitted",
   "reasoning.budget_coarsened",
   "reasoning.presentation_omitted",
   "reasoning.state_omitted",
