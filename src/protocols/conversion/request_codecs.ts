@@ -873,7 +873,10 @@ function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: ReadonlyM
   if (reasoningObject !== undefined) {
     if (oneMember(reasoningObject, "summary", "REQ-R-REASONING-SUMMARY") !== undefined) {
       projectIndependentOption(
-        oneMember(reasoningObject, "summary", "REQ-R-REASONING-SUMMARY"),
+        safeIndependentOption(
+          oneMember(reasoningObject, "summary", "REQ-R-REASONING-SUMMARY"),
+          "REQ-R-REASONING-SUMMARY",
+        ),
         (value) => typeof value === "string" && value.length > 0
           ? { kind: "value", value }
           : { kind: "malformed" },
@@ -1115,7 +1118,7 @@ function omitPresentationString(
   degradations: Set<ConversionDegradationRule>,
 ): void {
   if (value === undefined) return;
-  projectIndependentOption(value, (candidate) => (
+  projectIndependentOption(safeIndependentOption(value, "REQ-R-PRESENTATION-ID"), (candidate) => (
     typeof candidate === "string" && candidate.length > 0
       ? { kind: "value", value: candidate }
       : { kind: "malformed" }
@@ -1129,7 +1132,7 @@ function omitPresentationStatus(
   degradations: Set<ConversionDegradationRule>,
 ): void {
   if (value === undefined) return;
-  projectIndependentOption(value, (candidate) => (
+  projectIndependentOption(safeIndependentOption(value, "REQ-R-PRESENTATION-STATUS"), (candidate) => (
     candidate === "completed"
     || candidate === "incomplete"
     || candidate === "in_progress"
@@ -1145,14 +1148,18 @@ function independentResultStatus(
   degradations: Set<ConversionDegradationRule>,
 ): "completed" | "incomplete" | "in_progress" | "failed" | undefined {
   if (value === undefined) return undefined;
-  const status = projectIndependentOption<"completed" | "incomplete" | "in_progress" | "failed">(value, (candidate) => (
-    candidate === "completed"
-    || candidate === "incomplete"
-    || candidate === "in_progress"
-    || candidate === "failed"
-      ? { kind: "value", value: candidate }
-      : { kind: "malformed" }
-  ), { omission: "request.option_omitted", degradations });
+  const status = projectIndependentOption<"completed" | "incomplete" | "in_progress" | "failed">(
+    safeIndependentOption(value, "REQ-R-PRESENTATION-STATUS"),
+    (candidate) => (
+      candidate === "completed"
+      || candidate === "incomplete"
+      || candidate === "in_progress"
+      || candidate === "failed"
+        ? { kind: "value", value: candidate }
+        : { kind: "malformed" }
+    ),
+    { omission: "request.option_omitted", degradations },
+  );
   degradations.add("request.option_omitted");
   return status;
 }
@@ -1179,7 +1186,7 @@ function decodeResponsesContent(
       const annotations = oneMember(block, "annotations", "REQ-R-TEXT-ANNOTATIONS");
       if (annotations !== undefined) {
         const parsed = projectIndependentOption(
-          annotations,
+          safeIndependentOption(annotations, "REQ-R-TEXT-ANNOTATIONS"),
           (candidate) => isWireJsonArray(candidate) ? { kind: "value", value: candidate } : { kind: "malformed" },
           { omission: "request.option_omitted", degradations },
         );
@@ -2907,7 +2914,7 @@ function independentMetadata(
   value: WireJson | undefined,
   degradations: Set<ConversionDegradationRule>,
 ): WireJson | undefined {
-  return projectIndependentOption(value, (candidate) => {
+  return projectIndependentOption(safeIndependentOption(value, "REQ-METADATA"), (candidate) => {
     if (!isWireJsonObject(candidate) || duplicateMemberNames(candidate).length > 0) return { kind: "malformed" };
     if (candidate.members.some((member) => typeof member.value !== "string")) return { kind: "malformed" };
     return { kind: "value", value: candidate };
@@ -2919,7 +2926,7 @@ function decodeIndependentStreamOptions(
   omission: "chat.extensions_omitted" | "responses.extensions_omitted",
   degradations: Set<ConversionDegradationRule>,
 ): WireJsonObject | undefined {
-  const projected = projectIndependentOption(value, (candidate) => {
+  const projected = projectIndependentOption(safeIndependentOption(value, "REQ-STREAM-OPTIONS"), (candidate) => {
     if (!isWireJsonObject(candidate)) return { kind: "malformed" };
     const includeUsage = memberValues(candidate, "include_usage");
     if (includeUsage.length > 1 || (includeUsage[0] !== undefined && typeof includeUsage[0] !== "boolean")) {
@@ -2933,6 +2940,11 @@ function decodeIndependentStreamOptions(
   }, { omission: "request.option_omitted", degradations });
   if (value !== undefined) degradations.add("request.option_omitted");
   return projected;
+}
+
+function safeIndependentOption(value: WireJson | undefined, ruleId: string): WireJson | undefined {
+  if (value !== undefined && containsReasoningCarrier(value)) invalid(ruleId);
+  return value;
 }
 
 function replaceOptionalMember(

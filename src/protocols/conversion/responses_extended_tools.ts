@@ -75,6 +75,7 @@ export interface ResponsesToolCompatibilityProjection {
 
 interface MutableState {
   readonly degradations: Set<ConversionDegradationRule>;
+  readonly discoveredTools: WeakMap<WireJsonObject, WireJsonArray>;
   readonly bindings: ResponsesToolSourceBinding[];
   readonly bySourceKey: Map<string, ResponsesToolSourceBinding>;
   readonly byChatName: Map<string, ResponsesToolSourceBinding>;
@@ -147,6 +148,7 @@ function decodeResponsesExtendedToolProjection(
   }
   const state: MutableState = {
     degradations,
+    discoveredTools: new WeakMap(),
     bindings: [],
     bySourceKey: new Map(),
     byChatName: new Map(),
@@ -155,9 +157,7 @@ function decodeResponsesExtendedToolProjection(
     results: [],
   };
   const tools = requiredArray(toolsValue, "REQ-R-EXT-TOOLS");
-  for (const tool of tools.items) {
-    addDeclaration(state, tool);
-  }
+  for (const tool of tools.items) addDeclaration(state, tool);
   collectDiscoveredDeclarations(state, inputValue);
   const projection: ResponsesToolCompatibilityProjection = Object.freeze({
     chatTools: projectValidatedChatTools(state),
@@ -704,23 +704,20 @@ function hasExtendedSemantics(tools: WireJson | undefined, input: WireJson | und
   });
 }
 
-function addDeclaration(state: MutableState, value: WireJson, namespace?: string): void {
+function addDeclaration(state: MutableState, value: WireJson, namespace?: string): WireJsonObject {
   let tool = looseObject(value, "REQ-R-EXT-TOOL");
   const type = requiredString(single(tool, "type", "REQ-R-EXT-TOOL-TYPE"), "REQ-R-EXT-TOOL-TYPE");
   if (type === "function") {
-    addFunction(state, tool, namespace);
-    return;
+    return addFunction(state, tool, namespace);
   }
   if (namespace !== undefined) {
     unsupported("REQ-R-EXT-NAMESPACE-CHILD");
   }
   if (type === "custom") {
-    addCustom(state, tool);
-    return;
+    return addCustom(state, tool);
   }
   if (type === "namespace") {
-    addNamespace(state, tool);
-    return;
+    return addNamespace(state, tool);
   }
   if (type === "tool_search") {
     tool = projectExtended(state, tool, new Set(["type"]), "REQ-R-EXT-SEARCH");
@@ -735,12 +732,12 @@ function addDeclaration(state: MutableState, value: WireJson, namespace?: string
       ["parameters", TOOL_SEARCH_SCHEMA],
       ["strict", false],
     ]));
-    return;
+    return tool;
   }
   unsupported("REQ-R-EXT-TOOL-TYPE");
 }
 
-function addFunction(state: MutableState, tool: WireJsonObject, namespace?: string): void {
+function addFunction(state: MutableState, tool: WireJsonObject, namespace?: string): WireJsonObject {
   tool = projectExtended(
     state,
     tool,
@@ -754,6 +751,7 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
     new Set(["name", "description", "parameters", "strict"]),
     "REQ-R-EXT-FUNCTION-SHAPE",
   );
+  if (nested !== undefined) tool = replaceMember(tool, "function", shape);
   const sourceName = toolName(shape, "REQ-R-EXT-FUNCTION-NAME");
   const description = optionalString(single(shape, "description", "REQ-R-EXT-FUNCTION-DESCRIPTION"), "REQ-R-EXT-FUNCTION-DESCRIPTION");
   const parametersValue = single(shape, "parameters", "REQ-R-EXT-FUNCTION-SCHEMA");
@@ -781,9 +779,10 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
     ["parameters", parameters],
     ...(projectedStrict === undefined ? [] : [["strict", projectedStrict] as const]),
   ]));
+  return tool;
 }
 
-function addCustom(state: MutableState, tool: WireJsonObject): void {
+function addCustom(state: MutableState, tool: WireJsonObject): WireJsonObject {
   tool = projectExtended(state, tool, new Set(["type", "name", "description", "format"]), "REQ-R-EXT-CUSTOM");
   const name = toolName(tool, "REQ-R-EXT-CUSTOM-NAME");
   optionalString(single(tool, "description", "REQ-R-EXT-CUSTOM-DESCRIPTION"), "REQ-R-EXT-CUSTOM-DESCRIPTION");
@@ -807,9 +806,10 @@ function addCustom(state: MutableState, tool: WireJsonObject): void {
     ["parameters", CUSTOM_INPUT_SCHEMA],
     ["strict", false],
   ]));
+  return tool;
 }
 
-function addNamespace(state: MutableState, tool: WireJsonObject): void {
+function addNamespace(state: MutableState, tool: WireJsonObject): WireJsonObject {
   tool = projectExtended(
     state,
     tool,
@@ -827,9 +827,8 @@ function addNamespace(state: MutableState, tool: WireJsonObject): void {
   if (values.items.length === 0) {
     invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
   }
-  for (const child of values.items) {
-    addDeclaration(state, child, namespace);
-  }
+  const sanitized = values.items.map((child) => addDeclaration(state, child, namespace));
+  return replaceMember(tool, tools === undefined ? "children" : "tools", array(sanitized));
 }
 
 function addBinding(state: MutableState, binding: ResponsesToolSourceBinding, tool: WireJsonObject): void {
@@ -858,9 +857,7 @@ function collectDiscoveredDeclarations(state: MutableState, input: WireJson | un
       "REQ-R-EXT-SEARCH-OUTPUT",
     );
     const tools = requiredArray(single(projected, "tools", "REQ-R-EXT-SEARCH-OUTPUT-TOOLS"), "REQ-R-EXT-SEARCH-OUTPUT-TOOLS");
-    for (const tool of tools.items) {
-      addDeclaration(state, tool);
-    }
+    state.discoveredTools.set(item, array(tools.items.map((tool) => addDeclaration(state, tool))));
   }
 }
 
@@ -963,6 +960,10 @@ function transformInput(state: MutableState, input: WireJson | undefined): WireJ
       }
       const status = requestResultStatus(state, single(value, "status", "REQ-R-EXT-RESULT-STATUS"));
       const itemId = optionalItemId(state, value);
+      const discoveredTools = type === "tool_search_output" && isWireJsonObject(inputValue)
+        ? state.discoveredTools.get(inputValue)
+        : undefined;
+      if (discoveredTools !== undefined) value = replaceMember(value, "tools", discoveredTools);
       const sanitized = presentationFields(value, itemId, status);
       state.results.push(Object.freeze({
         kind: binding.kind,
@@ -1150,6 +1151,7 @@ function optionalItemId(
 ): string | undefined {
   const itemId = single(value, "id", "REQ-R-EXT-ITEM-ID");
   if (itemId === undefined) return undefined;
+  if (typeof itemId === "string" && isReasoningCarrier(itemId)) invalid("REQ-R-EXT-ITEM-ID");
   state.degradations.add("request.option_omitted");
   return typeof itemId === "string" && itemId.length > 0 ? itemId : undefined;
 }
@@ -1158,6 +1160,7 @@ function requestCallStatus(
   state: Pick<MutableState, "degradations">,
   value: WireJson | undefined,
 ): ResponsesToolCallBinding["status"] {
+  if (typeof value === "string" && isReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
   if (value === undefined || value === "completed" || value === "incomplete" || value === "in_progress") {
     if (value !== undefined) state.degradations.add("request.option_omitted");
     return value;
@@ -1170,6 +1173,7 @@ function requestResultStatus(
   state: Pick<MutableState, "degradations">,
   value: WireJson | undefined,
 ): ResponsesToolResultBinding["status"] {
+  if (typeof value === "string" && isReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
   if (value === undefined || value === "completed" || value === "incomplete" || value === "in_progress" || value === "failed") {
     if (value !== undefined) state.degradations.add("request.option_omitted");
     return value;

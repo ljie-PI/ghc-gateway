@@ -374,6 +374,10 @@ function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): Decod
   if (stream !== undefined && stream !== true && stream !== false) {
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
+  if (stream === true) {
+    const streamOptions = memberValues(body, "stream_options")[0];
+    if (streamOptions !== undefined) validateStreamOptions(streamOptions);
+  }
   return {
     body,
     ...(model === undefined ? {} : { requestedModel: model }),

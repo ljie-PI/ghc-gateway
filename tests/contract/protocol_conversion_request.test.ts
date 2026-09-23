@@ -1354,6 +1354,37 @@ describe("shared conversion request codecs", () => {
   });
 
   it.each([
+    ["metadata", { metadata: { user: "ghcg-rsn-v1:synthetic" } }],
+    ["stream options", { stream_options: { extension: "ghcg-rsn-v1:synthetic" } }],
+    ["reasoning summary", { reasoning: { summary: "ghcg-rsn-v1:synthetic" } }],
+    ["message ID", { input: [{ type: "message", id: "ghcg-rsn-v1:synthetic", role: "user", content: "hi" }] }],
+    ["annotations", { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi", annotations: ["ghcg-rsn-v1:synthetic"] }] }] }],
+  ] as const)("rejects a carrier hidden in recognized Responses %s", (_name, extra) => {
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      model: "x",
+      input: "hi",
+      ...extra,
+    }), "target", capability(["chat"]))).toThrow();
+  });
+
+  it("sanitizes discovered tool extensions before embedding tool-search output in Chat", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: [
+        { type: "tool_search_call", call_id: "search_1", arguments: { query: "docs" } },
+        {
+          type: "tool_search_output",
+          call_id: "search_1",
+          tools: [{ type: "function", name: "lookup", parameters: {}, strict: false, extension: true }],
+        },
+      ],
+      tools: [{ type: "tool_search" }],
+    }), "target", capability(["chat"]));
+    expect(decoder.decode(converted.bytes)).not.toContain("\"extension\"");
+    expect(converted.degradations).toContain("responses.extensions_omitted");
+  });
+
+  it.each([
     ["malformed cache control", {
       model: "source",
       messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: 17 }] }],
