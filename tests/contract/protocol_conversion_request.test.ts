@@ -284,23 +284,30 @@ describe("shared conversion request codecs", () => {
       expect(converted.degradations).toContain("messages.extensions_omitted");
       expect(decoded(converted.bytes)).toMatchObject({ metadata: { user_id: "user-1" } });
       expect(decoded(converted.bytes)).not.toHaveProperty("context_management");
-      expect(() => prepareConvertedRequest("messages", target, body({
+      const malformedOptional = prepareConvertedRequest("messages", target, body({
         model: "source",
         messages: [{ role: "user", content: "hi" }],
         max_tokens: "wrong",
         context_management: {},
-      }), "target", capability([target]))).toThrow();
+      }), "target", capability([target]));
+      const malformedBody = decoded(malformedOptional.bytes);
+      if (target === "chat") {
+        expect(malformedBody).toMatchObject({ max_tokens: 4096 });
+      } else {
+        expect(malformedBody).not.toHaveProperty("max_output_tokens");
+      }
     },
   );
 
-  it("omits duplicate unknown Messages extensions without weakening known duplicate rejection", () => {
+  it("omits duplicate unknown Messages extensions and keeps the first known duplicate", () => {
     const converted = prepareConvertedRequest("messages", "chat", rawBody(
       "{\"model\":\"source\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\",\"extension\":1,\"extension\":2}],\"max_tokens\":8,\"extension\":3,\"extension\":4}",
     ), "target", capability(["chat"]));
     expect(converted.degradations).toContain("messages.extensions_omitted");
-    expect(() => prepareConvertedRequest("messages", "chat", rawBody(
+    const duplicateRole = prepareConvertedRequest("messages", "chat", rawBody(
       "{\"model\":\"source\",\"messages\":[{\"role\":\"user\",\"role\":\"assistant\",\"content\":\"hi\"}],\"max_tokens\":8}",
-    ), "target", capability(["chat"]))).toThrow();
+    ), "target", capability(["chat"]));
+    expect(decoded(duplicateRole.bytes)).toMatchObject({ messages: [{ role: "user", content: "hi" }] });
   });
 
   it.each([
@@ -549,9 +556,9 @@ describe("shared conversion request codecs", () => {
   );
 
   it.each(["chat", "responses"] as const)(
-    "rejects an explicit false Messages JSON-schema strictness for %s",
+    "omits an explicit false Messages JSON-schema strictness for %s",
     (target) => {
-      expect(() => prepareConvertedRequest("messages", target, body({
+      const converted = prepareConvertedRequest("messages", target, body({
         model: "source",
         messages: [{ role: "user", content: "hi" }],
         max_tokens: 8,
@@ -562,7 +569,9 @@ describe("shared conversion request codecs", () => {
             strict: false,
           },
         },
-      }), "target", capability([target]))).toThrow();
+      }), "target", capability([target]));
+      expect(converted.degradations).toContain("request.option_omitted");
+      expect(decoder.decode(converted.bytes)).not.toContain("json_schema");
     },
   );
 
@@ -646,6 +655,55 @@ describe("shared conversion request codecs", () => {
       }), "target", capability([target]));
       expect(converted.degradations).toContain("reasoning.state_omitted");
       expect(JSON.stringify(decoded(converted.bytes))).not.toContain("reasoning_items");
+    },
+  );
+
+  it.each(["messages", "responses"] as const)(
+    "omits malformed optional Chat reasoning_items for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("chat", target, body({
+        model: "source",
+        messages: [{ role: "assistant", content: "ok", reasoning_items: 17 }],
+      }), "target", capability([target]));
+      expect(converted.degradations).toContain("request.option_omitted");
+      expect(converted.degradations).toContain("reasoning.state_omitted");
+      expect(JSON.stringify(decoded(converted.bytes))).toContain("ok");
+    },
+  );
+
+  it.each(["messages", "responses"] as const)(
+    "omits malformed optional Chat tool_calls for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("chat", target, body({
+        model: "source",
+        messages: [{ role: "assistant", content: "ok", tool_calls: 17 }],
+      }), "target", capability([target]));
+      expect(converted.degradations).toContain("request.option_omitted");
+      expect(JSON.stringify(decoded(converted.bytes))).toContain("ok");
+    },
+  );
+
+  it.each(["messages", "responses"] as const)(
+    "omits malformed optional Chat assistant content for %s",
+    (target) => {
+      const converted = prepareConvertedRequest("chat", target, body({
+        model: "source",
+        messages: [{
+          role: "assistant",
+          content: 17,
+          tool_calls: [{
+            id: "call_1",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          }],
+        }, {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "ok",
+        }],
+      }), "target", capability([target]));
+      expect(converted.degradations).toContain("request.option_omitted");
+      expect(JSON.stringify(decoded(converted.bytes))).toContain("call_1");
     },
   );
 
@@ -909,16 +967,6 @@ describe("shared conversion request codecs", () => {
     expect(plan.kind === "converted" ? plan.request.degradations : []).toContain("reasoning.budget_coarsened");
   });
 
-  it("rejects an unrecognized reasoning effort when conversion is required", () => {
-    expect(() => prepareConvertedRequest(
-      "responses",
-      "chat",
-      reasoningRequest("responses", "ultra"),
-      "target",
-      capability(["chat"]),
-    )).toThrow();
-  });
-
   it.each(["chat", "messages"] as const)(
     "strictly validates generated Responses reasoning items before converting to %s",
     (target) => {
@@ -937,11 +985,21 @@ describe("shared conversion request codecs", () => {
         ],
       }), "target", capability([target]));
       expect(converted.degradations).toEqual(["request.option_omitted", "reasoning.state_omitted"]);
-      for (const malformed of [
+      for (const tolerated of [
         { type: "reasoning", summary: [{ type: "unknown", text: "plan" }] },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "plan", unknown: true }] },
+      ]) {
+        expect(() => prepareConvertedRequest("responses", target, body({
+          model: "source",
+          input: [
+            { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+            tolerated,
+          ],
+        }), "target", capability([target]))).not.toThrow();
+      }
+      for (const malformed of [
         { type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: 1 }] },
         { type: "reasoning", summary: [], encrypted_content: {} },
-        { type: "reasoning", summary: [{ type: "summary_text", text: "plan", unknown: true }] },
       ]) {
         expect(() => prepareConvertedRequest("responses", target, body({
           model: "source",
@@ -1032,18 +1090,199 @@ describe("shared conversion request codecs", () => {
     })).toThrow();
   });
 
-  it("rejects unknown and conflicting nested Chat reasoning fields", () => {
-    for (const assistant of [
-      { role: "assistant", content: null, reasoning_text: "A", reasoning_content: "B" },
-      { role: "assistant", content: null, reasoning: { text: "plan", unknown: true } },
-      { role: "assistant", content: null, reasoning_details: [{ text: "plan", unknown: true }] },
-      { role: "assistant", content: null, thinking_blocks: [{ type: "thinking", thinking: "plan", unknown: true }] },
+  it("keeps the first conflicting Chat reasoning value and ignores nested extensions", () => {
+    for (const [assistant, degradation] of [
+      [{ role: "assistant", content: null, reasoning_text: "A", reasoning_content: "B" }, "reasoning.presentation_omitted"],
+      [{ role: "assistant", content: null, reasoning: { text: "plan", unknown: true } }, "chat.extensions_omitted"],
+      [{ role: "assistant", content: null, reasoning_details: [{ text: "plan", unknown: true }] }, "chat.extensions_omitted"],
+      [{ role: "assistant", content: null, reasoning_details: [{ type: 17, text: "plan" }] }, "chat.extensions_omitted"],
+      [{
+        role: "assistant",
+        content: null,
+        thinking_blocks: [{ type: "thinking", thinking: "plan", unknown: true }],
+      }, "chat.extensions_omitted"],
     ]) {
-      expect(() => prepareConvertedRequest("chat", "responses", body({
+      const converted = prepareConvertedRequest("chat", "responses", body({
         model: "source",
         messages: [{ role: "user", content: "hi" }, assistant],
-      }), "target", capability(["responses"]))).toThrow();
+      }), "target", capability(["responses"]));
+      expect(converted.degradations).toContain(degradation);
     }
+  });
+
+  it("rejects gateway carriers hidden in omitted reasoning members", () => {
+    const carrier = "ghcg-rsn-v1:synthetic";
+    expect(() => prepareConvertedRequest("chat", "responses", body({
+      model: "source",
+      messages: [{
+        role: "assistant",
+        content: null,
+        reasoning: { text: "plan", unknown: carrier },
+      }],
+    }), "target", capability(["responses"]))).toThrow();
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: [{
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: "plan", unknown: carrier }],
+      }],
+    }), "target", capability(["chat"]))).toThrow();
+  });
+
+  it.each([
+    {
+      source: "messages" as const,
+      target: "chat" as const,
+      request: body({
+        model: "source",
+        max_tokens: 8,
+        messages: [
+          { role: "user", content: "keep" },
+          { role: "future_role", content: "drop" },
+        ],
+      }),
+      omitted: "future_role",
+      degradation: "messages.extensions_omitted",
+    },
+    {
+      source: "responses" as const,
+      target: "chat" as const,
+      request: body({
+        model: "source",
+        input: [
+          { type: "message", role: "user", content: "keep" },
+          { type: "message", role: "future_role", content: "drop" },
+        ],
+      }),
+      omitted: "future_role",
+      degradation: "responses.extensions_omitted",
+    },
+  ])("drops unknown $source message roles", ({ source, target, request, omitted, degradation }) => {
+    const converted = prepareConvertedRequest(source, target, request, "target", capability([target]));
+    expect(decoder.decode(converted.bytes)).not.toContain(omitted);
+    expect(converted.degradations).toContain(degradation);
+  });
+
+  it("drops unknown Chat tool-call types and their orphaned results", () => {
+    const converted = prepareConvertedRequest("chat", "responses", body({
+      model: "source",
+      messages: [
+        { role: "user", content: "keep" },
+        {
+          role: "assistant",
+          content: "keep",
+          tool_calls: [{
+            id: "call_1",
+            type: "future_tool",
+            function: { name: "lookup", arguments: "{}" },
+          }],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "drop" },
+      ],
+    }), "target", capability(["responses"]));
+    expect(decoder.decode(converted.bytes)).not.toContain("call_1");
+    expect(converted.degradations).toContain("chat.extensions_omitted");
+    expect(converted.degradations).toContain("tools.history_omitted");
+  });
+
+  it.each(["chat", "responses"] as const)("omits unknown converted %s image detail", (source) => {
+    const request = source === "chat"
+      ? body({
+        model: "source",
+        messages: [{
+          role: "user",
+          content: [{ type: "image_url", image_url: { url: "https://example.test/image.png", detail: "future" } }],
+        }],
+      })
+      : body({
+        model: "source",
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_image", image_url: "https://example.test/image.png", detail: "future" }],
+        }],
+      });
+    const target = source === "chat" ? "responses" : "chat";
+    const converted = prepareConvertedRequest(source, target, request, "target", capability([target]));
+    expect(decoder.decode(converted.bytes)).not.toContain("future");
+    expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it.each([
+    ["Chat tool", "chat", "responses", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      tools: [{ type: 17 }],
+    }],
+    ["Messages tool", "messages", "chat", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      max_tokens: 8,
+      tools: [{ type: 17, name: "drop", input_schema: {} }],
+    }],
+    ["Responses tool", "responses", "chat", {
+      model: "source",
+      input: "keep",
+      tools: [{ type: 17 }],
+    }],
+    ["Chat content", "chat", "responses", {
+      model: "source",
+      messages: [{ role: "user", content: [{ type: 17, text: "drop" }, { type: "text", text: "keep" }] }],
+    }],
+    ["Messages system", "messages", "chat", {
+      model: "source",
+      system: [{ type: 17, text: "drop" }],
+      messages: [{ role: "user", content: "keep" }],
+      max_tokens: 8,
+    }],
+    ["Messages content", "messages", "chat", {
+      model: "source",
+      messages: [{ role: "user", content: [{ type: 17, text: "drop" }, { type: "text", text: "keep" }] }],
+      max_tokens: 8,
+    }],
+    ["Messages image source", "messages", "chat", {
+      model: "source",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: 17, url: "https://example.test/drop" } },
+          { type: "text", text: "keep" },
+        ],
+      }],
+      max_tokens: 8,
+    }],
+    ["Responses content", "responses", "chat", {
+      model: "source",
+      input: [{
+        type: "message",
+        role: "user",
+        content: [{ type: 17, text: "drop" }, { type: "input_text", text: "keep" }],
+      }],
+    }],
+    ["Responses input item", "responses", "chat", {
+      model: "source",
+      input: [
+        { type: "message", role: "user", content: "keep" },
+        { type: 17, extension: true },
+      ],
+    }],
+  ] as const)("drops malformed %s discriminators", (_name, source, target, request) => {
+    const converted = prepareConvertedRequest(source, target, body(request), "target", capability([target]));
+    expect(converted.degradations.some((rule) => (
+      rule === "request.option_omitted" || rule === `${source}.extensions_omitted`
+    ))).toBe(true);
+  });
+
+  it("rejects gateway carriers hidden in ignored recognized duplicates", () => {
+    expect(() => prepareConvertedRequest(
+      "chat",
+      "responses",
+      rawBody(
+        "{\"model\":\"source\",\"model\":\"ghcg-rsn-v1:synthetic\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+      ),
+      "target",
+      capability(["responses"]),
+    )).toThrow();
   });
 
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {
@@ -1332,7 +1571,6 @@ describe("shared conversion request codecs", () => {
   });
 
   it.each([
-    ["duplicate top-level key", "{\"model\":\"x\",\"model\":\"y\",\"messages\":[]}"],
     ["bad explicit null", "{\"model\":\"x\",\"messages\":null}"],
     ["n greater than one", "{\"model\":\"x\",\"messages\":[],\"n\":2}"],
     ["missing tool name", "{\"model\":\"x\",\"messages\":[],\"tools\":[{\"type\":\"function\",\"function\":{\"parameters\":{}}}]}"],
@@ -1345,6 +1583,33 @@ describe("shared conversion request codecs", () => {
       "target",
       capability(["responses"]),
     )).toThrow();
+  });
+
+  it("keeps the first duplicate top-level field before producing target bytes", () => {
+    const converted = prepareConvertedRequest(
+      "chat",
+      "responses",
+      rawBody("{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"first\"}],\"messages\":null}"),
+      "target",
+      capability(["responses"]),
+    );
+    expect(decoded(converted.bytes)).toMatchObject({
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "first" }] }],
+    });
+  });
+
+  it("does not fall through a malformed first duplicate token limit", () => {
+    const converted = prepareConvertedRequest(
+      "chat",
+      "responses",
+      rawBody(
+        "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":\"bad\",\"max_tokens\":7}",
+      ),
+      "target",
+      capability(["responses"]),
+    );
+    expect(decoded(converted.bytes)).not.toHaveProperty("max_output_tokens");
+    expect(converted.degradations).toContain("request.option_omitted");
   });
 
   it("omits an orphan Chat tool result as an incomplete history round", () => {
@@ -1387,15 +1652,153 @@ describe("shared conversion request codecs", () => {
     expect(converted.degradations).toContain("request.option_omitted");
   });
 
-  it("rejects file/audio content, hosted tools, and non-null direct continuation conversion", () => {
+  it.each(["chat", "responses"] as const)("omits malformed converted %s choice counts", (source) => {
+    const request = source === "chat"
+      ? body({ model: "x", messages: [{ role: "user", content: "hi" }], n: 0 })
+      : body({ model: "x", input: "hi", n: "bad" });
+    const target = source === "chat" ? "responses" : "chat";
+    const converted = prepareConvertedRequest(source, target, request, "target", capability([target]));
+    expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it.each([
+    ["Messages output config", "messages", "chat", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      output_config: 17,
+    }],
+    ["Responses reasoning config", "responses", "chat", {
+      model: "x",
+      input: "hi",
+      reasoning: 17,
+    }],
+    ["Messages system", "messages", "chat", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      system: 17,
+    }],
+    ["Chat tools", "chat", "responses", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      tools: 17,
+    }],
+    ["Messages tools", "messages", "chat", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      tools: 17,
+    }],
+    ["Responses tools", "responses", "chat", {
+      model: "x",
+      input: "hi",
+      tools: 17,
+    }],
+    ["Chat tool choice", "chat", "responses", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: 17,
+    }],
+    ["Messages tool choice", "messages", "chat", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      tool_choice: 17,
+    }],
+    ["Responses tool choice", "responses", "chat", {
+      model: "x",
+      input: "hi",
+      tool_choice: 17,
+    }],
+    ["Chat tool-choice discriminator", "chat", "responses", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      tool_choice: { type: 17 },
+    }],
+    ["Messages tool-choice discriminator", "messages", "chat", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      tool_choice: { type: 17 },
+    }],
+    ["Responses tool-choice discriminator", "responses", "chat", {
+      model: "x",
+      input: "hi",
+      tool_choice: { type: 17 },
+    }],
+    ["Responses instructions", "responses", "chat", {
+      model: "x",
+      input: "hi",
+      instructions: { bad: true },
+    }],
+    ["Responses text", "responses", "chat", {
+      model: "x",
+      input: "hi",
+      text: 17,
+    }],
+  ] as const)("omits malformed optional %s containers", (_name, source, target, request) => {
+    const converted = prepareConvertedRequest(source, target, body(request), "target", capability([target]));
+    expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it.each([
+    ["chat", "messages", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "future",
+    }],
+    ["messages", "chat", {
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 8,
+      output_config: { effort: "future" },
+    }],
+    ["responses", "chat", {
+      model: "x",
+      input: "hi",
+      reasoning: { effort: "future" },
+    }],
+  ] as const)("omits unknown converted %s reasoning effort", (source, target, request) => {
+    const converted = prepareConvertedRequest(source, target, body(request), "target", capability([target]));
+    expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it("preserves opaque metadata and duplicate tool-argument members", () => {
+    const metadata = decoded(prepareConvertedRequest("chat", "responses", rawBody(
+      "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"metadata\":{\"nested\":{\"enabled\":true},\"tag\":\"first\",\"tag\":\"second\"}}",
+    ), "target", capability(["responses"])).bytes);
+    expect(metadata.metadata).toEqual({ nested: { enabled: true }, tag: "first" });
+
+    const argumentsBody = decoded(prepareConvertedRequest("chat", "responses", body({
+      model: "x",
+      messages: [
+        { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{\"x\":1,\"x\":2}" } }] },
+        { role: "tool", tool_call_id: "call_1", content: "ok" },
+      ],
+      tools: [{ type: "function", function: { name: "lookup", parameters: {} } }],
+    }), "target", capability(["responses"])).bytes);
+    expect(argumentsBody.input).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "function_call", arguments: "{\"x\":1,\"x\":2}" }),
+    ]));
+  });
+
+  it("drops unknown content and hosted-tool discriminators but rejects direct continuation conversion", () => {
     for (const request of [
       body({ model: "x", input: [{ type: "message", role: "user", content: [{ type: "input_file", file_id: "file_1" }] }] }),
       body({ model: "x", input: [{ type: "message", role: "user", content: [{ type: "input_audio", input_audio: { data: "AA==", format: "wav" } }] }] }),
       body({ model: "x", input: "hi", tools: [{ type: "web_search_preview" }] }),
-      body({ model: "x", previous_response_id: "resp_external", input: "hi" }),
     ]) {
-      expect(() => prepareConvertedRequest("responses", "chat", request, "target", capability(["chat"]))).toThrow();
+      const converted = prepareConvertedRequest("responses", "chat", request, "target", capability(["chat"]));
+      expect(converted.degradations).toContain("responses.extensions_omitted");
     }
+    expect(() => prepareConvertedRequest(
+      "responses",
+      "chat",
+      body({ model: "x", previous_response_id: "resp_external", input: "hi" }),
+      "target",
+      capability(["chat"]),
+    )).toThrow();
   });
 
   it("rejects recognized unrepresentable controls instead of treating them as extensions", () => {
@@ -1462,7 +1865,9 @@ describe("shared conversion request codecs", () => {
         },
       ],
       stream_options: 17,
+      text: 17,
       tools: [{ type: "custom", name: "render", format: { type: "text", extension: true }, extension: true }],
+      tool_choice: { type: "future", name: "render" },
     }), "target", capability(["chat"]));
     expect(converted.degradations).toContain("responses.extensions_omitted");
     expect(converted.degradations).toContain("request.option_omitted");
@@ -1470,6 +1875,60 @@ describe("shared conversion request codecs", () => {
     expect(decoder.decode(converted.bytes)).not.toContain("\"id\":17");
     expect(decoder.decode(converted.bytes)).not.toContain("\"status\":\"unknown\"");
     expect(decoder.decode(converted.bytes)).not.toContain("stream_options");
+    expect(decoder.decode(converted.bytes)).not.toContain("\"text\":17");
+    expect(decoder.decode(converted.bytes)).not.toContain("tool_choice");
+  });
+
+  it("omits extended-tool rounds whose declaration discriminator is unknown", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: [
+        { type: "custom_tool_call", call_id: "call_omitted", name: "render", input: "draw" },
+        { type: "custom_tool_call_output", call_id: "call_omitted", output: "done" },
+      ],
+      tools: [{ type: "future_custom", name: "render" }],
+    }), "target", capability(["chat"]));
+    expect(decoder.decode(converted.bytes)).not.toContain("call_omitted");
+    expect(converted.degradations).toContain("responses.extensions_omitted");
+    expect(converted.degradations).toContain("tools.history_omitted");
+  });
+
+  it("omits malformed extended-tool format and execution options", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      response_format: { type: 17 },
+      input: [
+        {
+          type: "tool_search_call",
+          call_id: "call_search",
+          arguments: { query: "docs" },
+          execution: 17,
+        },
+        { type: "tool_search_output", call_id: "call_search", tools: [] },
+      ],
+      tools: [{ type: "tool_search" }],
+    }), "target", capability(["chat"]));
+    expect(decoder.decode(converted.bytes)).not.toContain("execution");
+    expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it("omits a malformed optional extended function-call namespace", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_lookup",
+          name: "lookup",
+          namespace: 17,
+          arguments: "{}",
+        },
+        { type: "function_call_output", call_id: "call_lookup", output: "done" },
+      ],
+      tools: [{ type: "function", name: "lookup", parameters: {} }],
+    }), "target", capability(["chat"]));
+    expect(decoder.decode(converted.bytes)).not.toContain("namespace");
+    expect(converted.degradations).toContain("request.option_omitted");
   });
 
   it.each(["chat", "responses"] as const)("rejects a carrier hidden in an omitted %s extension", (source) => {
@@ -1478,6 +1937,22 @@ describe("shared conversion request codecs", () => {
       : body({ model: "x", input: "hi", extension: { encrypted_content: "ghcg-rsn-v1:synthetic" } });
     const target = source === "chat" ? "responses" : "chat";
     expect(() => prepareConvertedRequest(source, target, request, "target", capability([target]))).toThrow();
+  });
+
+  it("rejects a carrier hidden in a malformed optional scalar", () => {
+    expect(() => prepareConvertedRequest("chat", "responses", body({
+      model: "x",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: { extension: "ghcg-rsn-v1:synthetic" },
+    }), "target", capability(["responses"]))).toThrow();
+  });
+
+  it("rejects a carrier hidden in an omitted Responses tool declaration", () => {
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      model: "x",
+      input: "hi",
+      tools: ["ghcg-rsn-v1:synthetic"],
+    }), "target", capability(["chat"]))).toThrow();
   });
 
   it.each([
@@ -1540,26 +2015,120 @@ describe("shared conversion request codecs", () => {
       model: "source",
       messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: 17 }] }],
       max_tokens: 8,
-    }],
+    }, "request.option_omitted"],
     ["malformed Messages metadata", {
       model: "source",
       messages: [{ role: "user", content: "hi" }],
       max_tokens: 8,
       metadata: { user_id: 17 },
-    }],
+    }, "request.option_omitted"],
     ["unknown Responses reasoning item key", {
       model: "source",
-      input: [{ type: "reasoning", summary: [], unknown: null }],
-    }],
-  ])("rejects strict nested protocol shape: %s", (_name, request) => {
+      input: [
+        { type: "message", role: "user", content: "keep" },
+        { type: "reasoning", summary: [{ type: "summary_text", text: "plan" }], unknown: null },
+      ],
+    }, "responses.extensions_omitted"],
+  ] as const)("omits malformed optional nested protocol shape: %s", (_name, request, degradation) => {
     const source = "input" in request ? "responses" : "messages";
-    expect(() => prepareConvertedRequest(
+    const converted = prepareConvertedRequest(
       source,
       source === "messages" ? "chat" : "messages",
       body(request),
       "target",
       capability([source === "messages" ? "chat" : "messages"]),
-    )).toThrow();
+    );
+    expect(converted.degradations).toContain(degradation);
+  });
+
+  it.each([
+    ["Messages system block", "messages", "chat", {
+      model: "source",
+      system: [{ type: "future_system", text: "drop" }],
+      messages: [{ role: "user", content: "keep" }],
+      max_tokens: 8,
+    }, "messages.extensions_omitted"],
+    ["Messages image source", "messages", "chat", {
+      model: "source",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "keep" },
+          { type: "image", source: { type: "future_image", url: "https://example.test/drop" } },
+        ],
+      }],
+      max_tokens: 8,
+    }, "messages.extensions_omitted"],
+    ["Messages tool-result content", "messages", "chat", {
+      model: "source",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_1", content: [{ type: "future_result" }] }],
+        },
+      ],
+      max_tokens: 8,
+      tools: [{ name: "lookup", input_schema: { type: "object" } }],
+    }, "messages.extensions_omitted"],
+    ["Chat output format", "chat", "responses", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      response_format: { type: "future_format" },
+    }, "chat.extensions_omitted"],
+    ["Messages output format", "messages", "chat", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      max_tokens: 8,
+      output_config: { format: { type: "future_format" } },
+    }, "messages.extensions_omitted"],
+    ["Responses output format", "responses", "chat", {
+      model: "source",
+      input: "keep",
+      text: { format: { type: "future_format" } },
+    }, "responses.extensions_omitted"],
+    ["Messages thinking", "messages", "chat", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      max_tokens: 8,
+      thinking: { type: "future_thinking" },
+    }, "messages.extensions_omitted"],
+    ["malformed Chat output format", "chat", "responses", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      response_format: { type: 17 },
+    }, "request.option_omitted"],
+    ["malformed Messages output format", "messages", "chat", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      max_tokens: 8,
+      output_config: { format: { type: 17 } },
+    }, "request.option_omitted"],
+    ["malformed Responses output format", "responses", "chat", {
+      model: "source",
+      input: "keep",
+      text: { format: { type: 17 } },
+    }, "request.option_omitted"],
+    ["malformed Messages thinking", "messages", "chat", {
+      model: "source",
+      messages: [{ role: "user", content: "keep" }],
+      max_tokens: 8,
+      thinking: { type: 17 },
+    }, "request.option_omitted"],
+  ] as const)("drops unknown %s discriminator", (_name, source, target, request, degradation) => {
+    const converted = prepareConvertedRequest(source, target, body(request), "target", capability([target]));
+    expect(converted.degradations).toContain(degradation);
+  });
+
+  it("omits malformed Responses text.format before checking response_format conflicts", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "keep",
+      text: { format: { type: 17 } },
+      response_format: { type: "json_object" },
+    }), "target", capability(["chat"]));
+    expect(decoded(converted.bytes)).toMatchObject({ response_format: { type: "json_object" } });
+    expect(converted.degradations).toContain("request.option_omitted");
   });
 
   it.each(["image", "input_image"] as const)("ignores an ordinary nested Messages %s tool-result extension", (type) => {
@@ -1582,6 +2151,39 @@ describe("shared conversion request codecs", () => {
       max_tokens: 8,
     }), "target", capability(["chat"]));
     expect(converted.degradations).toContain("messages.extensions_omitted");
+  });
+
+  it.each([
+    ["Messages", "messages", {
+      model: "source",
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+        {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "call_1",
+            content: [null, { type: "text", text: "ok" }],
+          }],
+        },
+      ],
+      max_tokens: 8,
+    }],
+    ["Responses", "responses", {
+      model: "source",
+      input: [
+        { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
+        {
+          type: "function_call_output",
+          call_id: "call_1",
+          output: [null, { type: "input_text", text: "ok" }],
+        },
+      ],
+    }],
+  ] as const)("drops malformed %s tool-result array items", (_name, source, request) => {
+    const converted = prepareConvertedRequest(source, "chat", body(request), "target", capability(["chat"]));
+    expect(converted.degradations).toContain(`${source}.extensions_omitted`);
+    expect(JSON.stringify(decoded(converted.bytes))).toContain("ok");
   });
 
   it("omits an unclosed Responses tool round before converting to Messages", () => {
@@ -1903,8 +2505,8 @@ describe("shared conversion request codecs", () => {
     ]);
   });
 
-  it("rejects unknown fields in nested JSON-encoded tool-result media", () => {
-    expect(() => prepareConvertedRequest("responses", "messages", body({
+  it("omits unknown fields in nested JSON-encoded tool-result media", () => {
+    const converted = prepareConvertedRequest("responses", "messages", body({
       model: "source",
       input: [
         {
@@ -1925,7 +2527,9 @@ describe("shared conversion request codecs", () => {
           },
         },
       ],
-    }), "target", capability(["messages"]))).toThrow();
+    }), "target", capability(["messages"]));
+    expect(converted.degradations).toContain("responses.extensions_omitted");
+    expect(decoder.decode(converted.bytes)).not.toContain("unsupported_core_constraint");
   });
 
   it("extracts a nested approved whole-string tool-result image data URL", () => {

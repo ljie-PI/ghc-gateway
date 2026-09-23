@@ -19,7 +19,7 @@ describe("diagnostic failure contracts", () => {
   it.each([
     { headers: { "anthropic-version": "PRIVATE_VERSION" }, input: body, code: "anthropic_version_unsupported", rule: undefined },
     { headers: { "anthropic-beta": "PRIVATE_BETA," }, input: body, code: "anthropic_beta_unsupported", rule: undefined },
-    { headers: {}, input: { ...body, max_tokens: "PRIVATE_LIMIT" }, code: undefined, rule: "REQ-M-LIMIT" },
+    { headers: {}, input: { ...body, messages: "PRIVATE_MESSAGES" }, code: undefined, rule: "REQ-M-MESSAGES" },
   ])("identifies local rejection without exposing input: $code $rule", async ({ headers, input, code, rule }) => {
     const { diagnostics, records } = collector();
     const harness = await anthropicGateway({ gatewayDependencies: { diagnostics }, expectations: [] });

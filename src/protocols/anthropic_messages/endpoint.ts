@@ -23,7 +23,7 @@ import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt } from "../../gateway/request_attempt.js";
 import { boundedCleanup } from "../../gateway/stream_execution.js";
 import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
-import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
+import { duplicateMemberNames, memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import type { TelemetryRecorder } from "../../telemetry/recorder.js";
@@ -108,6 +108,7 @@ async function executeAnthropicMessages(
   scope.diagnostics?.stage("request_validation");
   assertAnthropicVersion(request.headers, scope.diagnostics);
   const betaFeatures = readAnthropicBetaFeatures(request.headers, scope.diagnostics);
+  const strictFailure = captureFailure(() => validateNativeMessagesRequestEnvelope(request.body!));
   validateMessagesRequestSecurity(request.body);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
@@ -183,7 +184,10 @@ async function executeAnthropicMessages(
     scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
   if (plan.kind === "native") {
-    validateNativeMessagesRequestEnvelope(request.body);
+    if (duplicateMemberNames(request.body).length > 0) {
+      throw new GatewayFailureError({ kind: "invalid_request" });
+    }
+    if (strictFailure !== undefined) throw strictFailure;
     return withUpstreamProtocol(
       await executeNativeMessages(
         copilot,
@@ -197,6 +201,15 @@ async function executeAnthropicMessages(
       ),
       "messages",
     );
+  }
+
+  function captureFailure(work: () => void): unknown | undefined {
+    try {
+      work();
+      return undefined;
+    } catch (error: unknown) {
+      return error;
+    }
   }
   return withUpstreamProtocol(
     await executeConvertedMessages(
@@ -345,11 +358,7 @@ async function executeConvertedMessages(
 }
 
 function readStream(body: WireJsonObject): boolean {
-  const values = memberValues(body, "stream");
-  if (values.length > 1 || (values[0] !== undefined && typeof values[0] !== "boolean")) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  return values[0] === true;
+  return memberValues(body, "stream")[0] === true;
 }
 
 function attemptUsage(value: Readonly<SemanticUsage>) {
@@ -409,15 +418,8 @@ function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagno
 }
 
 function readRequestedModel(body: WireJsonObject): { readonly value: string | undefined } {
-  const values = memberValues(body, "model");
-  if (values.length === 0) {
-    return { value: undefined };
-  }
-  const value = values[0];
-  if (typeof value !== "string") {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  return { value };
+  const value = memberValues(body, "model")[0];
+  return { value: typeof value === "string" && value.length > 0 ? value : undefined };
 }
 
 async function bindAccount(

@@ -18,12 +18,6 @@ export class ResponsesRequestDecodeError extends Error {
 export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
   assertNoDuplicateTopLevelFields(body);
 
-  return decodeResponsesPlanningRequest(body);
-}
-
-export function decodeResponsesPlanningRequest(body: WireJsonObject): ResponsesRequest {
-  assertNoDuplicateFields(body, ["model", "stream", "store", "input", "previous_response_id"]);
-
   const model = optionalModel(body);
   const stream = optionalBoolean(body, "stream", false, false);
   const store = preservedBoolean(body, "store");
@@ -40,12 +34,45 @@ export function decodeResponsesPlanningRequest(body: WireJsonObject): ResponsesR
   };
 }
 
-function assertNoDuplicateFields(body: WireJsonObject, fields: readonly string[]): void {
-  for (const field of fields) {
-    if (memberValues(body, field).length > 1) {
-      throw new ResponsesRequestDecodeError(field, `duplicate Responses request field: ${field}`);
-    }
+export function decodeResponsesPlanningRequest(body: WireJsonObject): ResponsesRequest {
+  const model = optionalPlanningModel(body);
+  const stream = planningBoolean(body, "stream", false);
+  const store = preservedBoolean(body, "store");
+  const input = memberValues(body, "input")[0];
+  const previous = optionalPlanningString(body, "previous_response_id");
+
+  return {
+    body,
+    ...(model === undefined ? {} : { model }),
+    stream,
+    ...(store === undefined ? {} : { store }),
+    ...(input === undefined ? {} : { input }),
+    ...(previous === undefined ? {} : { previousResponseId: previous }),
+  };
+}
+
+function optionalPlanningModel(body: WireJsonObject): string | undefined {
+  const value = memberValues(body, "model")[0];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function optionalPlanningString(body: WireJsonObject, field: string): string | undefined {
+  const value = memberValues(body, field)[0];
+  if (value === undefined || value === null) {
+    return undefined;
   }
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ResponsesRequestDecodeError(
+      field,
+      `Responses request field ${field} must be a non-empty string or null`,
+    );
+  }
+  return value;
+}
+
+function planningBoolean(body: WireJsonObject, field: string, defaultValue: boolean): boolean {
+  const value = memberValues(body, field)[0];
+  return value === true || value === false ? value : defaultValue;
 }
 
 function assertNoDuplicateTopLevelFields(body: WireJsonObject): void {

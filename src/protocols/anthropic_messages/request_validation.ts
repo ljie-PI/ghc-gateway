@@ -59,7 +59,7 @@ interface NativeCallBinding {
 }
 
 export function validateMessagesRequestSecurity(body: WireJsonObject): void {
-  rejectSelectedDuplicates(body, ["model", "messages", "stream", ...OWNERSHIP_FIELDS]);
+  rejectSelectedDuplicates(body, [...OWNERSHIP_FIELDS]);
   rejectUnexpectedOwnership(body, new Set(["thinking"]));
   rejectCarrierOutsideDocumentedSlots(body, new Set());
 }

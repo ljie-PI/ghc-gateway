@@ -145,6 +145,27 @@ describe("Anthropic request route", () => {
   it.each([
     ["invalid role", { messages: [{ role: "system", content: "hi" }] }],
     ["orphan tool result", { messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "missing", content: "x" }] }] }],
+  ] as const)("drops unsupported converted Messages history: %s", async (_name, extra) => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
+    try {
+      const response = await gw.fetch(anthropicRequest({
+        model: "gpt",
+        max_tokens: 16,
+        context_management: { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
+        ...extra,
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(capturedRequests).toHaveLength(1);
+      const converted = new TextDecoder().decode(capturedRequests[0]?.body);
+      expect(converted).not.toContain("system");
+      expect(converted).not.toContain("missing");
+    } finally {
+      await close();
+    }
+  });
+
+  it.each([
     ["continuation ownership", { previous_response_id: "resp_external" }],
     ["synthetic tool ownership", { messages: [{ role: "user", content: "hi", tool_call_id: "call_1" }] }],
     ["synthetic reasoning carrier", { messages: [{ role: "user", content: [{ type: "text", text: "hi", signature: "ghcg-rsn-v1:synthetic" }] }] }],
@@ -663,7 +684,7 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("applies the registry output default without masking invalid explicit limits", async () => {
+  it("applies the registry output default when an explicit optional limit is invalid", async () => {
     const { gw, capturedRequests, close } = await anthropicGateway();
     try {
       const defaulted = await gw.fetch(anthropicRequest({
@@ -680,8 +701,9 @@ describe("Anthropic request route", () => {
         messages: [{ role: "user", content: "hi" }],
         stream: false,
       }));
-      expect(invalid.status).toBe(400);
-      expect(capturedRequests).toHaveLength(1);
+      expect(invalid.status).toBe(200);
+      expect(capturedRequests).toHaveLength(2);
+      expect(decodeChatBody(capturedRequests[1] as HttpRequestObservation).max_tokens).toBe(4096);
     } finally {
       await close();
     }
@@ -886,8 +908,8 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("rejects orphan parallel tool results instead of converting them to user text", async () => {
-    const { gw, upstream, close } = await anthropicGateway({ expectations: [] });
+  it("omits orphan parallel tool results without converting them to user text", async () => {
+    const { gw, capturedRequests, close } = await anthropicGateway();
     try {
       const response = await gw.fetch(anthropicRequest({
         model: "gpt",
@@ -907,8 +929,13 @@ describe("Anthropic request route", () => {
         }],
       }));
 
-      expect(response.status).toBe(400);
-      expect(upstream.requests).toEqual([]);
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(capturedRequests).toHaveLength(1);
+      const converted = new TextDecoder().decode(capturedRequests[0]?.body);
+      expect(converted).not.toContain("call_1");
+      expect(converted).not.toContain("call_2");
+      expect(converted).toContain("after tools");
     } finally {
       await close();
     }

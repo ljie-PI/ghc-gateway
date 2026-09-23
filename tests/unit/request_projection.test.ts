@@ -55,9 +55,19 @@ describe("auditable request projection", () => {
     expect(JSON.stringify(degradations.values())).not.toContain("PRIVATE");
   });
 
-  it("rejects duplicate known fields, sensitive fields, and carriers hidden in omitted values", () => {
+  it("keeps the first duplicate known field and rejects unsafe omitted values", () => {
+    const duplicateDegradations = new ConversionDegradationCollector();
+    const duplicate = projectKnownObject(object("{\"known\":1,\"known\":2}"), {
+      knownKeys: new Set(["known"]),
+      sensitiveKeys: new Set(["tool_call_id"]),
+      ruleId: "REQ-TEST-PROJECTION",
+      omission: "messages.extensions_omitted",
+      degradations: duplicateDegradations,
+    });
+    expect(decoder.decode(serializeWireJson(duplicate))).toBe("{\"known\":1}");
+    expect(duplicateDegradations.values()).toEqual([]);
+
     for (const input of [
-      object("{\"known\":1,\"known\":2}"),
       object("{\"known\":1,\"tool_call_id\":\"call_private\"}"),
       object("{\"known\":1,\"extension\":{\"signature\":\"ghcg-rsn-v1:private\"}}"),
     ]) {

@@ -297,8 +297,18 @@ describe("Responses endpoint", () => {
     ["array", []],
     ["string", "schema"],
     ["number", 1],
-  ] as const)("rejects explicit %s extended function parameters before inference", async (_caseName, parameters) => {
-    const { gw, upstream, history, close } = await responsesGateway();
+  ] as const)("omits explicit malformed %s extended function parameters", async (_caseName, parameters) => {
+    const expectations: HttpExpectation[] = [{
+      method: "POST",
+      path: "/chat/completions",
+      body: jsonStream(false),
+      reply: {
+        status: 200,
+        headers: {},
+        body: text("{\"id\":\"chatcmpl_parameters\",\"model\":\"chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}"),
+      },
+    }];
+    const { gw, upstream, close } = await responsesGateway({ expectations });
     try {
       const response = await gw.fetch(responsesRequest({
         model: "chat",
@@ -310,10 +320,17 @@ describe("Responses endpoint", () => {
         }],
       }));
 
-      expect(response.status).toBe(400);
-      expect(await response.text()).toBe("{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}");
-      expect(history.inspect()).toMatchObject({ count: 0, receiptCount: 0, legacyCount: 0 });
-      expect(upstream.requests).toEqual([]);
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(upstream.requests).toHaveLength(1);
+      expect(JSON.parse(new TextDecoder().decode(upstream.requests[0]?.body))).toMatchObject({
+        tools: [{
+          function: {
+            name: "docs__lookup",
+            parameters: { type: "object", properties: {} },
+          },
+        }],
+      });
     } finally {
       await close();
     }
