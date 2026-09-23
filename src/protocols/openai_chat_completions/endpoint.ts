@@ -109,6 +109,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
       let carrierClaim: ReturnType<typeof claimReasoningCarriers> | undefined;
       let resolved: ResolvedModel;
       let copilot: BoundCopilot;
+      let plan: ReturnType<typeof planProtocolExecution>;
       try {
         if (decoded.requestedModel !== undefined) usage.setRequestedModel(decoded.requestedModel);
         scope.diagnostics?.stage("account_binding");
@@ -134,30 +135,30 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         usage.setResolvedModel(resolved.upstreamModel);
         scope.diagnostics?.stage("account_binding");
         copilot = await bindCopilot(dependencies.copilot, account, scope);
+        const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
+          accountId: account.accountId,
+          modelId: resolved.upstreamModel,
+          endpoint: copilot.target.endpoint,
+          sourceProtocol: carrierClaim.binding.sourceProtocol,
+          wireProtocol: "chat",
+        });
+        const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
+          ? undefined
+          : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
+        plan = planProtocolExecution({
+          diagnostics: scope.diagnostics,
+          source: "chat",
+          body: decoded.body,
+          stream: decoded.stream,
+          capability: resolved.capability,
+          resolvedModel: resolved.upstreamModel,
+          ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
+          ...(carrierRecords === undefined ? {} : { carrierRecords }),
+        });
       } catch (error: unknown) {
         if (strictFailure !== undefined) throw strictFailure;
         throw error;
       }
-      const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
-        accountId: account.accountId,
-        modelId: resolved.upstreamModel,
-        endpoint: copilot.target.endpoint,
-        sourceProtocol: carrierClaim.binding.sourceProtocol,
-        wireProtocol: "chat",
-      });
-      const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
-        ? undefined
-        : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
-      const plan = planProtocolExecution({
-        diagnostics: scope.diagnostics,
-        source: "chat",
-        body: decoded.body,
-        stream: decoded.stream,
-        capability: resolved.capability,
-        resolvedModel: resolved.upstreamModel,
-        ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
-        ...(carrierRecords === undefined ? {} : { carrierRecords }),
-      });
       if (plan.kind === "converted") {
         const outputBinding = dependencies.reasoningCarriers === undefined || plan.target !== "responses" ? undefined : carrierBinding({
           accountId: account.accountId,

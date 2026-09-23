@@ -33,6 +33,7 @@ const nowMs = (): number => 1_700_000_000_000;
 class CapturingCopilotBackend implements CopilotBackend {
   readonly chatRequests: ChatCompletionsUpstreamRequest[] = [];
   readonly chatStreamRequests: ChatCompletionsUpstreamRequest[] = [];
+  readonly responsesRequests: NativeResponsesUpstreamRequest[] = [];
 
   constructor(
     private readonly options: {
@@ -41,6 +42,7 @@ class CapturingCopilotBackend implements CopilotBackend {
       readonly chatError?: unknown;
       readonly chatPromise?: Promise<UpstreamByteResponse>;
       readonly chatStream?: UpstreamByteStream;
+      readonly responses?: UpstreamByteResponse;
     },
   ) {}
 
@@ -72,8 +74,10 @@ class CapturingCopilotBackend implements CopilotBackend {
         }
         return this.options.chatStream;
       },
-      completeResponses: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteResponse> => {
-        throw new Error("responses must not be called");
+      completeResponses: async (request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteResponse> => {
+        this.responsesRequests.push(request);
+        if (this.options.responses === undefined) throw new Error("responses must not be called");
+        return this.options.responses;
       },
       openResponsesStream: async (_request: Readonly<NativeResponsesUpstreamRequest>): Promise<UpstreamByteStream> => {
         throw new Error("responses stream must not be called");
@@ -377,6 +381,51 @@ describe("OpenAI Chat endpoint", () => {
       const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true,\"stream_options\":null}"));
       expect(response.status).toBe(400);
       expect(backend.chatStreamRequests).toHaveLength(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps strict 400 precedence when converted planning also fails", async () => {
+    const backend = new CapturingCopilotBackend({});
+    const { gw, close } = await openAiGateway(backend, {
+      capiFetch: async () => ({
+        data: [{
+          id: "responses", name: "Responses", vendor: "test", model_picker_enabled: true,
+          model_info: { supported_endpoints: ["/responses"] },
+        }],
+      }),
+    });
+    try {
+      const response = await gw.fetch(jsonRequest(
+        "{\"model\":\"responses\",\"stream\":true,\"stream_options\":null,\"messages\":[],\"n\":2}",
+      ));
+      expect(response.status).toBe(400);
+      expect(backend.responsesRequests).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("does not let pending strict validation mask a converted upstream rejection", async () => {
+    const backend = new CapturingCopilotBackend({
+      responses: { status: 429, headers: new Headers({ "retry-after": "120" }), body: encoder.encode("{}") },
+    });
+    const { gw, close } = await openAiGateway(backend, {
+      capiFetch: async () => ({
+        data: [{
+          id: "responses", name: "Responses", vendor: "test", model_picker_enabled: true,
+          model_info: { supported_endpoints: ["/responses"] },
+        }],
+      }),
+    });
+    try {
+      const response = await gw.fetch(jsonRequest(
+        "{\"model\":\"responses\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"extension\":1,\"extension\":2}",
+      ));
+      expect(response.status).toBe(429);
+      expect(response.headers.get("retry-after")).toBe("120");
+      expect(backend.responsesRequests).toHaveLength(1);
     } finally {
       await close();
     }

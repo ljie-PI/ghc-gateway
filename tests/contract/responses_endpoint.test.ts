@@ -427,6 +427,30 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it("does not let pending duplicate-extension validation mask continuation or upstream failures", async () => {
+    const { gw, upstream, close } = await responsesGateway({ expectations: [{
+      method: "POST", path: "/chat/completions", body: jsonStream(false),
+      reply: { status: 429, headers: { "retry-after": "120" }, body: text("{}") },
+    }] });
+    try {
+      const continuation = await gw.fetch(rawResponsesRequest(
+        "{\"model\":\"chat\",\"previous_response_id\":\"external_unknown\",\"input\":\"hi\",\"extension\":1,\"extension\":2}",
+      ));
+      expect(continuation.status).toBe(409);
+      await continuation.text();
+      expect(upstream.requests).toEqual([]);
+
+      const rejected = await gw.fetch(rawResponsesRequest(
+        "{\"model\":\"chat\",\"input\":\"hi\",\"extension\":1,\"extension\":2}",
+      ));
+      expect(rejected.status).toBe(429);
+      expect(rejected.headers.get("retry-after")).toBe("120");
+      expect(upstream.requests).toHaveLength(1);
+    } finally {
+      await close();
+    }
+  });
+
   it("uses Responses SSE bytes for native and bridge streams without DONE markers", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/responses", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
@@ -908,6 +932,14 @@ describe("Responses endpoint", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
       ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  function rawResponsesRequest(body: string): Request {
+    return new Request("http://127.0.0.1:31400/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
     });
   }
 
