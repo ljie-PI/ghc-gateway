@@ -986,16 +986,22 @@ function decodeResponsesInput(
     let object = requestObject(item, "REQ-R-INPUT-ITEM");
     const type = optionalString(oneMember(object, "type", "REQ-R-INPUT-TYPE"), "REQ-R-INPUT-TYPE");
     if (type === undefined || type === "message") {
+      const role = requiredString(oneMember(object, "role", "REQ-R-MESSAGE-ROLE"), "REQ-R-MESSAGE-ROLE");
+      if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
+        invalid("REQ-R-MESSAGE-ROLE");
+      }
       object = projectRequestMembers(
         object,
-        new Set(["type", "id", "role", "content", "status"]),
+        new Set(["type", "id", "role", "content", "status", ...(role === "assistant" ? ["phase"] : [])]),
         "REQ-R-MESSAGE",
         "responses.extensions_omitted",
         degradations,
       );
-      const role = requiredString(oneMember(object, "role", "REQ-R-MESSAGE-ROLE"), "REQ-R-MESSAGE-ROLE");
-      if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
-        invalid("REQ-R-MESSAGE-ROLE");
+      if (role === "assistant") {
+        const phase = oneMember(object, "phase", "REQ-R-ASSISTANT-PHASE");
+        if (phase !== undefined && phase !== null) {
+          unsupported("REQ-R-ASSISTANT-PHASE");
+        }
       }
       output.push({
         type: "message",
@@ -1003,6 +1009,7 @@ function decodeResponsesInput(
         content: decodeResponsesContent(
           oneMember(object, "content", "REQ-R-MESSAGE-CONTENT"),
           role === "user",
+          role === "assistant",
           degradations,
         ),
       });
@@ -1167,6 +1174,7 @@ function independentResultStatus(
 function decodeResponsesContent(
   value: WireJson | undefined,
   allowImage: boolean,
+  assistant: boolean,
   degradations: Set<ConversionDegradationRule>,
 ): readonly SemanticContent[] {
   if (typeof value === "string") {
@@ -1190,6 +1198,9 @@ function decodeResponsesContent(
           (candidate) => isWireJsonArray(candidate) ? { kind: "value", value: candidate } : { kind: "malformed" },
           { omission: "request.option_omitted", degradations },
         );
+        if (assistant && parsed !== undefined && parsed.items.length > 0) {
+          unsupported("REQ-R-ASSISTANT-ANNOTATIONS");
+        }
         if (parsed === undefined) {
           block = { kind: "object", members: block.members.filter((member) => member.key !== "annotations") };
         }

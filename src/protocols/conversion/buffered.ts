@@ -162,6 +162,7 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   if (message === undefined) {
     upstreamInvalid();
   }
+  rejectNonemptyCitations(message, "annotations");
   const items: SemanticResponseItem[] = [];
   const finishReason = chatFinishReason(singleMember(choice, "finish_reason"));
   const completeTools = finishReason !== "length" && finishReason !== "content_filter";
@@ -302,6 +303,7 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
     }
     const type = stringMember(value, "type");
     if (type === "text") {
+      rejectNonemptyCitations(value, "citations");
       const text = stringMember(value, "text");
       if (text === undefined) {
         upstreamInvalid();
@@ -343,10 +345,10 @@ function decodeMessages(payload: WireJsonObject): SemanticResponse {
       ) {
         upstreamInvalid();
       }
-      if (thinking.length > 0) {
+      if (thinking.length > 0 || (typeof signatureValue === "string" && signatureValue.length > 0)) {
         items.push({
           type: "reasoning",
-          parts: [{ presentation: "summary", index: 0, text: thinking }],
+          parts: thinking.length === 0 ? [] : [{ presentation: "summary", index: 0, text: thinking }],
           hasOpaqueState: typeof signatureValue === "string" && signatureValue.length > 0,
           ...(typeof signatureValue === "string" && signatureValue.length > 0
             ? { opaqueState: { kind: "messages_block" as const, block: value } }
@@ -468,6 +470,7 @@ function decodeResponses(payload: WireJsonObject): SemanticResponse {
         }
         const partType = stringMember(part, "type");
         if (partType === "output_text") {
+          rejectNonemptyCitations(part, "annotations");
           const text = stringMember(part, "text");
           if (text === undefined) {
             upstreamInvalid();
@@ -685,7 +688,7 @@ function responsesEnvelope(
   const output: WireJsonObject[] = [];
   for (const item of response.items) {
     if (item.type === "reasoning") {
-      if (item.parts.length === 0 && (item.opaqueState === undefined || context.carrier === undefined)) continue;
+      if (item.parts.length === 0 && item.opaqueState === undefined) continue;
       const summary = item.parts
         .filter((part) => part.presentation === "summary")
         .sort((left, right) => left.index - right.index)
@@ -1106,4 +1109,17 @@ function upstreamInvalid(): never {
     source: "converter",
     phase: "convert",
   });
+}
+
+function rejectNonemptyCitations(object: WireJsonObject, key: string): void {
+  const value = singleMember(object, key);
+  if (value === undefined || value === null) return;
+  if (!isWireJsonArray(value)) upstreamInvalid();
+  if (value.items.length > 0) {
+    throw new GatewayFailureError({
+      kind: "unsupported_upstream_output",
+      source: "converter",
+      phase: "convert",
+    });
+  }
 }

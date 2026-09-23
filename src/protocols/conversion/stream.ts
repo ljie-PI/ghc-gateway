@@ -1327,7 +1327,7 @@ class ResponsesEmitter implements StreamEmitter {
     if (item.key === undefined) invalid();
     const reasoning = this.ensureReasoning(item.key, item.itemId);
     if (reasoning.done) return;
-    if (!reasoning.itemAdded && item.parts.some((part) => part.text.length > 0)) {
+    if (!reasoning.itemAdded) {
       reasoning.itemAdded = true;
       yield this.itemEvent(
         "response.output_item.added",
@@ -1335,7 +1335,6 @@ class ResponsesEmitter implements StreamEmitter {
         responseReasoning(reasoning, "in_progress", []),
       );
     }
-    if (!reasoning.itemAdded) return;
     for (const semanticPart of item.parts) {
       const partKey = semanticPart.key ?? `${item.key}:${semanticPart.presentation}:${semanticPart.index}`;
       const part = reasoning.parts.get(partKey);

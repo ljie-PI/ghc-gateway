@@ -18,6 +18,13 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
 import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
 import { getStreamExecutionHandle } from "../../src/gateway/stream_execution.js";
+import { closeDatabase, openDatabase } from "../../src/persistence/database.js";
+import { embedMigration } from "../../src/persistence/migrations.js";
+import { migration as runtimeConfigMigration } from "../../src/persistence/migrations/001_runtime_config.js";
+import { migration as historyMigration } from "../../src/persistence/migrations/030_responses_history.js";
+import { migration as ownershipMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
+import { migration as carriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
+import { SqliteReasoningCarrierStore, type ReasoningCarrierBinding } from "../../src/protocols/conversion/reasoning_carriers.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 const encoder = new TextEncoder();
@@ -647,6 +654,398 @@ describe("shared conversion response codecs", () => {
       response?: { output?: Array<Record<string, unknown>> };
     };
     expect(terminal.response?.output?.map((item) => item.status)).toEqual(["completed", "incomplete"]);
+  });
+
+  it.each((["signed", "redacted"] as const).flatMap((kind) => [
+    { kind, withCarrier: false, withTool: false },
+    { kind, withCarrier: true, withTool: false },
+    { kind, withCarrier: false, withTool: true },
+    { kind, withCarrier: true, withTool: true },
+  ]))("preserves $kind Messages thinking and contiguous Responses items (carrier=$withCarrier, tool=$withTool)", async ({
+    kind,
+    withCarrier,
+    withTool,
+  }) => {
+    const database = withCarrier ? openDatabase({
+      path: ":memory:",
+      migrations: [runtimeConfigMigration, historyMigration, ownershipMigration, carriersMigration].map(embedMigration),
+      nowMs: () => 1_700_000_000_000,
+    }) : undefined;
+    try {
+      let carrierId = 0;
+      const binding: ReasoningCarrierBinding = {
+        accountId: "github.com/1",
+        modelId: "target",
+        upstreamOrigin: "https://api.githubcopilot.com",
+        sourceProtocol: "messages",
+        wireProtocol: "responses",
+        conversionVersion: "responses-messages-v2",
+      };
+      const carrier = database === undefined ? undefined : {
+        store: new SqliteReasoningCarrierStore(database, {
+          nowMs: () => 1_700_000_000_000,
+          createId: () => `00000000-0000-4000-8000-${(++carrierId).toString().padStart(12, "0")}`,
+        }),
+        binding,
+      };
+      const content = [
+        kind === "signed"
+          ? { type: "thinking", thinking: "", signature: "provider-signature" }
+          : { type: "redacted_thinking", data: "opaque-state" },
+        { type: "text", text: "answer" },
+        ...(withTool ? [{ type: "tool_use", id: "call_lookup", name: "lookup", input: {} }] : []),
+      ];
+      const buffered = decoded(convertBufferedResponse(
+        encoder.encode(JSON.stringify({
+          id: "msg_opaque", type: "message", role: "assistant", model: "source", content,
+          stop_reason: withTool ? "tool_use" : "end_turn",
+          usage: { input_tokens: 1, output_tokens: 2 },
+        })),
+        { ...context("messages", "responses"), ...(carrier === undefined ? {} : { carrier: { ...carrier, stream: false } }) },
+      ).bytes);
+
+      const source = [
+        messageEvent("message_start", {
+          type: "message_start",
+          message: { id: "msg_opaque", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+        }),
+        messageEvent("content_block_start", {
+          type: "content_block_start", index: 0,
+          content_block: kind === "signed"
+            ? { type: "thinking", thinking: "", signature: "" }
+            : { type: "redacted_thinking", data: "opaque-state" },
+        }),
+        ...(kind === "signed" ? [
+          messageEvent("content_block_delta", {
+            type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "" },
+          }),
+          messageEvent("content_block_delta", {
+            type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "provider-signature" },
+          }),
+        ] : []),
+        messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+        messageEvent("content_block_start", {
+          type: "content_block_start", index: 1, content_block: { type: "text", text: "" },
+        }),
+        messageEvent("content_block_delta", {
+          type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "answer" },
+        }),
+        messageEvent("content_block_stop", { type: "content_block_stop", index: 1 }),
+        ...(withTool ? [
+          messageEvent("content_block_start", {
+            type: "content_block_start", index: 2,
+            content_block: { type: "tool_use", id: "call_lookup", name: "lookup", input: {} },
+          }),
+          messageEvent("content_block_stop", { type: "content_block_stop", index: 2 }),
+        ] : []),
+        messageEvent("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: withTool ? "tool_use" : "end_turn" },
+          usage: { output_tokens: 2 },
+        }),
+        messageEvent("message_stop", { type: "message_stop" }),
+      ].join("");
+      const emissions: ConvertedStreamEmission[] = [];
+      for await (const emission of convertProtocolStream(
+        chunks(encoder.encode(source)),
+        { ...streamContext("messages", "responses"), ...(carrier === undefined ? {} : { carrier: { ...carrier, stream: true } }) },
+      )) emissions.push(emission);
+      const wire = wireText(emissions);
+      const events = responseDataEvents(wire);
+      const added = events.filter((event) => event.type === "response.output_item.added");
+      const done = events.filter((event) => event.type === "response.output_item.done");
+      const kinds = withTool ? ["reasoning", "message", "function_call"] : ["reasoning", "message"];
+      expect(events.slice(0, 2).map((event) => event.type)).toEqual(["response.created", "response.in_progress"]);
+      expect(added.map((event) => [(event.item as { type: string }).type, event.output_index]))
+        .toEqual(kinds.map((kind, index) => [kind, index]));
+      expect(done).toHaveLength(kinds.length);
+      if (!withCarrier && !withTool && kind === "signed") {
+        const item = {
+          type: "reasoning",
+          id: "rs_00000000-0000-4000-8000-000000000104",
+          status: "in_progress",
+          summary: [],
+        };
+        expect(wire).toContain(responseEvent(2, "response.output_item.added", { output_index: 0, item }));
+        expect(wire).toContain(responseEvent(3, "response.output_item.done", {
+          output_index: 0, item: { ...item, status: "completed" },
+        }));
+      }
+      for (const event of done) {
+        expect(events.indexOf(event)).toBeGreaterThan(events.findIndex((candidate) => (
+          candidate.type === "response.output_item.added" && candidate.output_index === event.output_index
+        )));
+      }
+      const terminal = events.at(-1)?.response as { output: Array<Record<string, unknown>> };
+      const bufferedOutput = buffered.output as Array<Record<string, unknown>>;
+      expect(terminal.output.map((item) => item.type)).toEqual(kinds);
+      expect(bufferedOutput.map((item) => item.type)).toEqual(kinds);
+      for (const output of [terminal.output, bufferedOutput]) {
+        expect(output[0]).toMatchObject({ type: "reasoning", summary: [] });
+        if (withTool && withCarrier) {
+          expect(output[0]?.encrypted_content).toEqual(expect.stringMatching(/^ghcg-rsn-v1:messages_block:responses:/u));
+        } else {
+          expect(output[0]?.encrypted_content).toBeUndefined();
+        }
+      }
+      expect(wire).not.toContain("provider-signature");
+      expect(JSON.stringify(buffered)).not.toContain("provider-signature");
+      expect(wire).not.toContain("opaque-state");
+      expect(JSON.stringify(buffered)).not.toContain("opaque-state");
+      expect(events.some((event) => event.type === "response.reasoning_summary_text.delta")).toBe(false);
+    } finally {
+      if (database !== undefined) closeDatabase(database);
+    }
+  });
+
+  it.each([
+    ["reasoning", "text", "tool"],
+    ["reasoning", "tool", "text"],
+    ["reasoning", "tool"],
+    ["reasoning", "text"],
+    ["reasoning"],
+    ["text", "tool", "text"],
+    ["tool", "text", "tool"],
+    ["text"],
+    ["tool"],
+  ] as const)("keeps Messages content blocks in spec order across buffered and streamed Responses: %j", async (...kinds) => {
+    const stopReason = kinds.some((kind) => kind === "tool") ? "tool_use" : "end_turn";
+    const content = kinds.map((kind, index) => kind === "reasoning"
+      ? { type: "thinking", thinking: "", signature: "provider-signature" }
+      : kind === "text"
+        ? { type: "text", text: `text_${index}` }
+        : { type: "tool_use", id: `call_${index}`, name: "lookup", input: {} });
+    const expected = kinds.map((kind) => kind === "reasoning" ? "reasoning"
+      : kind === "text" ? "message" : "function_call");
+    const buffered = decoded(convertBufferedResponse(
+      encoder.encode(JSON.stringify({
+        id: "msg_order", type: "message", role: "assistant", model: "source",
+        content, stop_reason: stopReason, usage: { input_tokens: 1, output_tokens: 2 },
+      })),
+      context("messages", "responses"),
+    ).bytes);
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg_order", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+      }),
+      ...kinds.flatMap((kind, index) => [
+        messageEvent("content_block_start", {
+          type: "content_block_start", index,
+          content_block: kind === "reasoning"
+            ? { type: "thinking", thinking: "", signature: "" }
+            : kind === "text" ? { type: "text", text: "" }
+              : { type: "tool_use", id: `call_${index}`, name: "lookup", input: {} },
+        }),
+        ...(kind === "reasoning" ? [
+          messageEvent("content_block_delta", {
+            type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: "" },
+          }),
+          messageEvent("content_block_delta", {
+            type: "content_block_delta", index, delta: { type: "signature_delta", signature: "provider-signature" },
+          }),
+        ] : kind === "text" ? [
+          messageEvent("content_block_delta", {
+            type: "content_block_delta", index, delta: { type: "text_delta", text: `text_${index}` },
+          }),
+        ] : []),
+        messageEvent("content_block_stop", { type: "content_block_stop", index }),
+      ]),
+      messageEvent("message_delta", {
+        type: "message_delta", delta: { stop_reason: stopReason }, usage: { output_tokens: 2 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "messages", "responses", chunks(encoder.encode(source)),
+    )));
+    const added = events.filter((event) => event.type === "response.output_item.added");
+    const output = (events.at(-1)?.response as { output: Array<Record<string, unknown>> }).output;
+    expect(added.map((event) => [event.output_index, (event.item as { type: string }).type]))
+      .toEqual(expected.map((kind, index) => [index, kind]));
+    expect(output.map((item) => item.type)).toEqual(expected);
+    expect((buffered.output as Array<Record<string, unknown>>).map((item) => item.type)).toEqual(expected);
+    expect(events.some((event) => JSON.stringify(event).includes("provider-signature"))).toBe(false);
+  });
+
+  it.each(["chat", "responses"] as const)(
+    "ignores metadata-only future Messages events without dropping unknown semantic deltas (%s target)",
+    async (target) => {
+      const source = reasoningStreamSource("messages");
+      const optionalEvent = messageEvent("future_metadata", { type: "future_metadata" });
+      const baseline = wireText(await collectStream("messages", target, chunks(encoder.encode(source))));
+      const beforeContent = source.replace("event: content_block_start", `${optionalEvent}event: content_block_start`);
+      expect(wireText(await collectStream("messages", target, chunks(encoder.encode(beforeContent)))))
+        .toBe(baseline);
+      const withMetadata = source.replace("event: message_delta", `${optionalEvent}event: message_delta`);
+      expect(wireText(await collectStream("messages", target, chunks(encoder.encode(withMetadata))))).toBe(baseline);
+
+      const semanticEvent = messageEvent("future_semantic", {
+        type: "future_semantic", index: 1, delta: { type: "text_delta", text: "unmapped" },
+      });
+      const withSemantic = source.replace("event: message_delta", `${semanticEvent}event: message_delta`);
+      await expect(async () => {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(withSemantic)), streamContext("messages", target),
+        )) void _emission;
+      }).rejects.toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
+    },
+  );
+
+  it("keeps signature-only thinking incomplete when a Messages response stops at max_tokens", async () => {
+    const buffered = decoded(convertBufferedResponse(encoder.encode(JSON.stringify({
+      id: "msg_partial_opaque", type: "message", role: "assistant", model: "source",
+      content: [{ type: "thinking", thinking: "", signature: "provider-signature" }],
+      stop_reason: "max_tokens",
+      usage: { input_tokens: 1, output_tokens: 2 },
+    })), context("messages", "responses")).bytes);
+    const source = [
+      messageEvent("message_start", {
+        type: "message_start",
+        message: { id: "msg_partial_opaque", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+      }),
+      messageEvent("content_block_start", {
+        type: "content_block_start", index: 0,
+        content_block: { type: "thinking", thinking: "", signature: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta", index: 0,
+        delta: { type: "thinking_delta", thinking: "" },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta", index: 0,
+        delta: { type: "signature_delta", signature: "provider-signature" },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: 0 }),
+      messageEvent("message_delta", {
+        type: "message_delta", delta: { stop_reason: "max_tokens" }, usage: { output_tokens: 2 },
+      }),
+      messageEvent("message_stop", { type: "message_stop" }),
+    ].join("");
+    const events = responseDataEvents(wireText(await collectStream(
+      "messages", "responses", chunks(encoder.encode(source)),
+    )));
+    expect(events.map((event) => event.type)).toEqual([
+      "response.created", "response.in_progress",
+      "response.output_item.added", "response.output_item.done", "response.incomplete",
+    ]);
+    expect((events.at(-1)?.response as { output: Array<Record<string, unknown>> }).output)
+      .toMatchObject([{ type: "reasoning", status: "incomplete", summary: [] }]);
+    expect(buffered.output).toMatchObject([{ type: "reasoning", status: "incomplete", summary: [] }]);
+  });
+
+  it.each([
+    ["chat", "messages"], ["chat", "responses"],
+    ["messages", "chat"], ["messages", "responses"],
+    ["responses", "chat"], ["responses", "messages"],
+  ] as const)("rejects nonportable cited text instead of returning incomplete %s -> %s output", (source, target) => {
+    const citation = {
+      type: "url_citation", url: "https://example.test/source", title: "Source", start_index: 0, end_index: 6,
+    };
+    const payload = source === "chat"
+      ? { choices: [{ message: { role: "assistant", content: "answer", annotations: [citation] }, finish_reason: "stop" }] }
+      : source === "messages"
+        ? {
+          id: "msg_cited", type: "message", role: "assistant", model: "source",
+          content: [{ type: "text", text: "answer", citations: [{
+            type: "char_location", cited_text: "answer", document_index: 0,
+            document_title: null, start_char_index: 0, end_char_index: 6,
+          }] }],
+          stop_reason: "end_turn",
+        }
+        : {
+          id: "resp_cited", object: "response", status: "completed",
+          output: [{
+            id: "msg_cited", type: "message", status: "completed", role: "assistant",
+            content: [{ type: "output_text", text: "answer", annotations: [citation] }],
+          }],
+        };
+    let failure: unknown;
+    try {
+      convertBufferedResponse(encoder.encode(JSON.stringify(payload)), context(source, target));
+    } catch (error: unknown) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
+  });
+
+  it.each(["chat", "messages"] as const)(
+    "rejects nonportable streamed Responses citation events instead of dropping them (%s target)",
+    async (target) => {
+      const source = responseEvent(0, "response.output_text.annotation.added", {
+        item_id: "msg_cited", output_index: 0, content_index: 0,
+        annotation: {
+          type: "url_citation", url: "https://example.test/source", title: "Source", start_index: 0, end_index: 6,
+        },
+      });
+      let failure: unknown;
+      try {
+        for await (const _emission of convertProtocolStream(
+          chunks(encoder.encode(source)), streamContext("responses", target),
+        )) void _emission;
+      } catch (error: unknown) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
+    },
+  );
+
+  it.each([
+    ["chat", "messages"], ["chat", "responses"],
+    ["messages", "chat"], ["messages", "responses"],
+    ["responses", "chat"], ["responses", "messages"],
+  ] as const)("rejects nonportable cited %s streams before a successful %s terminal", async (source, target) => {
+    const citation = {
+      type: "url_citation", url: "https://example.test/source", title: "Source", start_index: 0, end_index: 6,
+    };
+    const input = source === "chat"
+      ? [
+        chatSse({ id: "chat_cited", choices: [{
+          index: 0, delta: { content: "answer", annotations: [citation] }, finish_reason: "stop",
+        }] }),
+        "data: [DONE]\n\n",
+      ].join("")
+      : source === "messages"
+        ? [
+          messageEvent("message_start", {
+            type: "message_start",
+            message: { id: "msg_cited", type: "message", role: "assistant", usage: { input_tokens: 1, output_tokens: 0 } },
+          }),
+          messageEvent("content_block_start", {
+            type: "content_block_start", index: 0, content_block: { type: "text", text: "" },
+          }),
+          messageEvent("content_block_delta", {
+            type: "content_block_delta", index: 0,
+            delta: { type: "citations_delta", citation: {
+              type: "char_location", cited_text: "answer", document_index: 0,
+              document_title: null, start_char_index: 0, end_char_index: 6,
+            } },
+          }),
+        ].join("")
+        : responseEvent(0, "response.completed", {
+          response: {
+            id: "resp_cited", object: "response", status: "completed",
+            output: [{
+              id: "msg_cited", type: "message", status: "completed", role: "assistant",
+              content: [{ type: "output_text", text: "answer", annotations: [citation] }],
+            }],
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        });
+    const emissions: ConvertedStreamEmission[] = [];
+    let failure: unknown;
+    try {
+      for await (const emission of convertProtocolStream(chunks(encoder.encode(input)), streamContext(source, target))) {
+        emissions.push(emission);
+      }
+    } catch (error: unknown) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
+    const wire = wireText(emissions);
+    expect(wire).not.toContain("response.completed");
+    expect(wire).not.toContain("event: message_stop");
+    expect(wire).not.toContain("data: [DONE]");
   });
 
   it("emits an incomplete reasoning-only Responses result without fabricating answer text", async () => {

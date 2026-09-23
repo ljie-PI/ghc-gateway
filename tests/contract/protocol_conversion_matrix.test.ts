@@ -87,6 +87,53 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it.each([false, true])("attributes valid but unmappable upstream citations to conversion (stream=%s)", async (stream) => {
+    const citation = {
+      type: "url_citation", url: "https://example.test/source", title: "Source", start_index: 0, end_index: 6,
+    };
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const harness = await matrixGateway(false, diagnostics, {
+      responsesBody: encoder.encode(JSON.stringify({
+        id: "resp_cited", object: "response", status: "completed",
+        output: [{
+          id: "msg_cited", type: "message", status: "completed", role: "assistant",
+          content: [{ type: "output_text", text: "answer", annotations: [citation] }],
+        }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      })),
+      responsesStreamBody: Buffer.concat([
+        responsesEvent(0, "response.created", {
+          response: { id: "resp_cited", object: "response", status: "in_progress", output: [] },
+        }),
+        responsesEvent(1, "response.output_item.added", {
+          output_index: 0,
+          item: { id: "msg_cited", type: "message", status: "in_progress", role: "assistant", content: [] },
+        }),
+        responsesEvent(2, "response.content_part.added", {
+          output_index: 0, content_index: 0, item_id: "msg_cited",
+          part: { type: "output_text", text: "answer", annotations: [citation] },
+        }),
+      ]),
+    });
+    try {
+      const response = await harness.gw.fetch(protocolRequest("chat", "native-responses", { stream }));
+      expect(response.status).toBe(502);
+      const body = await response.text();
+      expect(body).toContain("upstream response cannot be converted");
+      expect(body).not.toContain("https://example.test/source");
+      await diagnostics.close();
+      expect(records.at(-1)).toMatchObject({
+        httpStatus: 502,
+        outcome: "upstream_error",
+        failure: { kind: "unsupported_upstream_output", source: "converter" },
+      });
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
   it.each((["chat", "messages", "responses"] as const).flatMap((client) => (
     (["chat", "messages", "responses"] as const).map((upstream) => ({ client, upstream }))
   )))("retains buffered incomplete status independently of Usage ($client -> $upstream)", async ({ client, upstream }) => {

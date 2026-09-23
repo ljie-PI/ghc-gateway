@@ -59,6 +59,7 @@ export type GatewayFailure =
   | ({ readonly kind: "upstream_stream_error" } & GatewayFailureDetails)
   | ({ readonly kind: "upstream_stream_truncated" } & GatewayFailureDetails)
   | ({ readonly kind: "invalid_upstream_response" } & GatewayFailureDetails)
+  | ({ readonly kind: "unsupported_upstream_output" } & GatewayFailureDetails)
   | ({ readonly kind: "invalid_tool_arguments" } & GatewayFailureDetails)
   | ({ readonly kind: "invalid_logprobs" } & GatewayFailureDetails)
   | ({ readonly kind: "aborted" } & GatewayFailureDetails)
@@ -99,6 +100,7 @@ const FAILURE_POLICY: Readonly<Record<StaticGatewayFailureKind, GatewayFailurePo
   upstream_stream_error: { status: 502, message: "upstream request failed", outcome: "upstream_error" },
   upstream_stream_truncated: { status: 502, message: "upstream request failed", outcome: "upstream_error" },
   invalid_upstream_response: { status: 502, message: "invalid upstream response", outcome: "upstream_error" },
+  unsupported_upstream_output: { status: 502, message: "upstream response cannot be converted", outcome: "upstream_error" },
   invalid_tool_arguments: { status: 502, message: "invalid upstream response", outcome: "upstream_error" },
   invalid_logprobs: { status: 502, message: "invalid upstream response", outcome: "upstream_error" },
   aborted: { status: 500, message: "internal error", outcome: "aborted" },

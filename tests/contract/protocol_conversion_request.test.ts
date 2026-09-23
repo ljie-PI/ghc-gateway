@@ -1144,7 +1144,127 @@ describe("shared conversion request codecs", () => {
     },
   );
 
-  it("replays converter-emitted Responses message IDs and annotations through Messages", () => {
+  it.each([
+    ["chat", { type: "url_citation", url: "https://example.test/source", title: "Source", start_index: 0, end_index: 6 }],
+    ["chat", { type: "file_citation", file_id: "file_1", filename: "source.txt", index: 0 }],
+    ["messages", { type: "url_citation", url: "https://example.test/source", title: "Source", start_index: 0, end_index: 6 }],
+    ["messages", { type: "file_citation", file_id: "file_1", filename: "source.txt", index: 0 }],
+  ] as const)("rejects cited Responses assistant history before converting to %s", (target, citation) => {
+    const request = body({
+      model: "source",
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "question" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "earlier", annotations: [] }] },
+        {
+          type: "message",
+          id: "msg_cited",
+          status: "completed",
+          role: "assistant",
+          content: [
+            { type: "output_text", text: "uncited" },
+            { type: "output_text", text: "source", annotations: [citation] },
+          ],
+        },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "follow up" }] },
+      ],
+    });
+    expect(() => planProtocolExecution({
+      source: "responses",
+      body: request,
+      stream: false,
+      resolvedModel: "target",
+      capability: capability([target]),
+    })).toThrowError("unsupported_semantics");
+  });
+
+  it.each([
+    ["chat", "commentary", "intermediate"],
+    ["chat", "final_answer", [{ type: "output_text", text: "answer", annotations: [] }]],
+    ["messages", "commentary", [{ type: "output_text", text: "intermediate", annotations: [] }]],
+    ["messages", "final_answer", "answer"],
+  ] as const)("rejects Responses assistant phase before converting to %s: %s", (target, phase, content) => {
+    expect(() => planProtocolExecution({
+      source: "responses",
+      body: body({
+        model: "source",
+        input: [
+          { type: "message", role: "user", content: "question" },
+          { type: "message", role: "assistant", content: "earlier" },
+          { type: "message", role: "assistant", phase, content },
+          { type: "message", role: "user", content: "follow up" },
+        ],
+      }),
+      stream: false,
+      resolvedModel: "target",
+      capability: capability([target]),
+    })).toThrowError("unsupported_semantics");
+  });
+
+  it.each(["chat", "messages"] as const)(
+    "accepts empty assistant citations and null or absent phase when converting Responses to %s",
+    (target) => {
+      const converted = prepareConvertedRequest("responses", target, body({
+        model: "source",
+        input: [
+          { type: "message", role: "user", content: "question" },
+          { type: "message", role: "assistant", phase: null, content: [{ type: "output_text", text: "first", annotations: [] }] },
+          { type: "message", role: "user", content: "follow up" },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "second" }] },
+          { type: "message", role: "user", content: "next" },
+        ],
+      }), "target", capability([target]));
+      expect(decoded(converted.bytes).messages).toEqual(target === "chat"
+        ? [
+          { role: "user", content: "question" },
+          { role: "assistant", content: "first" },
+          { role: "user", content: "follow up" },
+          { role: "assistant", content: "second" },
+          { role: "user", content: "next" },
+        ]
+        : [
+          { role: "user", content: [{ type: "text", text: "question" }] },
+          { role: "assistant", content: [{ type: "text", text: "first" }] },
+          { role: "user", content: [{ type: "text", text: "follow up" }] },
+          { role: "assistant", content: [{ type: "text", text: "second" }] },
+          { role: "user", content: [{ type: "text", text: "next" }] },
+        ]);
+      expect(converted.degradations).toEqual(["request.option_omitted"]);
+    },
+  );
+
+  it("passes cited and phased assistant history through native Responses without conversion", () => {
+    const request = body({
+      model: "source",
+      input: [
+        {
+          type: "message",
+          role: "assistant",
+          phase: "final_answer",
+          content: [{
+            type: "output_text",
+            text: "answer",
+            annotations: [{
+              type: "url_citation",
+              url: "https://example.test/source",
+              title: "Source",
+              start_index: 0,
+              end_index: 6,
+            }],
+          }],
+        },
+        { type: "message", role: "user", content: "follow up" },
+      ],
+    });
+    expect(planProtocolExecution({
+      source: "responses",
+      body: request,
+      stream: false,
+      resolvedModel: "target",
+      capability: capability(["responses", "chat"]),
+    })).toMatchObject({ kind: "native", source: "responses", target: "responses" });
+  });
+
+  it("replays converter-emitted Responses message IDs and empty annotations through Messages", () => {
     const converted = prepareConvertedRequest("responses", "messages", body({
       model: "source",
       input: [
@@ -1157,7 +1277,7 @@ describe("shared conversion request codecs", () => {
           content: [{
             type: "output_text",
             text: "answer",
-            annotations: [{ type: "url_citation", url: "https://example.test" }],
+            annotations: [],
           }],
         },
       ],
