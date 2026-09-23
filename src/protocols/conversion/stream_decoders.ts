@@ -1022,7 +1022,7 @@ async function* decodeMessagesStream(
     if (payload.members.length === 1 && payload.members[0]?.key === "type") {
       continue;
     }
-    invalid();
+    unsupportedOutput();
   }
   invalidTruncated();
 }
@@ -2565,7 +2565,7 @@ function rejectNonemptyCitations(object: WireJsonObject, key: string): void {
 
 function unsupportedOutput(): never {
   throw new GatewayFailureError({
-    kind: "unsupported_semantics",
+    kind: "unsupported_upstream_output",
     source: "converter",
     phase: "stream",
   });

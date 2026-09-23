@@ -440,6 +440,7 @@ function safeFailure(value: NonNullable<DiagnosticRecord["failure"]>): NonNullab
     "authentication", "permission", "model_not_found", "continuation_conflict", "continuation_unavailable",
     "continuation_persistence", "queue_full", "queue_timeout", "upstream_http", "upstream_timeout",
     "upstream_network", "upstream_stream_error", "upstream_stream_truncated", "invalid_upstream_response",
+    "unsupported_upstream_output",
     "invalid_tool_arguments", "invalid_logprobs", "aborted", "internal",
   ] as const;
   const sources = ["request", "account", "credential", "catalog", "transport", "parser", "converter", "continuation", "gateway"] as const;

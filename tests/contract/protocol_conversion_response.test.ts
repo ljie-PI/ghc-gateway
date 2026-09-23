@@ -888,7 +888,7 @@ describe("shared conversion response codecs", () => {
         for await (const _emission of convertProtocolStream(
           chunks(encoder.encode(withSemantic)), streamContext("messages", target),
         )) void _emission;
-      }).rejects.toThrow();
+      }).rejects.toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
     },
   );
 
@@ -966,7 +966,7 @@ describe("shared conversion response codecs", () => {
     } catch (error: unknown) {
       failure = error;
     }
-    expect(failure).toMatchObject({ failure: { kind: "unsupported_semantics", source: "converter" } });
+    expect(failure).toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
   });
 
   it.each(["chat", "messages"] as const)(
@@ -986,7 +986,7 @@ describe("shared conversion response codecs", () => {
       } catch (error: unknown) {
         failure = error;
       }
-      expect(failure).toMatchObject({ failure: { kind: "unsupported_semantics", source: "converter" } });
+      expect(failure).toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
     },
   );
 
@@ -1041,7 +1041,7 @@ describe("shared conversion response codecs", () => {
     } catch (error: unknown) {
       failure = error;
     }
-    expect(failure).toMatchObject({ failure: { kind: "unsupported_semantics", source: "converter" } });
+    expect(failure).toMatchObject({ failure: { kind: "unsupported_upstream_output", source: "converter" } });
     const wire = wireText(emissions);
     expect(wire).not.toContain("response.completed");
     expect(wire).not.toContain("event: message_stop");

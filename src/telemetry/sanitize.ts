@@ -18,7 +18,7 @@ const EVENT_KEYS: Readonly<Record<string, Readonly<Record<string, (value: unknow
     requestId: safeRequestId,
     protocol: fixedString(["openai_chat", "openai_responses_unknown", "openai_responses_native", "openai_responses_bridge", "anthropic"]),
     status: httpStatus,
-    category: fixedString(["invalid_request", "unsupported_semantics", "authentication", "model_not_found", "upstream_error", "upstream_http", "upstream_timeout", "upstream_network", "invalid_upstream_response", "upstream_stream_truncated", "aborted", "internal"]),
+    category: fixedString(["invalid_request", "unsupported_semantics", "authentication", "model_not_found", "upstream_error", "upstream_http", "upstream_timeout", "upstream_network", "invalid_upstream_response", "unsupported_upstream_output", "upstream_stream_truncated", "aborted", "internal"]),
     outcome: fixedString(["success", "client_error", "authentication_error", "overloaded", "upstream_error", "timeout", "aborted", "internal_error"]),
   },
   account_authenticated: { accountId: safeAccountId },

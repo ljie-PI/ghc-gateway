@@ -73,7 +73,8 @@ Key behavior:
 - Selects one compatible native or converted upstream protocol per request.
 - Supports streaming, tool calls, reasoning output, and compatible Responses continuations.
 - Converted Messages-to-Responses output keeps signature-only thinking as an empty reasoning item before later text or tool items. Its hidden thinking text and provider signature are not shown; eligible tool continuations use bounded opaque state.
-- Converted routes reject citation-bearing output until they can map citations to the target protocol; native routes preserve the original response.
+- Converted routes return a 502 conversion error for citation-bearing output until they can map citations to the target protocol; native routes preserve the original response.
+- Responses assistant history with citations or an explicit `phase` needs a native Responses upstream; converting it to Chat or Messages fails before inference rather than dropping those fields.
 - Filters hop-by-hop headers, tracing headers, and private gateway headers.
 - Limits inference requests to 128 headers and 16 KiB of aggregate header data.
 - Keeps bounded continuation and reasoning state for up to `history.ttlDays`.

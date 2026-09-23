@@ -1117,7 +1117,7 @@ function rejectNonemptyCitations(object: WireJsonObject, key: string): void {
   if (!isWireJsonArray(value)) upstreamInvalid();
   if (value.items.length > 0) {
     throw new GatewayFailureError({
-      kind: "unsupported_semantics",
+      kind: "unsupported_upstream_output",
       source: "converter",
       phase: "convert",
     });
