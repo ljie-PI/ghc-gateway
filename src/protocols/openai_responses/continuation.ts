@@ -15,6 +15,7 @@ import {
   ResponsesContinuationError,
   isKnownResponsesConversionVersion,
   type ResponsesContinuationOwnership,
+  type ResponsesContinuationProtocol,
   type ResponsesContinuationResolution,
   type ResponsesHistory,
   type ResponsesRouteReceipt,
@@ -24,9 +25,15 @@ type ResponsesPlanKind = "native_responses" | "chat_bridge" | "messages_bridge";
 
 export type ResolvedResponsesContinuation = Extract<ResponsesContinuationResolution, { readonly kind: "none" | "owned" }>;
 
+/** History that exists in a form the gateway can't replay, as opposed to a storage failure. */
+export function isUnrestorableHistory(error: unknown): boolean {
+  return error instanceof ResponsesContinuationError;
+}
+
 /**
  * Best-effort, like cc-switch: history that is unknown, expired, legacy, uncertain, owned by
  * another account or unreadable resolves as `none`, so the request still reaches the upstream.
+ * Storage failures and cancellation still fail the request.
  */
 export async function resolveResponsesContinuation(
   history: ResponsesHistory,
@@ -41,7 +48,7 @@ export async function resolveResponsesContinuation(
   try {
     resolution = await history.resolve(previousResponseId, accountId, signal);
   } catch (error: unknown) {
-    if (signal.aborted) throw continuationFailure(error, signal);
+    if (signal.aborted || !isUnrestorableHistory(error)) throw continuationFailure(error, signal);
     return { kind: "none" };
   }
   return resolution.kind === "owned" ? resolution : { kind: "none" };
@@ -69,7 +76,7 @@ export function continuationModel(
 export function validateContinuationTarget(
   receipt: Readonly<ResponsesRouteReceipt> | undefined,
   endpoint: string,
-  protocols: readonly string[] | null,
+  protocols: readonly ResponsesContinuationProtocol[] | null,
 ): void {
   if (receipt === undefined) {
     return;
@@ -82,7 +89,8 @@ export function validateContinuationTarget(
       throw conflict();
     }
   }
-  if (protocols?.includes(receipt.upstreamProtocol) !== true) {
+  // Unknown capabilities are left to the planner, which reports them as unsupported.
+  if (protocols !== null && !protocols.includes(receipt.upstreamProtocol)) {
     throw conflict();
   }
 }
@@ -91,15 +99,15 @@ export function validateContinuationTarget(
  * An unresolved ID is meaningless to converted upstreams, and a gateway-managed ID is unknown to
  * Copilot; both are dropped so the request is still sent. Other native IDs pass through unchanged.
  */
-export function dropsUnresolvedPreviousResponseId(
+export function shouldDropUnresolvedPreviousResponseId(
   previousResponseId: string | undefined,
   resolution: Readonly<ResolvedResponsesContinuation>,
-  planKind: ResponsesPlanKind,
+  nativePlan: boolean,
 ): boolean {
   if (previousResponseId === undefined || resolution.kind !== "none") {
     return false;
   }
-  return planKind !== "native_responses" || isGatewayManagedResponseId(previousResponseId);
+  return !nativePlan || isGatewayManagedResponseId(previousResponseId);
 }
 
 export function continuationOwnership(
@@ -177,7 +185,7 @@ function trustedUpstreamOrigin(endpoint: string): string {
   }
 }
 
-function continuationFailure(
+export function continuationFailure(
   error: unknown,
   signal: AbortSignal,
 ): GatewayFailureError {

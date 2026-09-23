@@ -1136,6 +1136,62 @@ describe("protocol conversion matrix", () => {
     }
   });
 
+  it("keeps a reasoning carrier from another response in place and still sends the continuation", async () => {
+    const chatBody = encoder.encode(JSON.stringify({
+      id: "chatcmpl_tool",
+      object: "chat.completion",
+      created: 1_700_000_000,
+      model: "matrix",
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: null,
+          reasoning_content: "visible plan",
+          reasoning_opaque: "provider-state",
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "lookup", arguments: "{}" } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    }));
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) }, {
+      nowMs: () => 100, monotonicNowMs: () => 10,
+    });
+    const harness = await matrixGateway(true, diagnostics, { chatBody });
+    try {
+      const tools = [{ type: "function", name: "lookup", parameters: { type: "object" }, strict: false }];
+      const turn = async (input: string) => await (await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat", input, tools,
+      }))).json() as { id: string; output: Array<Record<string, unknown>> };
+      const first = await turn("first");
+      const other = await turn("other");
+      const otherReasoning = other.output.find((item) => item.type === "reasoning");
+      expect(otherReasoning?.encrypted_content).toEqual(expect.stringMatching(/^ghcg-rsn-v1:/u));
+
+      // The other response's carrier is not in the referenced checkpoint; it stays where the client
+      // put it, the referenced response's calls are restored, and the request reaches the upstream.
+      const continued = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        previous_response_id: first.id,
+        input: [otherReasoning, { type: "function_call_output", call_id: "call_1", output: "ok" }],
+        tools,
+      }));
+      const continuedBody = await continued.text();
+      await diagnostics.close();
+      expect(continued.status, `${continuedBody} ${JSON.stringify(records.filter((record) => record.event === "request_failed"))}`).toBe(200);
+      expect(harness.upstream.requests.map((entry) => entry.path)).toEqual([
+        "/chat/completions", "/chat/completions", "/chat/completions",
+      ]);
+      const forwarded = decoder.decode(harness.chatBodies.at(-1));
+      expect(forwarded).not.toContain("previous_response_id");
+      expect(forwarded).toContain("\"tool_call_id\":\"call_1\"");
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("pins a Responses continuation to Messages and consumes previous_response_id locally", async () => {
     const harness = await matrixGateway();
     try {

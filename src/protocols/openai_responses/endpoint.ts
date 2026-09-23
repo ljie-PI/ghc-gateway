@@ -9,7 +9,6 @@ import {
   normalizeTransportFailure,
 } from "../../copilot/failures.js";
 import {
-  failureFromSignal,
   GatewayFailureError,
   safeRetryAfter,
 } from "../../gateway/failures.js";
@@ -28,14 +27,16 @@ import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/ups
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import {
+  continuationFailure,
   continuationModel,
   continuationOwnership,
-  dropsUnresolvedPreviousResponseId,
   isTerminalResponsesEvent,
+  isUnrestorableHistory,
   ownedContinuationReceipt,
   persistContinuation,
   resolveResponsesContinuation,
   responseIdFromPayload,
+  shouldDropUnresolvedPreviousResponseId,
   validateContinuationTarget,
 } from "./continuation.js";
 import {
@@ -65,7 +66,7 @@ import {
   diagnosticShape,
   observeDiagnosticProtocolStatus,
 } from "../conversion/diagnostics.js";
-import { planProtocolExecution } from "../conversion/planner.js";
+import { planProtocolExecution, plansNativeExecution } from "../conversion/planner.js";
 import { completeConvertedOperation, openConvertedOperation } from "../conversion/operation.js";
 import { convertBufferedPlannedResponse } from "../conversion/buffered.js";
 import type {
@@ -213,10 +214,8 @@ async function prepareResponsesExecution(
       planningRequest = consumeResponsesPreviousResponseId(
         await dependencies.history.enrich(decoded, continuationReceipt, scope.signal),
       );
-    } catch {
-      if (scope.signal.aborted) {
-        throw new GatewayFailureError(failureFromSignal(scope.signal, { source: "continuation", phase: "resume" }));
-      }
+    } catch (error: unknown) {
+      if (scope.signal.aborted || !isUnrestorableHistory(error)) throw continuationFailure(error, scope.signal);
       planningRequest = consumeResponsesPreviousResponseId(decoded);
       historyOmitted = true;
     }
@@ -233,13 +232,10 @@ async function prepareResponsesExecution(
   const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
     ? undefined
     : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
-  // Mirrors the planner's native selection so an unusable ID is dropped before the codec sees it.
-  const plannedNative = resolved.capability.protocols.value?.includes("responses") === true
-    && (forcedTarget === undefined || forcedTarget === "responses");
-  if (dropsUnresolvedPreviousResponseId(
+  if (shouldDropUnresolvedPreviousResponseId(
     planningRequest.previousResponseId,
     continuation,
-    plannedNative ? "native_responses" : forcedTarget === "messages" ? "messages_bridge" : "chat_bridge",
+    plansNativeExecution(resolved.capability.protocols.value, "responses", forcedTarget),
   )) {
     planningRequest = consumeResponsesPreviousResponseId(planningRequest);
     historyOmitted = true;

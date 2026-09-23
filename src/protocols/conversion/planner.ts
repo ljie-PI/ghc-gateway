@@ -18,6 +18,15 @@ import {
   type SemanticRequest,
 } from "./types.js";
 
+/** The single rule for selecting a native plan; callers that must predict it use this too. */
+export function plansNativeExecution(
+  protocols: readonly InferenceProtocol[] | null,
+  source: InferenceProtocol,
+  forcedTarget: InferenceProtocol | undefined,
+): boolean {
+  return protocols?.includes(source) === true && (forcedTarget === undefined || forcedTarget === source);
+}
+
 export function planProtocolExecution(input: Readonly<ConversionPlanningInput>): ProtocolExecutionPlan {
   input.diagnostics?.stage("planning");
   const protocols = input.capability.protocols.value;
@@ -28,15 +37,7 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
     });
   }
 
-  if (input.forcedTarget === undefined && protocols.includes(input.source)) {
-    return observePlan(input, Object.freeze({
-      kind: "native",
-      source: input.source,
-      target: input.source,
-      stream: input.stream,
-    }));
-  }
-  if (input.forcedTarget === input.source && protocols.includes(input.source)) {
+  if (plansNativeExecution(protocols, input.source, input.forcedTarget)) {
     return observePlan(input, Object.freeze({
       kind: "native",
       source: input.source,

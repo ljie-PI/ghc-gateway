@@ -22,7 +22,7 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { migration as responsesHistoryMigration } from "../../src/persistence/migrations/030_responses_history.js";
 import { migration as responsesContinuationMigration } from "../../src/persistence/migrations/041_responses_continuation_ownership.js";
 import { migration as reasoningCarriersMigration } from "../../src/persistence/migrations/042_responses_reasoning_carriers.js";
-import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
+import { SqliteResponsesHistory, type ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
@@ -409,105 +409,144 @@ describe("Responses endpoint", () => {
   it("sends unrestorable continuations without history, like cc-switch", async () => {
     const decoded = (body: Uint8Array) => JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>;
     const withoutPrevious = (body: Uint8Array) => decoded(body).previous_response_id === undefined;
+    const chatReply = "{\"id\":\"chatcmpl_1\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
+    const chatStream = "data: {\"id\":\"chatcmpl_s\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
     const records: DiagnosticRecord[] = [];
     const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) }, {
       nowMs: () => 100, monotonicNowMs: () => 10,
     });
-    const { gw, upstream, history, close } = await responsesGateway({ diagnostics, expectations: [
+    const { gw, upstream, history, database, close } = await responsesGateway({ diagnostics, expectations: [
       { method: "POST", path: "/responses", body: (body) => decoded(body).previous_response_id === "resp_foreign",
         reply: { status: 200, headers: {}, body: text("{\"id\":\"resp_1\",\"output\":[]}") } },
-      { method: "POST", path: "/chat/completions", body: withoutPrevious, times: 4,
-        reply: { status: 200, headers: {}, body: text("{\"id\":\"chatcmpl_1\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}") } },
+      { method: "POST", path: "/chat/completions", body: (body) => withoutPrevious(body) && decoded(body).stream !== true, times: 10,
+        reply: { status: 200, headers: {}, body: text(chatReply) } },
+      { method: "POST", path: "/chat/completions", body: (body) => withoutPrevious(body) && decoded(body).stream === true,
+        reply: { status: 200, headers: { "content-type": "text/event-stream" }, body: text(chatStream) } },
       { method: "POST", path: "/responses", body: withoutPrevious, times: 2,
         reply: { status: 200, headers: {}, body: text("{\"id\":\"resp_2\",\"output\":[]}") } },
     ] });
     try {
       const signal = new AbortController().signal;
-      for (const [responseId, modelId, owner, upstreamProtocol] of [
-        ["resp_foreign", "native", "native", "responses"],
-        ["resp_foreign_chat", "chat", "converted", "chat"],
-      ] as const) {
-        await history.recordReceipt({
-          accountId: "github.com/2",
-          responseId,
-          modelId,
-          upstreamOrigin: upstream.origin,
-          owner,
-          upstreamProtocol,
-          conversionVersion: owner === "native" ? null : "responses-chat-v2",
-          checkpointState: "complete",
-        }, signal);
-      }
-      await history.recordReceipt({
-        accountId: "github.com/1",
-        responseId: "resp_without_checkpoint",
-        modelId: "chat",
+      const receipt = async (
+        accountId: string,
+        responseId: string,
+        modelId: string,
+        checkpointState: "route_only" | "complete" = "complete",
+        owner: "native" | "converted" = "converted",
+      ) => await history.recordReceipt({
+        accountId,
+        responseId,
+        modelId,
         upstreamOrigin: upstream.origin,
-        owner: "converted",
-        upstreamProtocol: "chat",
-        conversionVersion: "responses-chat-v2",
-        checkpointState: "complete",
+        owner,
+        upstreamProtocol: owner === "native" ? "responses" : "chat",
+        conversionVersion: owner === "native" ? null : "responses-chat-v2",
+        checkpointState,
       }, signal);
-      await history.recordCheckpoint({
-        responseId: "resp_tool_turn",
-        output: [{
-          kind: "object",
-          members: [
-            { key: "type", value: "function_call" },
-            { key: "call_id", value: "call_owned" },
-            { key: "name", value: "lookup" },
-            { key: "arguments", value: "{}" },
-          ],
-        }],
-      }, {
+      const call = (callId: string) => ({ kind: "object", members: [
+        { key: "type", value: "function_call" },
+        { key: "call_id", value: callId },
+        { key: "name", value: "lookup" },
+        { key: "arguments", value: "{}" },
+      ] }) as const;
+      const chatOwnership = (modelId: string) => ({
         accountId: "github.com/1",
-        modelId: "dual",
+        modelId,
         upstreamOrigin: upstream.origin,
         owner: "converted",
         upstreamProtocol: "chat",
         conversionVersion: "responses-chat-v2",
-      }, "complete", signal);
+      }) as const;
+      await receipt("github.com/2", "resp_foreign", "native", "complete", "native");
+      await receipt("github.com/2", "resp_foreign_chat", "chat");
+      await receipt("github.com/1", "resp_without_checkpoint", "chat");
+      await receipt("github.com/1", "resp_expired", "chat");
+      database.prepare("UPDATE response_route_receipts SET checkpoint_state = 'expired' WHERE response_id = ?").run("resp_expired");
+      database.prepare(
+        "INSERT INTO responses (response_id, insertion_seq, created_at_ms, expires_at_ms) VALUES (?, ?, ?, ?)",
+      ).run("resp_legacy", 900, nowMs(), nowMs() + 86_400_000);
+      await history.recordCheckpoint({ responseId: "resp_partial", output: [call("call_partial")] },
+        chatOwnership("chat"), "partial", signal);
+      await receipt("github.com/1", "resp_route_only", "chat", "route_only");
+      await history.recordCheckpoint({ responseId: "resp_tool_turn", output: [call("call_owned")] },
+        chatOwnership("dual"), "complete", signal);
 
-      const requests = [
+      const toolTurn = (callId: string) => [
+        { type: "function_call", call_id: callId, name: "lookup", arguments: "{}" },
+        { type: "function_call_output", call_id: callId, output: "ok" },
+      ];
+      const cases: Array<{ readonly body: Record<string, unknown>; readonly echo?: string }> = [
         // Another account's native ID is not restored; like any external native ID it passes through.
-        { model: "native", previous_response_id: "resp_foreign", input: "hi" },
-        { model: "chat", previous_response_id: "resp_foreign_chat", input: "hi" },
-        { model: "chat", previous_response_id: "external_unknown", input: "hi" },
-        { model: "chat", previous_response_id: "resp_without_checkpoint", input: "hi" },
+        { body: { model: "native", previous_response_id: "resp_foreign", input: "hi" } },
+        { body: { model: "chat", previous_response_id: "resp_foreign_chat", input: "hi" } },
+        { body: { model: "chat", previous_response_id: "external_unknown", input: "hi" }, echo: "external_unknown" },
+        { body: { model: "chat", previous_response_id: "resp_without_checkpoint", input: "hi" } },
+        { body: { model: "chat", previous_response_id: "resp_expired", input: "hi" } },
+        { body: { model: "chat", previous_response_id: "resp_legacy", input: "hi" } },
+        { body: { model: "chat", previous_response_id: "resp_partial", input: toolTurn("call_partial") } },
+        { body: { model: "chat", previous_response_id: "resp_route_only", input: toolTurn("call_route") } },
         // A text-only follow-up stays pinned to its converted route but has no tool calls to restore.
-        { model: "dual", previous_response_id: "resp_tool_turn", input: "hi" },
-        {
+        { body: { model: "dual", previous_response_id: "resp_tool_turn", input: "hi" } },
+        { body: { model: "dual", previous_response_id: "resp_tool_turn", input: toolTurn("call_other") } },
+        { body: {
           model: "native",
           previous_response_id: "resp_Z2hjLWdhdGV3YXk6Z2l0aHViX2NvcGlsb3Q7bmF0aXZlO3Jlc3BfdW5rbm93bg==",
           input: "hi",
-        },
-        {
+        } },
+        { body: {
           model: "native",
           previous_response_id: "resp_bGl0ZWxsbTpjdXN0b21fbGxtX3Byb3ZpZGVyOmdpdGh1Yl9jb3BpbG90O21vZGVsX2lkOmNoYXQ7cmVzcG9uc2VfaWQ6b2xk",
           input: "hi",
-        },
+        } },
+        { body: { model: "chat", previous_response_id: "external_stream", input: "hi", stream: true } },
       ];
-      for (const body of requests) {
+      for (const { body, echo } of cases) {
         const response = await gw.fetch(responsesRequest(body));
         expect(response.status).toBe(200);
-        await response.text();
+        const payload = await response.text();
+        if (echo !== undefined) expect((JSON.parse(payload) as { previous_response_id: unknown }).previous_response_id).toBe(echo);
       }
+      database.prepare(
+        "INSERT INTO response_receipt_uncertainty (singleton_id, uncertain_since_ms) VALUES (1, ?)",
+      ).run(nowMs());
+      const uncertain = await gw.fetch(responsesRequest({ model: "chat", previous_response_id: "external_uncertain", input: "hi" }));
+      expect(uncertain.status).toBe(200);
+      await uncertain.text();
+
       expect(upstream.requests.map((entry) => [entry.path, decoded(entry.body).previous_response_id ?? null])).toEqual([
         ["/responses", "resp_foreign"],
-        ["/chat/completions", null],
-        ["/chat/completions", null],
-        ["/chat/completions", null],
-        ["/chat/completions", null],
+        ...Array.from({ length: 9 }, () => ["/chat/completions", null]),
         ["/responses", null],
         ["/responses", null],
+        ["/chat/completions", null],
+        ["/chat/completions", null],
       ]);
       upstream.assertSatisfied();
       await diagnostics.close();
-      expect(records.filter((record) => record.degradations?.includes("continuation.history_omitted"))).toHaveLength(6);
-      expect(JSON.stringify(records)).not.toMatch(/resp_|external_unknown|call_owned/u);
+      expect(records.filter((record) => record.degradations?.includes("continuation.history_omitted"))).toHaveLength(13);
+      expect(JSON.stringify(records)).not.toMatch(/resp_(foreign|without|expired|legacy|partial|route|tool)|external_(unknown|stream|uncertain)|call_(owned|partial|route|other)/u);
     } finally {
       await close();
       await diagnostics.close();
+    }
+  });
+
+  it("fails continuation storage errors instead of sending without history", async () => {
+    const { gw, upstream, close } = await responsesGateway({
+      wrapHistory: (history) => ({
+        resolve: async () => { throw new Error("storage failure"); },
+        enrich: history.enrich.bind(history),
+        recordReceipt: history.recordReceipt.bind(history),
+        recordCheckpoint: history.recordCheckpoint.bind(history),
+      }),
+    });
+    try {
+      const response = await gw.fetch(responsesRequest({ model: "chat", previous_response_id: "resp_any", input: "hi" }));
+      expect(response.status).toBe(500);
+      await response.text();
+      expect(upstream.requests).toEqual([]);
+    } finally {
+      await close();
     }
   });
 
@@ -919,6 +958,7 @@ describe("Responses endpoint", () => {
     readonly runtime?: ReturnType<typeof defaultRuntimeConfigSnapshot>;
     readonly onClose?: () => void;
     readonly diagnostics?: DiagnosticRecorder;
+    readonly wrapHistory?: (history: SqliteResponsesHistory) => ResponsesHistory;
   } = {}) {
     return await withSetupCleanup(async (own) => {
       const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-responses-"));
@@ -973,7 +1013,7 @@ describe("Responses endpoint", () => {
         registry,
         preferences: accounts.preferences,
         copilot: http.backend,
-        history,
+        history: options.wrapHistory?.(history) ?? history,
         nowUnixSeconds: () => 1_700_000_000,
         createUuid: () => "00000000-0000-4000-8000-000000000001",
         ...(options.usageUpdates === undefined
@@ -990,6 +1030,7 @@ describe("Responses endpoint", () => {
         backend: http.backend,
         upstream: http.upstream,
         history,
+        database,
         async close() {
           await closeAll([() => gw.close(), () => registry.close(), () => http.close(), () => closeDatabase(database), () => rm(dir, { recursive: true, force: true })]);
         },

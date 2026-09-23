@@ -17,8 +17,8 @@ import {
 } from "../../src/protocols/openai_responses/history.js";
 import {
   continuationOwnership,
-  dropsUnresolvedPreviousResponseId,
   resolveResponsesContinuation,
+  shouldDropUnresolvedPreviousResponseId,
   validateContinuationTarget,
 } from "../../src/protocols/openai_responses/continuation.js";
 import type { ResponsesContinuationResolution, ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
@@ -1208,6 +1208,12 @@ describe("Responses continuation history", () => {
       checkpointState: "complete",
       expiresAt: 1_700_604_800_000,
     }, "https://api.githubcopilot.com/v1", ["chat"])).toThrow();
+    expect(() => validateContinuationTarget({
+      ...ownership("github.com/1", "gpt", "messages"),
+      responseId: "resp_unknown_capability",
+      checkpointState: "complete",
+      expiresAt: 1_700_604_800_000,
+    }, "https://api.githubcopilot.com/v1", null)).not.toThrow();
   });
 
   it("resolves every unrestorable continuation as unknown instead of failing", async () => {
@@ -1232,11 +1238,12 @@ describe("Responses continuation history", () => {
       { kind: "untracked_blocked" },
       { kind: "owned_by_another_account" },
       new ResponsesContinuationError("checkpoint_unavailable", "unreadable"),
-      new Error("storage failure"),
     ] as const) {
       await expect(resolveResponsesContinuation(resolving(result), "resp_x", "github.com/1", SIGNAL))
         .resolves.toEqual({ kind: "none" });
     }
+    await expect(resolveResponsesContinuation(resolving(new Error("storage failure")), "resp_x", "github.com/1", SIGNAL))
+      .rejects.toMatchObject({ failure: { kind: "continuation_persistence" } });
     await expect(resolveResponsesContinuation(resolving({ kind: "owned", receipt }), "resp_owned", "github.com/1", SIGNAL))
       .resolves.toEqual({ kind: "owned", receipt });
     await expect(resolveResponsesContinuation(resolving(new Error("unused")), undefined, "github.com/1", SIGNAL))
@@ -1250,15 +1257,14 @@ describe("Responses continuation history", () => {
   it("drops only unresolved IDs that the selected upstream cannot use", () => {
     const managed = "resp_Z2hjLWdhdGV3YXk6Z2l0aHViX2NvcGlsb3Q7bmF0aXZlO3Jlc3BfdW5rbm93bg==";
     const none = { kind: "none" } as const;
-    expect(dropsUnresolvedPreviousResponseId(undefined, none, "chat_bridge")).toBe(false);
-    expect(dropsUnresolvedPreviousResponseId("external", none, "chat_bridge")).toBe(true);
-    expect(dropsUnresolvedPreviousResponseId("external", none, "messages_bridge")).toBe(true);
-    expect(dropsUnresolvedPreviousResponseId("external", none, "native_responses")).toBe(false);
-    expect(dropsUnresolvedPreviousResponseId(managed, none, "native_responses")).toBe(true);
-    expect(dropsUnresolvedPreviousResponseId("external", {
+    expect(shouldDropUnresolvedPreviousResponseId(undefined, none, false)).toBe(false);
+    expect(shouldDropUnresolvedPreviousResponseId("external", none, false)).toBe(true);
+    expect(shouldDropUnresolvedPreviousResponseId("external", none, true)).toBe(false);
+    expect(shouldDropUnresolvedPreviousResponseId(managed, none, true)).toBe(true);
+    expect(shouldDropUnresolvedPreviousResponseId("external", {
       kind: "owned",
       receipt: { ...ownership("github.com/1"), responseId: "external", checkpointState: "complete", expiresAt: 1 },
-    }, "chat_bridge")).toBe(false);
+    }, false)).toBe(false);
   });
 
   it("preserves legacy rows as unowned and unusable", async () => {

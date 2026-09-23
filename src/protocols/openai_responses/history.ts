@@ -389,6 +389,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     const originalReasoningByCarrier = new Map<string, WireJsonObject>();
     const originalCarriers = new Set<string>();
     let knownOutputs = 0;
+    let knownCalls = 0;
     for (const item of originalItems) {
       if (isDeclaredReplayItem(item) && !isCallItem(item) && !isReasoningItem(item)) {
         unavailableCheckpoint();
@@ -407,6 +408,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
           unavailableCheckpoint();
         }
         originalCallsById.set(callId, item);
+        if (scoped.byCallId.has(callId)) knownCalls += 1;
       } else if (isReasoningItem(item)) {
         const carrier = reasoningCarrier(item);
         if (carrier !== undefined) {
@@ -417,8 +419,9 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
         }
       }
     }
-    // Without an output for a checkpointed call there is nothing to restore; the caller sends as-is.
-    if (scoped.formatVersion === 2 && knownOutputs === 0) unavailableCheckpoint();
+    // Report "not restored" when no output belongs to a checkpointed call. V2 would otherwise drop
+    // the client's checkpointed calls without reinserting them; v1 restores by field fill only.
+    if (knownOutputs === 0 && (scoped.formatVersion === 2 || knownCalls === 0)) unavailableCheckpoint();
 
     let changed = false;
     let sawOutput = false;
