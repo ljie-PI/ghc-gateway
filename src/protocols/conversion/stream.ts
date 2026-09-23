@@ -37,6 +37,7 @@ export interface StreamConversionContext {
   readonly accumulatorBytes: number;
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
+  readonly previousResponseId?: string | null | undefined;
   readonly degradations?: readonly ConversionDegradationRule[];
   readonly measureEvent?: (<T>(work: () => T) => T) | undefined;
   readonly flushEventMeasurement?: (() => void) | undefined;
@@ -1682,6 +1683,7 @@ class ResponsesEmitter implements StreamEmitter {
         output,
         usage,
         finishReason,
+        this.context.previousResponseId,
       )],
     ]));
   }
@@ -1855,6 +1857,7 @@ function responseSnapshot(
   output: readonly ReturnType<typeof wireObject>[],
   usage: Readonly<SemanticUsage>,
   finishReason?: SemanticResponse["finishReason"],
+  previousResponseId?: string | null,
 ) {
   return wireObject([
     ["id", id],
@@ -1877,7 +1880,7 @@ function responseSnapshot(
     ["tools", wireArray([])],
     ["top_p", null],
     ["max_output_tokens", null],
-    ["previous_response_id", null],
+    ["previous_response_id", previousResponseId ?? null],
     ["reasoning", null],
     ["text", wireObject([])],
     ["truncation", "disabled"],

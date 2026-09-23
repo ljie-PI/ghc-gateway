@@ -23,7 +23,7 @@ describe("fixture family closure", () => {
     const entries = await verifyFixtureManifests();
     const count = (family: string): number => entries.filter((entry) => entry.family === family).length;
 
-    expect(entries).toHaveLength(65);
+    expect(entries).toHaveLength(66);
     for (const entry of entries) {
       expect(entry).not.toHaveProperty("source");
       expect(entry).not.toHaveProperty("owner");
@@ -32,7 +32,7 @@ describe("fixture family closure", () => {
     expect(count("responses-native")).toBe(3);
     expect(count("responses-bridge-stream")).toBe(0);
     expect(count("responses-endpoint")).toBe(3);
-    expect(count("protocol-conversion")).toBe(20);
+    expect(count("protocol-conversion")).toBe(21);
     expect(count("agent-config")).toBe(6);
     expect(entries.some((entry) => entry.caseId.startsWith("gateway-http-host."))).toBe(true);
     expect(entries.some((entry) => entry.caseId.startsWith("gateway-http."))).toBe(false);

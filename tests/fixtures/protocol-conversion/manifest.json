@@ -7,6 +7,13 @@
     "encoder": "shared conversion request codecs"
   },
   {
+    "caseId": "protocol-conversion.request-responses-loose-to-messages",
+    "family": "protocol-conversion",
+    "input": "request/responses-loose-to-messages.input.json",
+    "expected": "request/responses-loose-to-messages.expected.json",
+    "encoder": "shared conversion request codecs"
+  },
+  {
     "caseId": "protocol-conversion.reasoning-max-chat-to-responses",
     "family": "protocol-conversion",
     "input": "request/reasoning-max-chat-to-responses.input.json",

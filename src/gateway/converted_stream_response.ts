@@ -26,6 +26,7 @@ export async function createConvertedStreamResponse(input: {
   readonly model: string;
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
+  readonly previousResponseId?: string | null | undefined;
   readonly headers: HeadersInit;
   readonly performanceObserver?: ProtocolPerformanceObserver | undefined;
   readonly carrier?: Omit<ReasoningCarrierConversionContext, "stream" | "onCreated"> | undefined;
@@ -61,6 +62,7 @@ export async function createConvertedStreamResponse(input: {
       accumulatorBytes: input.scope.config.limits.accumulatorBytes,
       createUuid: input.createUuid,
       nowUnixSeconds: input.nowUnixSeconds,
+      previousResponseId: input.previousResponseId,
       degradations: input.plan.request.degradations,
       measureEvent: performanceObserver === undefined
         ? undefined

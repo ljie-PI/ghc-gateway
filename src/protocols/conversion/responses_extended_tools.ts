@@ -17,6 +17,7 @@ import {
 } from "./compatibility_markers.js";
 import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import type {
+  ConversionDegradationRule,
   ResponsesToolBindingLedger,
   ResponsesToolCallBinding,
   ResponsesToolResultBinding,
@@ -25,27 +26,12 @@ import type {
   SemanticResponseItem,
 } from "./types.js";
 import { invalid, unsupported } from "./wire.js";
+import { isReasoningCarrier } from "./reasoning_carriers.js";
+import { projectKnownObject } from "./request_projection.js";
 
-const EXTENDED_RESPONSES_KEYS = new Set([
-  "model",
-  "instructions",
-  "input",
-  "stream",
-  "stream_options",
-  "max_output_tokens",
-  "max_tokens",
-  "max_completion_tokens",
-  "temperature",
-  "top_p",
-  "tools",
-  "tool_choice",
-  "parallel_tool_calls",
-  "reasoning",
-  "previous_response_id",
-  "store",
-  "background",
-  "n",
-  "metadata",
+const EXTENDED_SENSITIVE_FIELDS = new Set([
+  "allowed_callers", "caller", "container", "defer_loading", "encrypted_content", "output_schema",
+  "previous_response_id", "reasoning_content", "reasoning_details", "reasoning_items", "tool_call_id", "tool_use_id",
 ]);
 
 const CUSTOM_INPUT_SCHEMA = object([
@@ -88,6 +74,8 @@ export interface ResponsesToolCompatibilityProjection {
 }
 
 interface MutableState {
+  readonly degradations: Set<ConversionDegradationRule>;
+  readonly discoveredTools: WeakMap<WireJsonObject, WireJsonArray>;
   readonly bindings: ResponsesToolSourceBinding[];
   readonly bySourceKey: Map<string, ResponsesToolSourceBinding>;
   readonly byChatName: Map<string, ResponsesToolSourceBinding>;
@@ -96,21 +84,32 @@ interface MutableState {
   readonly results: ResponsesToolResultBinding[];
 }
 
-export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedResponsesExtendedTools | undefined {
-  const decoded = decodeResponsesExtendedToolProjection(body);
+export function prepareResponsesExtendedTools(
+  body: WireJsonObject,
+  degradations: Set<ConversionDegradationRule>,
+): PreparedResponsesExtendedTools | undefined {
+  const decoded = decodeResponsesExtendedToolProjection(body, degradations);
   if (decoded === undefined) {
     return undefined;
   }
   const { state, inputValue, transformedChoice, projection } = decoded;
-  assertAllowed(body, EXTENDED_RESPONSES_KEYS, "REQ-R-EXT-TOP");
   if (single(body, "text", "REQ-R-EXT-TEXT") !== undefined || single(body, "response_format", "REQ-R-EXT-FORMAT") !== undefined) {
     unsupported("REQ-R-EXT-FORMAT");
   }
   validateInstructionOrdering(inputValue);
-  const chatMessages = projectExtendedChatMessages(body, state);
   const transformedInput = transformInput(state, inputValue);
+  const transformedBody: WireJsonObject = Object.freeze({
+    kind: "object",
+    members: body.members.map((member) => {
+      if (member.key === "tools") return { key: member.key, value: array(state.tools) };
+      if (member.key === "input") return { key: member.key, value: transformedInput };
+      if (member.key === "tool_choice") return { key: member.key, value: transformedChoice as WireJson };
+      return member;
+    }),
+  });
+  const chatMessages = projectExtendedChatMessages(transformedBody, state);
   const prefixMembers = body.members
-    .filter((member) => member.key === "n" || member.key === "parallel_tool_calls" || member.key === "stream")
+    .filter((member) => member.key === "n" || member.key === "parallel_tool_calls" || member.key === "stop" || member.key === "stream")
     .map((member) => Object.freeze({ key: member.key, value: immutableWire(member.value) }));
   const streamOptions = single(body, "stream_options", "REQ-R-EXT-STREAM-OPTIONS");
   if (streamOptions !== undefined) {
@@ -125,21 +124,7 @@ export function prepareResponsesExtendedTools(body: WireJsonObject): PreparedRes
     chatPrefixMembers: Object.freeze(prefixMembers),
   });
   return {
-    body: Object.freeze({
-      kind: "object",
-      members: body.members.map((member) => {
-        if (member.key === "tools") {
-          return { key: member.key, value: array(state.tools) };
-        }
-        if (member.key === "input") {
-          return { key: member.key, value: transformedInput };
-        }
-        if (member.key === "tool_choice") {
-          return { key: member.key, value: transformedChoice as WireJson };
-        }
-        return member;
-      }),
-    }),
+    body: transformedBody,
     ledger,
     chatTools: projection.chatTools,
   };
@@ -154,6 +139,7 @@ interface DecodedResponsesExtendedToolProjection {
 
 function decodeResponsesExtendedToolProjection(
   body: WireJsonObject,
+  degradations: Set<ConversionDegradationRule>,
 ): DecodedResponsesExtendedToolProjection | undefined {
   const toolsValue = single(body, "tools", "REQ-R-EXT-TOOLS");
   const inputValue = single(body, "input", "REQ-R-EXT-INPUT");
@@ -161,6 +147,8 @@ function decodeResponsesExtendedToolProjection(
     return undefined;
   }
   const state: MutableState = {
+    degradations,
+    discoveredTools: new WeakMap(),
     bindings: [],
     bySourceKey: new Map(),
     byChatName: new Map(),
@@ -169,9 +157,7 @@ function decodeResponsesExtendedToolProjection(
     results: [],
   };
   const tools = requiredArray(toolsValue, "REQ-R-EXT-TOOLS");
-  for (const tool of tools.items) {
-    addDeclaration(state, tool);
-  }
+  for (const tool of tools.items) addDeclaration(state, tool);
   collectDiscoveredDeclarations(state, inputValue);
   const projection: ResponsesToolCompatibilityProjection = Object.freeze({
     chatTools: projectValidatedChatTools(state),
@@ -718,26 +704,23 @@ function hasExtendedSemantics(tools: WireJson | undefined, input: WireJson | und
   });
 }
 
-function addDeclaration(state: MutableState, value: WireJson, namespace?: string): void {
-  const tool = requiredObject(value, "REQ-R-EXT-TOOL");
+function addDeclaration(state: MutableState, value: WireJson, namespace?: string): WireJsonObject {
+  let tool = looseObject(value, "REQ-R-EXT-TOOL");
   const type = requiredString(single(tool, "type", "REQ-R-EXT-TOOL-TYPE"), "REQ-R-EXT-TOOL-TYPE");
   if (type === "function") {
-    addFunction(state, tool, namespace);
-    return;
+    return addFunction(state, tool, namespace);
   }
   if (namespace !== undefined) {
     unsupported("REQ-R-EXT-NAMESPACE-CHILD");
   }
   if (type === "custom") {
-    addCustom(state, tool);
-    return;
+    return addCustom(state, tool);
   }
   if (type === "namespace") {
-    addNamespace(state, tool);
-    return;
+    return addNamespace(state, tool);
   }
   if (type === "tool_search") {
-    assertAllowed(tool, new Set(["type"]), "REQ-R-EXT-SEARCH");
+    tool = projectExtended(state, tool, new Set(["type"]), "REQ-R-EXT-SEARCH");
     addBinding(state, {
       kind: "tool_search",
       chatName: "tool_search",
@@ -749,18 +732,26 @@ function addDeclaration(state: MutableState, value: WireJson, namespace?: string
       ["parameters", TOOL_SEARCH_SCHEMA],
       ["strict", false],
     ]));
-    return;
+    return tool;
   }
   unsupported("REQ-R-EXT-TOOL-TYPE");
 }
 
-function addFunction(state: MutableState, tool: WireJsonObject, namespace?: string): void {
-  assertAllowed(tool, new Set(["type", "function", "name", "description", "parameters", "strict"]), "REQ-R-EXT-FUNCTION");
+function addFunction(state: MutableState, tool: WireJsonObject, namespace?: string): WireJsonObject {
+  tool = projectExtended(
+    state,
+    tool,
+    new Set(["type", "function", "name", "description", "parameters", "strict"]),
+    "REQ-R-EXT-FUNCTION",
+  );
   const nested = single(tool, "function", "REQ-R-EXT-FUNCTION-SHAPE");
-  const shape = nested === undefined ? tool : requiredObject(nested, "REQ-R-EXT-FUNCTION-SHAPE");
-  if (nested !== undefined) {
-    assertAllowed(shape, new Set(["name", "description", "parameters", "strict"]), "REQ-R-EXT-FUNCTION-SHAPE");
-  }
+  const shape = nested === undefined ? tool : projectExtended(
+    state,
+    looseObject(nested, "REQ-R-EXT-FUNCTION-SHAPE"),
+    new Set(["name", "description", "parameters", "strict"]),
+    "REQ-R-EXT-FUNCTION-SHAPE",
+  );
+  if (nested !== undefined) tool = replaceMember(tool, "function", shape);
   const sourceName = toolName(shape, "REQ-R-EXT-FUNCTION-NAME");
   const description = optionalString(single(shape, "description", "REQ-R-EXT-FUNCTION-DESCRIPTION"), "REQ-R-EXT-FUNCTION-DESCRIPTION");
   const parametersValue = single(shape, "parameters", "REQ-R-EXT-FUNCTION-SCHEMA");
@@ -788,19 +779,25 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
     ["parameters", parameters],
     ...(projectedStrict === undefined ? [] : [["strict", projectedStrict] as const]),
   ]));
+  return tool;
 }
 
-function addCustom(state: MutableState, tool: WireJsonObject): void {
-  assertAllowed(tool, new Set(["type", "name", "description", "format"]), "REQ-R-EXT-CUSTOM");
+function addCustom(state: MutableState, tool: WireJsonObject): WireJsonObject {
+  tool = projectExtended(state, tool, new Set(["type", "name", "description", "format"]), "REQ-R-EXT-CUSTOM");
   const name = toolName(tool, "REQ-R-EXT-CUSTOM-NAME");
   optionalString(single(tool, "description", "REQ-R-EXT-CUSTOM-DESCRIPTION"), "REQ-R-EXT-CUSTOM-DESCRIPTION");
   const format = single(tool, "format", "REQ-R-EXT-CUSTOM-FORMAT");
   if (format !== undefined) {
-    const objectValue = requiredObject(format, "REQ-R-EXT-CUSTOM-FORMAT");
-    assertAllowed(objectValue, new Set(["type"]), "REQ-R-EXT-CUSTOM-FORMAT");
+    const objectValue = projectExtended(
+      state,
+      looseObject(format, "REQ-R-EXT-CUSTOM-FORMAT"),
+      new Set(["type"]),
+      "REQ-R-EXT-CUSTOM-FORMAT",
+    );
     if (single(objectValue, "type", "REQ-R-EXT-CUSTOM-FORMAT-TYPE") !== "text") {
       unsupported("REQ-R-EXT-CUSTOM-FORMAT-TYPE");
     }
+    tool = replaceMember(tool, "format", objectValue);
   }
   addBinding(state, { kind: "custom", chatName: name, sourceName: name }, object([
     ["type", "function"],
@@ -809,10 +806,16 @@ function addCustom(state: MutableState, tool: WireJsonObject): void {
     ["parameters", CUSTOM_INPUT_SCHEMA],
     ["strict", false],
   ]));
+  return tool;
 }
 
-function addNamespace(state: MutableState, tool: WireJsonObject): void {
-  assertAllowed(tool, new Set(["type", "name", "description", "tools", "children"]), "REQ-R-EXT-NAMESPACE");
+function addNamespace(state: MutableState, tool: WireJsonObject): WireJsonObject {
+  tool = projectExtended(
+    state,
+    tool,
+    new Set(["type", "name", "description", "tools", "children"]),
+    "REQ-R-EXT-NAMESPACE",
+  );
   const namespace = toolName(tool, "REQ-R-EXT-NAMESPACE-NAME");
   optionalString(single(tool, "description", "REQ-R-EXT-NAMESPACE-DESCRIPTION"), "REQ-R-EXT-NAMESPACE-DESCRIPTION");
   const tools = single(tool, "tools", "REQ-R-EXT-NAMESPACE-TOOLS");
@@ -824,9 +827,8 @@ function addNamespace(state: MutableState, tool: WireJsonObject): void {
   if (values.items.length === 0) {
     invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
   }
-  for (const child of values.items) {
-    addDeclaration(state, child, namespace);
-  }
+  const sanitized = values.items.map((child) => addDeclaration(state, child, namespace));
+  return replaceMember(tool, tools === undefined ? "children" : "tools", array(sanitized));
 }
 
 function addBinding(state: MutableState, binding: ResponsesToolSourceBinding, tool: WireJsonObject): void {
@@ -848,11 +850,14 @@ function collectDiscoveredDeclarations(state: MutableState, input: WireJson | un
     if (!isWireJsonObject(item) || single(item, "type", "REQ-R-EXT-DISCOVERED-TYPE") !== "tool_search_output") {
       continue;
     }
-    assertAllowed(item, new Set(["type", "id", "call_id", "output", "status", "tools"]), "REQ-R-EXT-SEARCH-OUTPUT");
-    const tools = requiredArray(single(item, "tools", "REQ-R-EXT-SEARCH-OUTPUT-TOOLS"), "REQ-R-EXT-SEARCH-OUTPUT-TOOLS");
-    for (const tool of tools.items) {
-      addDeclaration(state, tool);
-    }
+    const projected = projectExtended(
+      state,
+      item,
+      new Set(["type", "id", "call_id", "output", "status", "tools"]),
+      "REQ-R-EXT-SEARCH-OUTPUT",
+    );
+    const tools = requiredArray(single(projected, "tools", "REQ-R-EXT-SEARCH-OUTPUT-TOOLS"), "REQ-R-EXT-SEARCH-OUTPUT-TOOLS");
+    state.discoveredTools.set(item, array(tools.items.map((tool) => addDeclaration(state, tool))));
   }
 }
 
@@ -863,46 +868,54 @@ function transformInput(state: MutableState, input: WireJson | undefined): WireJ
   const calls = new Map<string, ResponsesToolSourceBinding>();
   const results = new Set<string>();
   const output: WireJson[] = [];
-  for (const value of input.items) {
+  for (const inputValue of input.items) {
+    let value = inputValue;
     if (!isWireJsonObject(value)) {
       output.push(value);
       continue;
     }
     const type = single(value, "type", "REQ-R-EXT-ITEM-TYPE");
     if (type === "custom_tool_call") {
-      assertAllowed(value, new Set(["type", "id", "call_id", "name", "input", "status"]), "REQ-R-EXT-CUSTOM-CALL");
+      value = projectExtended(state, value, new Set(["type", "id", "call_id", "name", "input", "status"]), "REQ-R-EXT-CUSTOM-CALL");
       const binding = requiredBinding(state, undefined, requiredString(single(value, "name", "REQ-R-EXT-CUSTOM-CALL-NAME"), "REQ-R-EXT-CUSTOM-CALL-NAME"), "custom");
       const callId = registerCall(calls, value, binding);
       const rawInput = requiredString(single(value, "input", "REQ-R-EXT-CUSTOM-CALL-INPUT"), "REQ-R-EXT-CUSTOM-CALL-INPUT", true);
-      state.calls.push(callBinding(value, callId, binding, { rawCustomInput: rawInput }));
+      const itemId = optionalItemId(state, value);
+      const status = requestCallStatus(state, single(value, "status", "REQ-R-EXT-CALL-STATUS"));
+      state.calls.push(callBinding(callId, binding, itemId, status, { rawCustomInput: rawInput }));
       output.push(object([
         ["type", "function_call"],
-        ...optionalCopied(value, ["id"]),
+        ...(itemId === undefined ? [] : [["id", itemId] as const]),
         ["call_id", callId],
         ["name", binding.chatName],
         ["arguments", canonicalString(object([["input", rawInput]]))],
-        ...optionalCopied(value, ["status"]),
+        ...(status === undefined ? [] : [["status", status] as const]),
       ]));
       continue;
     }
     if (type === "tool_search_call") {
-      assertAllowed(value, new Set(["type", "id", "call_id", "arguments", "status", "execution"]), "REQ-R-EXT-SEARCH-CALL");
+      value = projectExtended(state, value, new Set(["type", "id", "call_id", "arguments", "status", "execution"]), "REQ-R-EXT-SEARCH-CALL");
+      const execution = single(value, "execution", "REQ-R-EXT-SEARCH-CALL-EXECUTION");
+      if (execution !== undefined && execution !== "client") invalid("REQ-R-EXT-SEARCH-CALL-EXECUTION");
+      if (execution !== undefined) state.degradations.add("request.option_omitted");
       const binding = requiredBinding(state, undefined, "tool_search", "tool_search");
       const callId = registerCall(calls, value, binding);
       const argumentsValue = requiredObject(single(value, "arguments", "REQ-R-EXT-SEARCH-CALL-ARGS"), "REQ-R-EXT-SEARCH-CALL-ARGS");
-      state.calls.push(callBinding(value, callId, binding, { toolSearchArguments: immutableWire(argumentsValue) as WireJsonObject }));
+      const itemId = optionalItemId(state, value);
+      const status = requestCallStatus(state, single(value, "status", "REQ-R-EXT-CALL-STATUS"));
+      state.calls.push(callBinding(callId, binding, itemId, status, { toolSearchArguments: immutableWire(argumentsValue) as WireJsonObject }));
       output.push(object([
         ["type", "function_call"],
-        ...optionalCopied(value, ["id"]),
+        ...(itemId === undefined ? [] : [["id", itemId] as const]),
         ["call_id", callId],
         ["name", binding.chatName],
         ["arguments", canonicalString(argumentsValue)],
-        ...optionalCopied(value, ["status"]),
+        ...(status === undefined ? [] : [["status", status] as const]),
       ]));
       continue;
     }
     if (type === "function_call") {
-      assertAllowed(value, new Set(["type", "id", "call_id", "name", "namespace", "arguments", "status"]), "REQ-R-EXT-FUNCTION-CALL");
+      value = projectExtended(state, value, new Set(["type", "id", "call_id", "name", "namespace", "arguments", "status"]), "REQ-R-EXT-FUNCTION-CALL");
       const name = requiredString(single(value, "name", "REQ-R-EXT-FUNCTION-CALL-NAME"), "REQ-R-EXT-FUNCTION-CALL-NAME");
       const namespace = optionalString(single(value, "namespace", "REQ-R-EXT-FUNCTION-CALL-NS"), "REQ-R-EXT-FUNCTION-CALL-NS");
       const binding = requiredBinding(state, namespace, name);
@@ -912,14 +925,16 @@ function transformInput(state: MutableState, input: WireJson | undefined): WireJ
       const callId = registerCall(calls, value, binding);
       const argumentsText = requiredString(single(value, "arguments", "REQ-R-EXT-FUNCTION-CALL-ARGS"), "REQ-R-EXT-FUNCTION-CALL-ARGS", true);
       const parsedArguments = parseArguments(argumentsText, "REQ-R-EXT-FUNCTION-CALL-ARGS");
-      state.calls.push(callBinding(value, callId, binding));
+      const itemId = optionalItemId(state, value);
+      const status = requestCallStatus(state, single(value, "status", "REQ-R-EXT-CALL-STATUS"));
+      state.calls.push(callBinding(callId, binding, itemId, status));
       output.push(object([
         ["type", "function_call"],
-        ...optionalCopied(value, ["id"]),
+        ...(itemId === undefined ? [] : [["id", itemId] as const]),
         ["call_id", callId],
         ["name", binding.chatName],
         ["arguments", canonicalString(parsedArguments)],
-        ...optionalCopied(value, ["status"]),
+        ...(status === undefined ? [] : [["status", status] as const]),
       ]));
       continue;
     }
@@ -927,7 +942,7 @@ function transformInput(state: MutableState, input: WireJson | undefined): WireJ
       const allowed = type === "function_call_output"
         ? new Set(["type", "id", "call_id", "output", "status"])
         : new Set(["type", "id", "call_id", "output", "status", "tools"]);
-      assertAllowed(value, allowed, "REQ-R-EXT-RESULT");
+      value = projectExtended(state, value, allowed, "REQ-R-EXT-RESULT");
       const callId = requiredString(single(value, "call_id", "REQ-R-EXT-RESULT-ID"), "REQ-R-EXT-RESULT-ID");
       const binding = calls.get(callId);
       if (binding === undefined || results.has(callId)) {
@@ -946,20 +961,26 @@ function transformInput(state: MutableState, input: WireJson | undefined): WireJ
       if (containsMedia(resultValue)) {
         unsupported("REQ-R-EXT-RESULT-MEDIA");
       }
-      const status = requestResultStatus(single(value, "status", "REQ-R-EXT-RESULT-STATUS"));
+      const status = requestResultStatus(state, single(value, "status", "REQ-R-EXT-RESULT-STATUS"));
+      const itemId = optionalItemId(state, value);
+      const discoveredTools = type === "tool_search_output" && isWireJsonObject(inputValue)
+        ? state.discoveredTools.get(inputValue)
+        : undefined;
+      if (discoveredTools !== undefined) value = replaceMember(value, "tools", discoveredTools);
+      const sanitized = presentationFields(value, itemId, status);
       state.results.push(Object.freeze({
         kind: binding.kind,
         callId,
-        ...optionalItemId(value),
+        ...(itemId === undefined ? {} : { itemId }),
         ...(status === undefined ? {} : { status }),
       }));
       results.add(callId);
       output.push(object([
         ["type", "function_call_output"],
-        ...optionalCopied(value, ["id"]),
+        ...(itemId === undefined ? [] : [["id", itemId] as const]),
         ["call_id", callId],
-        ["output", type === "function_call_output" ? canonicalResult(resultValue) : canonicalString(value)],
-        ...optionalCopied(value, ["status"]),
+        ["output", type === "function_call_output" ? canonicalResult(resultValue) : canonicalString(sanitized)],
+        ...(status === undefined ? [] : [["status", status] as const]),
       ]));
       continue;
     }
@@ -985,8 +1006,12 @@ function transformToolChoice(state: MutableState, value: WireJson | undefined): 
   if (value === undefined || typeof value === "string") {
     return value;
   }
-  const choice = requiredObject(value, "REQ-R-EXT-CHOICE");
-  assertAllowed(choice, new Set(["type", "name", "namespace"]), "REQ-R-EXT-CHOICE");
+  const choice = projectExtended(
+    state,
+    looseObject(value, "REQ-R-EXT-CHOICE"),
+    new Set(["type", "name", "namespace"]),
+    "REQ-R-EXT-CHOICE",
+  );
   const type = requiredString(single(choice, "type", "REQ-R-EXT-CHOICE-TYPE"), "REQ-R-EXT-CHOICE-TYPE");
   if (type !== "function" && type !== "custom" && type !== "tool_search") {
     invalid("REQ-R-EXT-CHOICE-TYPE");
@@ -1108,38 +1133,78 @@ function toolName(value: WireJsonObject, ruleId: string): string {
 }
 
 function callBinding(
-  value: WireJsonObject,
   callId: string,
   binding: ResponsesToolSourceBinding,
+  itemId: string | undefined,
+  status: ResponsesToolCallBinding["status"],
   extended: Pick<ResponsesToolCallBinding, "rawCustomInput" | "toolSearchArguments"> = {},
 ): ResponsesToolCallBinding {
-  const status = requestCallStatus(single(value, "status", "REQ-R-EXT-CALL-STATUS"));
   return Object.freeze({
     ...binding,
     callId,
-    ...optionalItemId(value),
+    ...(itemId === undefined ? {} : { itemId }),
     ...(status === undefined ? {} : { status }),
     ...extended,
   });
 }
 
-function optionalItemId(value: WireJsonObject): { readonly itemId?: string } {
-  const itemId = optionalString(single(value, "id", "REQ-R-EXT-ITEM-ID"), "REQ-R-EXT-ITEM-ID");
-  return itemId === undefined ? {} : { itemId };
+function optionalItemId(
+  state: Pick<MutableState, "degradations">,
+  value: WireJsonObject,
+): string | undefined {
+  const itemId = single(value, "id", "REQ-R-EXT-ITEM-ID");
+  if (itemId === undefined) return undefined;
+  if (containsReasoningCarrier(itemId)) invalid("REQ-R-EXT-ITEM-ID");
+  state.degradations.add("request.option_omitted");
+  return typeof itemId === "string" && itemId.length > 0 ? itemId : undefined;
 }
 
-function requestCallStatus(value: WireJson | undefined): ResponsesToolCallBinding["status"] {
+function requestCallStatus(
+  state: Pick<MutableState, "degradations">,
+  value: WireJson | undefined,
+): ResponsesToolCallBinding["status"] {
+  if (value !== undefined && containsReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
   if (value === undefined || value === "completed" || value === "incomplete" || value === "in_progress") {
+    if (value !== undefined) state.degradations.add("request.option_omitted");
     return value;
   }
-  invalid("REQ-R-EXT-STATUS");
+  state.degradations.add("request.option_omitted");
+  return undefined;
 }
 
-function requestResultStatus(value: WireJson | undefined): ResponsesToolResultBinding["status"] {
+function requestResultStatus(
+  state: Pick<MutableState, "degradations">,
+  value: WireJson | undefined,
+): ResponsesToolResultBinding["status"] {
+  if (value !== undefined && containsReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
   if (value === undefined || value === "completed" || value === "incomplete" || value === "in_progress" || value === "failed") {
+    if (value !== undefined) state.degradations.add("request.option_omitted");
     return value;
   }
-  invalid("REQ-R-EXT-STATUS");
+  state.degradations.add("request.option_omitted");
+  return undefined;
+}
+
+function presentationFields(
+  value: WireJsonObject,
+  itemId: string | undefined,
+  status: ResponsesToolResultBinding["status"],
+): WireJsonObject {
+  return {
+    kind: "object",
+    members: value.members.flatMap((member) => {
+      if (member.key === "id") return itemId === undefined ? [] : [{ key: member.key, value: itemId }];
+      if (member.key === "status") return status === undefined ? [] : [{ key: member.key, value: status }];
+      return [member];
+    }),
+  };
+}
+
+function replaceMember(objectValue: WireJsonObject, key: string, value: WireJson): WireJsonObject {
+  return {
+    kind: "object",
+    members: objectValue.members.map((member) => member.key === key ? { key, value } : member),
+  };
 }
 
 function parseArguments(value: string, ruleId: string): WireJsonObject {
@@ -1191,6 +1256,34 @@ function assertAllowed(value: WireJsonObject, allowed: ReadonlySet<string>, rule
   if (value.members.some((member) => !allowed.has(member.key))) {
     unsupported(ruleId);
   }
+}
+
+function projectExtended(
+  state: Pick<MutableState, "degradations">,
+  value: WireJsonObject,
+  allowed: ReadonlySet<string>,
+  ruleId: string,
+): WireJsonObject {
+  return projectKnownObject(value, {
+    knownKeys: allowed,
+    sensitiveKeys: EXTENDED_SENSITIVE_FIELDS,
+    omittedValueIsUnsafe: containsReasoningCarrier,
+    ruleId,
+    omission: "responses.extensions_omitted",
+    degradations: state.degradations,
+  });
+}
+
+function containsReasoningCarrier(value: WireJson): boolean {
+  if (typeof value === "string") return isReasoningCarrier(value);
+  if (isWireJsonArray(value)) return value.items.some(containsReasoningCarrier);
+  if (isWireJsonObject(value)) return value.members.some((member) => containsReasoningCarrier(member.value));
+  return false;
+}
+
+function looseObject(value: WireJson | undefined, ruleId: string): WireJsonObject {
+  if (!isWireJsonObject(value)) invalid(ruleId);
+  return value;
 }
 
 function single(value: WireJsonObject, key: string, ruleId: string): WireJson | undefined {

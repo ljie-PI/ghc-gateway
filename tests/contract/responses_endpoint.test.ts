@@ -353,6 +353,8 @@ describe("Responses endpoint", () => {
         input: { type: "function_call_output", call_id: "call_owned", output: "ok" },
       }));
       expect(response.status).toBe(200);
+      const converted = await response.json() as { previous_response_id: string | null };
+      expect(converted.previous_response_id).toBe("resp_converted");
       expect(upstream.requests.map((entry) => [entry.path, JSON.parse(new TextDecoder().decode(entry.body)).stream === true])).toEqual([["/chat/completions", false]]);
       const forwarded = new TextDecoder().decode(upstream.requests[0]?.body);
       expect(forwarded).not.toContain("previous_response_id");
@@ -420,6 +422,30 @@ describe("Responses endpoint", () => {
         await response.text();
       }
       expect(upstream.requests).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("does not let pending duplicate-extension validation mask continuation or upstream failures", async () => {
+    const { gw, upstream, close } = await responsesGateway({ expectations: [{
+      method: "POST", path: "/chat/completions", body: jsonStream(false),
+      reply: { status: 429, headers: { "retry-after": "120" }, body: text("{}") },
+    }] });
+    try {
+      const continuation = await gw.fetch(rawResponsesRequest(
+        "{\"model\":\"chat\",\"previous_response_id\":\"external_unknown\",\"input\":\"hi\",\"extension\":1,\"extension\":2}",
+      ));
+      expect(continuation.status).toBe(409);
+      await continuation.text();
+      expect(upstream.requests).toEqual([]);
+
+      const rejected = await gw.fetch(rawResponsesRequest(
+        "{\"model\":\"chat\",\"input\":\"hi\",\"extension\":1,\"extension\":2}",
+      ));
+      expect(rejected.status).toBe(429);
+      expect(rejected.headers.get("retry-after")).toBe("120");
+      expect(upstream.requests).toHaveLength(1);
     } finally {
       await close();
     }
@@ -906,6 +932,14 @@ describe("Responses endpoint", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
       ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  function rawResponsesRequest(body: string): Request {
+    return new Request("http://127.0.0.1:31400/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
     });
   }
 

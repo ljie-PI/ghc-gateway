@@ -88,6 +88,10 @@ All routes share the loopback listener:
 
 The gateway selects one compatible native or converted upstream protocol for each request. It does not probe paid inference routes or retry a rejected request through a different protocol.
 
+Converted Chat and Responses requests project recognized portable fields and omit unknown ordinary extensions without recording their names or values. Malformed presentation-only options such as stream options, metadata, item IDs/status, text annotations, and reasoning-summary presentation may also be omitted. Core prompt structure, model identity, token/sampling/output constraints, reasoning carriers, tool declarations and controls, call/result ownership, and continuation identity remain fail closed. Unsupported file/audio input and hosted tools are rejected rather than discarded. A valid conversion to Messages that starts with assistant or tool history receives one fixed `(continuing the conversation)` user turn; ordinary user-first requests are unchanged.
+
+An external `previous_response_id` is forwarded only on a native Responses route. Gateway-owned converted continuations are materialized from Responses History, pinned to their owning Chat or Messages route, removed from the upstream converted request, and echoed in the converted Responses body and response-bearing SSE snapshots. First-turn converted Responses use `null`.
+
 Native same-protocol requests forward safe unrecognized end-to-end request headers, including duplicate values in their received order. Gateway-owned identity, credentials, protocol, framing, hop-by-hop, forwarding, browser-security, tracing, and private gateway headers are removed or replaced. Converted requests do not forward arbitrary client headers, and cross-origin upstream redirects drop all forwarded client headers. Inference requests with more than 128 header fields or more than 16 KiB of aggregate UTF-8 header names and values are rejected.
 
 Converted Chat and Responses output keeps visible reasoning separate from answer text. Chat uses

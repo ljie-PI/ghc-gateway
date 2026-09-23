@@ -437,6 +437,7 @@ describe("protocol conversion matrix", () => {
         stop: ["END"],
       }));
       expect(response.status).toBe(200);
+      await response.text();
       expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/v1/messages", false]]);
       expect(JSON.parse(decoder.decode(harness.messagesBodies[0]))).toMatchObject({
         model: "responses-messages",
@@ -493,7 +494,7 @@ describe("protocol conversion matrix", () => {
         { type: "custom", name: "render", format: { type: "text" } },
         { type: "function", name: "bad", parameters: [], unknown: true },
       ],
-    }, 422],
+    }, 400],
     [{
       tools: [{
         type: "namespace",
@@ -506,7 +507,7 @@ describe("protocol conversion matrix", () => {
           unknown_constraint: true,
         }],
       }],
-    }, 422],
+    }, 400],
     [{
       tools: [{ type: "custom", name: "render", format: { type: "text" } }],
       parallel_tool_calls: "bad",
@@ -672,6 +673,7 @@ describe("protocol conversion matrix", () => {
         ],
       }));
       expect(response.status).toBe(200);
+      await response.text();
       const request = JSON.parse(decoder.decode(harness.chatBodies[0])) as {
         tools: Array<{ function: { name: string; strict?: boolean } }>;
       };
@@ -1006,7 +1008,6 @@ describe("protocol conversion matrix", () => {
   );
 
   it.each([
-    ["/v1/chat/completions", "{\"model\":\"responses-messages\",\"messages\":[],\"unknown\":null}", 422],
     ["/v1/chat/completions", "{\"model\":\"native-responses\",\"messages\":[],\"n\":2}", 422],
     ["/v1/messages", "{\"model\":\"native-responses\",\"max_tokens\":8,\"messages\":[],\"stop_sequences\":[\"x\"]}", 400],
     ["/v1/responses", "{\"model\":\"native-messages\",\"input\":\"hi\",\"background\":true}", 422],
@@ -1018,6 +1019,22 @@ describe("protocol conversion matrix", () => {
       expect(response.status).toBe(status);
       await response.text();
       expect(harness.upstream.requests).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("omits an ordinary converted Chat extension while keeping native projection separate", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(rawRequest(
+        "/v1/chat/completions",
+        "{\"model\":\"responses-messages\",\"messages\":[],\"unknown\":null}",
+      ));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(decoder.decode(harness.upstream.requests[0]?.body)).not.toContain("unknown");
     } finally {
       await harness.close();
     }
@@ -1096,7 +1113,7 @@ describe("protocol conversion matrix", () => {
         conversionVersion: "responses-messages-v1",
       }, "complete", new AbortController().signal);
 
-      const rejected = await harness.gw.fetch(jsonRequest("/v1/responses", {
+      const resultOnly = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "dual-messages",
         previous_response_id: "resp_messages_owned",
         input: [{
@@ -1105,9 +1122,16 @@ describe("protocol conversion matrix", () => {
           output: "result",
         }],
       }));
-      expect(rejected.status).not.toBe(200);
-      await rejected.text();
-      expect(harness.upstream.requests).toEqual([]);
+      expect(resultOnly.status).toBe(200);
+      expect((await resultOnly.json() as { previous_response_id: string | null }).previous_response_id)
+        .toBe("resp_messages_owned");
+      const resultOnlyBody = JSON.parse(decoder.decode(harness.messagesBodies[0])) as {
+        messages: Array<Record<string, unknown>>;
+      };
+      expect(resultOnlyBody.messages[0]).toEqual({
+        role: "user",
+        content: [{ type: "text", text: "(continuing the conversation)" }],
+      });
 
       for (const content of ["", [], [{ type: "input_text", text: "" }]]) {
         const emptyContext = await harness.gw.fetch(jsonRequest("/v1/responses", {
@@ -1122,10 +1146,9 @@ describe("protocol conversion matrix", () => {
             },
           ],
         }));
-        expect(emptyContext.status).not.toBe(200);
+        expect(emptyContext.status).toBe(200);
         await emptyContext.text();
       }
-      expect(harness.upstream.requests).toEqual([]);
 
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
         model: "dual-messages",
@@ -1144,8 +1167,13 @@ describe("protocol conversion matrix", () => {
         ],
       }));
       expect(response.status).toBe(200);
-      expect(harness.upstream.requests.map((entry) => [entry.path, JSON.parse(decoder.decode(entry.body)).stream === true])).toEqual([["/v1/messages", false]]);
-      const forwarded = decoder.decode(harness.messagesBodies[0]);
+      expect((await response.json() as { previous_response_id: string | null }).previous_response_id)
+        .toBe("resp_messages_owned");
+      expect(harness.upstream.requests).toHaveLength(5);
+      expect(harness.upstream.requests.every((entry) => (
+        entry.path === "/v1/messages" && JSON.parse(decoder.decode(entry.body)).stream !== true
+      ))).toBe(true);
+      const forwarded = decoder.decode(harness.messagesBodies.at(-1));
       expect(forwarded).not.toContain("previous_response_id");
       expect(forwarded).toContain("call_owned");
       expect(forwarded).toContain("original task");

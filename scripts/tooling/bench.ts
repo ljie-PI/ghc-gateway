@@ -38,6 +38,9 @@ import {
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
 import { nearestRankP95, THRESHOLDS } from "../../src/telemetry/performance.js";
+import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
+import { isWireJsonObject, parseWireJson, type WireJsonObject } from "../../src/serialization/wire_json.js";
+import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { assertNode24 } from "./node_version.js";
 import type { PerformanceMeasurement, ProtocolPerformanceObserver } from "../../src/telemetry/runtime.js";
 import {
@@ -62,6 +65,7 @@ const DEFAULT_EVENT_SAMPLES = 600;
 const DEFAULT_CHECKPOINT_STREAMS = 30;
 const MEMORY_WARMUP_STREAMS = 1_000;
 const LATENCY_WARMUP_REQUESTS = 20;
+const PROJECTION_SAMPLES = 600;
 const STABLE_SAMPLE_COUNT = 3;
 const STABLE_SAMPLE_INTERVAL_MS = 50;
 const encoder = new TextEncoder();
@@ -150,6 +154,11 @@ export interface BenchmarkArtifact {
   readonly requiredRepeat: number;
   readonly runs: readonly BenchmarkRunResult[];
   readonly passed: boolean;
+}
+
+export interface ProjectionBenchmarkResult extends LatencyMetricResult {
+  readonly kind: "request-projection";
+  readonly itemCount: number;
 }
 
 interface IdleWorkerResult {
@@ -492,6 +501,71 @@ export function benchmarkCliSummary(artifactPath: string, artifact: Readonly<Ben
       eventLoopP95Ms: run.eventLoop.p95Ms,
       passed: run.passed,
     })),
+  };
+}
+
+export function runRequestProjectionBenchmark(sampleCount = PROJECTION_SAMPLES): ProjectionBenchmarkResult {
+  const request = projectionRequest(200);
+  for (let index = 0; index < LATENCY_WARMUP_REQUESTS; index += 1) projectRequest(request);
+  const values: number[] = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    const started = performance.now();
+    projectRequest(request);
+    values.push(elapsedMs(started));
+  }
+  return {
+    kind: "request-projection",
+    itemCount: 400,
+    ...latencyResult(values, THRESHOLDS.bufferedMs, LATENCY_WARMUP_REQUESTS),
+  };
+}
+
+function projectRequest(request: WireJsonObject): void {
+  const converted = prepareConvertedRequest("responses", "chat", request, "target", projectionCapability());
+  if (!converted.degradations.includes("responses.extensions_omitted")) {
+    throw new Error("projection benchmark did not exercise loose projection");
+  }
+}
+
+function projectionRequest(rounds: number): WireJsonObject {
+  const input = Array.from({ length: rounds }, (_, index) => [
+    { type: "function_call", call_id: `call_${index}`, name: "lookup", arguments: "{}" },
+    { type: "function_call_output", call_id: `call_${index}`, output: "ok" },
+  ]).flat();
+  const bytes = encoder.encode(JSON.stringify({
+    model: "source",
+    extension: true,
+    input,
+    tools: [{ type: "function", name: "lookup", parameters: {}, strict: false }],
+  }));
+  const parsed = parseWireJson(bytes, { maxBytes: bytes.byteLength, maxDepth: 64 });
+  if (!isWireJsonObject(parsed)) throw new Error("projection benchmark request must be an object");
+  return parsed;
+}
+
+function projectionCapability(): EffectiveModelCapabilitySnapshot {
+  return {
+    accountId: "github.com/1", modelId: "target", name: "target", vendor: "test",
+    protocols: { value: ["chat"], source: "live", conflict: false, liveState: "value" },
+    maxInputTokens: { value: 128_000, source: "live", conflict: false, liveState: "value" },
+    maxOutputTokens: { value: 16_384, source: "live", conflict: false, liveState: "value" },
+    defaultOutputTokens: {
+      configuration: { value: 4_096, source: "live", conflict: false, liveState: "value" },
+      effective: 4_096, source: "live", valid: true,
+    },
+    capabilities: {
+      contextWindowTokens: 128_000, maxContextWindowTokens: 128_000,
+      reasoningLevels: [], reasoningProtocols: [], inputModalities: ["text", "image"],
+      toolCalling: true, parallelToolCalling: true, reasoningSummaries: false,
+      verbosity: false, search: false,
+    },
+    profile: {
+      chatOutputTokenField: { value: "max_tokens", source: "live", conflict: false, liveState: "value" },
+      supportedParameters: { value: [], source: "live", conflict: false, liveState: "value" },
+      reasoningEfforts: { value: [], source: "live", conflict: false, liveState: "value" },
+      unrecognizedReasoningEfforts: { value: [], source: "live", conflict: false, liveState: "value" },
+    },
+    revision: { credentialGeneration: 0, catalogGeneration: 1, builtinRevision: null },
   };
 }
 
@@ -1209,7 +1283,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parseArgs(argv: readonly string[]): { readonly command: "full" | "worker"; readonly repeat: number } {
+function parseArgs(argv: readonly string[]): { readonly command: "full" | "projection" | "worker"; readonly repeat: number } {
   const [rawCommand = "full", ...rest] = argv;
   if (rawCommand === "__worker") {
     const run = Number.parseInt(rest[0] ?? "", 10);
@@ -1218,8 +1292,9 @@ function parseArgs(argv: readonly string[]): { readonly command: "full" | "worke
     }
     return { command: "worker", repeat: run };
   }
+  if (rawCommand === "projection") return { command: "projection", repeat: 1 };
   if (rawCommand !== "full" && rawCommand !== "baseline") {
-    throw new Error("usage: bench [full] [--repeat <positive integer>]");
+    throw new Error("usage: bench [full|projection] [--repeat <positive integer>]");
   }
   const repeatIndex = rest.indexOf("--repeat");
   const repeat = repeatIndex === -1
@@ -1237,6 +1312,12 @@ async function main(): Promise<void> {
   if (parsed.command === "worker") {
     const result = await runBenchmarkIteration(parsed.repeat);
     process.stdout.write(JSON.stringify(result));
+    return;
+  }
+  if (parsed.command === "projection") {
+    const result = runRequestProjectionBenchmark();
+    console.log(JSON.stringify(result));
+    if (!result.passed) process.exitCode = 1;
     return;
   }
   const artifact = await runFullBenchmark(parsed.repeat);

@@ -37,6 +37,7 @@ export interface BufferedConversionContext {
   readonly maxBytes: number;
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
+  readonly previousResponseId?: string | null | undefined;
   readonly degradations?: readonly ConversionDegradationRule[];
   readonly carrier?: ReasoningCarrierConversionContext | undefined;
 }
@@ -54,6 +55,7 @@ export interface PlannedBufferedConversionContext {
   readonly maxBytes: number;
   readonly createUuid: () => string;
   readonly nowUnixSeconds: () => number;
+  readonly previousResponseId?: string | null | undefined;
   readonly carrier?: ReasoningCarrierConversionContext | undefined;
 }
 
@@ -769,7 +771,7 @@ function responsesEnvelope(
     ["tools", wireArray([])],
     ["top_p", null],
     ["max_output_tokens", null],
-    ["previous_response_id", null],
+    ["previous_response_id", context.previousResponseId ?? null],
     ["reasoning", null],
     ["text", wireObject([])],
     ["truncation", "disabled"],

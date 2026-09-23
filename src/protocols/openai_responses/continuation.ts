@@ -102,6 +102,25 @@ export function validateExternalContinuation(
   }
 }
 
+export function convertedResponsePreviousResponseId(
+  requestedId: string | undefined,
+  receipt: Readonly<ResponsesRouteReceipt> | undefined,
+  target: "chat" | "messages",
+): string | null {
+  if (requestedId === undefined && receipt === undefined) return null;
+  if (
+    requestedId !== undefined
+    && receipt?.owner === "converted"
+    && receipt.responseId === requestedId
+    && receipt.upstreamProtocol === target
+  ) return receipt.responseId;
+  throw new GatewayFailureError({
+    kind: "continuation_unavailable",
+    source: "continuation",
+    phase: "resume",
+  });
+}
+
 export function continuationOwnership(
   accountId: string,
   modelId: string,
