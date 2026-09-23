@@ -78,6 +78,10 @@ Key behavior:
   - When the history can't be restored, the request is still sent without it rather than failing. This happens when the ID is unknown, expired or from another account, has no checkpoint, or the turn is text-only.
   - A mismatched model, route or upstream origin for known history still returns 409.
 - Converted Messages-to-Responses output keeps signature-only thinking as an empty reasoning item before later text or tool items. Its hidden thinking text and provider signature are not shown; eligible tool continuations use bounded opaque state.
+- Chat and Responses requests converted to a Messages upstream get Anthropic `cache_control` breakpoints, as in cc-switch, so repeated turns can hit prompt caching:
+  - Positions: the last tool, the end of `system`, the newest cacheable message block and, in longer histories, the second-newest user message.
+  - At most four breakpoints per request.
+  - Native Messages requests, including their own markers, are forwarded unchanged.
 - Converted routes return a 502 conversion error for citation-bearing output until they can map citations to the target protocol; native routes preserve the original response.
 - Responses assistant history with citations or an explicit `phase` needs a native Responses upstream; converting it to Chat or Messages fails before inference rather than dropping those fields.
 - Filters hop-by-hop headers, tracing headers, and private gateway headers.
