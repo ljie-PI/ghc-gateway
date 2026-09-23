@@ -6,17 +6,19 @@ import {
   type WireJsonArray,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
+import { wireArray, wireObject } from "./wire.js";
 
 /** Anthropic accepts at most four cache breakpoints per request. */
 const MAX_CACHE_BREAKPOINTS = 4;
-const EPHEMERAL: WireJsonObject = { kind: "object", members: [{ key: "type", value: "ephemeral" }] };
+const EPHEMERAL = wireObject([["type", "ephemeral"]]);
 
 /**
  * Port of cc-switch's `cache_injector::inject` for converted Messages requests. Chat and Responses
  * clients cannot express Anthropic prompt caching, which is opt-in, so stable prefixes are marked
  * here: the last tool, the end of `system`, the newest cacheable message block and, for longer
- * histories, the second-newest user message. Client markers count against the budget of four and
- * are never moved or removed.
+ * histories, the second-newest user message. Converted bodies currently carry no markers and an
+ * array `system`; the existing-marker budget and string `system` handling keep cc-switch's
+ * semantics for any caller that does.
  */
 export function withMessagesCacheBreakpoints(body: WireJsonObject): WireJsonObject {
   let budget = MAX_CACHE_BREAKPOINTS - countBreakpoints(body);
@@ -36,7 +38,7 @@ export function withMessagesCacheBreakpoints(body: WireJsonObject): WireJsonObje
   if (budget > 0) {
     let system = memberValue(result, "system");
     if (typeof system === "string") {
-      system = { kind: "array", items: [{ kind: "object", members: [{ key: "type", value: "text" }, { key: "text", value: system }] }] };
+      system = wireArray([wireObject([["type", "text"], ["text", system]])]);
     }
     if (isWireJsonArray(system)) {
       const last = system.items.length - 1;
@@ -74,7 +76,7 @@ export function withMessagesCacheBreakpoints(body: WireJsonObject): WireJsonObje
       }
     }
   }
-  return items === messages.items ? result : withMember(result, "messages", { kind: "array", items });
+  return items === messages.items ? result : withMember(result, "messages", wireArray(items));
 }
 
 function withMessageBreakpoint(message: WireJson | undefined): WireJsonObject | undefined {
@@ -125,7 +127,7 @@ function withMember(object: WireJsonObject, key: string, value: WireJson): WireJ
 }
 
 function withItem(array: WireJsonArray, index: number, value: WireJson): WireJsonArray {
-  return { kind: "array", items: replaced(array.items, index, value) };
+  return wireArray(replaced(array.items, index, value));
 }
 
 function replaced(items: readonly WireJson[], index: number, value: WireJson): readonly WireJson[] {
