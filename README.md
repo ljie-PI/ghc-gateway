@@ -137,24 +137,52 @@ npm run e2e
 npm run pack
 ```
 
-Use `node dist/src/cli/main.js` instead of `ghcg` when exercising the built CLI. Official-client suites require explicit opt-in:
+Use `node dist/src/cli/main.js` instead of `ghcg` when exercising the built CLI.
+
+### Recording and replay tests
+
+Official-client SDK tests require explicit opt-in. They run offline: official SDK → gateway → a
+loopback Copilot replay server. Each test selects one scenario; the replay server returns the
+recorded bytes only when the gateway's upstream request matches that step's request predicate,
+otherwise it answers `409`.
 
 ```bash
 GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
+GHC_GATEWAY_SDK_TESTS=1 npx vitest run --config vitest.sdk.config.ts tests/sdk/matrix_replay.sdk.test.ts
 ```
 
-The replay corpus in `tests/sdk/corpus` holds live Copilot responses for `gemini-3.8-flash`
-(Chat), `gpt-6-astra` (Responses) and `claude-opus-5.5` (Messages). The recorder sends the same
-official-SDK scenarios through the gateway and replaces only the selected cases, after every
-selected exchange validates. It uses the signed-in account and makes live inference requests only
-with `--execute`:
+`tests/sdk/corpus` holds live Copilot responses for `gemini-3.8-flash` (Chat), `gpt-6-astra`
+(Responses) and `claude-opus-5.5` (Messages). Never edit corpus files by hand; re-record them. The
+recorder sends the same official-SDK requests through the gateway to live Copilot using the
+signed-in account (`--data-dir`, `--account`). It replaces the selected cases only after every
+selected exchange validates. Without `--execute` it prints the plan and makes no request:
 
 ```bash
+node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts
 node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts --execute --model claude-opus-5.5 --scenario coherent-session
 ```
 
-Without `--execute` it prints the plan. After recording, update the reported `sessionAssistantTextSha256`
-values in `tests/sdk/scenarios.ts` and the corpus digests in `tests/unit/sdk_corpus_manifest.test.ts`.
+Both selectors default to `all`:
+
+- `--model`: `gemini-3.8-flash`, `gpt-6-astra` or `claude-opus-5.5`.
+- `--scenario`: `plain-text`, `image`, `weather-roundtrip`, `parallel-tools`, `mixed-image-tool`,
+  `reasoning-effort` or `coherent-session`.
+
+Output and errors are content-free: configuration, case IDs, check names, status codes, byte counts
+and digests. A failed run publishes nothing and is not retried; re-run that model and scenario.
+
+After recording:
+
+1. Copy the reported `sessionAssistantTextSha256` values into `SESSION_ASSISTANT_TEXT_SHA256` in
+   `tests/sdk/scenarios.ts`.
+2. Update the corpus digests in `tests/unit/sdk_corpus_manifest.test.ts` from the received values that
+   `npx vitest run tests/unit/sdk_corpus_manifest.test.ts` reports; re-run until it passes.
+3. Run the SDK suite. `tests/sdk/corpus_recorder.sdk.test.ts` re-records the whole corpus offline
+   and must reproduce every byte.
+
+SDK request definitions live in `tests/sdk/scenario_requests.ts`, replay request predicates in
+`tests/sdk/replay_scenarios.ts`, and recording cases and checks in `tests/sdk/corpus_recorder.ts`.
+The recording and replay catalog is `tests/support/replay/catalog.ts`.
 
 ## License
 

@@ -3,6 +3,7 @@
 ## Project references
 
 - **Usage and configuration:** read `README.md`.
+- **SDK replay tests and corpus recording:** follow `README.md` → *Recording and replay tests*.
 - **Naming:** use the vocabulary in `CONTEXT.md`.
 - **Implementation changes:** inspect the relevant module interfaces in `src/`, their tests in `tests/`, and the commands in `package.json`.
 
@@ -22,6 +23,7 @@ Keep documentation limited to usage and concise contributor guidance. Do not rec
 - Treat exact protocol fields, ordering, terminal events, and wire bytes as observable behavior.
 - Test through module interfaces; use deterministic clock/UUID inputs and protocol golden fixtures where required.
 - Use targeted existing tests and preserve fixture inputs/expected bytes unless the requested behavior changes. Official SDK suites require separate explicit authorization, including the offline suite.
+- Never hand-write or hand-edit `tests/sdk/corpus`; re-record it with the recorder. Live recording uses the signed-in account and requires explicit authorization.
 
 ## Review gate
 
