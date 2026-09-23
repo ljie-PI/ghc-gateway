@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   benchmarkCliSummary,
   evaluateBenchmarkRuns,
+  runRequestProjectionBenchmark,
   sanitizedNpmUserAgent,
   type BenchmarkArtifact,
   type BenchmarkRunResult,
@@ -116,6 +117,19 @@ function passingRun(run: number): BenchmarkRunResult {
 }
 
 describe("benchmark gate contract", () => {
+  it("measures the affected loose-projection workload through the isolated benchmark seam", () => {
+    const result = runRequestProjectionBenchmark(20);
+    expect(result).toMatchObject({
+      kind: "request-projection",
+      itemCount: 400,
+      thresholdMs: 5,
+      warmupCount: 20,
+      sampleCount: 20,
+    });
+    expect(result.valuesMs).toHaveLength(20);
+    expect(result.p95Ms).toBeGreaterThanOrEqual(0);
+  });
+
   it("requires two latency passes and every memory pass across three repetitions", () => {
     const runs = [passingRun(1), passingRun(2), passingRun(3)];
     expect(evaluateBenchmarkRuns(runs)).toBe(true);

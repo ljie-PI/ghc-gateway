@@ -103,7 +103,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
       }
 
       scope.diagnostics?.stage("request_validation");
-      const decoded = decodeOpenaiChatCompletionsRequest(request.body);
+      const decoded = decodeOpenaiChatCompletionsPlanningRequest(request.body);
       if (decoded.requestedModel !== undefined) {
         usage.setRequestedModel(decoded.requestedModel);
       }
@@ -166,6 +166,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
           plan.target,
         );
       }
+      decodeOpenaiChatCompletionsRequest(request.body);
       const prepared = prepareOpenaiChatCompletionsRequest(decoded, resolved);
       scope.diagnostics?.shape("upstream_request", () => diagnosticShape(prepared.body));
       scope.diagnostics?.stage("upstream_request");
@@ -353,6 +354,27 @@ export function decodeOpenaiChatCompletionsRequest(body: WireJsonObject): Decode
     body,
     ...(model === undefined ? {} : { requestedModel: model }),
     stream: streamValue === true,
+  };
+}
+
+function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
+  const modelValues = memberValues(body, "model");
+  const streamValues = memberValues(body, "stream");
+  if (modelValues.length > 1 || streamValues.length > 1) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const model = modelValues[0];
+  if (model !== undefined && (typeof model !== "string" || model.length === 0)) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  const stream = streamValues[0];
+  if (stream !== undefined && stream !== true && stream !== false) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
+  return {
+    body,
+    ...(model === undefined ? {} : { requestedModel: model }),
+    stream: stream === true,
   };
 }
 

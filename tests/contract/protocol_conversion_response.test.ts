@@ -24,6 +24,47 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 describe("shared conversion response codecs", () => {
+  it("echoes a validated previous response ID in buffered converted Responses output", () => {
+    const converted = convertBufferedResponse(
+      encoder.encode(JSON.stringify({
+        id: "chatcmpl_previous",
+        model: "chat",
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+      })),
+      { ...context("chat", "responses"), previousResponseId: "resp_previous" },
+    );
+    expect(decoded(converted.bytes).previous_response_id).toBe("resp_previous");
+  });
+
+  it("echoes a validated previous response ID in every converted Responses stream snapshot", async () => {
+    const emissions: ConvertedStreamEmission[] = [];
+    for await (const emission of convertProtocolStream(
+      chunks(encoder.encode([
+        "data: {\"id\":\"chatcmpl_previous\",\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ].join(""))),
+      { ...streamContext("chat", "responses"), previousResponseId: "resp_previous" },
+    )) emissions.push(emission);
+    const snapshots = responseDataEvents(wireText(emissions))
+      .map((event) => event.response as { previous_response_id?: string } | undefined)
+      .filter((response): response is { previous_response_id?: string } => response !== undefined);
+    expect(snapshots).toHaveLength(3);
+    expect(snapshots.every((response) => response.previous_response_id === "resp_previous")).toBe(true);
+  });
+
+  it("echoes a validated previous response ID in an incomplete Responses stream snapshot", async () => {
+    const emissions: ConvertedStreamEmission[] = [];
+    for await (const emission of convertProtocolStream(
+      chunks(encoder.encode(
+        "data: {\"id\":\"chatcmpl_previous\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n",
+      )),
+      { ...streamContext("chat", "responses"), previousResponseId: "resp_previous" },
+    )) emissions.push(emission);
+    const incomplete = responseDataEvents(wireText(emissions)).find((event) => event.type === "response.incomplete");
+    expect((incomplete?.response as { previous_response_id?: string } | undefined)?.previous_response_id)
+      .toBe("resp_previous");
+  });
+
   it.each([
     { source: "chat" as const, target: "responses" as const, visible: true },
     { source: "chat" as const, target: "messages" as const, visible: false },

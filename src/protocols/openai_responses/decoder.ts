@@ -18,6 +18,12 @@ export class ResponsesRequestDecodeError extends Error {
 export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
   assertNoDuplicateTopLevelFields(body);
 
+  return decodeResponsesPlanningRequest(body);
+}
+
+export function decodeResponsesPlanningRequest(body: WireJsonObject): ResponsesRequest {
+  assertNoDuplicateFields(body, ["model", "stream", "store", "input", "previous_response_id"]);
+
   const model = optionalModel(body);
   const stream = optionalBoolean(body, "stream", false, false);
   const store = preservedBoolean(body, "store");
@@ -32,6 +38,14 @@ export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
     ...(input === undefined ? {} : { input }),
     ...(previous === undefined ? {} : { previousResponseId: previous }),
   };
+}
+
+function assertNoDuplicateFields(body: WireJsonObject, fields: readonly string[]): void {
+  for (const field of fields) {
+    if (memberValues(body, field).length > 1) {
+      throw new ResponsesRequestDecodeError(field, `duplicate Responses request field: ${field}`);
+    }
+  }
 }
 
 function assertNoDuplicateTopLevelFields(body: WireJsonObject): void {

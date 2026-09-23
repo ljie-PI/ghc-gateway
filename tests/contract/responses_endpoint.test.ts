@@ -353,6 +353,8 @@ describe("Responses endpoint", () => {
         input: { type: "function_call_output", call_id: "call_owned", output: "ok" },
       }));
       expect(response.status).toBe(200);
+      const converted = await response.json() as { previous_response_id: string | null };
+      expect(converted.previous_response_id).toBe("resp_converted");
       expect(upstream.requests.map((entry) => [entry.path, JSON.parse(new TextDecoder().decode(entry.body)).stream === true])).toEqual([["/chat/completions", false]]);
       const forwarded = new TextDecoder().decode(upstream.requests[0]?.body);
       expect(forwarded).not.toContain("previous_response_id");

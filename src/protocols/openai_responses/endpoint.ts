@@ -23,13 +23,14 @@ import {
   withByteIdleDeadlines,
   type StreamExecutionEmission,
 } from "../../gateway/stream_execution.js";
-import { isWireJsonArray, isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
+import { isWireJsonNumber, isWireJsonObject, memberValues, parseWireJson, type WireJson, type WireJsonObject } from "../../serialization/wire_json.js";
 import type { UpstreamByteResponse, UpstreamByteStream } from "../../copilot/upstream_types.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import {
   continuationModel,
   continuationOwnership,
+  convertedResponsePreviousResponseId,
   isTerminalResponsesEvent,
   ownedContinuationReceipt,
   persistContinuation,
@@ -38,8 +39,12 @@ import {
   validateContinuationTarget,
   validateExternalContinuation,
 } from "./continuation.js";
-import { decodeResponsesRequest, ResponsesRequestDecodeError } from "./decoder.js";
-import { consumeResponsesPreviousResponseId, type ResponsesRequest } from "./dto.js";
+import {
+  decodeResponsesPlanningRequest,
+  decodeResponsesRequest,
+  ResponsesRequestDecodeError,
+} from "./decoder.js";
+import { consumeResponsesPreviousResponseId } from "./dto.js";
 import {
   type ResponsesContinuationOwnership,
   type ResponsesHistory,
@@ -171,16 +176,6 @@ async function executeOpenaiResponses(
     && continuationReceipt.upstreamProtocol !== "responses";
   let planningRequest = decoded;
   if (convertedContinuation && continuationReceipt !== undefined) {
-    if (
-      continuationReceipt.upstreamProtocol === "messages"
-      && !hasClientMessagesContinuationContext(decoded)
-    ) {
-      throw new GatewayFailureError({
-        kind: "continuation_unavailable",
-        source: "continuation",
-        phase: "resume",
-      });
-    }
     try {
       planningRequest = consumeResponsesPreviousResponseId(
         await dependencies.history.enrich(decoded, continuationReceipt, scope.signal),
@@ -216,6 +211,13 @@ async function executeOpenaiResponses(
   const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
     ? undefined
     : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
+  validateExternalContinuation(
+    decoded.previousResponseId,
+    continuation,
+    forcedTarget === undefined && resolved.capability.protocols.value?.includes("responses") === true
+      ? "native_responses"
+      : forcedTarget === "messages" ? "messages_bridge" : "chat_bridge",
+  );
   const plan = planProtocolExecution({
     diagnostics: scope.diagnostics,
     source: "responses",
@@ -239,6 +241,7 @@ async function executeOpenaiResponses(
     plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
   );
   if (plan.kind === "native") {
+    decodeResponsesRequest(request.body);
     const nativePlan = createNativeResponsesPlan(decoded, resolved, bound.target.endpoint);
     return withUpstreamProtocol(decoded.stream
       ? await nativeStreamResponse(
@@ -268,14 +271,19 @@ async function executeOpenaiResponses(
     sourceProtocol: plan.target,
     wireProtocol: "responses",
   });
+  const previousResponseId = convertedResponsePreviousResponseId(
+    decoded.previousResponseId,
+    continuationReceipt,
+    plan.target === "messages" ? "messages" : "chat",
+  );
   return withUpstreamProtocol(decoded.stream
-    ? await convertedStreamResponse(dependencies, ownership, bound, plan, scope, usage, outputCarrierBinding)
-    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, scope, usage, outputCarrierBinding), plan.target);
+    ? await convertedStreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding)
+    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding), plan.target);
 }
 
 function decodeRequest(body: WireJsonObject) {
   try {
-    return decodeResponsesRequest(body);
+    return decodeResponsesPlanningRequest(body);
   } catch (error: unknown) {
     if (error instanceof ResponsesRequestDecodeError) {
       throw new GatewayFailureError({ kind: "invalid_request", cause: error });
@@ -383,6 +391,7 @@ async function convertedNonstreamResponse(
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Readonly<ConvertedProtocolPlan>,
+  previousResponseId: string | null,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
   carrierBindingValue?: ReasoningCarrierBinding,
@@ -399,6 +408,7 @@ async function convertedNonstreamResponse(
         maxBytes: scope.config.limits.nonstreamBodyBytes,
         createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
         nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+        previousResponseId,
         ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
           carrier: {
             store: dependencies.reasoningCarriers,
@@ -444,6 +454,7 @@ async function convertedStreamResponse(
   ownership: Readonly<ResponsesContinuationOwnership>,
   bound: BoundCopilot,
   plan: Readonly<ConvertedProtocolPlan>,
+  previousResponseId: string | null,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
   carrierBindingValue?: ReasoningCarrierBinding,
@@ -460,6 +471,7 @@ async function convertedStreamResponse(
     model: plan.requestModel,
     createUuid: dependencies.createUuid ?? crypto.randomUUID.bind(crypto),
     nowUnixSeconds: dependencies.nowUnixSeconds ?? (() => Math.floor(Date.now() / 1000)),
+    previousResponseId,
     performanceObserver: dependencies.performanceObserver,
     ...(dependencies.reasoningCarriers === undefined || carrierBindingValue === undefined ? {} : {
       carrier: { store: dependencies.reasoningCarriers, binding: carrierBindingValue },
@@ -823,53 +835,6 @@ function memberValue(object: WireJsonObject | undefined, key: string): WireJson 
   }
   const values = memberValues(object, key);
   return values.length === 1 ? values[0] : undefined;
-}
-
-function hasClientMessagesContinuationContext(request: Readonly<ResponsesRequest>): boolean {
-  const instructions = memberValue(request.body, "instructions");
-  if (hasNonEmptyContinuationContent(instructions)) {
-    return true;
-  }
-  const input = memberValue(request.body, "input");
-  if (typeof input === "string") {
-    return input.trim().length > 0;
-  }
-  const items = isWireJsonArray(input) ? input.items : isWireJsonObject(input) ? [input] : [];
-  return items.some((item) => {
-    if (!isWireJsonObject(item)) {
-      return false;
-    }
-    const type = memberValue(item, "type");
-    const role = memberValue(item, "role");
-    return (type === undefined || type === "message")
-      && (role === "user" || role === "system" || role === "developer")
-      && hasNonEmptyContinuationContent(memberValue(item, "content"));
-  });
-}
-
-function hasNonEmptyContinuationContent(value: WireJson | undefined): boolean {
-  if (typeof value === "string") {
-    return value.trim().length > 0;
-  }
-  if (isWireJsonArray(value)) {
-    return value.items.some((item) => hasNonEmptyContinuationContent(item));
-  }
-  if (!isWireJsonObject(value)) {
-    return false;
-  }
-  const type = memberValue(value, "type");
-  if (type === "input_text" || type === "text") {
-    return hasNonEmptyContinuationContent(memberValue(value, "text"));
-  }
-  if (type === "input_image") {
-    return hasNonEmptyContinuationContent(memberValue(value, "image_url"));
-  }
-  if (type === "image") {
-    const source = objectMember(value, "source");
-    return hasNonEmptyContinuationContent(memberValue(source, "url"))
-      || hasNonEmptyContinuationContent(memberValue(source, "data"));
-  }
-  return false;
 }
 
 function observedInteger(value: WireJson | undefined): number | undefined {

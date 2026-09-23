@@ -930,12 +930,11 @@ describe("shared conversion request codecs", () => {
           },
         ],
       }), "target", capability([target]));
-      expect(converted.degradations).toEqual(["reasoning.state_omitted"]);
+      expect(converted.degradations).toEqual(["request.option_omitted", "reasoning.state_omitted"]);
       for (const malformed of [
         { type: "reasoning", summary: [{ type: "unknown", text: "plan" }] },
         { type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: 1 }] },
         { type: "reasoning", summary: [], encrypted_content: {} },
-        { type: "reasoning", status: "failed", summary: [] },
         { type: "reasoning", summary: [{ type: "summary_text", text: "plan", unknown: true }] },
       ]) {
         expect(() => prepareConvertedRequest("responses", target, body({
@@ -946,6 +945,14 @@ describe("shared conversion request codecs", () => {
           ],
         }), "target", capability([target]))).toThrow();
       }
+      const malformedStatus = prepareConvertedRequest("responses", target, body({
+        model: "source",
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+          { type: "reasoning", status: "failed", summary: [] },
+        ],
+      }), "target", capability([target]));
+      expect(malformedStatus.degradations).toContain("request.option_omitted");
     },
   );
 
@@ -1090,6 +1097,7 @@ describe("shared conversion request codecs", () => {
     });
 
     expect(converted.degradations).toEqual([
+      "request.option_omitted",
       "reasoning.presentation_omitted",
       "reasoning.state_omitted",
     ]);
@@ -1197,12 +1205,10 @@ describe("shared conversion request codecs", () => {
   });
 
   it.each([
-    ["unknown top-level key", "{\"model\":\"x\",\"messages\":[],\"unknown\":null}"],
     ["duplicate top-level key", "{\"model\":\"x\",\"model\":\"y\",\"messages\":[]}"],
     ["bad explicit null", "{\"model\":\"x\",\"messages\":null}"],
     ["n greater than one", "{\"model\":\"x\",\"messages\":[],\"n\":2}"],
     ["missing tool name", "{\"model\":\"x\",\"messages\":[],\"tools\":[{\"type\":\"function\",\"function\":{\"parameters\":{}}}]}"],
-    ["orphan tool result", "{\"model\":\"x\",\"messages\":[{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"x\"}]}"],
     ["invalid complete arguments", "{\"model\":\"x\",\"messages\":[{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"x\",\"arguments\":\"{\"}}]}]}"],
   ])("rejects %s before producing target bytes", (_name, json) => {
     expect(() => prepareConvertedRequest(
@@ -1212,6 +1218,129 @@ describe("shared conversion request codecs", () => {
       "target",
       capability(["responses"]),
     )).toThrow();
+  });
+
+  it("omits an orphan Chat tool result as an incomplete history round", () => {
+    const converted = prepareConvertedRequest(
+      "chat",
+      "responses",
+      rawBody("{\"model\":\"x\",\"messages\":[{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":\"x\"}]}"),
+      "target",
+      capability(["responses"]),
+    );
+    expect((decoded(converted.bytes).input as unknown[])).toEqual([]);
+    expect(converted.degradations).toContain("tools.history_omitted");
+  });
+
+  it.each(["chat", "responses"] as const)("omits ordinary %s extensions while retaining strict core fields", (source) => {
+    const request = source === "chat"
+      ? rawBody("{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\",\"extension\":1,\"extension\":2}],\"extension\":3,\"extension\":4}")
+      : rawBody("{\"model\":\"x\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\",\"extension\":1,\"extension\":2}],\"extension\":3,\"extension\":4}");
+    const target = source === "chat" ? "responses" : "chat";
+    const converted = prepareConvertedRequest(source, target, request, "target", capability([target]));
+    expect(converted.degradations).toContain(`${source}.extensions_omitted`);
+  });
+
+  it.each(["chat", "responses"] as const)("omits malformed independent %s presentation options", (source) => {
+    const request = source === "chat"
+      ? body({ model: "x", messages: [{ role: "user", content: "hi" }], stream_options: 17, metadata: { user: 17 } })
+      : body({
+        model: "x",
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "hi", annotations: 17 }],
+        }],
+        stream_options: 17,
+        metadata: { user: 17 },
+        reasoning: { summary: 17 },
+      });
+    const target = source === "chat" ? "responses" : "chat";
+    const converted = prepareConvertedRequest(source, target, request, "target", capability([target]));
+    expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it("rejects file/audio content, hosted tools, and non-null direct continuation conversion", () => {
+    for (const request of [
+      body({ model: "x", input: [{ type: "message", role: "user", content: [{ type: "input_file", file_id: "file_1" }] }] }),
+      body({ model: "x", input: [{ type: "message", role: "user", content: [{ type: "input_audio", input_audio: { data: "AA==", format: "wav" } }] }] }),
+      body({ model: "x", input: "hi", tools: [{ type: "web_search_preview" }] }),
+      body({ model: "x", previous_response_id: "resp_external", input: "hi" }),
+    ]) {
+      expect(() => prepareConvertedRequest("responses", "chat", request, "target", capability(["chat"]))).toThrow();
+    }
+  });
+
+  it("rejects recognized unrepresentable controls instead of treating them as extensions", () => {
+    for (const extra of [
+      { modalities: ["audio"] },
+      { conversation: "conv_1" },
+      { truncation: "auto" },
+      { service_tier: "priority" },
+      { logprobs: true },
+    ]) {
+      expect(() => prepareConvertedRequest(
+        "responses",
+        "chat",
+        body({ model: "x", input: "hi", ...extra }),
+        "target",
+        capability(["chat"]),
+      )).toThrow();
+    }
+  });
+
+  it("rejects a gateway carrier in the non-authorized top-level Responses reasoning state slot", () => {
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      model: "x",
+      input: "hi",
+      reasoning: { encrypted_content: "ghcg-rsn-v1:synthetic" },
+    }), "target", capability(["chat"]))).toThrow();
+  });
+
+  it("omits a false parallel control when the target cannot parallelize", () => {
+    const base = capability(["chat"]);
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "x",
+      input: "hi",
+      tools: [{ type: "function", name: "lookup", parameters: {}, strict: false }],
+      parallel_tool_calls: false,
+    }), "target", {
+      ...base,
+      capabilities: { ...base.capabilities, parallelToolCalling: false },
+    });
+    expect(decoded(converted.bytes)).not.toHaveProperty("parallel_tool_calls");
+    expect(converted.degradations).toContain("tools.parallel_control_omitted");
+  });
+
+  it("omits ordinary nested extensions in the Responses extended-tool adapter", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: [
+        {
+          type: "custom_tool_call",
+          call_id: "call_custom",
+          name: "render",
+          input: "draw",
+          extension: true,
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_custom",
+          output: "done",
+          extension: true,
+        },
+      ],
+      tools: [{ type: "custom", name: "render", format: { type: "text", extension: true }, extension: true }],
+    }), "target", capability(["chat"]));
+    expect(converted.degradations).toContain("responses.extensions_omitted");
+  });
+
+  it.each(["chat", "responses"] as const)("rejects a carrier hidden in an omitted %s extension", (source) => {
+    const request = source === "chat"
+      ? body({ model: "x", messages: [{ role: "user", content: "hi" }], extension: "ghcg-rsn-v1:synthetic" })
+      : body({ model: "x", input: "hi", extension: { encrypted_content: "ghcg-rsn-v1:synthetic" } });
+    const target = source === "chat" ? "responses" : "chat";
+    expect(() => prepareConvertedRequest(source, target, request, "target", capability([target]))).toThrow();
   });
 
   it.each([
@@ -1263,19 +1392,26 @@ describe("shared conversion request codecs", () => {
     expect(converted.degradations).toContain("messages.extensions_omitted");
   });
 
-  it("rejects an unclosed Responses tool round before converting to Messages", () => {
-    expect(() => prepareConvertedRequest("responses", "messages", body({
+  it("omits an unclosed Responses tool round before converting to Messages", () => {
+    const converted = prepareConvertedRequest("responses", "messages", body({
       model: "source",
       input: [
         { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
         { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
         { type: "message", role: "user", content: [{ type: "input_text", text: "unrelated" }] },
       ],
-    }), "target", capability(["messages"]))).toThrow();
+    }), "target", capability(["messages"]));
+    expect(decoded(converted.bytes)).toMatchObject({
+      messages: [{ role: "user", content: [
+        { type: "text", text: "hi" },
+        { type: "text", text: "unrelated" },
+      ] }],
+    });
+    expect(converted.degradations).toContain("tools.history_omitted");
   });
 
-  it("rejects assistant-first Chat and Responses histories before Messages inference", () => {
-    expect(() => prepareConvertedRequest("chat", "messages", body({
+  it("synthesizes one fixed leading Messages user for assistant-first Chat and Responses histories", () => {
+    const chat = prepareConvertedRequest("chat", "messages", body({
       model: "source",
       messages: [
         {
@@ -1289,22 +1425,30 @@ describe("shared conversion request codecs", () => {
         },
         { role: "tool", tool_call_id: "call_1", content: "ok" },
       ],
-    }), "target", capability(["messages"]))).toThrow();
+    }), "target", capability(["messages"]));
 
-    expect(() => prepareConvertedRequest("responses", "messages", body({
+    const responses = prepareConvertedRequest("responses", "messages", body({
       model: "source",
       instructions: "system context is not a user turn",
       input: [
         { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
         { type: "function_call_output", call_id: "call_1", output: "ok" },
       ],
-    }), "target", capability(["messages"]))).toThrow();
+    }), "target", capability(["messages"]));
+
+    for (const converted of [chat, responses]) {
+      expect((decoded(converted.bytes).messages as unknown[])[0]).toEqual({
+        role: "user",
+        content: [{ type: "text", text: "(continuing the conversation)" }],
+      });
+      expect(converted.degradations).toContain("messages.leading_user_synthesized");
+    }
   });
 
   it.each(["", []] as const)(
-    "rejects empty leading Chat user context before Messages tools: %j",
+    "synthesizes before empty leading Chat user context and Messages tools: %j",
     (content) => {
-      expect(() => prepareConvertedRequest("chat", "messages", body({
+      const converted = prepareConvertedRequest("chat", "messages", body({
         model: "source",
         messages: [
           { role: "user", content },
@@ -1319,12 +1463,23 @@ describe("shared conversion request codecs", () => {
           },
           { role: "tool", tool_call_id: "call_1", content: "ok" },
         ],
-      }), "target", capability(["messages"]))).toThrow();
+      }), "target", capability(["messages"]));
+      expect((decoded(converted.bytes).messages as unknown[])[0]).toEqual({
+        role: "user",
+        content: [{ type: "text", text: "(continuing the conversation)" }],
+      });
     },
   );
 
-  it("rejects an empty leading Responses user message before Messages tools", () => {
-    expect(() => prepareConvertedRequest("responses", "messages", body({
+  it.each(["chat", "responses"] as const)("does not synthesize a Messages turn for empty %s input alone", (source) => {
+    const request = source === "chat"
+      ? body({ model: "source", messages: [{ role: "user", content: "" }] })
+      : body({ model: "source", input: [{ type: "message", role: "user", content: [] }] });
+    expect(() => prepareConvertedRequest(source, "messages", request, "target", capability(["messages"]))).toThrow();
+  });
+
+  it("synthesizes before an empty leading Responses user message and Messages tools", () => {
+    const converted = prepareConvertedRequest("responses", "messages", body({
       model: "source",
       instructions: "system instructions are not a user turn",
       input: [
@@ -1332,7 +1487,11 @@ describe("shared conversion request codecs", () => {
         { type: "function_call", call_id: "call_1", name: "lookup", arguments: "{}" },
         { type: "function_call_output", call_id: "call_1", output: "ok" },
       ],
-    }), "target", capability(["messages"]))).toThrow();
+    }), "target", capability(["messages"]));
+    expect((decoded(converted.bytes).messages as unknown[])[0]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "(continuing the conversation)" }],
+    });
   });
 
   it("rejects developer authority promotion on Chat and Responses to Messages conversions", () => {
@@ -1356,9 +1515,9 @@ describe("shared conversion request codecs", () => {
   });
 
   it.each(["chat", "messages"] as const)(
-    "rejects a new tool round before every prior parallel call has a result for %s",
+    "omits a new tool round before every prior parallel call has a result for %s",
     (target) => {
-      expect(() => prepareConvertedRequest("responses", target, body({
+      const prepare = () => prepareConvertedRequest("responses", target, body({
         model: "source",
         input: [
           { type: "function_call", call_id: "call_a", name: "lookup", arguments: "{}" },
@@ -1368,12 +1527,17 @@ describe("shared conversion request codecs", () => {
           { type: "function_call_output", call_id: "call_b", output: "b" },
           { type: "function_call_output", call_id: "call_c", output: "c" },
         ],
-      }), "target", capability([target]))).toThrow();
+      }), "target", capability([target]));
+      if (target === "messages") {
+        expect(prepare).toThrow();
+      } else {
+        expect(prepare().degradations).toContain("tools.history_omitted");
+      }
     },
   );
 
-  it("rejects assistant content inserted after only part of a parallel Chat tool round", () => {
-    expect(() => prepareConvertedRequest("responses", "chat", body({
+  it("omits a partial parallel Chat tool round while preserving unrelated assistant content", () => {
+    const converted = prepareConvertedRequest("responses", "chat", body({
       model: "source",
       input: [
         { type: "function_call", call_id: "call_a", name: "lookup", arguments: "{}" },
@@ -1386,7 +1550,32 @@ describe("shared conversion request codecs", () => {
         },
         { type: "function_call_output", call_id: "call_b", output: "b" },
       ],
-    }), "target", capability(["chat"]))).toThrow();
+    }), "target", capability(["chat"]));
+    expect(decoded(converted.bytes)).toMatchObject({
+      messages: [{ role: "assistant", content: "next" }],
+    });
+    expect(converted.degradations).toContain("tools.history_omitted");
+  });
+
+  it.each([
+    ["tools", { capabilities: { toolCalling: false } }],
+    ["parallel tools", { capabilities: { parallelToolCalling: false } }],
+    ["images", { capabilities: { inputModalities: ["text"] as const } }],
+  ] as const)("rejects converted target without %s capability", (_name, override) => {
+    const base = capability(["chat"]);
+    const target = {
+      ...base,
+      capabilities: { ...base.capabilities, ...override.capabilities },
+    };
+    const request = _name === "images"
+      ? body({ model: "source", input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: "https://example.com/x.png" }] }] })
+      : body({
+        model: "source",
+        input: "hi",
+        tools: [{ type: "function", name: "lookup", parameters: {} }],
+        ...(_name === "parallel tools" ? { parallel_tool_calls: true } : {}),
+      });
+    expect(() => prepareConvertedRequest("responses", "chat", request, "target", target)).toThrow();
   });
 
   it("preserves a valid Messages text/tool/text round followed by its bound result", () => {

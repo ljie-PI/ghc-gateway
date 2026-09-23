@@ -33,7 +33,6 @@ import {
   jsonObjectString,
   oneMember,
   optionalBoolean,
-  optionalObject,
   optionalString,
   parseStringList,
   positiveInteger,
@@ -54,7 +53,11 @@ import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
 import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 import { isReasoningCarrier, type ReasoningCarrierRecord } from "./reasoning_carriers.js";
-import { projectKnownObject } from "./request_projection.js";
+import {
+  projectIndependentOption,
+  projectKnownObject,
+  projectToolRequest,
+} from "./request_projection.js";
 
 const CHAT_TOP_LEVEL = new Set([
   "model",
@@ -110,6 +113,35 @@ const MESSAGES_SENSITIVE_EXTENSION_FIELDS = new Set([
   ...MESSAGES_CONTINUATION_FIELDS,
   ...MESSAGES_TOOL_OWNERSHIP_FIELDS,
   ...MESSAGES_REASONING_CARRIER_FIELDS,
+]);
+const REQUEST_SENSITIVE_EXTENSION_FIELDS = new Set([
+  ...MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+  "audio",
+  "context_management",
+  "conversation",
+  "frequency_penalty",
+  "function_call",
+  "functions",
+  "include",
+  "logit_bias",
+  "logprobs",
+  "max_tool_calls",
+  "modalities",
+  "moderation",
+  "prediction",
+  "presence_penalty",
+  "prompt",
+  "seed",
+  "service_tier",
+  "top_logprobs",
+  "truncation",
+  "web_search_options",
+]);
+const TOOL_SENSITIVE_EXTENSION_FIELDS = new Set([
+  ...REQUEST_SENSITIVE_EXTENSION_FIELDS,
+  "allowed_callers",
+  "defer_loading",
+  "output_schema",
 ]);
 
 const RESPONSES_TOP_LEVEL = new Set([
@@ -173,10 +205,20 @@ export const PROTOCOL_REQUEST_CODECS: Readonly<Record<InferenceProtocol, Protoco
 };
 
 function decodeChatRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest {
-  assertAllowedKeys(body, CHAT_TOP_LEVEL, "REQ-C-TOP");
-  validateStreamOptions(oneMember(body, "stream_options", "REQ-C-STREAM-OPTIONS"));
-  validateSingleChoice(oneMember(body, "n", "REQ-C-N"), "REQ-C-N");
   const degradations = new Set<ConversionDegradationRule>();
+  body = projectRequestMembers(
+    body,
+    CHAT_TOP_LEVEL,
+    "REQ-C-TOP",
+    "chat.extensions_omitted",
+    degradations,
+  );
+  decodeIndependentStreamOptions(
+    oneMember(body, "stream_options", "REQ-C-STREAM-OPTIONS"),
+    "chat.extensions_omitted",
+    degradations,
+  );
+  validateSingleChoice(oneMember(body, "n", "REQ-C-N"), "REQ-C-N");
   const items: SemanticRequestItem[] = [];
   const messages = requiredArray(oneMember(body, "messages", "REQ-C-MESSAGES"), "REQ-C-MESSAGES");
   for (const value of messages.items) {
@@ -187,18 +229,29 @@ function decodeChatRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<st
     "REQ-C-REASONING",
     true,
   );
+  const tools = decodeChatTools(oneMember(body, "tools", "REQ-C-TOOLS"), degradations);
+  const toolChoice = decodeChatToolChoice(oneMember(body, "tool_choice", "REQ-C-TOOL-CHOICE"), degradations);
+  const parallelToolCalls = optionalBoolean(
+    oneMember(body, "parallel_tool_calls", "REQ-C-PARALLEL"),
+    "REQ-C-PARALLEL",
+  );
+  const projectedTools = projectSemanticToolRequest(
+    "chat",
+    items,
+    tools,
+    toolChoice,
+    parallelToolCalls,
+    degradations,
+  );
   return Object.freeze({
     source: "chat",
     model: optionalString(oneMember(body, "model", "REQ-C-MODEL"), "REQ-C-MODEL"),
     stream: optionalBoolean(oneMember(body, "stream", "REQ-C-STREAM"), "REQ-C-STREAM") ?? false,
     instructions: [],
-    items,
-    tools: decodeChatTools(oneMember(body, "tools", "REQ-C-TOOLS")),
-    toolChoice: decodeChatToolChoice(oneMember(body, "tool_choice", "REQ-C-TOOL-CHOICE")),
-    parallelToolCalls: optionalBoolean(
-      oneMember(body, "parallel_tool_calls", "REQ-C-PARALLEL"),
-      "REQ-C-PARALLEL",
-    ),
+    items: projectedTools.items,
+    tools: projectedTools.tools,
+    toolChoice: projectedTools.toolChoice,
+    parallelToolCalls: projectedTools.parallelToolCalls,
     maxOutputTokens: aliasedPositiveInteger(
       body,
       ["max_completion_tokens", "max_tokens"],
@@ -212,9 +265,9 @@ function decodeChatRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<st
     ),
     topP: finiteNumber(oneMember(body, "top_p", "REQ-C-TOP-P"), "REQ-C-TOP-P", 0, 1),
     stop: parseStringList(oneMember(body, "stop", "REQ-C-STOP"), "REQ-C-STOP"),
-    outputFormat: decodeChatOutputFormat(oneMember(body, "response_format", "REQ-C-FORMAT")),
+    outputFormat: decodeChatOutputFormat(oneMember(body, "response_format", "REQ-C-FORMAT"), degradations),
     reasoning,
-    metadata: validatedMetadata(oneMember(body, "metadata", "REQ-C-METADATA"), "chat"),
+    metadata: independentMetadata(oneMember(body, "metadata", "REQ-C-METADATA"), degradations),
     degradations: [...degradations],
     ...(carrierRecords === undefined ? {} : { carrierRecords }),
   });
@@ -226,22 +279,30 @@ function decodeChatMessage(
   degradations: Set<ConversionDegradationRule>,
   carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>,
 ): void {
-  const message = requiredObject(value, "REQ-C-MESSAGE");
+  let message = requestObject(value, "REQ-C-MESSAGE");
   const role = requiredString(oneMember(message, "role", "REQ-C-MESSAGE-ROLE"), "REQ-C-MESSAGE-ROLE");
   if (role === "system" || role === "developer" || role === "user") {
-    assertAllowedKeys(message, new Set(["role", "content"]), "REQ-C-MESSAGE-KEY");
+    message = projectRequestMembers(
+      message,
+      new Set(["role", "content"]),
+      "REQ-C-MESSAGE-KEY",
+      "chat.extensions_omitted",
+      degradations,
+    );
     output.push({
       type: "message",
       role,
       content: decodeChatContent(
         oneMember(message, "content", "REQ-C-MESSAGE-CONTENT"),
         role !== "user",
+        false,
+        degradations,
       ),
     });
     return;
   }
   if (role === "assistant") {
-    assertAllowedKeys(
+    message = projectRequestMembers(
       message,
       new Set([
         "role",
@@ -256,6 +317,8 @@ function decodeChatMessage(
         "thinking_blocks",
       ]),
       "REQ-C-ASSISTANT",
+      "chat.extensions_omitted",
+      degradations,
     );
     const visibleReasoning = decodeChatReasoning(message, () => invalid("REQ-C-ASSISTANT-REASONING"));
     if (visibleReasoning.text.length > 0) {
@@ -293,6 +356,7 @@ function decodeChatMessage(
       oneMember(message, "content", "REQ-C-ASSISTANT-CONTENT"),
       true,
       true,
+      degradations,
     );
     const refusalValue = oneMember(message, "refusal", "REQ-C-ASSISTANT-REFUSAL");
     const refusal = refusalValue === null
@@ -305,7 +369,7 @@ function decodeChatMessage(
     const calls = oneMember(message, "tool_calls", "REQ-C-TOOL-CALLS");
     if (calls !== undefined) {
       for (const call of requiredArray(calls, "REQ-C-TOOL-CALLS").items) {
-        output.push(decodeChatToolCall(call));
+        output.push(decodeChatToolCall(call, degradations));
       }
     }
     if (combined.length === 0 && calls === undefined && !hasReasoningItems && visibleReasoning.text.length === 0) {
@@ -314,14 +378,25 @@ function decodeChatMessage(
     return;
   }
   if (role === "tool") {
-    assertAllowedKeys(message, new Set(["role", "content", "tool_call_id"]), "REQ-C-TOOL-RESULT");
+    message = projectRequestMembers(
+      message,
+      new Set(["role", "content", "tool_call_id"]),
+      "REQ-C-TOOL-RESULT",
+      "chat.extensions_omitted",
+      degradations,
+    );
     output.push({
       type: "tool_result",
       callId: requiredString(
         oneMember(message, "tool_call_id", "REQ-C-TOOL-RESULT-ID"),
         "REQ-C-TOOL-RESULT-ID",
       ),
-      content: decodeChatContent(oneMember(message, "content", "REQ-C-TOOL-RESULT-CONTENT"), false),
+      content: decodeChatContent(
+        oneMember(message, "content", "REQ-C-TOOL-RESULT-CONTENT"),
+        false,
+        false,
+        degradations,
+      ),
       isError: false,
     });
     return;
@@ -333,6 +408,7 @@ function decodeChatContent(
   value: WireJson | undefined,
   textOnly: boolean,
   allowNull = false,
+  degradations?: Set<ConversionDegradationRule>,
 ): readonly SemanticContent[] {
   if ((value === null || value === undefined) && allowNull) {
     return [];
@@ -342,19 +418,36 @@ function decodeChatContent(
   }
   const array = requiredArray(value, "REQ-C-CONTENT");
   return array.items.map((item) => {
-    const block = requiredObject(item, "REQ-C-CONTENT-BLOCK");
+    let block = requestObject(item, "REQ-C-CONTENT-BLOCK");
     const type = requiredString(oneMember(block, "type", "REQ-C-CONTENT-TYPE"), "REQ-C-CONTENT-TYPE");
     if (type === "text") {
-      assertAllowedKeys(block, new Set(["type", "text"]), "REQ-C-TEXT");
+      block = projectRequestMembers(
+        block,
+        new Set(["type", "text"]),
+        "REQ-C-TEXT",
+        "chat.extensions_omitted",
+        degradations ?? new Set(),
+      );
       return {
         type: "text",
         text: requiredString(oneMember(block, "text", "REQ-C-TEXT"), "REQ-C-TEXT", true),
       } as const;
     }
     if (type === "image_url" && !textOnly) {
-      assertAllowedKeys(block, new Set(["type", "image_url"]), "REQ-C-IMAGE");
-      const image = requiredObject(oneMember(block, "image_url", "REQ-C-IMAGE"), "REQ-C-IMAGE");
-      assertAllowedKeys(image, new Set(["url", "detail"]), "REQ-C-IMAGE");
+      block = projectRequestMembers(
+        block,
+        new Set(["type", "image_url"]),
+        "REQ-C-IMAGE",
+        "chat.extensions_omitted",
+        degradations ?? new Set(),
+      );
+      const image = projectRequestMembers(
+        requestObject(oneMember(block, "image_url", "REQ-C-IMAGE"), "REQ-C-IMAGE"),
+        new Set(["url", "detail"]),
+        "REQ-C-IMAGE",
+        "chat.extensions_omitted",
+        degradations ?? new Set(),
+      );
       return imageContent(
         requiredString(oneMember(image, "url", "REQ-C-IMAGE-URL"), "REQ-C-IMAGE-URL"),
         optionalString(oneMember(image, "detail", "REQ-C-IMAGE-DETAIL"), "REQ-C-IMAGE-DETAIL"),
@@ -365,21 +458,37 @@ function decodeChatContent(
   });
 }
 
-function decodeChatToolCall(value: WireJson) {
-  const call = requiredObject(value, "REQ-C-TOOL-CALL");
-  assertAllowedKeys(call, new Set(["id", "type", "function", "index"]), "REQ-C-TOOL-CALL");
+function decodeChatToolCall(value: WireJson, degradations?: Set<ConversionDegradationRule>) {
+  const projection = degradations ?? new Set<ConversionDegradationRule>();
+  const call = projectRequestMembers(
+    requestObject(value, "REQ-C-TOOL-CALL"),
+    new Set(["id", "type", "function", "index"]),
+    "REQ-C-TOOL-CALL",
+    "chat.extensions_omitted",
+    projection,
+    TOOL_SENSITIVE_EXTENSION_FIELDS,
+  );
   const type = requiredString(oneMember(call, "type", "REQ-C-TOOL-CALL-TYPE"), "REQ-C-TOOL-CALL-TYPE");
   if (type !== "function") {
     unsupported("REQ-C-TOOL-CALL-TYPE");
   }
-  const fn = requiredObject(oneMember(call, "function", "REQ-C-TOOL-CALL-FUNCTION"), "REQ-C-TOOL-CALL-FUNCTION");
-  assertAllowedKeys(fn, new Set(["name", "arguments"]), "REQ-C-TOOL-CALL-FUNCTION");
+  const fn = projectRequestMembers(
+    requestObject(oneMember(call, "function", "REQ-C-TOOL-CALL-FUNCTION"), "REQ-C-TOOL-CALL-FUNCTION"),
+    new Set(["name", "arguments"]),
+    "REQ-C-TOOL-CALL-FUNCTION",
+    "chat.extensions_omitted",
+    projection,
+    TOOL_SENSITIVE_EXTENSION_FIELDS,
+  );
   const argumentsJson = requiredString(
     oneMember(fn, "arguments", "REQ-C-TOOL-CALL-ARGS"),
     "REQ-C-TOOL-CALL-ARGS",
     true,
   );
   validateArgumentsJson(argumentsJson, "REQ-C-TOOL-CALL-ARGS");
+  if (oneMember(call, "index", "REQ-C-TOOL-CALL-INDEX") !== undefined) {
+    projection.add("request.option_omitted");
+  }
   return {
     type: "tool_call",
     callId: requiredString(oneMember(call, "id", "REQ-C-TOOL-CALL-ID"), "REQ-C-TOOL-CALL-ID"),
@@ -715,63 +824,112 @@ function decodeMessagesToolResult(
 }
 
 function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest {
-  const extended = prepareResponsesExtendedTools(body);
-  const semanticBody = extended?.body ?? body;
-  assertAllowedKeys(semanticBody, RESPONSES_TOP_LEVEL, "REQ-R-TOP");
-  validateStreamOptions(oneMember(semanticBody, "stream_options", "REQ-R-STREAM-OPTIONS"));
+  const degradations = new Set<ConversionDegradationRule>();
+  body = projectRequestMembers(
+    body,
+    RESPONSES_TOP_LEVEL,
+    "REQ-R-TOP",
+    "responses.extensions_omitted",
+    degradations,
+  );
+  const extended = prepareResponsesExtendedTools(body, degradations);
+  let semanticBody = extended?.body ?? body;
+  semanticBody = projectRequestMembers(
+    semanticBody,
+    RESPONSES_TOP_LEVEL,
+    "REQ-R-TOP",
+    "responses.extensions_omitted",
+    degradations,
+  );
+  decodeIndependentStreamOptions(
+    oneMember(semanticBody, "stream_options", "REQ-R-STREAM-OPTIONS"),
+    "responses.extensions_omitted",
+    degradations,
+  );
   validateSingleChoice(oneMember(semanticBody, "n", "REQ-R-N"), "REQ-R-N");
   const background = optionalBoolean(oneMember(semanticBody, "background", "REQ-R-BACKGROUND"), "REQ-R-BACKGROUND");
   if (background === true) {
     unsupported("REQ-R-BACKGROUND");
   }
   const previousResponseId = oneMember(semanticBody, "previous_response_id", "REQ-R-PREVIOUS");
-  if (previousResponseId !== undefined) {
-    requiredString(previousResponseId, "REQ-R-PREVIOUS");
+  if (previousResponseId !== undefined && previousResponseId !== null) {
+    unsupported("REQ-R-PREVIOUS");
   }
   const store = optionalBoolean(oneMember(semanticBody, "store", "REQ-R-STORE"), "REQ-R-STORE");
   if (store === true) {
     unsupported("REQ-R-STORE");
   }
-  const degradations = new Set<ConversionDegradationRule>();
   const items = decodeResponsesInput(oneMember(semanticBody, "input", "REQ-R-INPUT"), degradations, carrierRecords);
-  const reasoningObject = optionalObject(
-    oneMember(semanticBody, "reasoning", "REQ-R-REASONING"),
-    "REQ-R-REASONING",
-  );
+  const reasoningValue = oneMember(semanticBody, "reasoning", "REQ-R-REASONING");
+  const reasoningObject = reasoningValue === undefined
+    ? undefined
+    : projectRequestMembers(
+      requestObject(reasoningValue, "REQ-R-REASONING"),
+      new Set(["effort", "summary", "encrypted_content"]),
+      "REQ-R-REASONING",
+      "responses.extensions_omitted",
+      degradations,
+    );
   if (reasoningObject !== undefined) {
-    assertAllowedKeys(reasoningObject, new Set(["effort", "summary", "encrypted_content"]), "REQ-R-REASONING");
     if (oneMember(reasoningObject, "summary", "REQ-R-REASONING-SUMMARY") !== undefined) {
-      requiredString(oneMember(reasoningObject, "summary", "REQ-R-REASONING-SUMMARY"), "REQ-R-REASONING-SUMMARY");
+      projectIndependentOption(
+        oneMember(reasoningObject, "summary", "REQ-R-REASONING-SUMMARY"),
+        (value) => typeof value === "string" && value.length > 0
+          ? { kind: "value", value }
+          : { kind: "malformed" },
+        { omission: "request.option_omitted", degradations },
+      );
       degradations.add("reasoning.presentation_omitted");
     }
     if (oneMember(reasoningObject, "encrypted_content", "REQ-R-REASONING-STATE") !== undefined) {
-      requiredString(oneMember(reasoningObject, "encrypted_content", "REQ-R-REASONING-STATE"), "REQ-R-REASONING-STATE");
+      const encrypted = requiredString(
+        oneMember(reasoningObject, "encrypted_content", "REQ-R-REASONING-STATE"),
+        "REQ-R-REASONING-STATE",
+      );
+      if (isReasoningCarrier(encrypted)) invalid("REQ-R-REASONING-STATE");
       degradations.add("reasoning.state_omitted");
     }
   }
+  const tools = decodeResponsesTools(
+    oneMember(semanticBody, "tools", "REQ-R-TOOLS"),
+    extended !== undefined,
+    degradations,
+  ).map((tool) => {
+    const binding = extended?.ledger.bindings.find((candidate) => candidate.chatName === tool.name);
+    return binding === undefined ? tool : {
+      ...tool,
+      kind: binding.kind,
+      sourceName: binding.sourceName,
+      ...(binding.namespace === undefined ? {} : { namespace: binding.namespace }),
+    };
+  });
+  const toolChoice = decodeResponsesToolChoice(
+    oneMember(semanticBody, "tool_choice", "REQ-R-TOOL-CHOICE"),
+    degradations,
+  );
+  const parallelToolCalls = optionalBoolean(
+    oneMember(semanticBody, "parallel_tool_calls", "REQ-R-PARALLEL"),
+    "REQ-R-PARALLEL",
+  );
+  const projectedTools = extended === undefined
+    ? projectSemanticToolRequest(
+      "responses",
+      items,
+      tools,
+      toolChoice,
+      parallelToolCalls,
+      degradations,
+    )
+    : { items, tools, toolChoice, parallelToolCalls };
   return Object.freeze({
     source: "responses",
     model: optionalString(oneMember(semanticBody, "model", "REQ-R-MODEL"), "REQ-R-MODEL"),
     stream: optionalBoolean(oneMember(semanticBody, "stream", "REQ-R-STREAM"), "REQ-R-STREAM") ?? false,
     instructions: decodeResponsesInstructions(oneMember(semanticBody, "instructions", "REQ-R-INSTRUCTIONS")),
-    items,
-    tools: decodeResponsesTools(
-      oneMember(semanticBody, "tools", "REQ-R-TOOLS"),
-      extended !== undefined,
-    ).map((tool) => {
-      const binding = extended?.ledger.bindings.find((candidate) => candidate.chatName === tool.name);
-      return binding === undefined ? tool : {
-        ...tool,
-        kind: binding.kind,
-        sourceName: binding.sourceName,
-        ...(binding.namespace === undefined ? {} : { namespace: binding.namespace }),
-      };
-    }),
-    toolChoice: decodeResponsesToolChoice(oneMember(semanticBody, "tool_choice", "REQ-R-TOOL-CHOICE")),
-    parallelToolCalls: optionalBoolean(
-      oneMember(semanticBody, "parallel_tool_calls", "REQ-R-PARALLEL"),
-      "REQ-R-PARALLEL",
-    ),
+    items: projectedTools.items,
+    tools: projectedTools.tools,
+    toolChoice: projectedTools.toolChoice,
+    parallelToolCalls: projectedTools.parallelToolCalls,
     maxOutputTokens: aliasedPositiveInteger(
       semanticBody,
       ["max_output_tokens", "max_completion_tokens", "max_tokens"],
@@ -785,7 +943,7 @@ function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: ReadonlyM
     ),
     topP: finiteNumber(oneMember(semanticBody, "top_p", "REQ-R-TOP-P"), "REQ-R-TOP-P", 0, 1),
     stop: parseStringList(oneMember(semanticBody, "stop", "REQ-R-STOP"), "REQ-R-STOP"),
-    outputFormat: decodeResponsesOutputFormat(semanticBody),
+    outputFormat: decodeResponsesOutputFormat(semanticBody, degradations),
     reasoning: reasoningFromEffort(
       optionalString(
         reasoningObject === undefined ? undefined : oneMember(reasoningObject, "effort", "REQ-R-EFFORT"),
@@ -794,7 +952,7 @@ function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: ReadonlyM
       "REQ-R-EFFORT",
       true,
     ),
-    metadata: validatedMetadata(oneMember(semanticBody, "metadata", "REQ-R-METADATA"), "responses"),
+    metadata: independentMetadata(oneMember(semanticBody, "metadata", "REQ-R-METADATA"), degradations),
     degradations: [...degradations],
     ...(extended === undefined ? {} : { responseBindings: extended.ledger }),
     ...(carrierRecords === undefined ? {} : { carrierRecords }),
@@ -822,10 +980,16 @@ function decodeResponsesInput(
   const values = isWireJsonArray(value) ? value.items : [value];
   const output: SemanticRequestItem[] = [];
   for (const item of values) {
-    const object = requiredObject(item, "REQ-R-INPUT-ITEM");
+    let object = requestObject(item, "REQ-R-INPUT-ITEM");
     const type = optionalString(oneMember(object, "type", "REQ-R-INPUT-TYPE"), "REQ-R-INPUT-TYPE");
     if (type === undefined || type === "message") {
-      assertAllowedKeys(object, new Set(["type", "id", "role", "content", "status"]), "REQ-R-MESSAGE");
+      object = projectRequestMembers(
+        object,
+        new Set(["type", "id", "role", "content", "status"]),
+        "REQ-R-MESSAGE",
+        "responses.extensions_omitted",
+        degradations,
+      );
       const role = requiredString(oneMember(object, "role", "REQ-R-MESSAGE-ROLE"), "REQ-R-MESSAGE-ROLE");
       if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
         invalid("REQ-R-MESSAGE-ROLE");
@@ -836,15 +1000,21 @@ function decodeResponsesInput(
         content: decodeResponsesContent(
           oneMember(object, "content", "REQ-R-MESSAGE-CONTENT"),
           role === "user",
+          degradations,
         ),
       });
+      omitPresentationString(oneMember(object, "id", "REQ-R-MESSAGE-ID"), degradations);
+      omitPresentationStatus(oneMember(object, "status", "REQ-R-MESSAGE-STATUS"), false, degradations);
       continue;
     }
     if (type === "function_call") {
-      assertAllowedKeys(
+      object = projectRequestMembers(
         object,
         new Set(["type", "id", "call_id", "name", "arguments", "status"]),
         "REQ-R-FUNCTION-CALL",
+        "responses.extensions_omitted",
+        degradations,
+        TOOL_SENSITIVE_EXTENSION_FIELDS,
       );
       const argumentsJson = requiredString(
         oneMember(object, "arguments", "REQ-R-FUNCTION-ARGS"),
@@ -854,26 +1024,28 @@ function decodeResponsesInput(
       validateArgumentsJson(argumentsJson, "REQ-R-FUNCTION-ARGS");
       output.push({
         type: "tool_call",
-        itemId: optionalString(oneMember(object, "id", "REQ-R-FUNCTION-ITEM-ID"), "REQ-R-FUNCTION-ITEM-ID"),
         callId: requiredString(
           oneMember(object, "call_id", "REQ-R-FUNCTION-CALL-ID"),
           "REQ-R-FUNCTION-CALL-ID",
         ),
         name: requiredString(oneMember(object, "name", "REQ-R-FUNCTION-NAME"), "REQ-R-FUNCTION-NAME"),
         argumentsJson,
-        ...responsesRequestItemStatus(object, false),
       });
+      omitPresentationString(oneMember(object, "id", "REQ-R-FUNCTION-ITEM-ID"), degradations);
+      omitPresentationStatus(oneMember(object, "status", "REQ-R-ITEM-STATUS"), false, degradations);
       continue;
     }
     if (type === "function_call_output") {
-      assertAllowedKeys(
+      object = projectRequestMembers(
         object,
         new Set(["type", "id", "call_id", "output", "status"]),
         "REQ-R-FUNCTION-OUTPUT",
+        "responses.extensions_omitted",
+        degradations,
+        TOOL_SENSITIVE_EXTENSION_FIELDS,
       );
       output.push({
         type: "tool_result",
-        itemId: optionalString(oneMember(object, "id", "REQ-R-FUNCTION-OUTPUT-ITEM-ID"), "REQ-R-FUNCTION-OUTPUT-ITEM-ID"),
         callId: requiredString(
           oneMember(object, "call_id", "REQ-R-FUNCTION-OUTPUT-ID"),
           "REQ-R-FUNCTION-OUTPUT-ID",
@@ -882,19 +1054,30 @@ function decodeResponsesInput(
           oneMember(object, "output", "REQ-R-FUNCTION-OUTPUT-CONTENT"),
           degradations,
         ),
-        isError: oneMember(object, "status", "REQ-R-FUNCTION-OUTPUT-STATUS") === "failed",
-        ...responsesRequestItemStatus(object, true),
+        isError: independentResultStatus(
+          oneMember(object, "status", "REQ-R-FUNCTION-OUTPUT-STATUS"),
+          degradations,
+        ) === "failed",
       });
+      omitPresentationString(oneMember(object, "id", "REQ-R-FUNCTION-OUTPUT-ITEM-ID"), degradations);
       continue;
     }
     if (type === "reasoning") {
-      assertAllowedKeys(
+      object = projectRequestMembers(
         object,
         new Set(["type", "id", "status", "summary", "content", "encrypted_content"]),
         "REQ-R-REASONING-ITEM",
+        "responses.extensions_omitted",
+        degradations,
       );
+      omitPresentationString(oneMember(object, "id", "REQ-R-REASONING-ID"), degradations);
+      omitPresentationStatus(oneMember(object, "status", "REQ-R-REASONING-STATUS"), false, degradations);
+      const reasoningCore = {
+        kind: "object" as const,
+        members: object.members.filter((member) => member.key !== "id" && member.key !== "status"),
+      };
       const reasoning = decodeResponsesReasoningItem(
-        object,
+        reasoningCore,
         () => invalid("REQ-R-REASONING-ITEM"),
         false,
       );
@@ -927,32 +1110,83 @@ function decodeResponsesInput(
   return output;
 }
 
-function responsesRequestItemStatus(
-  object: WireJsonObject,
-  allowFailed: boolean,
-): { readonly status?: "completed" | "incomplete" | "in_progress" | "failed" } {
-  const status = optionalString(oneMember(object, "status", "REQ-R-ITEM-STATUS"), "REQ-R-ITEM-STATUS");
-  if (status === undefined) {
-    return {};
-  }
-  if (status === "completed" || status === "incomplete" || status === "in_progress" || (allowFailed && status === "failed")) {
-    return { status };
-  }
-  invalid("REQ-R-ITEM-STATUS");
+function omitPresentationString(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): void {
+  if (value === undefined) return;
+  projectIndependentOption(value, (candidate) => (
+    typeof candidate === "string" && candidate.length > 0
+      ? { kind: "value", value: candidate }
+      : { kind: "malformed" }
+  ), { omission: "request.option_omitted", degradations });
+  degradations.add("request.option_omitted");
 }
 
-function decodeResponsesContent(value: WireJson | undefined, allowImage: boolean): readonly SemanticContent[] {
+function omitPresentationStatus(
+  value: WireJson | undefined,
+  allowFailed: boolean,
+  degradations: Set<ConversionDegradationRule>,
+): void {
+  if (value === undefined) return;
+  projectIndependentOption(value, (candidate) => (
+    candidate === "completed"
+    || candidate === "incomplete"
+    || candidate === "in_progress"
+    || (allowFailed && candidate === "failed")
+      ? { kind: "value", value: candidate }
+      : { kind: "malformed" }
+  ), { omission: "request.option_omitted", degradations });
+  degradations.add("request.option_omitted");
+}
+
+function independentResultStatus(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): "completed" | "incomplete" | "in_progress" | "failed" | undefined {
+  if (value === undefined) return undefined;
+  const status = projectIndependentOption<"completed" | "incomplete" | "in_progress" | "failed">(value, (candidate) => (
+    candidate === "completed"
+    || candidate === "incomplete"
+    || candidate === "in_progress"
+    || candidate === "failed"
+      ? { kind: "value", value: candidate }
+      : { kind: "malformed" }
+  ), { omission: "request.option_omitted", degradations });
+  degradations.add("request.option_omitted");
+  return status;
+}
+
+function decodeResponsesContent(
+  value: WireJson | undefined,
+  allowImage: boolean,
+  degradations: Set<ConversionDegradationRule>,
+): readonly SemanticContent[] {
   if (typeof value === "string") {
     return [{ type: "text", text: value }];
   }
   return requiredArray(value, "REQ-R-CONTENT").items.map((item) => {
-    const block = requiredObject(item, "REQ-R-CONTENT-BLOCK");
+    let block = requestObject(item, "REQ-R-CONTENT-BLOCK");
     const type = requiredString(oneMember(block, "type", "REQ-R-CONTENT-TYPE"), "REQ-R-CONTENT-TYPE");
     if (type === "input_text" || type === "output_text" || type === "text") {
-      assertAllowedKeys(block, new Set(["type", "text", "annotations"]), "REQ-R-TEXT");
+      block = projectRequestMembers(
+        block,
+        new Set(["type", "text", "annotations"]),
+        "REQ-R-TEXT",
+        "responses.extensions_omitted",
+        degradations,
+      );
       const annotations = oneMember(block, "annotations", "REQ-R-TEXT-ANNOTATIONS");
       if (annotations !== undefined) {
-        requiredArray(annotations, "REQ-R-TEXT-ANNOTATIONS");
+        const parsed = projectIndependentOption(
+          annotations,
+          (candidate) => isWireJsonArray(candidate) ? { kind: "value", value: candidate } : { kind: "malformed" },
+          { omission: "request.option_omitted", degradations },
+        );
+        if (parsed === undefined) {
+          block = { kind: "object", members: block.members.filter((member) => member.key !== "annotations") };
+        }
+        degradations.add("request.option_omitted");
       }
       return {
         type: "text",
@@ -960,14 +1194,26 @@ function decodeResponsesContent(value: WireJson | undefined, allowImage: boolean
       } as const;
     }
     if (type === "refusal") {
-      assertAllowedKeys(block, new Set(["type", "refusal"]), "REQ-R-REFUSAL");
+      block = projectRequestMembers(
+        block,
+        new Set(["type", "refusal"]),
+        "REQ-R-REFUSAL",
+        "responses.extensions_omitted",
+        degradations,
+      );
       return {
         type: "refusal",
         text: requiredString(oneMember(block, "refusal", "REQ-R-REFUSAL"), "REQ-R-REFUSAL", true),
       } as const;
     }
     if (type === "input_image" && allowImage) {
-      assertAllowedKeys(block, new Set(["type", "image_url", "detail"]), "REQ-R-IMAGE");
+      block = projectRequestMembers(
+        block,
+        new Set(["type", "image_url", "detail"]),
+        "REQ-R-IMAGE",
+        "responses.extensions_omitted",
+        degradations,
+      );
       return imageContent(
         requiredString(oneMember(block, "image_url", "REQ-R-IMAGE-URL"), "REQ-R-IMAGE-URL"),
         optionalString(oneMember(block, "detail", "REQ-R-IMAGE-DETAIL"), "REQ-R-IMAGE-DETAIL"),
@@ -1241,18 +1487,33 @@ function decodeToolResultContent(
   });
 }
 
-function decodeChatTools(value: WireJson | undefined): readonly SemanticTool[] {
+function decodeChatTools(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): readonly SemanticTool[] {
   if (value === undefined) {
     return [];
   }
   return requiredArray(value, "REQ-C-TOOLS").items.map((item) => {
-    const tool = requiredObject(item, "REQ-C-TOOL");
-    assertAllowedKeys(tool, new Set(["type", "function"]), "REQ-C-TOOL");
+    const tool = projectRequestMembers(
+      requestObject(item, "REQ-C-TOOL"),
+      new Set(["type", "function"]),
+      "REQ-C-TOOL",
+      "chat.extensions_omitted",
+      degradations,
+      TOOL_SENSITIVE_EXTENSION_FIELDS,
+    );
     if (requiredString(oneMember(tool, "type", "REQ-C-TOOL-TYPE"), "REQ-C-TOOL-TYPE") !== "function") {
       unsupported("REQ-C-TOOL-TYPE");
     }
-    const fn = requiredObject(oneMember(tool, "function", "REQ-C-TOOL-FUNCTION"), "REQ-C-TOOL-FUNCTION");
-    assertAllowedKeys(fn, new Set(["name", "description", "parameters", "strict"]), "REQ-C-TOOL-FUNCTION");
+    const fn = projectRequestMembers(
+      requestObject(oneMember(tool, "function", "REQ-C-TOOL-FUNCTION"), "REQ-C-TOOL-FUNCTION"),
+      new Set(["name", "description", "parameters", "strict"]),
+      "REQ-C-TOOL-FUNCTION",
+      "chat.extensions_omitted",
+      degradations,
+      TOOL_SENSITIVE_EXTENSION_FIELDS,
+    );
     return semanticTool(fn, "parameters", "REQ-C-TOOL", false);
   });
 }
@@ -1292,16 +1553,19 @@ function decodeMessagesTools(
 function decodeResponsesTools(
   value: WireJson | undefined,
   allowCompatibilityStrictOmission = false,
+  degradations: Set<ConversionDegradationRule> = new Set(),
 ): readonly SemanticTool[] {
   if (value === undefined) {
     return [];
   }
   return requiredArray(value, "REQ-R-TOOLS").items.map((item) => {
-    const tool = requiredObject(item, "REQ-R-TOOL");
-    assertAllowedKeys(
-      tool,
+    const tool = projectRequestMembers(
+      requestObject(item, "REQ-R-TOOL"),
       new Set(["type", "name", "description", "parameters", "strict"]),
       "REQ-R-TOOL",
+      "responses.extensions_omitted",
+      degradations,
+      TOOL_SENSITIVE_EXTENSION_FIELDS,
     );
     if (requiredString(oneMember(tool, "type", "REQ-R-TOOL-TYPE"), "REQ-R-TOOL-TYPE") !== "function") {
       unsupported("REQ-R-TOOL-TYPE");
@@ -1337,7 +1601,10 @@ function semanticTool(
   };
 }
 
-function decodeChatToolChoice(value: WireJson | undefined): SemanticToolChoice | undefined {
+function decodeChatToolChoice(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): SemanticToolChoice | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -1347,16 +1614,25 @@ function decodeChatToolChoice(value: WireJson | undefined): SemanticToolChoice |
     }
     invalid("REQ-C-TOOL-CHOICE");
   }
-  const object = requiredObject(value, "REQ-C-TOOL-CHOICE");
-  assertAllowedKeys(object, new Set(["type", "function"]), "REQ-C-TOOL-CHOICE");
+  const object = projectRequestMembers(
+    requestObject(value, "REQ-C-TOOL-CHOICE"),
+    new Set(["type", "function"]),
+    "REQ-C-TOOL-CHOICE",
+    "chat.extensions_omitted",
+    degradations,
+    TOOL_SENSITIVE_EXTENSION_FIELDS,
+  );
   if (requiredString(oneMember(object, "type", "REQ-C-TOOL-CHOICE-TYPE"), "REQ-C-TOOL-CHOICE-TYPE") !== "function") {
     unsupported("REQ-C-TOOL-CHOICE-TYPE");
   }
-  const fn = requiredObject(
-    oneMember(object, "function", "REQ-C-TOOL-CHOICE-FUNCTION"),
+  const fn = projectRequestMembers(
+    requestObject(oneMember(object, "function", "REQ-C-TOOL-CHOICE-FUNCTION"), "REQ-C-TOOL-CHOICE-FUNCTION"),
+    new Set(["name"]),
     "REQ-C-TOOL-CHOICE-FUNCTION",
+    "chat.extensions_omitted",
+    degradations,
+    TOOL_SENSITIVE_EXTENSION_FIELDS,
   );
-  assertAllowedKeys(fn, new Set(["name"]), "REQ-C-TOOL-CHOICE-FUNCTION");
   return {
     kind: "tool",
     name: requiredString(oneMember(fn, "name", "REQ-C-TOOL-CHOICE-NAME"), "REQ-C-TOOL-CHOICE-NAME"),
@@ -1419,7 +1695,10 @@ function messagesParallelToolCalls(
   return disabled === undefined ? undefined : !disabled;
 }
 
-function decodeResponsesToolChoice(value: WireJson | undefined): SemanticToolChoice | undefined {
+function decodeResponsesToolChoice(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): SemanticToolChoice | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -1429,8 +1708,14 @@ function decodeResponsesToolChoice(value: WireJson | undefined): SemanticToolCho
     }
     invalid("REQ-R-TOOL-CHOICE");
   }
-  const object = requiredObject(value, "REQ-R-TOOL-CHOICE");
-  assertAllowedKeys(object, new Set(["type", "name"]), "REQ-R-TOOL-CHOICE");
+  const object = projectRequestMembers(
+    requestObject(value, "REQ-R-TOOL-CHOICE"),
+    new Set(["type", "name"]),
+    "REQ-R-TOOL-CHOICE",
+    "responses.extensions_omitted",
+    degradations,
+    TOOL_SENSITIVE_EXTENSION_FIELDS,
+  );
   if (requiredString(oneMember(object, "type", "REQ-R-TOOL-CHOICE-TYPE"), "REQ-R-TOOL-CHOICE-TYPE") !== "function") {
     unsupported("REQ-R-TOOL-CHOICE-TYPE");
   }
@@ -1440,12 +1725,20 @@ function decodeResponsesToolChoice(value: WireJson | undefined): SemanticToolCho
   };
 }
 
-function decodeChatOutputFormat(value: WireJson | undefined): SemanticOutputFormat | undefined {
+function decodeChatOutputFormat(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): SemanticOutputFormat | undefined {
   if (value === undefined) {
     return undefined;
   }
-  const object = requiredObject(value, "REQ-C-FORMAT");
-  assertAllowedKeys(object, new Set(["type", "json_schema"]), "REQ-C-FORMAT");
+  const object = projectRequestMembers(
+    requestObject(value, "REQ-C-FORMAT"),
+    new Set(["type", "json_schema"]),
+    "REQ-C-FORMAT",
+    "chat.extensions_omitted",
+    degradations,
+  );
   const type = requiredString(oneMember(object, "type", "REQ-C-FORMAT-TYPE"), "REQ-C-FORMAT-TYPE");
   if (type === "json_object") {
     return { kind: "json_object" };
@@ -1454,7 +1747,13 @@ function decodeChatOutputFormat(value: WireJson | undefined): SemanticOutputForm
     unsupported("REQ-C-FORMAT-TYPE");
   }
   return decodeNamedSchema(
-    requiredObject(oneMember(object, "json_schema", "REQ-C-FORMAT-SCHEMA"), "REQ-C-FORMAT-SCHEMA"),
+    projectRequestMembers(
+      requestObject(oneMember(object, "json_schema", "REQ-C-FORMAT-SCHEMA"), "REQ-C-FORMAT-SCHEMA"),
+      new Set(["name", "description", "schema", "strict"]),
+      "REQ-C-FORMAT-SCHEMA",
+      "chat.extensions_omitted",
+      degradations,
+    ),
     "REQ-C-FORMAT-SCHEMA",
   );
 }
@@ -1506,12 +1805,19 @@ function validateOpenaiStrictSchema(schema: WireJsonObject, root = false, depth 
   }
 }
 
-function decodeResponsesOutputFormat(body: WireJsonObject): SemanticOutputFormat | undefined {
-  const text = optionalObject(oneMember(body, "text", "REQ-R-TEXT-FORMAT"), "REQ-R-TEXT-FORMAT");
+function decodeResponsesOutputFormat(
+  body: WireJsonObject,
+  degradations: Set<ConversionDegradationRule>,
+): SemanticOutputFormat | undefined {
+  const textValue = oneMember(body, "text", "REQ-R-TEXT-FORMAT");
+  const text = textValue === undefined ? undefined : projectRequestMembers(
+    requestObject(textValue, "REQ-R-TEXT-FORMAT"),
+    new Set(["format"]),
+    "REQ-R-TEXT-FORMAT",
+    "responses.extensions_omitted",
+    degradations,
+  );
   const responseFormat = oneMember(body, "response_format", "REQ-R-FORMAT");
-  if (text !== undefined) {
-    assertAllowedKeys(text, new Set(["format"]), "REQ-R-TEXT-FORMAT");
-  }
   const textFormat = text === undefined ? undefined : oneMember(text, "format", "REQ-R-TEXT-FORMAT");
   if (textFormat !== undefined && responseFormat !== undefined) {
     invalid("REQ-R-FORMAT-CONFLICT");
@@ -1520,8 +1826,13 @@ function decodeResponsesOutputFormat(body: WireJsonObject): SemanticOutputFormat
   if (value === undefined) {
     return undefined;
   }
-  const object = requiredObject(value, "REQ-R-FORMAT");
-  assertAllowedKeys(object, new Set(["type", "name", "description", "schema", "strict"]), "REQ-R-FORMAT");
+  const object = projectRequestMembers(
+    requestObject(value, "REQ-R-FORMAT"),
+    new Set(["type", "name", "description", "schema", "strict"]),
+    "REQ-R-FORMAT",
+    "responses.extensions_omitted",
+    degradations,
+  );
   const type = requiredString(oneMember(object, "type", "REQ-R-FORMAT-TYPE"), "REQ-R-FORMAT-TYPE");
   if (type === "json_object") {
     return { kind: "json_object" };
@@ -1585,6 +1896,7 @@ function encodeChatRequest(
   const targetReasoning = reasoningForTarget(context.capability, "chat", request.reasoning);
   const reasoning = targetReasoning.reasoning;
   const reasoningDegradations = targetReasoning.degradations;
+  const targetParallel = parallelCallsForTarget(request, context.capability);
   const messages = request.responseBindings === undefined
     ? encodeChatMessages(request)
     : request.responseBindings.chatMessages;
@@ -1607,7 +1919,7 @@ function encodeChatRequest(
       ["stream_options", request.stream ? wireObject([["include_usage", true]]) : undefined],
       ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
       ["tool_choice", encodeChatToolChoice(request.toolChoice)],
-      ["parallel_tool_calls", request.parallelToolCalls],
+      ["parallel_tool_calls", targetParallel.value],
       ["response_format", encodeChatOutputFormat(request.outputFormat)],
       ["reasoning_effort", reasoning?.effort],
       ["metadata", request.metadata],
@@ -1615,16 +1927,19 @@ function encodeChatRequest(
     : wireObject([
       ["model", context.resolvedModel],
       ["messages", wireArray(messages)],
-      ...request.responseBindings.chatPrefixMembers.map((member) => [member.key, member.value] as const),
+      ...request.responseBindings.chatPrefixMembers
+        .filter((member) => member.key !== "parallel_tool_calls")
+        .map((member) => [member.key, member.value] as const),
       ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
       ["tool_choice", encodeChatToolChoice(request.toolChoice)],
+      ["parallel_tool_calls", targetParallel.value],
       ...(budget === undefined || tokenField === null ? [] : [[tokenField, wireNumber(budget)] as const]),
       ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
       ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
       ["reasoning_effort", reasoning?.effort],
       ["metadata", request.metadata],
     ]);
-  return encodedRequest(request, body, reasoningDegradations);
+  return encodedRequest(request, body, [...reasoningDegradations, ...targetParallel.degradations]);
 }
 
 function encodeResponsesRequest(
@@ -1635,6 +1950,7 @@ function encodeResponsesRequest(
   const targetReasoning = reasoningForTarget(context.capability, "responses", request.reasoning);
   const reasoning = targetReasoning.reasoning;
   const reasoningDegradations = targetReasoning.degradations;
+  const targetParallel = parallelCallsForTarget(request, context.capability);
   if (request.stop !== undefined) {
     unsupported("REQ-TARGET-R-STOP");
   }
@@ -1648,7 +1964,7 @@ function encodeResponsesRequest(
     ["stream", request.stream ? true : undefined],
     ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeResponsesTool))],
     ["tool_choice", encodeResponsesToolChoice(request.toolChoice)],
-    ["parallel_tool_calls", request.parallelToolCalls],
+    ["parallel_tool_calls", targetParallel.value],
     ["text", request.outputFormat === undefined
       ? undefined
       : wireObject([["format", encodeResponsesOutputFormat(request.outputFormat)]])],
@@ -1657,7 +1973,7 @@ function encodeResponsesRequest(
       : wireObject([["effort", reasoning.effort]])],
     ["metadata", request.metadata],
   ]);
-  return encodedRequest(request, body, reasoningDegradations);
+  return encodedRequest(request, body, [...reasoningDegradations, ...targetParallel.degradations]);
 }
 
 function encodeMessagesRequest(
@@ -1693,18 +2009,35 @@ function encodeMessagesRequest(
   const targetDegradations = [...resolvedReasoning.degradations];
   if (resolvedReasoning.reasoning?.effort === "minimal") targetDegradations.push("reasoning.budget_coarsened");
   const budget = outputBudget(request.maxOutputTokens, context.capability);
+  const targetParallel = parallelCallsForTarget(request, context.capability);
+  targetDegradations.push(...targetParallel.degradations);
   const split = splitMessagesInstructions(request);
+  const messages = encodeMessagesItems(split.items);
+  if (!messages.some((message) => (
+    oneMember(message, "role", "REQ-INTERNAL") === "assistant"
+    || hasSubstantiveMessagesUserContent(oneMember(message, "content", "REQ-INTERNAL"))
+  ))) {
+    unsupported("REQ-TARGET-M-EMPTY");
+  }
+  if (!hasSubstantiveLeadingMessagesUser(messages)) {
+    if (messages[0] !== undefined && oneMember(messages[0], "role", "REQ-INTERNAL") === "user") {
+      messages[0] = syntheticMessagesLeadingUser();
+    } else {
+      messages.unshift(syntheticMessagesLeadingUser());
+    }
+    targetDegradations.push("messages.leading_user_synthesized");
+  }
   const body = wireObject([
     ["model", context.resolvedModel],
     ["system", encodeMessagesSystem(split.instructions)],
-    ["messages", wireArray(encodeMessagesItems(split.items))],
+    ["messages", wireArray(messages)],
     ["max_tokens", wireNumber(budget)],
     ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
     ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
     ["stop_sequences", request.stop === undefined ? undefined : wireArray(request.stop)],
     ["stream", request.stream ? true : undefined],
     ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeMessagesTool))],
-    ["tool_choice", encodeMessagesToolChoice(request.toolChoice, request.parallelToolCalls)],
+    ["tool_choice", encodeMessagesToolChoice(request.toolChoice, targetParallel.value)],
     ["output_config", encodeMessagesOutputConfig(request.outputFormat, targetReasoning)],
     ["metadata", request.metadata],
   ]);
@@ -1728,12 +2061,44 @@ function reasoningForTarget(
   return { reasoning: undefined, degradations: ["reasoning.presentation_omitted"] };
 }
 
+function parallelCallsForTarget(
+  request: Readonly<SemanticRequest>,
+  capability: Readonly<EffectiveModelCapabilitySnapshot>,
+): { readonly value?: boolean; readonly degradations: readonly ConversionDegradationRule[] } {
+  if (request.parallelToolCalls === undefined || capability.capabilities.parallelToolCalling) {
+    return {
+      ...(request.parallelToolCalls === undefined ? {} : { value: request.parallelToolCalls }),
+      degradations: [],
+    };
+  }
+  if (request.parallelToolCalls) unsupported("REQ-TARGET-PARALLEL-CAPABILITY");
+  return { degradations: ["tools.parallel_control_omitted"] };
+}
+
 function validateConditionalTargetParameters(
   request: Readonly<SemanticRequest>,
   capability: Readonly<EffectiveModelCapabilitySnapshot>,
   target: InferenceProtocol,
 ): void {
   const supported = capability.profile.supportedParameters.value;
+  const hasToolSemantics = request.tools.length > 0
+    || request.toolChoice?.kind === "required"
+    || request.toolChoice?.kind === "tool"
+    || request.items.some((item) => item.type === "tool_call" || item.type === "tool_result");
+  if (hasToolSemantics && !capability.capabilities.toolCalling) {
+    unsupported("REQ-TARGET-TOOL-CAPABILITY");
+  }
+  if (request.parallelToolCalls === true && !capability.capabilities.parallelToolCalling) {
+    unsupported("REQ-TARGET-PARALLEL-CAPABILITY");
+  }
+  const hasImages = request.instructions.some((part) => part.type === "image")
+    || request.items.some((item) => (
+      (item.type === "message" || item.type === "tool_result")
+      && item.content.some((part) => part.type === "image")
+    ));
+  if (hasImages && !capability.capabilities.inputModalities.includes("image")) {
+    unsupported("REQ-TARGET-IMAGE-CAPABILITY");
+  }
   if (request.temperature !== undefined && supported?.includes("temperature") !== true) {
     unsupported("REQ-TARGET-TEMPERATURE-CAPABILITY");
   }
@@ -1751,6 +2116,38 @@ function validateConditionalTargetParameters(
   if (!formatKeys.some((key) => supported?.includes(key) === true)) {
     unsupported("REQ-TARGET-FORMAT-CAPABILITY");
   }
+}
+
+function projectSemanticToolRequest(
+  source: "chat" | "responses",
+  items: readonly SemanticRequestItem[],
+  tools: readonly SemanticTool[],
+  toolChoice: SemanticToolChoice | undefined,
+  parallelToolCalls: boolean | undefined,
+  degradations: Set<ConversionDegradationRule>,
+) {
+  const callBindings = new Map<string, string | undefined>();
+  for (const item of items) {
+    if (item.type !== "tool_call") continue;
+    callBindings.set(item.callId, callBindings.has(item.callId) ? undefined : item.name);
+  }
+  return projectToolRequest({
+    source,
+    candidates: items.map((item) => item.type === "tool_call"
+      ? { kind: "tool_call" as const, callId: item.callId, bindingKey: item.name, item }
+      : item.type === "tool_result"
+        ? {
+          kind: "tool_result" as const,
+          callId: item.callId,
+          bindingKey: callBindings.get(item.callId) ?? `unbound:${item.callId}`,
+          item,
+        }
+        : { kind: "item" as const, item }),
+    tools,
+    toolChoice,
+    parallelToolCalls,
+    degradations,
+  });
 }
 
 function splitMessagesInstructions(request: Readonly<SemanticRequest>): {
@@ -1962,14 +2359,24 @@ function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObj
   if (output.length === 0) {
     unsupported("REQ-TARGET-M-EMPTY");
   }
-  const first = output[0] as WireJsonObject;
-  if (
-    oneMember(first, "role", "REQ-INTERNAL") !== "user"
-    || !hasSubstantiveMessagesUserContent(oneMember(first, "content", "REQ-INTERNAL"))
-  ) {
-    unsupported("REQ-TARGET-M-LEADING-USER");
-  }
   return output;
+}
+
+function hasSubstantiveLeadingMessagesUser(output: readonly WireJsonObject[]): boolean {
+  const first = output[0];
+  return first !== undefined
+    && oneMember(first, "role", "REQ-INTERNAL") === "user"
+    && hasSubstantiveMessagesUserContent(oneMember(first, "content", "REQ-INTERNAL"));
+}
+
+function syntheticMessagesLeadingUser(): WireJsonObject {
+  return wireObject([
+    ["role", "user"],
+    ["content", wireArray([wireObject([
+      ["type", "text"],
+      ["text", "(continuing the conversation)"],
+    ])])],
+  ]);
 }
 
 function hasSubstantiveMessagesUserContent(value: WireJson | undefined): boolean {
@@ -2293,15 +2700,6 @@ function outputBudget(explicit: number | undefined, capability: EffectiveModelCa
   }
 }
 
-function validateStreamOptions(value: WireJson | undefined): void {
-  if (value === undefined) {
-    return;
-  }
-  const object = requiredObject(value, "REQ-STREAM-OPTIONS");
-  assertAllowedKeys(object, new Set(["include_usage"]), "REQ-STREAM-OPTIONS");
-  optionalBoolean(oneMember(object, "include_usage", "REQ-STREAM-USAGE"), "REQ-STREAM-USAGE");
-}
-
 function validateSingleChoice(value: WireJson | undefined, ruleId: string): void {
   if (value === undefined) {
     return;
@@ -2445,6 +2843,24 @@ function projectMessagesMembers(
   });
 }
 
+function projectRequestMembers(
+  object: WireJsonObject,
+  allowed: ReadonlySet<string>,
+  ruleId: string,
+  omission: "chat.extensions_omitted" | "responses.extensions_omitted",
+  degradations: Set<ConversionDegradationRule>,
+  sensitiveKeys: ReadonlySet<string> = REQUEST_SENSITIVE_EXTENSION_FIELDS,
+): WireJsonObject {
+  return projectKnownObject(object, {
+    knownKeys: allowed,
+    sensitiveKeys,
+    omittedValueIsUnsafe: containsReasoningCarrier,
+    ruleId,
+    omission,
+    degradations,
+  });
+}
+
 function containsReasoningCarrier(value: WireJson): boolean {
   if (typeof value === "string") {
     return isReasoningCarrier(value);
@@ -2487,7 +2903,40 @@ function validatedMetadata(
   return object;
 }
 
+function independentMetadata(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): WireJson | undefined {
+  return projectIndependentOption(value, (candidate) => {
+    if (!isWireJsonObject(candidate) || duplicateMemberNames(candidate).length > 0) return { kind: "malformed" };
+    if (candidate.members.some((member) => typeof member.value !== "string")) return { kind: "malformed" };
+    return { kind: "value", value: candidate };
+  }, { omission: "request.option_omitted", degradations });
+}
+
+function decodeIndependentStreamOptions(
+  value: WireJson | undefined,
+  omission: "chat.extensions_omitted" | "responses.extensions_omitted",
+  degradations: Set<ConversionDegradationRule>,
+): void {
+  projectIndependentOption(value, (candidate) => {
+    if (!isWireJsonObject(candidate)) return { kind: "malformed" };
+    const includeUsage = memberValues(candidate, "include_usage");
+    if (includeUsage.length > 1 || (includeUsage[0] !== undefined && typeof includeUsage[0] !== "boolean")) {
+      return { kind: "malformed" };
+    }
+    if (candidate.members.some((member) => member.key !== "include_usage")) degradations.add(omission);
+    return { kind: "value", value: undefined };
+  }, { omission: "request.option_omitted", degradations });
+  if (value !== undefined) degradations.add("request.option_omitted");
+}
+
 function messagesObject(value: WireJson | undefined, ruleId: string): WireJsonObject {
+  if (!isWireJsonObject(value)) invalid(ruleId);
+  return value;
+}
+
+function requestObject(value: WireJson | undefined, ruleId: string): WireJsonObject {
   if (!isWireJsonObject(value)) invalid(ruleId);
   return value;
 }

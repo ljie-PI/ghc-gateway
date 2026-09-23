@@ -515,6 +515,7 @@ async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): P
     readonly target: InferenceProtocol;
     readonly payload: unknown;
     readonly targetReasoningEfforts?: readonly SupportedReasoningEffort[];
+    readonly previousResponseId?: string | null;
   };
   if (input.kind === "request") {
     const request = wireObjectFromUnknown(input.payload);
@@ -536,6 +537,7 @@ async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): P
         maxBytes: 1_048_576,
         createUuid: () => "00000000-0000-4000-8000-000000000104",
         nowUnixSeconds: () => 1_700_000_000,
+        previousResponseId: input.previousResponseId,
       },
     ).bytes);
   }
@@ -560,6 +562,7 @@ async function expectedProtocolConversionFixture(entry: FixtureManifestEntry): P
     accumulatorBytes: 1_048_576,
     createUuid: () => "00000000-0000-4000-8000-000000000104",
     nowUnixSeconds: () => 1_700_000_000,
+    previousResponseId: input.previousResponseId,
   })) {
     if (emission.kind === "wire") {
       output += new TextDecoder().decode(emission.bytes);
