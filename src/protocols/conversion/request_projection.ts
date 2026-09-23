@@ -179,7 +179,7 @@ function toolRoundBounds(
       close(index - 1);
       continue;
     }
-    if (candidate.kind === "tool_call" && start !== undefined && (calls.size === 0 || complete())) {
+    if (start !== undefined && (complete() || (candidate.kind === "tool_call" && calls.size === 0))) {
       close(index - 1);
     }
     start ??= index;
