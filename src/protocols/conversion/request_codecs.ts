@@ -27,7 +27,6 @@ import {
 } from "./types.js";
 import {
   assertAllowedKeys,
-  assertNoDuplicates,
   encodeWireObject,
   finiteNumber,
   invalid,
@@ -55,6 +54,7 @@ import { isOpenaiStrictSchemaCompatible } from "./strict_schema.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
 import { decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 import { isReasoningCarrier, type ReasoningCarrierRecord } from "./reasoning_carriers.js";
+import { projectKnownObject } from "./request_projection.js";
 
 const CHAT_TOP_LEVEL = new Set([
   "model",
@@ -390,7 +390,7 @@ function decodeChatToolCall(value: WireJson) {
 
 function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>): SemanticRequest {
   const degradations = new Set<ConversionDegradationRule>();
-  assertMessagesProjection(
+  body = projectMessagesMembers(
     body,
     MESSAGES_TOP_LEVEL,
     "REQ-M-TOP",
@@ -406,12 +406,12 @@ function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMa
     positiveInteger(oneMember(body, "top_k", "REQ-M-TOP-K"), "REQ-M-TOP-K");
     degradations.add("sampling.top_k_omitted");
   }
-  const outputConfig = optionalObject(
-    oneMember(body, "output_config", "REQ-M-OUTPUT-CONFIG"),
-    "REQ-M-OUTPUT-CONFIG",
-  );
+  const outputConfigValue = oneMember(body, "output_config", "REQ-M-OUTPUT-CONFIG");
+  let outputConfig = outputConfigValue === undefined
+    ? undefined
+    : messagesObject(outputConfigValue, "REQ-M-OUTPUT-CONFIG");
   if (outputConfig !== undefined) {
-    assertMessagesProjection(outputConfig, new Set(["effort", "format"]), "REQ-M-OUTPUT-CONFIG", degradations);
+    outputConfig = projectMessagesMembers(outputConfig, new Set(["effort", "format"]), "REQ-M-OUTPUT-CONFIG", degradations);
   }
   const reasoning = mergeReasoning(
     reasoningFromEffort(
@@ -431,7 +431,10 @@ function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: ReadonlyMa
     items,
     tools: decodeMessagesTools(oneMember(body, "tools", "REQ-M-TOOLS"), degradations),
     toolChoice: decodeMessagesToolChoice(oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE"), degradations),
-    parallelToolCalls: messagesParallelToolCalls(oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE")),
+    parallelToolCalls: messagesParallelToolCalls(
+      oneMember(body, "tool_choice", "REQ-M-TOOL-CHOICE"),
+      degradations,
+    ),
     maxOutputTokens: positiveInteger(oneMember(body, "max_tokens", "REQ-M-LIMIT"), "REQ-M-LIMIT"),
     temperature: finiteNumber(
       oneMember(body, "temperature", "REQ-M-TEMPERATURE"),
@@ -463,24 +466,24 @@ function decodeMessagesSystem(
     return [{ type: "text", text: value }];
   }
   return requiredArray(value, "REQ-M-SYSTEM").items.map((item) => {
-    const block = requiredObject(item, "REQ-M-SYSTEM-BLOCK");
-    assertMessagesProjection(
+    const block = messagesObject(item, "REQ-M-SYSTEM-BLOCK");
+    const projected = projectMessagesMembers(
       block,
       new Set(["type", "text", "cache_control"]),
       "REQ-M-SYSTEM-BLOCK",
       degradations,
       MESSAGES_SENSITIVE_EXTENSION_FIELDS,
     );
-    if (requiredString(oneMember(block, "type", "REQ-M-SYSTEM-TYPE"), "REQ-M-SYSTEM-TYPE") !== "text") {
+    if (requiredString(oneMember(projected, "type", "REQ-M-SYSTEM-TYPE"), "REQ-M-SYSTEM-TYPE") !== "text") {
       unsupported("REQ-M-SYSTEM-TYPE");
     }
-    if (oneMember(block, "cache_control", "REQ-M-SYSTEM-CACHE") !== undefined) {
-      validateCacheControl(oneMember(block, "cache_control", "REQ-M-SYSTEM-CACHE"), degradations);
+    if (oneMember(projected, "cache_control", "REQ-M-SYSTEM-CACHE") !== undefined) {
+      validateCacheControl(oneMember(projected, "cache_control", "REQ-M-SYSTEM-CACHE"), degradations);
       degradations.add("cache.control_omitted");
     }
     return {
       type: "text",
-      text: requiredString(oneMember(block, "text", "REQ-M-SYSTEM-TEXT"), "REQ-M-SYSTEM-TEXT", true),
+      text: requiredString(oneMember(projected, "text", "REQ-M-SYSTEM-TEXT"), "REQ-M-SYSTEM-TEXT", true),
     } as const;
   });
 }
@@ -491,9 +494,8 @@ function decodeMessagesMessage(
   degradations: Set<ConversionDegradationRule>,
   carrierRecords?: ReadonlyMap<string, ReasoningCarrierRecord>,
 ): void {
-  const message = requiredObject(value, "REQ-M-MESSAGE");
-  assertMessagesProjection(
-    message,
+  const message = projectMessagesMembers(
+    messagesObject(value, "REQ-M-MESSAGE"),
     new Set(["role", "content"]),
     "REQ-M-MESSAGE",
     degradations,
@@ -516,10 +518,10 @@ function decodeMessagesMessage(
     output.push({ type: "message", role, content: ordinary.splice(0) });
   };
   for (const item of requiredArray(content, "REQ-M-MESSAGE-CONTENT").items) {
-    const block = requiredObject(item, "REQ-M-CONTENT-BLOCK");
+    let block = messagesObject(item, "REQ-M-CONTENT-BLOCK");
     const type = requiredString(oneMember(block, "type", "REQ-M-CONTENT-TYPE"), "REQ-M-CONTENT-TYPE");
     if (type === "text") {
-      assertMessagesProjection(
+      block = projectMessagesMembers(
         block,
         new Set(["type", "text", "cache_control"]),
         "REQ-M-TEXT",
@@ -540,7 +542,7 @@ function decodeMessagesMessage(
       if (role !== "user") {
         invalid("REQ-M-IMAGE-ROLE");
       }
-      assertMessagesProjection(
+      block = projectMessagesMembers(
         block,
         new Set(["type", "source", "cache_control"]),
         "REQ-M-IMAGE",
@@ -571,7 +573,7 @@ function decodeMessagesMessage(
     }
     if (type === "thinking" || type === "redacted_thinking") {
       if (type === "thinking") {
-        assertMessagesProjection(
+        block = projectMessagesMembers(
           block,
           new Set(["type", "thinking", "signature"]),
           "REQ-M-THINKING-BLOCK",
@@ -583,18 +585,18 @@ function decodeMessagesMessage(
           const record = requiredCarrier(carrierRecords, signature, "responses_item", "REQ-M-THINKING-SIGNATURE");
           const state = carrierState(record, "REQ-M-THINKING-SIGNATURE");
           const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-THINKING-SIGNATURE"));
-          requireProjection(record, messagesProjection(block), "REQ-M-THINKING-SIGNATURE");
+          requireProjection(record, messagesReasoningProjection(block), "REQ-M-THINKING-SIGNATURE");
           output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
           continue;
         }
       } else {
-        assertMessagesProjection(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING", degradations);
+        block = projectMessagesMembers(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING", degradations);
         const data = requiredString(oneMember(block, "data", "REQ-M-REDACTED-DATA"), "REQ-M-REDACTED-DATA", true);
         if (isReasoningCarrier(data)) {
           const record = requiredCarrier(carrierRecords, data, "responses_item", "REQ-M-REDACTED-DATA");
           const state = carrierState(record, "REQ-M-REDACTED-DATA");
           const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-REDACTED-DATA"));
-          requireProjection(record, messagesProjection(block), "REQ-M-REDACTED-DATA");
+          requireProjection(record, messagesReasoningProjection(block), "REQ-M-REDACTED-DATA");
           output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
           continue;
         }
@@ -611,14 +613,14 @@ function decodeMessagesImage(
   value: WireJson | undefined,
   degradations?: Set<ConversionDegradationRule>,
 ): SemanticImage {
-  const source = requiredObject(value, "REQ-M-IMAGE-SOURCE");
+  let source = messagesObject(value, "REQ-M-IMAGE-SOURCE");
   const type = requiredString(oneMember(source, "type", "REQ-M-IMAGE-SOURCE-TYPE"), "REQ-M-IMAGE-SOURCE-TYPE");
   if (type === "base64") {
     const allowed = new Set(["type", "media_type", "data"]);
     if (degradations === undefined) {
       assertAllowedKeys(source, allowed, "REQ-M-IMAGE-SOURCE");
     } else {
-      assertMessagesProjection(
+      source = projectMessagesMembers(
         source,
         allowed,
         "REQ-M-IMAGE-SOURCE",
@@ -638,7 +640,7 @@ function decodeMessagesImage(
     if (degradations === undefined) {
       assertAllowedKeys(source, allowed, "REQ-M-IMAGE-SOURCE");
     } else {
-      assertMessagesProjection(
+      source = projectMessagesMembers(
         source,
         allowed,
         "REQ-M-IMAGE-SOURCE",
@@ -659,7 +661,7 @@ function decodeMessagesToolUse(
   value: WireJsonObject,
   degradations: Set<ConversionDegradationRule>,
 ) {
-  assertMessagesProjection(
+  value = projectMessagesMembers(
     value,
     new Set(["type", "id", "name", "input", "cache_control"]),
     "REQ-M-TOOL-USE",
@@ -683,7 +685,7 @@ function decodeMessagesToolResult(
   value: WireJsonObject,
   degradations: Set<ConversionDegradationRule>,
 ): SemanticToolResultItem {
-  assertMessagesProjection(
+  value = projectMessagesMembers(
     value,
     new Set(["type", "tool_use_id", "content", "is_error", "cache_control"]),
     "REQ-M-TOOL-RESULT",
@@ -1169,7 +1171,7 @@ function decodeToolResultContent(
   }
   const array = requiredArray(value, "REQ-TOOL-RESULT-CONTENT");
   return array.items.map((item) => {
-    const block = requiredObject(item, "REQ-TOOL-RESULT-BLOCK");
+    let block = messagesProjection ? messagesObject(item, "REQ-TOOL-RESULT-BLOCK") : requiredObject(item, "REQ-TOOL-RESULT-BLOCK");
     const type = requiredString(
       oneMember(block, "type", "REQ-TOOL-RESULT-TYPE"),
       "REQ-TOOL-RESULT-TYPE",
@@ -1177,7 +1179,7 @@ function decodeToolResultContent(
     if (type === "text" || type === "input_text") {
       const allowed = new Set(["type", "text", "cache_control"]);
       if (messagesProjection) {
-        assertMessagesProjection(block, allowed, "REQ-TOOL-RESULT-TEXT", degradations);
+        block = projectMessagesMembers(block, allowed, "REQ-TOOL-RESULT-TEXT", degradations);
       } else {
         assertAllowedKeys(block, allowed, "REQ-TOOL-RESULT-TEXT");
       }
@@ -1200,7 +1202,7 @@ function decodeToolResultContent(
     if (type === "image") {
       const allowed = new Set(["type", "source", "cache_control"]);
       if (messagesProjection) {
-        assertMessagesProjection(block, allowed, "REQ-TOOL-RESULT-IMAGE", degradations);
+        block = projectMessagesMembers(block, allowed, "REQ-TOOL-RESULT-IMAGE", degradations);
       } else {
         assertAllowedKeys(block, allowed, "REQ-TOOL-RESULT-IMAGE");
       }
@@ -1219,7 +1221,7 @@ function decodeToolResultContent(
     if (type === "input_image") {
       const allowed = new Set(["type", "image_url", "detail"]);
       if (messagesProjection) {
-        assertMessagesProjection(block, allowed, "REQ-TOOL-RESULT-IMAGE", degradations);
+        block = projectMessagesMembers(block, allowed, "REQ-TOOL-RESULT-IMAGE", degradations);
       } else {
         assertAllowedKeys(block, allowed, "REQ-TOOL-RESULT-IMAGE");
       }
@@ -1263,9 +1265,8 @@ function decodeMessagesTools(
     return [];
   }
   return requiredArray(value, "REQ-M-TOOLS").items.map((item) => {
-    const tool = requiredObject(item, "REQ-M-TOOL");
-    assertMessagesProjection(
-      tool,
+    const tool = projectMessagesMembers(
+      messagesObject(item, "REQ-M-TOOL"),
       new Set(["name", "description", "input_schema", "strict", "type", "cache_control"]),
       "REQ-M-TOOL",
       degradations,
@@ -1369,14 +1370,15 @@ function decodeMessagesToolChoice(
   if (value === undefined) {
     return undefined;
   }
-  const object = requiredObject(value, "REQ-M-TOOL-CHOICE");
-  assertMessagesProjection(
-    object,
-    new Set(["type", "name", "disable_parallel_tool_use"]),
-    "REQ-M-TOOL-CHOICE",
-    degradations,
-    MESSAGES_SENSITIVE_EXTENSION_FIELDS,
-  );
+  const object = degradations === undefined
+    ? requiredObject(value, "REQ-M-TOOL-CHOICE")
+    : projectMessagesMembers(
+      messagesObject(value, "REQ-M-TOOL-CHOICE"),
+      new Set(["type", "name", "disable_parallel_tool_use"]),
+      "REQ-M-TOOL-CHOICE",
+      degradations,
+      MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+    );
   const type = requiredString(oneMember(object, "type", "REQ-M-TOOL-CHOICE-TYPE"), "REQ-M-TOOL-CHOICE-TYPE");
   if (type === "auto") {
     return { kind: "auto" };
@@ -1396,11 +1398,20 @@ function decodeMessagesToolChoice(
   unsupported("REQ-M-TOOL-CHOICE-TYPE");
 }
 
-function messagesParallelToolCalls(value: WireJson | undefined): boolean | undefined {
+function messagesParallelToolCalls(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): boolean | undefined {
   if (value === undefined) {
     return undefined;
   }
-  const object = requiredObject(value, "REQ-M-TOOL-CHOICE");
+  const object = projectMessagesMembers(
+    messagesObject(value, "REQ-M-TOOL-CHOICE"),
+    new Set(["type", "name", "disable_parallel_tool_use"]),
+    "REQ-M-TOOL-CHOICE",
+    degradations,
+    MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+  );
   const disabled = optionalBoolean(
     oneMember(object, "disable_parallel_tool_use", "REQ-M-PARALLEL"),
     "REQ-M-PARALLEL",
@@ -1455,13 +1466,14 @@ function decodeMessagesOutputFormat(
   if (value === undefined) {
     return undefined;
   }
-  const object = requiredObject(value, "REQ-M-FORMAT");
-  assertMessagesProjection(
-    object,
-    new Set(["type", "name", "description", "schema", "strict"]),
-    "REQ-M-FORMAT",
-    degradations,
-  );
+  const object = degradations === undefined
+    ? requiredObject(value, "REQ-M-FORMAT")
+    : projectMessagesMembers(
+      messagesObject(value, "REQ-M-FORMAT"),
+      new Set(["type", "name", "description", "schema", "strict"]),
+      "REQ-M-FORMAT",
+      degradations,
+    );
   const type = requiredString(oneMember(object, "type", "REQ-M-FORMAT-TYPE"), "REQ-M-FORMAT-TYPE");
   if (type === "json_object") {
     return { kind: "json_object" };
@@ -1540,8 +1552,12 @@ function decodeMessagesThinking(
   if (value === undefined) {
     return undefined;
   }
-  const object = requiredObject(value, "REQ-M-THINKING");
-  assertMessagesProjection(object, new Set(["type", "budget_tokens"]), "REQ-M-THINKING", degradations);
+  const object = projectMessagesMembers(
+    messagesObject(value, "REQ-M-THINKING"),
+    new Set(["type", "budget_tokens"]),
+    "REQ-M-THINKING",
+    degradations,
+  );
   const type = requiredString(oneMember(object, "type", "REQ-M-THINKING-TYPE"), "REQ-M-THINKING-TYPE");
   if (type === "disabled") {
     return undefined;
@@ -2262,7 +2278,7 @@ function reasoningProjection(item: WireJsonObject): WireJsonObject {
   return wireObject([["type", "reasoning"], ["text", typeof text === "string" ? text : ""]]);
 }
 
-function messagesProjection(block: WireJsonObject): WireJsonObject {
+function messagesReasoningProjection(block: WireJsonObject): WireJsonObject {
   const type = oneMember(block, "type", "REQ-INTERNAL");
   const text = type === "thinking" ? oneMember(block, "thinking", "REQ-INTERNAL") : "";
   if (typeof text !== "string") invalid("REQ-INTERNAL");
@@ -2391,11 +2407,11 @@ function validateCacheControl(
   value: WireJson | undefined,
   degradations?: Set<ConversionDegradationRule>,
 ): void {
-  const object = requiredObject(value, "REQ-M-CACHE-CONTROL");
+  let object = messagesObject(value, "REQ-M-CACHE-CONTROL");
   if (degradations === undefined) {
     assertAllowedKeys(object, new Set(["type", "ttl"]), "REQ-M-CACHE-CONTROL");
   } else {
-    assertMessagesProjection(
+    object = projectMessagesMembers(
       object,
       new Set(["type", "ttl"]),
       "REQ-M-CACHE-CONTROL",
@@ -2412,25 +2428,21 @@ function validateCacheControl(
   }
 }
 
-function assertMessagesProjection(
+function projectMessagesMembers(
   object: WireJsonObject,
   allowed: ReadonlySet<string>,
   ruleId: string,
-  degradations?: Set<ConversionDegradationRule>,
+  degradations: Set<ConversionDegradationRule>,
   forbidden: ReadonlySet<string> = MESSAGES_SENSITIVE_EXTENSION_FIELDS,
-): void {
-  assertNoDuplicates(object, ruleId);
-  const unknown = object.members.filter((member) => !allowed.has(member.key));
-  if (
-    forbidden !== undefined
-    && unknown.some((member) => forbidden.has(member.key))
-  ) {
-    invalid(ruleId);
-  }
-  if (unknown.some((member) => containsReasoningCarrier(member.value))) {
-    invalid(ruleId);
-  }
-  recordMessagesExtensions(object, allowed, degradations);
+): WireJsonObject {
+  return projectKnownObject(object, {
+    knownKeys: allowed,
+    sensitiveKeys: forbidden,
+    omittedValueIsUnsafe: containsReasoningCarrier,
+    ruleId,
+    omission: "messages.extensions_omitted",
+    degradations,
+  });
 }
 
 function containsReasoningCarrier(value: WireJson): boolean {
@@ -2446,16 +2458,6 @@ function containsReasoningCarrier(value: WireJson): boolean {
   return false;
 }
 
-function recordMessagesExtensions(
-  object: WireJsonObject,
-  allowed: ReadonlySet<string>,
-  degradations?: Set<ConversionDegradationRule>,
-): void {
-  if (object.members.some((member) => !allowed.has(member.key))) {
-    degradations?.add("messages.extensions_omitted");
-  }
-}
-
 function validatedMetadata(
   value: WireJson | undefined,
   source: InferenceProtocol,
@@ -2464,10 +2466,11 @@ function validatedMetadata(
   if (value === undefined) {
     return undefined;
   }
-  const object = requiredObject(value, `REQ-${source.toUpperCase()}-METADATA`);
   if (source === "messages") {
-    assertMessagesProjection(object, new Set(["user_id"]), "REQ-M-METADATA", degradations);
-    const userId = object.members.filter((member) => member.key === "user_id");
+    if (degradations === undefined) invalid("REQ-M-METADATA");
+    const object = messagesObject(value, "REQ-M-METADATA");
+    const projected = projectMessagesMembers(object, new Set(["user_id"]), "REQ-M-METADATA", degradations);
+    const userId = projected.members.filter((member) => member.key === "user_id");
     for (const member of userId) {
       if (typeof member.value !== "string") {
         invalid("REQ-M-METADATA");
@@ -2475,12 +2478,18 @@ function validatedMetadata(
     }
     return userId.length === 0 ? undefined : { kind: "object", members: userId };
   }
+  const object = requiredObject(value, `REQ-${source.toUpperCase()}-METADATA`);
   for (const member of object.members) {
     if (typeof member.value !== "string") {
       invalid(`REQ-${source.toUpperCase()}-METADATA`);
     }
   }
   return object;
+}
+
+function messagesObject(value: WireJson | undefined, ruleId: string): WireJsonObject {
+  if (!isWireJsonObject(value)) invalid(ruleId);
+  return value;
 }
 
 function parseArgumentsObject(value: string, ruleId: string): WireJsonObject {

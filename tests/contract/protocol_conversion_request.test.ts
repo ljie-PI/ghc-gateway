@@ -287,6 +287,16 @@ describe("shared conversion request codecs", () => {
     },
   );
 
+  it("omits duplicate unknown Messages extensions without weakening known duplicate rejection", () => {
+    const converted = prepareConvertedRequest("messages", "chat", rawBody(
+      "{\"model\":\"source\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\",\"extension\":1,\"extension\":2}],\"max_tokens\":8,\"extension\":3,\"extension\":4}",
+    ), "target", capability(["chat"]));
+    expect(converted.degradations).toContain("messages.extensions_omitted");
+    expect(() => prepareConvertedRequest("messages", "chat", rawBody(
+      "{\"model\":\"source\",\"messages\":[{\"role\":\"user\",\"role\":\"assistant\",\"content\":\"hi\"}],\"max_tokens\":8}",
+    ), "target", capability(["chat"]))).toThrow();
+  });
+
   it.each([
     ["top-level thinking", { thinking: { type: "adaptive", optional_extension: true } }],
     ["thinking block", {

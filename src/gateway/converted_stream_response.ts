@@ -17,6 +17,7 @@ import type {
   ReasoningCarrierConversionContext,
 } from "../protocols/conversion/types.js";
 import type { ProtocolPerformanceObserver } from "../telemetry/runtime.js";
+import { ConversionDegradationCollector } from "../protocols/conversion/degradations.js";
 
 export async function createConvertedStreamResponse(input: {
   readonly upstream: UpstreamByteStream;
@@ -140,6 +141,7 @@ async function* convertedEmissions(
     reasoningTokens: 0,
   };
   let firstSemanticObserved = false;
+  const degradations = new ConversionDegradationCollector();
   const startedAt = Date.now();
   try {
     for (;;) {
@@ -174,6 +176,9 @@ async function* convertedEmissions(
         }
       } else if (emission.kind === "usage") {
         observedUsage = emission.usage;
+      } else if (emission.kind === "degradation") {
+        degradations.add(emission.ruleId);
+        input.scope.diagnostics?.set({ degradations: degradations.values() });
       } else if (emission.kind === "wire") {
         yield { kind: "wire", bytes: emission.bytes };
       } else if (emission.kind === "terminal") {

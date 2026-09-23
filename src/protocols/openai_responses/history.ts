@@ -1498,15 +1498,19 @@ function isDeclaredOutputItem(item: WireJson): boolean {
 function strictCallIdFromItem(item: WireJsonObject): string | undefined {
   const callIds = memberValues(item, "call_id");
   const ids = memberValues(item, "id");
-  if (callIds.length > 1 || ids.length > 1) {
+  if (callIds.length !== 1 || ids.length > 1) {
     return undefined;
   }
-  const callId = callIds.length === 1 ? trimmedString(callIds[0]) : undefined;
-  const id = ids.length === 1 ? trimmedString(ids[0]) : undefined;
-  if ((callIds.length === 1 && callId === undefined) || (ids.length === 1 && id === undefined)) {
+  const callId = callIds[0];
+  const id = ids[0];
+  if (
+    typeof callId !== "string"
+    || callId.length === 0
+    || (id !== undefined && (typeof id !== "string" || id.length === 0))
+  ) {
     return undefined;
   }
-  return callId ?? id;
+  return callId;
 }
 
 function firstMemberValue(item: WireJsonObject, key: string): WireJson | undefined {
@@ -1516,14 +1520,6 @@ function firstMemberValue(item: WireJsonObject, key: string): WireJson | undefin
     }
   }
   return undefined;
-}
-
-function trimmedString(value: WireJson | undefined): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? undefined : trimmed;
 }
 
 function minimalCallItem(item: WireJsonObject): WireJsonObject {

@@ -473,6 +473,11 @@ describe("Responses continuation history", () => {
       }, ownership("github.com/1"), "complete", SIGNAL))
         .rejects.toMatchObject({ code: "checkpoint_unavailable" });
       await expect(store.recordCheckpoint({
+        responseId: "resp_item_id_only",
+        output: outputFromJson("[{\"type\":\"function_call\",\"id\":\"item_not_a_call\",\"name\":\"a\",\"arguments\":\"{}\"}]"),
+      }, ownership("github.com/1"), "complete", SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
+      await expect(store.recordCheckpoint({
         responseId: "resp_duplicate_type",
         output: outputFromJson("[{\"type\":\"function_call\",\"type\":\"function_call\",\"call_id\":\"call\",\"name\":\"a\",\"arguments\":\"{}\"}]"),
       }, ownership("github.com/1"), "complete", SIGNAL))
@@ -483,6 +488,34 @@ describe("Responses continuation history", () => {
       }, ownership("github.com/1"), "complete", SIGNAL))
         .rejects.toMatchObject({ code: "checkpoint_unavailable" });
       expect(store.inspect()).toMatchObject({ revision: 0, count: 0, receiptCount: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("preserves exact call IDs without trimming or falling back to item IDs", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint({
+        responseId: "resp_exact_call_id",
+        output: outputFromJson(
+          "[{\"type\":\"function_call\",\"id\":\"item_1\",\"call_id\":\" call_1 \",\"name\":\"lookup\",\"arguments\":\"{}\"}]",
+        ),
+      }, ownership("github.com/1"), "complete", SIGNAL);
+      expect(database.prepare(
+        "SELECT call_id FROM response_scoped_replay_items WHERE response_id = ? AND item_kind = 'function_call'",
+      ).get("resp_exact_call_id")).toEqual({ call_id: " call_1 " });
+
+      const receipt = await owned(store, "resp_exact_call_id", "github.com/1");
+      const exact = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\" call_1 \",\"output\":\"ok\"}}",
+      ));
+      await expect(store.enrich(exact, receipt, SIGNAL)).resolves.toBeDefined();
+      const normalized = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"ok\"}}",
+      ));
+      await expect(store.enrich(normalized, receipt, SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
     } finally {
       database.close();
     }
