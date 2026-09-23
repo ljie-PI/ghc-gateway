@@ -315,6 +315,7 @@ async function* decodeChatStream(
     }
     const delta = objectMember(choice, "delta");
     if (delta !== undefined) {
+      rejectNonemptyCitations(delta, "annotations");
       const audio = singleMember(delta, "audio");
       if (audio !== undefined && audio !== null) {
         invalid();
@@ -461,6 +462,7 @@ async function* decodeChatStream(
     }
     const finalMessage = objectMember(choice, "message");
     if (finalMessage !== undefined) {
+      rejectNonemptyCitations(finalMessage, "annotations");
       const audio = singleMember(finalMessage, "audio");
       if (audio !== undefined && audio !== null) {
         invalid();
@@ -710,6 +712,7 @@ async function* decodeMessagesStream(
       budget.reserveEntry();
       const blockType = stringMember(block, "type");
       if (blockType === "text") {
+        rejectNonemptyCitations(block, "citations");
         const text = singleMember(block, "text");
         if (typeof text !== "string") {
           invalid();
@@ -879,6 +882,8 @@ async function* decodeMessagesStream(
         budget.reserve(signature);
         block.signature += signature;
         if (signature.length > 0) yield { kind: "semantic_progress" };
+      } else if (block.kind === "text" && deltaType === "citations_delta") {
+        unsupportedOutput();
       } else invalid();
       continue;
     }
@@ -1014,6 +1019,9 @@ async function* decodeMessagesStream(
     if (type === "ping") {
       continue;
     }
+    if (payload.members.length === 1 && payload.members[0]?.key === "type") {
+      continue;
+    }
     invalid();
   }
   invalidTruncated();
@@ -1078,6 +1086,7 @@ async function* decodeResponsesStream(
       lastSequence = sequence;
     }
     const eventOutputIndex = integerMember(payload, "output_index");
+    if (type === "response.output_text.annotation.added") unsupportedOutput();
     if (
       pendingStatuslessReasoning !== undefined
       && eventOutputIndex !== undefined
@@ -1382,6 +1391,7 @@ async function* decodeResponsesStream(
       observeOutputIndex(observedOutputIndexes, budget, outputIndex);
       const partType = stringMember(part, "type");
       if (partType === "output_text") {
+        rejectNonemptyCitations(part, "annotations");
         const text = stringMember(part, "text");
         if (text === undefined) {
           invalid();
@@ -1983,6 +1993,7 @@ function* messageContentEvents(
     }
     const partType = stringMember(part, "type");
     if (partType === "output_text") {
+      rejectNonemptyCitations(part, "annotations");
       const text = stringMember(part, "text");
       if (text === undefined) {
         invalid();
@@ -2541,6 +2552,21 @@ function invalid(): never {
   throw new GatewayFailureError({
     kind: "invalid_upstream_response",
     source: "parser",
+    phase: "stream",
+  });
+}
+
+function rejectNonemptyCitations(object: WireJsonObject, key: string): void {
+  const value = singleMember(object, key);
+  if (value === undefined || value === null) return;
+  if (!isWireJsonArray(value)) invalid();
+  if (value.items.length > 0) unsupportedOutput();
+}
+
+function unsupportedOutput(): never {
+  throw new GatewayFailureError({
+    kind: "unsupported_semantics",
+    source: "converter",
     phase: "stream",
   });
 }
