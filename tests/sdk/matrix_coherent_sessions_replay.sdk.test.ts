@@ -152,7 +152,10 @@ function mutateRequest(body: Record<string, unknown>, protocol: SdkProtocol, mut
       if (result[key] === TOKYO_RESULT) {
         const payload = JSON.parse(TOKYO_RESULT) as { hours: { temperature_c: number }[] };
         if (mutation === "result-value") payload.hours[0]!.temperature_c = 99;
-        result[key] = mutation === "result-format" ? payload : JSON.stringify(payload);
+        // Native Messages validation rejects object tool_result content before replay, so keep a
+        // valid string there and change only its JSON layout.
+        result[key] = mutation === "result-value" ? JSON.stringify(payload)
+          : protocol === "messages" ? JSON.stringify(payload, null, 2) : payload;
         changed = true;
       }
     }
