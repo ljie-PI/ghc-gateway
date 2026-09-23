@@ -181,13 +181,15 @@ describe("package entrypoints and toolchain", () => {
 
   it("keeps recording explicit, content-free and absent from ordinary automation", async () => {
     const pkg = await readPackageJson();
-    expect(Object.values(pkg.scripts).join("\n")).not.toMatch(/capture_upstream|capture_recorder|--execute/u);
+    expect(Object.values(pkg.scripts).join("\n")).not.toMatch(/capture_upstream|corpus_recorder|--execute/u);
     const command = ["scripts/tooling/bootstrap.mjs", "scripts/tooling/capture_upstream.ts"];
     const plan = await execFileAsync(process.execPath, command, {
       windowsHide: true,
       env: { ...process.env, GHC_GATEWAY_CI_NETWORK_GUARD: "1" },
     });
-    expect(JSON.parse(plan.stdout)).toMatchObject({ executed: false, requests: 16, model: "gemini-3.5-flash", protocol: "chat" });
+    expect(JSON.parse(plan.stdout)).toMatchObject({
+      executed: false, requests: 45, models: ["gemini-3.8-flash", "claude-opus-5.5", "gpt-6-astra"],
+    });
     expect(plan.stderr).toBe("");
     for (const args of [
       ["--model", "private-prompt-marker"],

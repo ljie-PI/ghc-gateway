@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { expect } from "vitest";
-import { sdkToolCalls as sessionCalls, type SdkProtocol, type SdkProtocolResult as SessionResult, type SdkToolCall as ForecastCall } from "./client.js";
+import { sdkToolCalls as sessionCalls, TEXT_TERMINAL, TOOL_TERMINAL, type SdkProtocol, type SdkProtocolResult as SessionResult, type SdkToolCall as ForecastCall } from "./client.js";
 import { expectUsage, type ExpectedResult } from "./replay_expectations.js";
 import {
-  expectedForecastArguments, FORECAST_PARAMETERS, PARIS_RESULT, SESSION_SYSTEM, TEXT_SCENARIOS, TOKYO_RESULT,
+  expectedForecastArguments, FORECAST_PARAMETERS, MIN_SESSION_TEXT_CHARACTERS, PARIS_RESULT, scheduledShotCount,
+  SESSION_SHOT_COUNT, SESSION_SYSTEM, sessionTurnFacts, TOKYO_RESULT,
 } from "./scenarios.js";
 import { SESSION_PROMPTS, type SessionTurn } from "./session_inputs.js";
 
@@ -21,21 +22,12 @@ export function expectSessionTurn(value: SessionResult, expected: ExpectedResult
       expect(isDeepStrictEqual(calls[index]?.arguments, expectedForecastArguments(city)), "nested multi-parameter forecast arguments").toBe(true);
     }
   } else {
-    expect(result.text.length, "substantive textual response").toBeGreaterThan(600);
-    const patterns = turn === 1 ? TEXT_SCENARIOS.find((scenario) => scenario.id === "image")!.facts.map((fact) => fact.pattern)
-      : [ /Tokyo/iu, /silver|white/iu, /coat/iu, /sword|katana/iu, /30%/u, /13\s*(?:kph|km\/h)/iu,
-        ...(turn === 4 ? [/15:00/u, /18:00/u, /contingency|rain|shelter|covered/iu] : [
-          /Paris/iu, /blue/iu, /20\s*°?\s*C/u, /14\s*°?\s*C/u, /70%/u, /21\s*(?:kph|km\/h)/iu,
-        ]),
-        ...(turn === 5 ? [/Image-derived claims/iu, /Tool-derived claims/iu, /Unsupported claims/iu, /handoff/iu] : []),
-      ];
-    for (const pattern of patterns) expect(pattern.test(result.text), `session fact ${pattern.source}`).toBe(true);
-    if (turn === 4) expect([...result.text.matchAll(/^[* \t]*(?:15|16|17|18):[0-5]\d/gmu)].length, "six scheduled shots").toBe(6);
+    expect(result.text.length, "substantive textual response").toBeGreaterThanOrEqual(MIN_SESSION_TEXT_CHARACTERS);
+    for (const pattern of sessionTurnFacts(turn)) expect(pattern.test(result.text), `session fact ${pattern.source}`).toBe(true);
+    if (turn === 4) expect(scheduledShotCount(result.text), "six scheduled shots").toBe(SESSION_SHOT_COUNT);
   }
   expect(result.text === expected.text, "complete parsed text matches independent fixture text").toBe(true);
-  const terminal = protocol === "responses" ? "completed"
-    : protocol === "messages" ? (turn === 2 ? "tool_use" : "end_turn") : (turn === 2 ? "tool_calls" : "stop");
-  expect(result.terminal === terminal, "expected session terminal outcome").toBe(true);
+  expect(result.terminal === (turn === 2 ? TOOL_TERMINAL : TEXT_TERMINAL)[protocol], "expected session terminal outcome").toBe(true);
   if (turn === 1) expect(result.stream === undefined, "buffered turn contains no stream observations").toBe(true);
   else {
     expect(result.stream?.terminalCount, "exactly one normal stream terminal").toBe(1);
@@ -143,6 +135,9 @@ function appendContent(target: unknown[][], role: string, content: unknown, prot
     const textType = protocol === "responses" ? (role === "assistant" ? "output_text" : "input_text") : "text";
     if (part.type === textType && typeof part.text === "string") {
       if (part.text !== "") appendText(target, role, part.text);
+    } else if (protocol === "messages" && role === "assistant" && (part.type === "thinking" || part.type === "redacted_thinking")) {
+      // Returned reasoning state is opaque and required alongside tool use; it is not semantic history.
+      continue;
     } else if (protocol === "messages" && part.type === "tool_use" && role === "assistant") {
       target.push(["call", part.id, part.name, part.input]);
     } else if (protocol === "messages" && part.type === "tool_result" && role === "user") {

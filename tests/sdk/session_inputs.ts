@@ -41,7 +41,7 @@ export function createSessionDriver(clients: SdkClients, protocol: SdkProtocol, 
         ? [{ type: "text", text: prompt }, { type: "image_url", image_url: { url: dataUrl, detail: "auto" } }]
         : prompt });
       const result = await executeChat(clients.openai, {
-        model, messages: chat, max_tokens: 3_000,
+        model, messages: chat, max_tokens: 6_000,
         ...(turn >= 2 ? { tools: [FORECAST_TOOL_OPENAI] } : {}),
         ...(turn === 2 ? { tool_choice: "auto", parallel_tool_calls: true } : {}),
       }, mode);
@@ -56,7 +56,7 @@ export function createSessionDriver(clients: SdkClients, protocol: SdkProtocol, 
         ...(turn === 1 ? [{ type: "image" as const, source: { type: "base64" as const, media_type: "image/jpeg" as const, data: imageBase64 } }] : []),
       ] });
       const result = await executeMessages(clients.anthropic, {
-        model, system: SESSION_SYSTEM, messages, max_tokens: 3_000, thinking: { type: "disabled" },
+        model, system: SESSION_SYSTEM, messages, max_tokens: 6_000,
         ...(turn >= 2 ? { tools: [FORECAST_TOOL_ANTHROPIC] } : {}),
         ...(turn === 2 ? { tool_choice: { type: "auto", disable_parallel_tool_use: false } } : {}),
       }, mode);
@@ -70,7 +70,7 @@ export function createSessionDriver(clients: SdkClients, protocol: SdkProtocol, 
         ...(turn === 1 ? [{ type: "input_image" as const, image_url: dataUrl, detail: "auto" as const }] : []),
       ] });
       const result = await executeResponses(clients.openai, {
-        model, instructions: SESSION_SYSTEM, input, max_output_tokens: 3_000,
+        model, instructions: SESSION_SYSTEM, input, max_output_tokens: 6_000,
         ...(turn >= 2 ? { tools: [FORECAST_TOOL_RESPONSES] } : {}),
         ...(turn === 2 ? { tool_choice: "auto", parallel_tool_calls: true } : {}),
       }, mode);

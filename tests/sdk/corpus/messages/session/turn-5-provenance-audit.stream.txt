@@ -1,1347 +1,521 @@
-event:message_start
-data:{"type":"message_start","message":{"id":"msg_LdzFRnWDVkxEq0pLeE7SkJrI","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":492,"cache_creation_input_tokens":0,"cache_read_input_tokens":2560,"output_tokens":0,"service_tier":"standard","inference_geo":"not_available"}}}
+event: message_start
+data: {"message":{"container":null,"content":[],"id":"msg_011CfKv351XWnDZT2kL98ssd","model":"claude-opus-5-5","role":"assistant","stop_details":null,"stop_reason":null,"stop_sequence":null,"type":"message","usage":{"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"inference_geo":"global","input_tokens":5261,"output_tokens":3}},"type":"message_start"}
 
-event:content_block_start
-data:{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+event: content_block_start
+data: {"content_block":{"signature":"","thinking":"","type":"thinking"},"index":0,"type":"content_block_start"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
+event: ping
+data: {"type":"ping"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Image"}}
+event: content_block_delta
+data: {"delta":{"thinking":"","type":"thinking_delta"},"index":0,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-derived"}}
+event: content_block_delta
+data: {"delta":{"signature":"CAQS5QoKEAgSGAI4AUIIdGhpbmtpbmcSDCYzWRQ9tlINca78fRoMYe9636qTpu7RxGMmIjCHrut1Te+iuGUsLh+XLhLzui8KuDNNo9FZEtI0wesuFJbXnQZuIIT0j+KzmcB71q8qggp+mYS/agrVxUSE4n9cdz+3V8faXWfsosDMADbz2YEHjsI7jSqckSXxz/TOSnNY95H3iFrvnmYl5pG0c9NHMvYwac8JLOOZgv5yfwzi+t3BAnFR5KqRk7J79DiSlK8urIgv3ASYvo7I89WeuWETGYZp9j4c5Na3fFbjtcjcInN185ulY7mH7n+8pCLvzXMfvUB360Pa2IeapsHDC0FAeLFgajyHihbiiOm4PuwUhVzd81QS6ISyMnN84LEYk1WtW0ms0nm4VroFdMcmKlSmmf/sVWAnD8sV22v8D7KtSqiQmYHVvsynZ9B8N3fs8Pwnf8Qf0oq0DiFl9kW0wUOVb6ANkno3/ELol36FHYkG2Z4027riVlsGRutFGQS5HC7yTIrAAPIEDIXA94NUeRiLiwLP0+n4c58p1nj6HTuLS9lzYJrgTRPkk5RSoapMYZaVFginLvoXc8eretm7o+XylMXVQoJKVhG695em0CN9i1REAbYrmb8+SunmPzGETbK+GY6zW0pRZ1kBlegp2v7l5pqpFpwJ4ujIkyCGgMYlIqnWYmN0S0+yw1T5rlYR0eX19VnZ/o6BNYmAVk0YtbuUCFSDO8s5Sx0SDv8Pd+vmSY+clCN9V8xlguReosJTOQDNl2weApN5hLR6D3J9zFFptfEB0VNSvZ6dvKWiKQPm584Oget3eU9GzPhjrPFF+AILXWW3IAcwLyITHq9zoiZAwZhwk8h2Uj0wZ69W2oYlqT9vm5imlBK4SWjGbcDlVdQJbUbfZHRi3ZWUw99xbqtYNWGUkvs8YJI7QLTT7kTv5twEIBpBAc2yJyLVVI+U0LpXGijmlhIXxr8WhMd8YsanVEd1X3P1HLPZlFCtvOIWvzQwi8phXhhOAAecD5gTeezrN5kSo52vTPgcJFJ7bVHZB/8MHD/IivDAglQon8kLOnyXwbTvazYjXSpTKh4yTHvGBpMVui1kqKnRc8tb5Lf3RYQHjxywNjcdkaTi7lCbpgv6wON/Qtz4pSJJGGNrijEsudJCNZyXE/lfZxbqEmAiMum+vAcuQ0Rv/5cx4l6Vl2Af1ddpjn/GGFKGEPfmtc2x3j4aPTVZnCDpdSqV+LTblA/nKh0Ddw3l95+kUfhdJHMcjcke7RlQCow/CPaPZAgrXvC/K+4U5UG9f2wl89NgB0LJv6Wc8Z/Po6ztrOZYk4qOv74wLYKJaC/N9f4eYmCL2kcvI76muwNIVy7zUsMn8JlT2T0r4fnEv0EqxH32Wm+tkKcws3HG8bUc2meCpEPznLnru6zw8wi3WNel7SRyoTSQnV7krtGY3XU66OScLJUHWo2hswU5a1NfRq4/73QOnJgVSLLWpVmAOXu75cFEXgaaOWKwd76RHUIycvu3NntrsRrUIt/yfyuNnuYZexZZ8Tc7wsrhqZ2P/+A03usXtjy9vxVbEx32cyuzTAiPZaSFVvlLEcVUFGE74+weXQtz1y80SHqYn7zcs6pFkFX2A3qX+hDlBgHKTNprB3bMMADSabTujH4poQyViyFS5L/Rr0qzBxKaHjjU50CqC5CK4YYhzOEFNiZCsOJifzTppv6pdSJ7dSfTFVYS+5VVGqGyJVZyPx70FVvoIle4D/Ox3d4KMxSo0hOXWW4a9AcpxpryKKa5vhXVTG3g6i3H+wSFS7G9NsnP+zpcejPuK7QbuoPed/u6BQjl7BSLZzAjeECF9nxBGAE=","type":"signature_delta"},"index":0,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" claims"}}
+event: content_block_stop
+data: {"index":0,"type":"content_block_stop"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**\n"}}
+event: content_block_start
+data: {"content_block":{"text":"","type":"text"},"index":1,"type":"content_block_start"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
+event: content_block_delta
+data: {"delta":{"text":"#","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Silver"}}
+event: content_block_delta
+data: {"delta":{"text":" Audit:","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" swept"}}
+event: content_block_delta
+data: {"delta":{"text":" Tokyo","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-back"}}
+event: content_block_delta
+data: {"delta":{"text":" Vergil","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hair"}}
+event: content_block_delta
+data: {"delta":{"text":" Shoot,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":" 2026-10-18","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" stern"}}
+event: content_block_delta
+data: {"delta":{"text":"\n\n## Image-derived claims","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" expression"}}
+event: content_block_delta
+data: {"delta":{"text":" (","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":"visible in the reference)","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" long"}}
+event: content_block_delta
+data: {"delta":{"text":"\n- Sw","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" royal"}}
+event: content_block_delta
+data: {"delta":{"text":"ept-back, spiky sil","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-blue"}}
+event: content_block_delta
+data: {"delta":{"text":"ver-white hair\n- A","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" coat"}}
+event: content_block_delta
+data: {"delta":{"text":" stern, downward gl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":"are\n- A long navy-","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" fl"}}
+event: content_block_delta
+data: {"delta":{"text":"blue coat with","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ared"}}
+event: content_block_delta
+data: {"delta":{"text":" a high collar and p","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" red"}}
+event: content_block_delta
+data: {"delta":{"text":"ale-blue embroidery","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" inner"}}
+event: content_block_delta
+data: {"delta":{"text":" near the collar\n- B","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" lining"}}
+event: content_block_delta
+data: {"delta":{"text":"ronze-gold trim and","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":" chevron (","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gold"}}
+event: content_block_delta
+data: {"delta":{"text":"diamond) pat","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sleeve"}}
+event: content_block_delta
+data: {"delta":{"text":"terns on the cuffs","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" l"}}
+event: content_block_delta
+data: {"delta":{"text":"\n- A black","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"acing"}}
+event: content_block_delta
+data: {"delta":{"text":" undershirt and d","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":"ark trousers\n- A d","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" black"}}
+event: content_block_delta
+data: {"delta":{"text":"ark red","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" shirt"}}
+event: content_block_delta
+data: {"delta":{"text":" co","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+event: content_block_delta
+data: {"delta":{"text":"at lining,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" trousers"}}
+event: content_block_delta
+data: {"delta":{"text":" visible at the lower left","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":"\n- Brown finger","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" brown"}}
+event: content_block_delta
+data: {"delta":{"text":"less gloves\n- A dr","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" leather"}}
+event: content_block_delta
+data: {"delta":{"text":"awn,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gloves"}}
+event: content_block_delta
+data: {"delta":{"text":" thin,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":" sil","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" kat"}}
+event: content_block_delta
+data: {"delta":{"text":"ver katana held diagonally","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ana"}}
+event: content_block_delta
+data: {"delta":{"text":" across the body in the right hand","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" held"}}
+event: content_block_delta
+data: {"delta":{"text":"\n- A black scabbard","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" across"}}
+event: content_block_delta
+data: {"delta":{"text":" held low in the left hand","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+event: content_block_delta
+data: {"delta":{"text":"\n- A plain light","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" body"}}
+event: content_block_delta
+data: {"delta":{"text":"-gray background","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":"\n\n## Tool-derived","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" dark"}}
+event: content_block_delta
+data: {"delta":{"text":" claims (ex","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sc"}}
+event: content_block_delta
+data: {"delta":{"text":"act forecast values)\n**","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"abb"}}
+event: content_block_delta
+data: {"delta":{"text":"Tokyo,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ard"}}
+event: content_block_delta
+data: {"delta":{"text":" JP**\n- 15:","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" in"}}
+event: content_block_delta
+data: {"delta":{"text":"00: 20 °C,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+event: content_block_delta
+data: {"delta":{"text":" 20% rain, 45","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" opposite"}}
+event: content_block_delta
+data: {"delta":{"text":"% cloud, 11 ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hand"}}
+event: content_block_delta
+data: {"delta":{"text":"kph\n- 16:00","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":": 19 °C, ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cool"}}
+event: content_block_delta
+data: {"delta":{"text":"25% rain, 50%","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" cloud, 12 k","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" disciplined"}}
+event: content_block_delta
+data: {"delta":{"text":"ph\n- 17:00:","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" 18 °C, 30","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" arist"}}
+event: content_block_delta
+data: {"delta":{"text":"% rain, 55% c","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ocratic"}}
+event: content_block_delta
+data: {"delta":{"text":"loud, 13 kph","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"\n- 18:00: ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" men"}}
+event: content_block_delta
+data: {"delta":{"text":"17 °C, 30%","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"acing"}}
+event: content_block_delta
+data: {"delta":{"text":" rain, 60% clo","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" mood"}}
+event: content_block_delta
+data: {"delta":{"text":"ud, 12 kph","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n\n"}}
+event: content_block_delta
+data: {"delta":{"text":"\n\n**Paris, FR**","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
+event: content_block_delta
+data: {"delta":{"text":"\n- 15:00: ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Tool"}}
+event: content_block_delta
+data: {"delta":{"text":"14 °C, 60%","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-derived"}}
+event: content_block_delta
+data: {"delta":{"text":" rain, 80% clo","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" claims"}}
+event: content_block_delta
+data: {"delta":{"text":"ud, 18 kph","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**\n"}}
+event: content_block_delta
+data: {"delta":{"text":"\n- 16:00: 13","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
+event: content_block_delta
+data: {"delta":{"text":" °C, 65% r","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Tokyo"}}
+event: content_block_delta
+data: {"delta":{"text":"ain, 85% cloud","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":", 19 kph\n-","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" 17:00: 12 ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"202"}}
+event: content_block_delta
+data: {"delta":{"text":"°C, 70% rain","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"6"}}
+event: content_block_delta
+data: {"delta":{"text":", 90% cloud,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
+event: content_block_delta
+data: {"delta":{"text":" 21 kph\n- ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"10"}}
+event: content_block_delta
+data: {"delta":{"text":"18:00: 11 °","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
+event: content_block_delta
+data: {"delta":{"text":"C, 70% rain,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
+event: content_block_delta
+data: {"delta":{"text":" 90% cloud, ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"20 kph\n\n## Un","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"supported claims\n**","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"15"}}
+event: content_block_delta
+data: {"delta":{"text":"Inferences:","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":"**\n- Naming the character","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
+event: content_block_delta
+data: {"delta":{"text":" Vergil (the","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
+event: content_block_delta
+data: {"delta":{"text":" user's brief and my","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
+event: content_block_delta
+data: {"delta":{"text":" own","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":" guess) and the s","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
+event: content_block_delta
+data: {"delta":{"text":"word","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" local"}}
+event: content_block_delta
+data: {"delta":{"text":" Yamato.\n- Sa","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"ying 45","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" metric"}}
+event: content_block_delta
+data: {"delta":{"text":"–60% cloud c","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":"over gives \"diffused\"","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" light.\n- Saying ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"15"}}
+event: content_block_delta
+data: {"delta":{"text":"11–13 kph w","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":"ind flares the coat h","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
+event: content_block_delta
+data: {"delta":{"text":"em \"without whipping,\"","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
+event: content_block_delta
+data: {"delta":{"text":" and that","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" it","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"20"}}
+event: content_block_delta
+data: {"delta":{"text":" keeps light stands st","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
+event: content_block_delta
+data: {"delta":{"text":"able.\n- Saying ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"17–20 °C is com","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"fortable for the cost","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"20"}}
+event: content_block_delta
+data: {"delta":{"text":"ume.\n- Saying the","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%"}}
+event: content_block_delta
+data: {"delta":{"text":" red","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" precipitation"}}
+event: content_block_delta
+data: {"delta":{"text":" lining will flash during the un","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" probability"}}
+event: content_block_delta
+data: {"delta":{"text":"sheathing shot.","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"\n- Describ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"ing \"blue-","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"45"}}
+event: content_block_delta
+data: {"delta":{"text":"hour\" or c","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%"}}
+event: content_block_delta
+data: {"delta":{"text":"ool light","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cloud"}}
+event: content_block_delta
+data: {"delta":{"text":" near","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cover"}}
+event: content_block_delta
+data: {"delta":{"text":" 18:00. The tool","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" g","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"ave no sunset time","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"11"}}
+event: content_block_delta
+data: {"delta":{"text":".\n\n**Err","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
+event: content_block_delta
+data: {"delta":{"text":"ors:**\n- **","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
+event: content_block_delta
+data: {"delta":{"text":"Cov","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" wind"}}
+event: content_block_delta
+data: {"delta":{"text":"ered back","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":"up:** \"","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"The","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"16"}}
+event: content_block_delta
+data: {"delta":{"text":" covered concrete arcade","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":" scouted earlier\" was","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
+event: content_block_delta
+data: {"delta":{"text":" never scouted or","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
+event: content_block_delta
+data: {"delta":{"text":" conf","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"irmed. It is a made","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"19"}}
+event: content_block_delta
+data: {"delta":{"text":"-up location.\n- **","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
+event: content_block_delta
+data: {"delta":{"text":"Timing:** The schedule","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" assumes each","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" shot takes about 30 ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"25"}}
+event: content_block_delta
+data: {"delta":{"text":"minutes. That","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
+event: content_block_delta
+data: {"delta":{"text":" is my","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" est","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"50"}}
+event: content_block_delta
+data: {"delta":{"text":"imate, not something","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
+event: content_block_delta
+data: {"delta":{"text":" from either source.\n\n## Hand","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"off note\nWe","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"12"}}
+event: content_block_delta
+data: {"delta":{"text":"'re shooting in","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
+event: content_block_delta
+data: {"delta":{"text":" Tokyo from","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
+event: content_block_delta
+data: {"delta":{"text":" 15:00 to 18","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":":00. The ch","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"ance of rain rises from ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"17"}}
+event: content_block_delta
+data: {"delta":{"text":"20% to 30%, and","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":" wind st","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
+event: content_block_delta
+data: {"delta":{"text":"ays between","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
+event: content_block_delta
+data: {"delta":{"text":" 11 and 13 k","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"ph. Shoot the full","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
+event: content_block_delta
+data: {"delta":{"text":"-length coat-flare sh","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
+event: content_block_delta
+data: {"delta":{"text":"ots first, while rain ris","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"k is lowest. Ke","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"ep the kat","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"30"}}
+event: content_block_delta
+data: {"delta":{"text":"ana diagonal and the sc","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
+event: content_block_delta
+data: {"delta":{"text":"abbard low, as","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" in the reference. Use","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"55"}}
+event: content_block_delta
+data: {"delta":{"text":" a cool rim light to separ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
+event: content_block_delta
+data: {"delta":{"text":"ate the sil","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":"ver hair and cat","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"13"}}
+event: content_block_delta
+data: {"delta":{"text":"ch the blade. No cov","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
+event: content_block_delta
+data: {"delta":{"text":"ered backup location","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
+event: content_block_delta
+data: {"delta":{"text":" has been chosen yet,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
+event: content_block_delta
+data: {"delta":{"text":" so please scout one before the","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" sh","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
+event: content_block_delta
+data: {"delta":{"text":"oot. Bring rain","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":" covers for the coat and s","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
+event: content_block_delta
+data: {"delta":{"text":"word, and s","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
+event: content_block_delta
+data: {"delta":{"text":"andbags","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: content_block_delta
+data: {"delta":{"text":" for the","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"17"}}
+event: content_block_delta
+data: {"delta":{"text":" stands.","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
+event: content_block_stop
+data: {"index":1,"type":"content_block_stop"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: message_delta
+data: {"copilot_usage":{"token_details":[{"batch_size":1000000,"cost_per_batch":400000000000,"model":"claude-opus-5.5","token_count":5261,"token_type":"input"},{"batch_size":1000000,"cost_per_batch":20000000000,"model":"claude-opus-5.5","token_count":0,"token_type":"cache_read"},{"batch_size":1000000,"cost_per_batch":500000000000,"model":"claude-opus-5.5","token_count":0,"token_type":"cache_write"},{"batch_size":1000000,"cost_per_batch":2000000000000,"model":"claude-opus-5.5","token_count":1241,"token_type":"output"}],"total_nano_aiu":4586400000},"delta":{"container":null,"stop_details":null,"stop_reason":"end_turn","stop_sequence":null},"type":"message_delta","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":5261,"output_tokens":1241,"output_tokens_details":{"thinking_tokens":257}}}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
+event: message_stop
+data: {"type":"message_stop"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"30"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"60"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"12"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Paris"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" same"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" window"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"15"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"14"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"60"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"80"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"16"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"13"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"65"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"85"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"19"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"17"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"12"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"70"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"90"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"21"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" —"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"11"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"70"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"90"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%,"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"20"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n\n"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Unsupported"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" claims"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**\n"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Covered"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" arcade"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" deep"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" over"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hang"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" availability"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" wool"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" coat"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" material"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" local"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" time"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" interpretation"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" beyond"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" requested"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" window"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" “"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"low"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-s"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"un"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" potential"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"”"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" as"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" forecast"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" fact"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" blade"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"/g"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"love"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" vulnerability"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" weather"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n\n"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hand"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"off"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" note"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"**\n"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Shoot"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Tokyo"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" on"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"202"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"6"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"10"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" priorit"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"izing"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"15"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"16"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" for"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" clean"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"est"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" conditions"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"20"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"19"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"20"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"25"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" precipitation"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" probability"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"45"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"50"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cloud"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cover"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"11"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"12"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" wind"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Keep"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" palette"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cool"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" let"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" wind"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" move"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" blue"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" coat"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" red"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" lining"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" maintain"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" stern"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" controlled"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" expressions"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" By"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"17"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"00"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" exact"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" values"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" are"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"18"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"17"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"°C"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"30"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" precipitation"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" probability"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"55"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"60"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cloud"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cover"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" "}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"13"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"–"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"12"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" k"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ph"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" wind"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" so"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" protect"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" kat"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ana"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" finish"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" tighter"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" frames"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
-
-event:content_block_stop
-data:{"type":"content_block_stop","index":0}
-
-event:message_delta
-data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":492,"cache_creation_input_tokens":0,"cache_read_input_tokens":2560,"output_tokens":454}}
-
-event:message_stop
-data:{"type":"message_stop"}
+data: [DONE]
 

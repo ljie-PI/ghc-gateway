@@ -807,7 +807,7 @@ describe("shared conversion response codecs", () => {
     "accepts captured Responses reasoning ID rotation when converting to %s",
     async (target) => {
       const source = await readFile(
-        new URL("../sdk/corpus/responses/plain-text.stream.txt", import.meta.url),
+        new URL("../sdk/corpus/responses/image.stream.txt", import.meta.url),
       );
       const emissions = await collectStream("responses", target, chunks(source));
       expect(emissions.filter((emission) => emission.kind === "terminal")).toEqual([

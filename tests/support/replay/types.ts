@@ -10,14 +10,11 @@ export interface ReplayExchangeRecord {
   readonly logicalModel: string;
   readonly upstreamModel: string;
   readonly capturedAt?: string;
-  readonly generatedAt?: string;
   /** Historical recording metadata only; never executable scenario selection. */
   readonly selection?: "explicit";
   readonly request: {
     readonly method: string;
     readonly path: string;
-    readonly headers?: Record<string, string>;
-    readonly bodyJson?: unknown;
   };
   readonly response: {
     readonly status: number;
@@ -25,28 +22,6 @@ export interface ReplayExchangeRecord {
     readonly bodyFile: string;
     readonly bodySha256: string;
     readonly stream: boolean;
-  };
-  readonly downstreamExpectation?: {
-    readonly goldenFile?: string;
-    readonly expectedOutput?: unknown;
-    readonly textSha256?: string;
-    readonly minTextChars?: number;
-    readonly minTextDeltas?: number;
-    readonly expectedToolCall?: { readonly name: string; readonly arguments: string };
-    readonly expectedToolCalls?: readonly {
-      readonly name: string;
-      readonly arguments: unknown;
-    }[];
-    readonly toolCallsCount?: number;
-    readonly hasUsage?: boolean;
-    readonly usage?: {
-      readonly inputTokens: number;
-      readonly outputTokens: number;
-      readonly cacheReadTokens: number;
-      readonly cacheWriteTokens: number;
-      readonly reasoningTokens: number;
-      readonly visualTokens: number | "not_reported";
-    };
   };
 }
 

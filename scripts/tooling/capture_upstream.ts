@@ -3,8 +3,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { parseStartupConfig, type StartupConfig } from "../../src/config/startup_config.js";
 import type { ApplicationContext } from "../../src/main.js";
-import { CaptureError, recordCapture } from "./capture_recorder.js";
-import type { CaptureScenario } from "./capture_scenarios.js";
+import { CaptureError, recordReplayCorpus } from "../../tests/sdk/corpus_recorder.js";
 
 type CaptureContext = Pick<ApplicationContext, "close" | "forceClose"> & {
   readonly directory: Pick<ApplicationContext["directory"], "bindDefault" | "bindAccount">;
@@ -29,16 +28,14 @@ export async function runCaptureCli(
       "data-dir": { type: "string" },
       account: { type: "string" },
       model: { type: "string" },
-      protocol: { type: "string" },
       scenario: { type: "string" },
-      mode: { type: "string" },
       "total-timeout-ms": { type: "string" },
     },
     strict: true, allowPositionals: false,
   });
   if (values.help) {
-    console.log("Usage: node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts [--execute] [--data-dir PATH] [--account ID] [--model gemini-3.5-flash|gpt-5.5|claude-sonnet-4] [--scenario all|long-text|image|parallel-tools|five-turn] [--mode both|nonstream|stream] [--total-timeout-ms 1200000]");
-    console.log("Default: plan only, no account access or inference. Execution creates a unique OS-temporary capture directory; never promotes or replaces corpus files.");
+    console.log("Usage: node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts [--execute] [--data-dir PATH] [--account ID] [--model all|gemini-3.8-flash|gpt-6-astra|claude-opus-5.5] [--scenario all|plain-text|image|weather-roundtrip|parallel-tools|mixed-image-tool|reasoning-effort|coherent-session] [--total-timeout-ms 3600000]");
+    console.log("Default: plan only, no account access or inference. Execution sends the official SDK scenarios through the gateway to live Copilot and replaces the selected tests/sdk/corpus cases only after every selected exchange validates.");
     return;
   }
   let context: CaptureContext | undefined;
@@ -47,12 +44,10 @@ export async function runCaptureCli(
   process.once("SIGINT", cancel);
   process.once("SIGTERM", cancel);
   try {
-    const result = await recordCapture({
+    const result = await recordReplayCorpus({
       execute: values.execute,
       ...(values.model === undefined ? {} : { model: values.model }),
-      ...(values.protocol === undefined ? {} : { protocol: values.protocol }),
-      ...(values.scenario === undefined ? {} : { scenario: values.scenario as CaptureScenario | "all" }),
-      ...(values.mode === undefined ? {} : { mode: values.mode as "nonstream" | "stream" | "both" }),
+      ...(values.scenario === undefined ? {} : { scenario: values.scenario }),
       ...(values["total-timeout-ms"] === undefined ? {} : { totalTimeoutMs: Number(values["total-timeout-ms"]) }),
       signal: controller.signal,
     }, {
@@ -73,7 +68,7 @@ export async function runCaptureCli(
         return owned.copilot.bind(account, signal);
       },
     });
-    // The public result contains only finite configuration, counts and digests.
+    // The public result contains only finite configuration, case IDs, byte counts and digests.
     console.log(JSON.stringify(result));
   } finally {
     process.removeListener("SIGINT", cancel);
@@ -104,9 +99,7 @@ async function closeContext(context: CaptureContext): Promise<void> {
 
 if (process.argv[1] !== undefined && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
   runCaptureCli().catch((error: unknown) => {
-    console.error(JSON.stringify(error instanceof CaptureError
-      ? { error: error.code, ...(error.status === undefined ? {} : { status: error.status }), ...(error.step === undefined ? {} : { step: error.step }) }
-      : { error: "capture_failed" }));
+    console.error(JSON.stringify(error instanceof CaptureError ? { error: error.code, ...error.detail } : { error: "capture_failed" }));
     process.exitCode = 1;
   });
 }

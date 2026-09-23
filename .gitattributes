@@ -2,3 +2,5 @@
 tests/fixtures/**/*.expected.txt whitespace=-blank-at-eof
 tests/fixtures/copilot-transport/sse/done.input.txt whitespace=-blank-at-eof
 tests/fixtures/openai-chat/stream/done.input.txt whitespace=-blank-at-eof
+# Recorded upstream entity bytes are digest-protected; never convert line endings.
+tests/sdk/corpus/** -text

@@ -127,22 +127,24 @@ describe("independent SDK replay expectations (no SDK execution)", () => {
     for (const exchange of manifest.exchanges) {
       const result = await readExpectedExchangeResult(exchange);
       expect(result.upstream).toBe(exchange.targetProtocol);
-      if (exchange.downstreamExpectation?.usage !== undefined) expect(result.usage).toEqual(exchange.downstreamExpectation.usage);
       expectUsage(result.nativeUsage, result.upstream, result);
     }
   });
 
   it.each([
-    { id: "replay.messages.plain-text.stream", uncached: 0, cached: 94, total: 94 },
-    { id: "replay.messages.image.stream", uncached: 82, cached: 629, total: 711 },
-  ])("keeps historical $id cache fraction without requiring fresh capture hit rates", async ({ id, uncached, cached, total }) => {
-    const manifest = JSON.parse(await readFile(new URL("../sdk/corpus/manifest.json", import.meta.url), "utf8")) as ReplayScenarioManifest;
-    const result = await readExpectedExchangeResult(manifest.exchanges.find((exchange) => exchange.caseId === id)!);
-    expect(result.nativeUsage.input_tokens).toBe(uncached);
-    expect(result.nativeUsage.cache_read_input_tokens).toBe(cached);
-    expect(result.usage.inputTokens + result.usage.cacheReadTokens + result.usage.cacheWriteTokens).toBe(total);
-    expect(cached / total).toBeLessThanOrEqual(1);
+    { name: "fully cached", uncached: 0, cached: 94 },
+    { name: "partially cached", uncached: 82, cached: 629 },
+  ])("keeps a $name Messages stream cache fraction without requiring fresh capture hit rates", ({ uncached, cached }) => {
+    const total = uncached + cached;
+    const result: ExpectedResult = {
+      ...messages,
+      nativeUsage: { input_tokens: uncached, output_tokens: 22, cache_read_input_tokens: cached, cache_creation_input_tokens: 0 },
+      usage: { ...messages.usage, inputTokens: uncached, cacheReadTokens: cached, cacheWriteTokens: 0 },
+    };
+    expectUsage(result.nativeUsage, "messages", result);
     expectUsage({ input_tokens: total, output_tokens: result.usage.outputTokens, total_tokens: total + result.usage.outputTokens,
       input_tokens_details: { cached_tokens: cached }, output_tokens_details: { reasoning_tokens: 0 } }, "responses", result);
+    expect(() => expectUsage({ input_tokens: total, output_tokens: result.usage.outputTokens, total_tokens: total + result.usage.outputTokens,
+      input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } }, "responses", result)).toThrow();
   });
 });

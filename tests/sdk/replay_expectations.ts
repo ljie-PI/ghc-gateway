@@ -3,11 +3,18 @@ import { isDeepStrictEqual } from "node:util";
 import type Anthropic from "@anthropic-ai/sdk";
 import type OpenAI from "openai";
 import { expect } from "vitest";
-import type { SdkMode, SdkProtocol, SdkResult } from "./client.js";
-import type { TextScenario } from "./scenarios.js";
+import { TEXT_TERMINAL, type SdkMode, type SdkProtocol, type SdkResult } from "./client.js";
+import { MIN_TEXT_SCENARIO_CHARACTERS, type TextScenario } from "./scenarios.js";
 import type { ReplayExchangeRecord } from "../support/replay/types.js";
 
-type CapturedUsage = NonNullable<NonNullable<ReplayExchangeRecord["downstreamExpectation"]>["usage"]>;
+interface CapturedUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly reasoningTokens: number;
+  readonly visualTokens: number | "not_reported";
+}
 
 export interface ExpectedResult {
   readonly text: string;
@@ -44,18 +51,14 @@ export async function readExpectedExchangeResult(exchange: ReplayExchangeRecord)
         : { ...record(record(fixtures[0]?.message)?.usage), ...record(fixtures.findLast((event) => event.type === "message_delta")?.usage) };
   if (nativeUsage === undefined) throw new Error("Missing fixed fixture usage");
   const fields = usageFields(nativeUsage, upstream);
-  const usage = exchange.downstreamExpectation?.usage ?? {
+  const usage: CapturedUsage = {
     inputTokens: fields.input, outputTokens: fields.output,
     cacheReadTokens: fields.cacheRead ?? 0, cacheWriteTokens: fields.cacheWrite ?? 0,
     reasoningTokens: fields.reasoning ?? 0, visualTokens: "not_reported",
   };
-  expect({ inputTokens: fields.input, outputTokens: fields.output, cacheReadTokens: fields.cacheRead ?? 0,
-    cacheWriteTokens: fields.cacheWrite ?? 0, reasoningTokens: fields.reasoning ?? 0 }).toEqual({
-    inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens,
-    cacheWriteTokens: usage.cacheWriteTokens, reasoningTokens: usage.reasoningTokens,
-  });
   const reasoning = upstream === "messages"
-    ? (completed?.content as Anthropic.ContentBlock[] | undefined)?.filter((block) => block.type === "thinking" || block.type === "redacted_thinking") ?? []
+    ? mode === "stream" ? streamedThinkingBlocks(fixtures)
+      : (completed?.content as Anthropic.ContentBlock[] | undefined)?.filter((block) => block.type === "thinking" || block.type === "redacted_thinking") ?? []
     : upstream === "responses"
       ? (completed?.output as OpenAI.Responses.ResponseOutputItem[] | undefined)?.filter((item) => item.type === "reasoning") ?? []
       : fixtures.flatMap((fixture) => {
@@ -64,6 +67,21 @@ export async function readExpectedExchangeResult(exchange: ReplayExchangeRecord)
       });
   return { text: fixedText(fixtures, upstream, mode), upstream, usage, nativeUsage, mode, reasoning,
     toolCallIds: fixedToolIds(fixtures, upstream, mode) };
+}
+
+/** Fixed Messages thinking blocks: start snapshots plus their ordered thinking/signature deltas. */
+function streamedThinkingBlocks(fixtures: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const blocks = new Map<unknown, Record<string, unknown>>();
+  for (const event of fixtures) {
+    const block = event.type === "content_block_start" ? record(event.content_block) : undefined;
+    if (block?.type === "thinking" || block?.type === "redacted_thinking") blocks.set(event.index, { ...block });
+    const target = event.type === "content_block_delta" ? blocks.get(event.index) : undefined;
+    const delta = record(event.delta);
+    if (target === undefined || delta === undefined) continue;
+    if (delta.type === "thinking_delta") target.thinking = `${String(target.thinking)}${String(delta.thinking)}`;
+    if (delta.type === "signature_delta") target.signature = `${String(target.signature ?? "")}${String(delta.signature)}`;
+  }
+  return [...blocks.values()];
 }
 
 export function matchesTextRequest(body: unknown, protocol: SdkProtocol, scenario: Pick<TextScenario, "prompt" | "system">, imageBase64: string | undefined): boolean {
@@ -199,7 +217,7 @@ export function expectScenarioResult(
   mode: SdkMode,
 ): void {
   const expectedText = expected.text;
-  expect(expectedText.length).toBeGreaterThan(1_000);
+  expect(expectedText.length).toBeGreaterThanOrEqual(MIN_TEXT_SCENARIO_CHARACTERS);
   // Compare complete strings without dumping captured content in a failed assertion.
   expect(result.text === expectedText, "complete parsed text matches the upstream fixture").toBe(true);
   for (const fact of scenario.facts) {
@@ -207,7 +225,7 @@ export function expectScenarioResult(
   }
   expectUsage(result.response.usage, downstream, expected);
   expectReasoningResult(result, expected, downstream);
-  expect(result.terminal === { chat: "stop", messages: "end_turn", responses: "completed" }[downstream], "normal terminal outcome").toBe(true);
+  expect(result.terminal === TEXT_TERMINAL[downstream], "normal terminal outcome").toBe(true);
   if (mode === "stream") {
     expect(result.stream?.terminalCount, "exactly one normal terminal outcome").toBe(1);
     expect(result.stream?.text === expectedText, "streamed text is neither truncated nor duplicated").toBe(true);
