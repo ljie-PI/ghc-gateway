@@ -127,158 +127,164 @@ async function executeOpenaiResponses(
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   scope.diagnostics?.stage("request_validation");
+  const strictFailure = captureStrictDecodeFailure(request.body);
   const decoded = decodeRequest(request.body);
-  scope.diagnostics?.set(diagnosticResponsesReasoning(decoded.body));
-  if (decoded.model !== undefined) {
-    usage.setRequestedModel(decoded.model);
-  }
-  scope.diagnostics?.stage("account_binding");
-  const account = await bindAccount(dependencies.directory, scope.signal);
-  usage.setAccount(account.accountId);
-  scope.diagnostics?.stage("continuation");
-  const initialCarrierClaim = dependencies.reasoningCarriers === undefined
-    ? undefined
-    : claimReasoningCarriers(request.body, "responses", account.accountId, dependencies.reasoningCarriers);
-  if (
-    decoded.model !== undefined
+  try {
+    scope.diagnostics?.set(diagnosticResponsesReasoning(decoded.body));
+    if (decoded.model !== undefined) {
+      usage.setRequestedModel(decoded.model);
+    }
+    scope.diagnostics?.stage("account_binding");
+    const account = await bindAccount(dependencies.directory, scope.signal);
+    usage.setAccount(account.accountId);
+    scope.diagnostics?.stage("continuation");
+    const initialCarrierClaim = dependencies.reasoningCarriers === undefined
+      ? undefined
+      : claimReasoningCarriers(request.body, "responses", account.accountId, dependencies.reasoningCarriers);
+    if (
+      decoded.model !== undefined
     && initialCarrierClaim !== undefined
     && decoded.model !== initialCarrierClaim.binding.modelId
-  ) {
-    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-  }
-  const continuation = await resolveResponsesContinuation(
-    dependencies.history,
-    decoded.previousResponseId,
-    account.accountId,
-    scope.signal,
-  );
-  const continuationReceipt = ownedContinuationReceipt(continuation);
-  const requestedModel = continuationModel(initialCarrierClaim?.binding.modelId ?? decoded.model, continuationReceipt);
-  const preference = dependencies.preferences.get(account.accountId);
-  scope.diagnostics?.stage("model_resolution");
-  const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
-  const resolved = resolveModel(catalog, requestedModel, preference);
-  if ("kind" in resolved) {
-    if (continuationReceipt !== undefined) {
-      throw new GatewayFailureError({
-        kind: "continuation_conflict",
-        source: "continuation",
-        phase: "resume",
-      });
+    ) {
+      throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
     }
-    throw new GatewayFailureError({ kind: resolved.kind });
-  }
-  usage.setResolvedModel(resolved.upstreamModel);
-  scope.diagnostics?.stage("account_binding");
-  const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
-  validateContinuationTarget(continuationReceipt, bound.target.endpoint);
-  const convertedContinuation = continuationReceipt !== undefined
-    && continuationReceipt.upstreamProtocol !== "responses";
-  let planningRequest = decoded;
-  if (convertedContinuation && continuationReceipt !== undefined) {
-    try {
-      planningRequest = consumeResponsesPreviousResponseId(
-        await dependencies.history.enrich(decoded, continuationReceipt, scope.signal),
-      );
-    } catch (error: unknown) {
-      if (scope.signal.aborted) {
-        throw new GatewayFailureError(failureFromSignal(scope.signal, {
+    const continuation = await resolveResponsesContinuation(
+      dependencies.history,
+      decoded.previousResponseId,
+      account.accountId,
+      scope.signal,
+    );
+    const continuationReceipt = ownedContinuationReceipt(continuation);
+    const requestedModel = continuationModel(initialCarrierClaim?.binding.modelId ?? decoded.model, continuationReceipt);
+    const preference = dependencies.preferences.get(account.accountId);
+    scope.diagnostics?.stage("model_resolution");
+    const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
+    const resolved = resolveModel(catalog, requestedModel, preference);
+    if ("kind" in resolved) {
+      if (continuationReceipt !== undefined) {
+        throw new GatewayFailureError({
+          kind: "continuation_conflict",
           source: "continuation",
           phase: "resume",
-        }));
+        });
       }
-
-      throw new GatewayFailureError({
-        kind: "continuation_unavailable",
-        source: "continuation",
-        phase: "resume",
-        cause: error,
-      });
+      throw new GatewayFailureError({ kind: resolved.kind });
     }
-  }
-  const carrierClaim = dependencies.reasoningCarriers === undefined
-    ? undefined
-    : claimReasoningCarriers(planningRequest.body, "responses", account.accountId, dependencies.reasoningCarriers);
-  validateCarrierContinuation(initialCarrierClaim, carrierClaim, continuationReceipt);
-  const forcedTarget = continuationReceipt?.upstreamProtocol ?? carrierClaim?.binding.sourceProtocol;
-  const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
-    accountId: account.accountId,
-    modelId: resolved.upstreamModel,
-    endpoint: bound.target.endpoint,
-    sourceProtocol: carrierClaim.binding.sourceProtocol,
-    wireProtocol: "responses",
-  });
-  const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
-    ? undefined
-    : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
-  validateExternalContinuation(
-    decoded.previousResponseId,
-    continuation,
-    forcedTarget === undefined && resolved.capability.protocols.value?.includes("responses") === true
-      ? "native_responses"
-      : forcedTarget === "messages" ? "messages_bridge" : "chat_bridge",
-  );
-  const plan = planProtocolExecution({
-    diagnostics: scope.diagnostics,
-    source: "responses",
-    body: planningRequest.body,
-    stream: decoded.stream,
-    capability: resolved.capability,
-    resolvedModel: resolved.upstreamModel,
-    ...(forcedTarget === undefined ? {} : { forcedTarget }),
-    ...(carrierRecords === undefined ? {} : { carrierRecords }),
-  });
-  validateExternalContinuation(
-    decoded.previousResponseId,
-    continuation,
-    plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
-  );
-  usage.setProtocol(plan.kind === "native" ? "openai_responses_native" : "openai_responses_bridge");
-  const ownership = continuationOwnership(
-    account.accountId,
-    resolved.upstreamModel,
-    bound.target.endpoint,
-    plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
-  );
-  if (plan.kind === "native") {
-    decodeResponsesRequest(request.body);
-    const nativePlan = createNativeResponsesPlan(decoded, resolved, bound.target.endpoint);
+    usage.setResolvedModel(resolved.upstreamModel);
+    scope.diagnostics?.stage("account_binding");
+    const bound = await bindCopilot(dependencies.copilot, account, scope.signal);
+    validateContinuationTarget(continuationReceipt, bound.target.endpoint);
+    const convertedContinuation = continuationReceipt !== undefined
+    && continuationReceipt.upstreamProtocol !== "responses";
+    let planningRequest = decoded;
+    if (convertedContinuation && continuationReceipt !== undefined) {
+      try {
+        planningRequest = consumeResponsesPreviousResponseId(
+          await dependencies.history.enrich(decoded, continuationReceipt, scope.signal),
+        );
+      } catch (error: unknown) {
+        if (scope.signal.aborted) {
+          throw new GatewayFailureError(failureFromSignal(scope.signal, {
+            source: "continuation",
+            phase: "resume",
+          }));
+        }
+
+        throw new GatewayFailureError({
+          kind: "continuation_unavailable",
+          source: "continuation",
+          phase: "resume",
+          cause: error,
+        });
+      }
+    }
+    const carrierClaim = dependencies.reasoningCarriers === undefined
+      ? undefined
+      : claimReasoningCarriers(planningRequest.body, "responses", account.accountId, dependencies.reasoningCarriers);
+    validateCarrierContinuation(initialCarrierClaim, carrierClaim, continuationReceipt);
+    const forcedTarget = continuationReceipt?.upstreamProtocol ?? carrierClaim?.binding.sourceProtocol;
+    const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
+      accountId: account.accountId,
+      modelId: resolved.upstreamModel,
+      endpoint: bound.target.endpoint,
+      sourceProtocol: carrierClaim.binding.sourceProtocol,
+      wireProtocol: "responses",
+    });
+    const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
+      ? undefined
+      : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
+    validateExternalContinuation(
+      decoded.previousResponseId,
+      continuation,
+      forcedTarget === undefined && resolved.capability.protocols.value?.includes("responses") === true
+        ? "native_responses"
+        : forcedTarget === "messages" ? "messages_bridge" : "chat_bridge",
+    );
+    const plan = planProtocolExecution({
+      diagnostics: scope.diagnostics,
+      source: "responses",
+      body: planningRequest.body,
+      stream: decoded.stream,
+      capability: resolved.capability,
+      resolvedModel: resolved.upstreamModel,
+      ...(forcedTarget === undefined ? {} : { forcedTarget }),
+      ...(carrierRecords === undefined ? {} : { carrierRecords }),
+    });
+    validateExternalContinuation(
+      decoded.previousResponseId,
+      continuation,
+      plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
+    );
+    usage.setProtocol(plan.kind === "native" ? "openai_responses_native" : "openai_responses_bridge");
+    const ownership = continuationOwnership(
+      account.accountId,
+      resolved.upstreamModel,
+      bound.target.endpoint,
+      plan.kind === "native" ? "native_responses" : plan.target === "messages" ? "messages_bridge" : "chat_bridge",
+    );
+    if (plan.kind === "native") {
+      if (strictFailure !== undefined) throw strictFailure;
+      const nativePlan = createNativeResponsesPlan(decoded, resolved, bound.target.endpoint);
+      return withUpstreamProtocol(decoded.stream
+        ? await nativeStreamResponse(
+          dependencies.history,
+          ownership,
+          bound,
+          nativePlan,
+          request.headerFields,
+          scope,
+          usage,
+          dependencies.performanceObserver,
+        )
+        : await nativeNonstreamResponse(
+          dependencies.history,
+          ownership,
+          bound,
+          nativePlan,
+          request.headerFields,
+          scope,
+          usage,
+        ), "responses");
+    }
+    const outputCarrierBinding = dependencies.reasoningCarriers === undefined ? undefined : carrierBinding({
+      accountId: account.accountId,
+      modelId: resolved.upstreamModel,
+      endpoint: bound.target.endpoint,
+      sourceProtocol: plan.target,
+      wireProtocol: "responses",
+    });
+    const previousResponseId = convertedResponsePreviousResponseId(
+      decoded.previousResponseId,
+      continuationReceipt,
+      plan.target === "messages" ? "messages" : "chat",
+    );
     return withUpstreamProtocol(decoded.stream
-      ? await nativeStreamResponse(
-        dependencies.history,
-        ownership,
-        bound,
-        nativePlan,
-        request.headerFields,
-        scope,
-        usage,
-        dependencies.performanceObserver,
-      )
-      : await nativeNonstreamResponse(
-        dependencies.history,
-        ownership,
-        bound,
-        nativePlan,
-        request.headerFields,
-        scope,
-        usage,
-      ), "responses");
+      ? await convertedStreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding)
+      : await convertedNonstreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding), plan.target);
+  } catch (error: unknown) {
+    if (strictFailure !== undefined) throw strictFailure;
+    throw error;
   }
-  const outputCarrierBinding = dependencies.reasoningCarriers === undefined ? undefined : carrierBinding({
-    accountId: account.accountId,
-    modelId: resolved.upstreamModel,
-    endpoint: bound.target.endpoint,
-    sourceProtocol: plan.target,
-    wireProtocol: "responses",
-  });
-  const previousResponseId = convertedResponsePreviousResponseId(
-    decoded.previousResponseId,
-    continuationReceipt,
-    plan.target === "messages" ? "messages" : "chat",
-  );
-  return withUpstreamProtocol(decoded.stream
-    ? await convertedStreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding)
-    : await convertedNonstreamResponse(dependencies, ownership, bound, plan, previousResponseId, scope, usage, outputCarrierBinding), plan.target);
 }
 
 function decodeRequest(body: WireJsonObject) {
@@ -289,6 +295,17 @@ function decodeRequest(body: WireJsonObject) {
       throw new GatewayFailureError({ kind: "invalid_request", cause: error });
     }
     throw error;
+  }
+}
+
+function captureStrictDecodeFailure(body: WireJsonObject): GatewayFailureError | undefined {
+  try {
+    decodeResponsesRequest(body);
+    return undefined;
+  } catch (error: unknown) {
+    return error instanceof ResponsesRequestDecodeError
+      ? new GatewayFailureError({ kind: "invalid_request", cause: error })
+      : new GatewayFailureError({ kind: "internal", cause: error });
   }
 }
 

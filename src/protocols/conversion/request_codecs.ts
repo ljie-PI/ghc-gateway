@@ -2020,10 +2020,7 @@ function encodeMessagesRequest(
   targetDegradations.push(...targetParallel.degradations);
   const split = splitMessagesInstructions(request);
   const messages = encodeMessagesItems(split.items);
-  if (!messages.some((message) => (
-    oneMember(message, "role", "REQ-INTERNAL") === "assistant"
-    || hasSubstantiveMessagesUserContent(oneMember(message, "content", "REQ-INTERNAL"))
-  ))) {
+  if (!messages.some(hasSubstantiveMessagesTurn)) {
     unsupported("REQ-TARGET-M-EMPTY");
   }
   if (!hasSubstantiveLeadingMessagesUser(messages)) {
@@ -2374,6 +2371,26 @@ function hasSubstantiveLeadingMessagesUser(output: readonly WireJsonObject[]): b
   return first !== undefined
     && oneMember(first, "role", "REQ-INTERNAL") === "user"
     && hasSubstantiveMessagesUserContent(oneMember(first, "content", "REQ-INTERNAL"));
+}
+
+function hasSubstantiveMessagesTurn(message: WireJsonObject): boolean {
+  const role = oneMember(message, "role", "REQ-INTERNAL");
+  const content = oneMember(message, "content", "REQ-INTERNAL");
+  if (role === "user") return hasSubstantiveMessagesUserContent(content);
+  if (role !== "assistant" || !isWireJsonArray(content)) return false;
+  return content.items.some((item) => {
+    if (!isWireJsonObject(item)) return false;
+    const type = oneMember(item, "type", "REQ-INTERNAL");
+    if (type === "text") {
+      const text = oneMember(item, "text", "REQ-INTERNAL");
+      return typeof text === "string" && text.trim().length > 0;
+    }
+    if (type === "thinking") {
+      const text = oneMember(item, "thinking", "REQ-INTERNAL");
+      return typeof text === "string" && text.trim().length > 0;
+    }
+    return type === "redacted_thinking" || type === "tool_use";
+  });
 }
 
 function syntheticMessagesLeadingUser(): WireJsonObject {

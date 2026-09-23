@@ -895,6 +895,9 @@ function transformInput(state: MutableState, input: WireJson | undefined): WireJ
     }
     if (type === "tool_search_call") {
       value = projectExtended(state, value, new Set(["type", "id", "call_id", "arguments", "status", "execution"]), "REQ-R-EXT-SEARCH-CALL");
+      const execution = single(value, "execution", "REQ-R-EXT-SEARCH-CALL-EXECUTION");
+      if (execution !== undefined && execution !== "client") invalid("REQ-R-EXT-SEARCH-CALL-EXECUTION");
+      if (execution !== undefined) state.degradations.add("request.option_omitted");
       const binding = requiredBinding(state, undefined, "tool_search", "tool_search");
       const callId = registerCall(calls, value, binding);
       const argumentsValue = requiredObject(single(value, "arguments", "REQ-R-EXT-SEARCH-CALL-ARGS"), "REQ-R-EXT-SEARCH-CALL-ARGS");
@@ -1151,7 +1154,7 @@ function optionalItemId(
 ): string | undefined {
   const itemId = single(value, "id", "REQ-R-EXT-ITEM-ID");
   if (itemId === undefined) return undefined;
-  if (typeof itemId === "string" && isReasoningCarrier(itemId)) invalid("REQ-R-EXT-ITEM-ID");
+  if (containsReasoningCarrier(itemId)) invalid("REQ-R-EXT-ITEM-ID");
   state.degradations.add("request.option_omitted");
   return typeof itemId === "string" && itemId.length > 0 ? itemId : undefined;
 }
@@ -1160,7 +1163,7 @@ function requestCallStatus(
   state: Pick<MutableState, "degradations">,
   value: WireJson | undefined,
 ): ResponsesToolCallBinding["status"] {
-  if (typeof value === "string" && isReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
+  if (value !== undefined && containsReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
   if (value === undefined || value === "completed" || value === "incomplete" || value === "in_progress") {
     if (value !== undefined) state.degradations.add("request.option_omitted");
     return value;
@@ -1173,7 +1176,7 @@ function requestResultStatus(
   state: Pick<MutableState, "degradations">,
   value: WireJson | undefined,
 ): ResponsesToolResultBinding["status"] {
-  if (typeof value === "string" && isReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
+  if (value !== undefined && containsReasoningCarrier(value)) invalid("REQ-R-EXT-STATUS");
   if (value === undefined || value === "completed" || value === "incomplete" || value === "in_progress" || value === "failed") {
     if (value !== undefined) state.degradations.add("request.option_omitted");
     return value;

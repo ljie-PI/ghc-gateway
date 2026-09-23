@@ -1359,12 +1359,36 @@ describe("shared conversion request codecs", () => {
     ["reasoning summary", { reasoning: { summary: "ghcg-rsn-v1:synthetic" } }],
     ["message ID", { input: [{ type: "message", id: "ghcg-rsn-v1:synthetic", role: "user", content: "hi" }] }],
     ["annotations", { input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi", annotations: ["ghcg-rsn-v1:synthetic"] }] }] }],
+    ["nested extended ID", {
+      input: [
+        { type: "custom_tool_call", id: { value: "ghcg-rsn-v1:synthetic" }, call_id: "call_1", name: "render", input: "x" },
+        { type: "custom_tool_call_output", call_id: "call_1", output: "ok" },
+      ],
+      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+    }],
   ] as const)("rejects a carrier hidden in recognized Responses %s", (_name, extra) => {
     expect(() => prepareConvertedRequest("responses", "chat", body({
       model: "x",
       input: "hi",
       ...extra,
     }), "target", capability(["chat"]))).toThrow();
+  });
+
+  it("rejects non-client or carrier-bearing tool-search execution controls", () => {
+    for (const execution of ["server", { value: "ghcg-rsn-v1:synthetic" }]) {
+      expect(() => prepareConvertedRequest("responses", "chat", body({
+        model: "source",
+        input: [{ type: "tool_search_call", call_id: "call_1", arguments: { query: "docs" }, execution }],
+        tools: [{ type: "tool_search" }],
+      }), "target", capability(["chat"]))).toThrow();
+    }
+  });
+
+  it.each(["chat", "responses"] as const)("rejects empty assistant-only %s input instead of synthesizing", (source) => {
+    const request = source === "chat"
+      ? body({ model: "source", messages: [{ role: "assistant", content: "" }] })
+      : body({ model: "source", input: [{ type: "message", role: "assistant", content: [] }] });
+    expect(() => prepareConvertedRequest(source, "messages", request, "target", capability(["messages"]))).toThrow();
   });
 
   it("sanitizes discovered tool extensions before embedding tool-search output in Chat", () => {
