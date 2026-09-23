@@ -22,12 +22,18 @@ import {
 
 type ResponsesPlanKind = "native_responses" | "chat_bridge" | "messages_bridge";
 
+export type ResolvedResponsesContinuation = Extract<ResponsesContinuationResolution, { readonly kind: "none" | "owned" }>;
+
+/**
+ * Best-effort, like cc-switch: history that is unknown, expired, legacy, uncertain, owned by
+ * another account or unreadable resolves as `none`, so the request still reaches the upstream.
+ */
 export async function resolveResponsesContinuation(
   history: ResponsesHistory,
   previousResponseId: string | undefined,
   accountId: string,
   signal: AbortSignal,
-): Promise<ResponsesContinuationResolution> {
+): Promise<ResolvedResponsesContinuation> {
   if (previousResponseId === undefined) {
     return { kind: "none" };
   }
@@ -35,22 +41,14 @@ export async function resolveResponsesContinuation(
   try {
     resolution = await history.resolve(previousResponseId, accountId, signal);
   } catch (error: unknown) {
-    throw continuationFailure(error, signal);
+    if (signal.aborted) throw continuationFailure(error, signal);
+    return { kind: "none" };
   }
-  if (resolution.kind === "owned" || resolution.kind === "none") {
-    return resolution;
-  }
-  throw new GatewayFailureError({
-    kind: resolution.kind === "owned_by_another_account"
-      ? "continuation_conflict"
-      : "continuation_unavailable",
-    source: "continuation",
-    phase: "resume",
-  });
+  return resolution.kind === "owned" ? resolution : { kind: "none" };
 }
 
 export function ownedContinuationReceipt(
-  resolution: Readonly<ResponsesContinuationResolution>,
+  resolution: Readonly<ResolvedResponsesContinuation>,
 ): ResponsesRouteReceipt | undefined {
   return resolution.kind === "owned" ? resolution.receipt : undefined;
 }
@@ -71,6 +69,7 @@ export function continuationModel(
 export function validateContinuationTarget(
   receipt: Readonly<ResponsesRouteReceipt> | undefined,
   endpoint: string,
+  protocols: readonly string[] | null,
 ): void {
   if (receipt === undefined) {
     return;
@@ -83,42 +82,24 @@ export function validateContinuationTarget(
       throw conflict();
     }
   }
+  if (protocols?.includes(receipt.upstreamProtocol) !== true) {
+    throw conflict();
+  }
 }
 
-export function validateExternalContinuation(
+/**
+ * An unresolved ID is meaningless to converted upstreams, and a gateway-managed ID is unknown to
+ * Copilot; both are dropped so the request is still sent. Other native IDs pass through unchanged.
+ */
+export function dropsUnresolvedPreviousResponseId(
   previousResponseId: string | undefined,
-  resolution: Readonly<ResponsesContinuationResolution>,
+  resolution: Readonly<ResolvedResponsesContinuation>,
   planKind: ResponsesPlanKind,
-): void {
+): boolean {
   if (previousResponseId === undefined || resolution.kind !== "none") {
-    return;
+    return false;
   }
-  if (planKind !== "native_responses" || isGatewayManagedResponseId(previousResponseId)) {
-    throw new GatewayFailureError({
-      kind: "continuation_unavailable",
-      source: "continuation",
-      phase: "resume",
-    });
-  }
-}
-
-export function convertedResponsePreviousResponseId(
-  requestedId: string | undefined,
-  receipt: Readonly<ResponsesRouteReceipt> | undefined,
-  target: "chat" | "messages",
-): string | null {
-  if (requestedId === undefined && receipt === undefined) return null;
-  if (
-    requestedId !== undefined
-    && receipt?.owner === "converted"
-    && receipt.responseId === requestedId
-    && receipt.upstreamProtocol === target
-  ) return receipt.responseId;
-  throw new GatewayFailureError({
-    kind: "continuation_unavailable",
-    source: "continuation",
-    phase: "resume",
-  });
+  return planKind !== "native_responses" || isGatewayManagedResponseId(previousResponseId);
 }
 
 export function continuationOwnership(

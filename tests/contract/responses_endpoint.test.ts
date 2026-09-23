@@ -25,6 +25,7 @@ import { migration as reasoningCarriersMigration } from "../../src/persistence/m
 import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
+import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
 
 const nowMs = (): number => 1_700_000_000_000;
 
@@ -364,20 +365,10 @@ describe("Responses endpoint", () => {
     }
   });
 
-  it("rejects cross-account, model, protocol, origin, and unknown converted continuations", async () => {
+  it("rejects model, protocol, and origin conflicts with an owned continuation", async () => {
     const { gw, upstream, history, close } = await responsesGateway();
     try {
       const signal = new AbortController().signal;
-      await history.recordReceipt({
-        accountId: "github.com/2",
-        responseId: "resp_foreign",
-        modelId: "native",
-        upstreamOrigin: upstream.origin,
-        owner: "native",
-        upstreamProtocol: "responses",
-        conversionVersion: null,
-        checkpointState: "complete",
-      }, signal);
       await history.recordReceipt({
         accountId: "github.com/1",
         responseId: "resp_chat_route",
@@ -400,11 +391,91 @@ describe("Responses endpoint", () => {
       }, signal);
 
       const requests = [
-        { model: "native", previous_response_id: "resp_foreign", input: "hi" },
         { model: "chat", previous_response_id: "resp_chat_route", input: "hi" },
         { model: "native", previous_response_id: "resp_chat_route", input: "hi" },
         { model: "native", previous_response_id: "resp_other_origin", input: "hi" },
+      ];
+      for (const body of requests) {
+        const response = await gw.fetch(responsesRequest(body));
+        expect(response.status).toBe(409);
+        await response.text();
+      }
+      expect(upstream.requests).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("sends unrestorable continuations without history, like cc-switch", async () => {
+    const decoded = (body: Uint8Array) => JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>;
+    const withoutPrevious = (body: Uint8Array) => decoded(body).previous_response_id === undefined;
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) }, {
+      nowMs: () => 100, monotonicNowMs: () => 10,
+    });
+    const { gw, upstream, history, close } = await responsesGateway({ diagnostics, expectations: [
+      { method: "POST", path: "/responses", body: (body) => decoded(body).previous_response_id === "resp_foreign",
+        reply: { status: 200, headers: {}, body: text("{\"id\":\"resp_1\",\"output\":[]}") } },
+      { method: "POST", path: "/chat/completions", body: withoutPrevious, times: 4,
+        reply: { status: 200, headers: {}, body: text("{\"id\":\"chatcmpl_1\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}") } },
+      { method: "POST", path: "/responses", body: withoutPrevious, times: 2,
+        reply: { status: 200, headers: {}, body: text("{\"id\":\"resp_2\",\"output\":[]}") } },
+    ] });
+    try {
+      const signal = new AbortController().signal;
+      for (const [responseId, modelId, owner, upstreamProtocol] of [
+        ["resp_foreign", "native", "native", "responses"],
+        ["resp_foreign_chat", "chat", "converted", "chat"],
+      ] as const) {
+        await history.recordReceipt({
+          accountId: "github.com/2",
+          responseId,
+          modelId,
+          upstreamOrigin: upstream.origin,
+          owner,
+          upstreamProtocol,
+          conversionVersion: owner === "native" ? null : "responses-chat-v2",
+          checkpointState: "complete",
+        }, signal);
+      }
+      await history.recordReceipt({
+        accountId: "github.com/1",
+        responseId: "resp_without_checkpoint",
+        modelId: "chat",
+        upstreamOrigin: upstream.origin,
+        owner: "converted",
+        upstreamProtocol: "chat",
+        conversionVersion: "responses-chat-v2",
+        checkpointState: "complete",
+      }, signal);
+      await history.recordCheckpoint({
+        responseId: "resp_tool_turn",
+        output: [{
+          kind: "object",
+          members: [
+            { key: "type", value: "function_call" },
+            { key: "call_id", value: "call_owned" },
+            { key: "name", value: "lookup" },
+            { key: "arguments", value: "{}" },
+          ],
+        }],
+      }, {
+        accountId: "github.com/1",
+        modelId: "dual",
+        upstreamOrigin: upstream.origin,
+        owner: "converted",
+        upstreamProtocol: "chat",
+        conversionVersion: "responses-chat-v2",
+      }, "complete", signal);
+
+      const requests = [
+        // Another account's native ID is not restored; like any external native ID it passes through.
+        { model: "native", previous_response_id: "resp_foreign", input: "hi" },
+        { model: "chat", previous_response_id: "resp_foreign_chat", input: "hi" },
         { model: "chat", previous_response_id: "external_unknown", input: "hi" },
+        { model: "chat", previous_response_id: "resp_without_checkpoint", input: "hi" },
+        // A text-only follow-up stays pinned to its converted route but has no tool calls to restore.
+        { model: "dual", previous_response_id: "resp_tool_turn", input: "hi" },
         {
           model: "native",
           previous_response_id: "resp_Z2hjLWdhdGV3YXk6Z2l0aHViX2NvcGlsb3Q7bmF0aXZlO3Jlc3BfdW5rbm93bg==",
@@ -418,23 +489,46 @@ describe("Responses endpoint", () => {
       ];
       for (const body of requests) {
         const response = await gw.fetch(responsesRequest(body));
-        expect(response.status).toBe(409);
+        expect(response.status).toBe(200);
         await response.text();
       }
-      expect(upstream.requests).toEqual([]);
+      expect(upstream.requests.map((entry) => [entry.path, decoded(entry.body).previous_response_id ?? null])).toEqual([
+        ["/responses", "resp_foreign"],
+        ["/chat/completions", null],
+        ["/chat/completions", null],
+        ["/chat/completions", null],
+        ["/chat/completions", null],
+        ["/responses", null],
+        ["/responses", null],
+      ]);
+      upstream.assertSatisfied();
+      await diagnostics.close();
+      expect(records.filter((record) => record.degradations?.includes("continuation.history_omitted"))).toHaveLength(6);
+      expect(JSON.stringify(records)).not.toMatch(/resp_|external_unknown|call_owned/u);
     } finally {
       await close();
+      await diagnostics.close();
     }
   });
 
   it("does not let pending duplicate-extension validation mask continuation or upstream failures", async () => {
-    const { gw, upstream, close } = await responsesGateway({ expectations: [{
+    const { gw, upstream, history, close } = await responsesGateway({ expectations: [{
       method: "POST", path: "/chat/completions", body: jsonStream(false),
       reply: { status: 429, headers: { "retry-after": "120" }, body: text("{}") },
     }] });
     try {
+      await history.recordReceipt({
+        accountId: "github.com/1",
+        responseId: "resp_native_route",
+        modelId: "native",
+        upstreamOrigin: upstream.origin,
+        owner: "native",
+        upstreamProtocol: "responses",
+        conversionVersion: null,
+        checkpointState: "complete",
+      }, new AbortController().signal);
       const continuation = await gw.fetch(rawResponsesRequest(
-        "{\"model\":\"chat\",\"previous_response_id\":\"external_unknown\",\"input\":\"hi\",\"extension\":1,\"extension\":2}",
+        "{\"model\":\"chat\",\"previous_response_id\":\"resp_native_route\",\"input\":\"hi\",\"extension\":1,\"extension\":2}",
       ));
       expect(continuation.status).toBe(409);
       await continuation.text();
@@ -824,6 +918,7 @@ describe("Responses endpoint", () => {
     readonly catalogError?: unknown;
     readonly runtime?: ReturnType<typeof defaultRuntimeConfigSnapshot>;
     readonly onClose?: () => void;
+    readonly diagnostics?: DiagnosticRecorder;
   } = {}) {
     return await withSetupCleanup(async (own) => {
       const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-responses-"));
@@ -887,6 +982,7 @@ describe("Responses endpoint", () => {
       })], {
         createRequestId: () => "req_responses",
         ...(options.onClose === undefined ? {} : { onClose: options.onClose }),
+        ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
       });
       own(() => gw.close());
       return {
