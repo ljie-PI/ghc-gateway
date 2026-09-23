@@ -30,7 +30,10 @@ export function projectKnownObject(
   let omitted = false;
   for (const member of object.members) {
     if (policy.knownKeys.has(member.key)) {
-      if (seen.has(member.key)) invalid(policy.ruleId);
+      if (seen.has(member.key)) {
+        if (policy.omittedValueIsUnsafe?.(member.value) === true) invalid(policy.ruleId);
+        continue;
+      }
       seen.add(member.key);
       members.push(member);
       continue;

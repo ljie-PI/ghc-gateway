@@ -1,5 +1,4 @@
 import {
-  duplicateMemberNames,
   isWireJsonArray,
   isWireJsonNumber,
   isWireJsonObject,
@@ -9,6 +8,7 @@ import {
   type WireJsonArray,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
+import { containsReasoningCarrier } from "./reasoning_carriers.js";
 import { ConversionContractError } from "./types.js";
 
 export function wireObject(entries: readonly (readonly [string, WireJson | undefined])[]): WireJsonObject {
@@ -36,7 +36,6 @@ export function requiredObject(value: WireJson | undefined, ruleId: string): Wir
   if (!isWireJsonObject(value)) {
     invalid(ruleId);
   }
-  assertNoDuplicates(value, ruleId);
   return value;
 }
 
@@ -65,17 +64,18 @@ export function optionalString(value: WireJson | undefined, ruleId: string): str
   if (value === undefined) {
     return undefined;
   }
-  return requiredString(value, ruleId);
+  if (typeof value === "string" && value.length > 0) return value;
+  if (containsReasoningCarrier(value)) invalid(ruleId);
+  return undefined;
 }
 
 export function optionalBoolean(value: WireJson | undefined, ruleId: string): boolean | undefined {
   if (value === undefined) {
     return undefined;
   }
-  if (typeof value !== "boolean") {
-    invalid(ruleId);
-  }
-  return value;
+  if (typeof value === "boolean") return value;
+  if (containsReasoningCarrier(value)) invalid(ruleId);
+  return undefined;
 }
 
 export function positiveInteger(value: WireJson | undefined, ruleId: string): number | undefined {
@@ -83,11 +83,12 @@ export function positiveInteger(value: WireJson | undefined, ruleId: string): nu
     return undefined;
   }
   if (!isWireJsonNumber(value)) {
-    invalid(ruleId);
+    if (containsReasoningCarrier(value)) invalid(ruleId);
+    return undefined;
   }
   const parsed = Number(value.lexeme);
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    invalid(ruleId);
+    return undefined;
   }
   return parsed;
 }
@@ -102,45 +103,24 @@ export function finiteNumber(
     return undefined;
   }
   if (!isWireJsonNumber(value)) {
-    invalid(ruleId);
+    if (containsReasoningCarrier(value)) invalid(ruleId);
+    return undefined;
   }
   const parsed = Number(value.lexeme);
   if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
-    invalid(ruleId);
+    return undefined;
   }
   return parsed;
 }
 
-export function oneMember(object: WireJsonObject, key: string, ruleId: string): WireJson | undefined {
-  const values = memberValues(object, key);
-  if (values.length > 1) {
-    invalid(ruleId);
-  }
-  return values[0];
-}
-
-export function assertNoDuplicates(object: WireJsonObject, ruleId: string): void {
-  if (duplicateMemberNames(object).length > 0) {
-    invalid(ruleId);
-  }
-}
-
-export function assertAllowedKeys(
-  object: WireJsonObject,
-  allowed: ReadonlySet<string>,
-  ruleId: string,
-): void {
-  assertNoDuplicates(object, ruleId);
-  if (object.members.some((member) => !allowed.has(member.key))) {
-    unsupported(ruleId);
-  }
+export function oneMember(object: WireJsonObject, key: string, _ruleId: string): WireJson | undefined {
+  return memberValues(object, key)[0];
 }
 
 export function jsonObjectString(value: WireJson, ruleId: string): string {
   if (!isWireJsonObject(value)) {
     invalid(ruleId);
   }
-  assertNoDuplicates(value, ruleId);
   return new TextDecoder().decode(serializeWireJson(value));
 }
 
@@ -149,10 +129,16 @@ export function parseStringList(value: WireJson | undefined, ruleId: string): re
     return undefined;
   }
   if (typeof value === "string") {
-    return [value];
+    return value.length > 0 ? [value] : undefined;
   }
-  const array = requiredArray(value, ruleId);
-  return array.items.map((item) => requiredString(item, ruleId));
+  if (!isWireJsonArray(value)) {
+    if (containsReasoningCarrier(value)) invalid(ruleId);
+    return undefined;
+  }
+  const items = value.items.filter((item): item is string => typeof item === "string" && item.length > 0);
+  if (items.length === value.items.length) return items;
+  if (containsReasoningCarrier(value)) invalid(ruleId);
+  return undefined;
 }
 
 export function invalid(ruleId: string): never {

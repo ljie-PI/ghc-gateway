@@ -1,8 +1,10 @@
 import type { SqliteDatabase } from "../../persistence/sqlite.js";
 import {
+  isWireJsonArray,
   isWireJsonObject,
   memberValues,
   parseWireJson,
+  type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
@@ -17,6 +19,13 @@ const GATEWAY_CARRIER_PATTERN = /^ghcg-rsn-v[^:]*:/u;
 
 export type ReasoningCarrierSourceKind = "chat_state" | "messages_block" | "responses_item";
 export type ReasoningCarrierState = "partial" | "complete";
+
+export function containsReasoningCarrier(value: WireJson): boolean {
+  if (typeof value === "string") return isReasoningCarrier(value);
+  if (isWireJsonArray(value)) return value.items.some(containsReasoningCarrier);
+  if (isWireJsonObject(value)) return value.members.some((member) => containsReasoningCarrier(member.value));
+  return false;
+}
 
 export interface ReasoningCarrierBinding {
   readonly accountId: string;

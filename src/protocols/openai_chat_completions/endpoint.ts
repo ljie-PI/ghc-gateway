@@ -364,19 +364,10 @@ export function decodeOpenaiChatCompletionsRequest(body: WireJsonObject): Decode
 }
 
 function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
-  const modelValues = memberValues(body, "model");
-  const streamValues = memberValues(body, "stream");
-  if (modelValues.length > 1 || streamValues.length > 1) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  const model = modelValues[0];
-  if (model !== undefined && (typeof model !== "string" || model.length === 0)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  const stream = streamValues[0];
-  if (stream !== undefined && stream !== true && stream !== false) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
+  const modelValue = memberValues(body, "model")[0];
+  const model = typeof modelValue === "string" && modelValue.length > 0 ? modelValue : undefined;
+  const streamValue = memberValues(body, "stream")[0];
+  const stream = streamValue === true;
   return {
     body,
     ...(model === undefined ? {} : { requestedModel: model }),

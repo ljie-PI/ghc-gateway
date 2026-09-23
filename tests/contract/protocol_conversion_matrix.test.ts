@@ -538,10 +538,10 @@ describe("protocol conversion matrix", () => {
   it.each([
     [{
       tools: [
-        { type: "custom", name: "render", format: { type: "text" } },
-        { type: "function", name: "bad", parameters: [], unknown: true },
+        { type: "custom", name: "render", description: 17, format: 17 },
+        { type: "function", name: "bad", description: 17, parameters: [], unknown: true },
       ],
-    }, 400],
+    }, 200],
     [{
       tools: [{
         type: "namespace",
@@ -554,16 +554,12 @@ describe("protocol conversion matrix", () => {
           unknown_constraint: true,
         }],
       }],
-    }, 400],
-    [{
-      tools: [{ type: "custom", name: "render", format: { type: "text" } }],
-      parallel_tool_calls: "bad",
-    }, 400],
+    }, 200],
     [{
       tools: [{ type: "custom", name: "render", format: { type: "text" } }],
       tool_choice: { type: "custom", name: "missing" },
     }, 400],
-  ] as const)("strictly rejects malformed extended tool declarations and controls", async (extra, status) => {
+  ] as const)("applies extended-tool tolerance and binding validation", async (extra, status) => {
     const harness = await matrixGateway();
     try {
       const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
@@ -573,37 +569,59 @@ describe("protocol conversion matrix", () => {
       }));
       expect(response.status).toBe(status);
       await response.text();
-      expect(harness.upstream.requests).toEqual([]);
+      expect(harness.upstream.requests).toHaveLength(status === 200 ? 1 : 0);
     } finally {
       await harness.close();
     }
   });
 
-  it("rejects duplicate fields in flat namespace children before inference", async () => {
+  it("omits a malformed optional extended-tool parallel control", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+        parallel_tool_calls: "bad",
+      }));
+      expect(response.status).toBe(200);
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(JSON.parse(decoder.decode(harness.chatBodies[0]))).not.toHaveProperty("parallel_tool_calls");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("keeps the first duplicate field in flat namespace children", async () => {
     const harness = await matrixGateway();
     try {
       const response = await harness.gw.fetch(rawRequest(
         "/v1/responses",
         "{\"model\":\"native-chat\",\"input\":\"render\",\"tools\":[{\"type\":\"namespace\",\"name\":\"ns\",\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"},\"strict\":false,\"strict\":true}]}]}",
       ));
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(200);
       await response.text();
-      expect(harness.upstream.requests).toEqual([]);
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(JSON.parse(decoder.decode(harness.chatBodies[0]))).toMatchObject({
+        tools: [{ function: { strict: false } }],
+      });
     } finally {
       await harness.close();
     }
   });
 
-  it("rejects duplicate fields in discovered namespaces before inference", async () => {
+  it("keeps the first duplicate field in discovered namespaces", async () => {
     const harness = await matrixGateway();
     try {
       const response = await harness.gw.fetch(rawRequest(
         "/v1/responses",
         "{\"model\":\"native-chat\",\"input\":[{\"type\":\"tool_search_call\",\"call_id\":\"call_search\",\"arguments\":{\"query\":\"lookup\"}},{\"type\":\"tool_search_output\",\"call_id\":\"call_search\",\"tools\":[{\"type\":\"namespace\",\"name\":\"first\",\"name\":\"second\",\"tools\":[{\"type\":\"function\",\"name\":\"lookup\",\"parameters\":{\"type\":\"object\"}}]}]}],\"tools\":[{\"type\":\"tool_search\"}]}",
       ));
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(200);
       await response.text();
-      expect(harness.upstream.requests).toEqual([]);
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(decoder.decode(harness.chatBodies[0])).toContain("first__lookup");
+      expect(decoder.decode(harness.chatBodies[0])).not.toContain("second__lookup");
     } finally {
       await harness.close();
     }
@@ -873,17 +891,6 @@ describe("protocol conversion matrix", () => {
       tools: [{ type: "custom", name: "render", format: { type: "text" } }],
     },
     {
-      input: [
-        { type: "tool_search_call", call_id: "call_search", arguments: { query: "x" } },
-        {
-          type: "tool_search_output",
-          call_id: "call_search",
-          tools: [{ type: "custom", name: "grammar", format: { type: "grammar", syntax: "regex" } }],
-        },
-      ],
-      tools: [{ type: "tool_search" }],
-    },
-    {
       input: "namespace choice",
       tools: [{
         type: "namespace",
@@ -920,6 +927,29 @@ describe("protocol conversion matrix", () => {
       expect([400, 422]).toContain(response.status);
       await response.text();
       expect(harness.upstream.requests).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("omits unsupported optional formats on discovered custom tools", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: [
+          { type: "tool_search_call", call_id: "call_search", arguments: { query: "x" } },
+          {
+            type: "tool_search_output",
+            call_id: "call_search",
+            tools: [{ type: "custom", name: "grammar", format: { type: "grammar", syntax: "regex" } }],
+          },
+        ],
+        tools: [{ type: "tool_search" }],
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(harness.upstream.requests).toHaveLength(1);
     } finally {
       await harness.close();
     }
@@ -1058,7 +1088,6 @@ describe("protocol conversion matrix", () => {
     ["/v1/chat/completions", "{\"model\":\"native-responses\",\"messages\":[],\"n\":2}", 422],
     ["/v1/messages", "{\"model\":\"native-responses\",\"max_tokens\":8,\"messages\":[],\"stop_sequences\":[\"x\"]}", 400],
     ["/v1/responses", "{\"model\":\"native-messages\",\"input\":\"hi\",\"background\":true}", 422],
-    ["/v1/responses", "{\"model\":\"native-chat\",\"input\":\"hi\",\"reasoning\":{\"effort\":\"ultra\"}}", 422],
   ] as const)("rejects converted request %s before inference", async (path, body, status) => {
     const harness = await matrixGateway();
     try {
@@ -1066,6 +1095,22 @@ describe("protocol conversion matrix", () => {
       expect(response.status).toBe(status);
       await response.text();
       expect(harness.upstream.requests).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("omits an unknown converted Responses reasoning effort", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(rawRequest(
+        "/v1/responses",
+        "{\"model\":\"native-chat\",\"input\":\"hi\",\"reasoning\":{\"effort\":\"ultra\"}}",
+      ));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(decoder.decode(harness.upstream.requests[0]?.body)).not.toContain("ultra");
     } finally {
       await harness.close();
     }
@@ -1082,6 +1127,36 @@ describe("protocol conversion matrix", () => {
       await response.text();
       expect(harness.upstream.requests).toHaveLength(1);
       expect(decoder.decode(harness.upstream.requests[0]?.body)).not.toContain("unknown");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("uses the first duplicate routing control on every converted endpoint", async () => {
+    const harness = await matrixGateway();
+    try {
+      const requests = [
+        ["chat", rawRequest(
+          "/v1/chat/completions",
+          "{\"model\":\"responses-messages\",\"model\":\"missing\",\"stream\":false,\"stream\":true,\"messages\":[]}",
+        )],
+        ["messages", rawRequest(
+          "/v1/messages",
+          "{\"model\":\"native-chat\",\"model\":\"missing\",\"stream\":false,\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+        )],
+        ["responses", rawRequest(
+          "/v1/responses",
+          "{\"model\":\"native-chat\",\"model\":\"missing\",\"stream\":false,\"stream\":true,\"input\":\"hi\"}",
+        )],
+      ] as const;
+      for (const [protocol, request] of requests) {
+        expect((await harness.gw.fetch(request)).status, protocol).toBe(200);
+      }
+      expect(harness.upstream.requests).toHaveLength(3);
+      for (const request of harness.upstream.requests) {
+        expect(JSON.parse(decoder.decode(request.body)).stream).not.toBe(true);
+      }
+
     } finally {
       await harness.close();
     }
@@ -1312,7 +1387,6 @@ describe("protocol conversion matrix", () => {
   });
 
   it.each([
-    [{ max_output_tokens: -1 }, 400],
     [{ text: { format: { type: "json_schema", name: "x", schema: { type: "object" } } } }, 422],
     [{ stream: true }, 422],
   ] as const)("rejects unsafe extended-tool semantics before inference", async (extra, status) => {
@@ -1327,6 +1401,23 @@ describe("protocol conversion matrix", () => {
       expect(response.status).toBe(status);
       await response.text();
       expect(harness.upstream.requests).toEqual([]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("omits an invalid optional output limit for extended tools", async () => {
+    const harness = await matrixGateway();
+    try {
+      const response = await harness.gw.fetch(jsonRequest("/v1/responses", {
+        model: "native-chat",
+        input: "render",
+        tools: [{ type: "custom", name: "render", format: { type: "text" } }],
+        max_output_tokens: -1,
+      }));
+      expect(response.status).toBe(200);
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(JSON.parse(decoder.decode(harness.chatBodies[0]))).not.toHaveProperty("max_tokens");
     } finally {
       await harness.close();
     }
