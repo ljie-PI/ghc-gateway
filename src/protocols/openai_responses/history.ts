@@ -1513,6 +1513,22 @@ function strictCallIdFromItem(item: WireJsonObject): string | undefined {
   return callId;
 }
 
+function legacyStoredCallIdFromItem(item: WireJsonObject): string | undefined {
+  const callIds = memberValues(item, "call_id");
+  const ids = memberValues(item, "id");
+  if (callIds.length > 1 || ids.length > 1) return undefined;
+  const callId = callIds.length === 1 ? legacyStoredId(callIds[0]) : undefined;
+  const id = ids.length === 1 ? legacyStoredId(ids[0]) : undefined;
+  if ((callIds.length === 1 && callId === undefined) || (ids.length === 1 && id === undefined)) return undefined;
+  return callId ?? id;
+}
+
+function legacyStoredId(value: WireJson | undefined): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? undefined : trimmed;
+}
+
 function firstMemberValue(item: WireJsonObject, key: string): WireJson | undefined {
   for (const member of item.members) {
     if (member.key === key) {
@@ -1607,19 +1623,33 @@ function replayItemFromRow(row: Readonly<ReplayItemRow>, item: WireJsonObject): 
       itemBytes: row.item_bytes,
     };
   }
-  const callId = strictCallIdFromItem(item);
-  if (row.call_id === null || callId !== row.call_id) {
+  if (row.call_id === null) {
     unavailableCheckpoint();
   }
+  const callId = strictCallIdFromItem(item);
+  const legacyCallId = legacyStoredCallIdFromItem(item);
+  if (callId !== row.call_id && legacyCallId !== row.call_id) unavailableCheckpoint();
+  const restoredItem = callId === row.call_id ? item : restoreLegacyStoredCallId(item, row.call_id);
   return {
     groupOrdinal: row.group_ordinal,
     itemOrdinal: row.item_ordinal,
     kind: row.item_kind,
     callId: row.call_id,
-    item,
+    item: restoredItem,
     itemJson: row.item_json,
     itemBytes: row.item_bytes,
   };
+}
+
+function restoreLegacyStoredCallId(item: WireJsonObject, callId: string): WireJsonObject {
+  let replaced = false;
+  const members = item.members.map((member) => {
+    if (member.key !== "call_id") return member;
+    replaced = true;
+    return { key: member.key, value: callId };
+  });
+  if (!replaced) members.push({ key: "call_id", value: callId });
+  return { kind: "object", members };
 }
 
 function isReplayItemKind(value: string): value is ReplayItemKind {

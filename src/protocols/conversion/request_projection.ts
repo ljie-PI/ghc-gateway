@@ -69,13 +69,13 @@ export type ToolHistoryProjectionItem =
   | {
     readonly kind: "tool_call";
     readonly callId?: string | undefined;
-    readonly binding: string;
+    readonly bindingKey: string;
     readonly item?: SemanticToolCallItem | undefined;
   }
   | {
     readonly kind: "tool_result";
     readonly callId?: string | undefined;
-    readonly binding: string;
+    readonly bindingKey: string;
     readonly item?: SemanticToolResultItem | undefined;
   };
 
@@ -115,7 +115,7 @@ export function projectCompleteToolRounds(
       || resultIndexes.length !== 1
       || call?.kind !== "tool_call"
       || result?.kind !== "tool_result"
-      || call.binding !== result.binding
+      || call.bindingKey !== result.bindingKey
     ) {
       for (const index of [...callIndexes, ...resultIndexes]) omitted.add(index);
     }
@@ -185,10 +185,10 @@ function invalidRoundIdentities(
       if (candidate.kind === "tool_call") {
         activeIds.add(callId);
         roundIds.add(callId);
-        sequence.observeToolCall(callId, candidate.binding);
+        sequence.observeToolCall(callId, candidate.bindingKey);
       } else {
         sequence.observeToolResult(callId, (binding) => {
-          if (binding !== candidate.binding) reject();
+          if (binding !== candidate.bindingKey) reject();
         });
         activeIds.delete(callId);
         if (!sequence.hasOpenCalls()) roundIds.clear();

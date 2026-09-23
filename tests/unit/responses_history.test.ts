@@ -914,6 +914,49 @@ describe("Responses continuation history", () => {
     }
   });
 
+  it.each([
+    ["item-id fallback", "call_from_item", "{\"type\":\"function_call\",\"id\":\"call_from_item\",\"name\":\"legacy\",\"arguments\":\"{}\"}"],
+    ["trimmed call ID", "call_trimmed", "{\"type\":\"function_call\",\"call_id\":\" call_trimmed \",\"name\":\"legacy\",\"arguments\":\"{}\"}"],
+  ] as const)("reads a migration-042 v1 row using the legacy %s", async (_name, callId, callJson) => {
+    const database = new Database(":memory:");
+    const base = [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
+    ];
+    applyMigrations(database, base, () => 1_700_000_000_000);
+    database.prepare(
+      `INSERT INTO response_route_receipts VALUES (
+        'github.com/1', 'resp_legacy_identity', 'gpt', 'https://api.githubcopilot.com',
+        'converted', 'chat', 'responses-chat-v1', 'complete', 1, ?, ?
+      )`,
+    ).run(1_700_000_000_000, 1_700_604_800_000);
+    database.prepare(
+      "INSERT INTO response_scoped_checkpoints VALUES ('github.com/1', 'resp_legacy_identity', 1, ?, ?)",
+    ).run(1_700_000_000_000, 1_700_604_800_000);
+    database.prepare(
+      "INSERT INTO response_scoped_calls VALUES ('github.com/1', 'resp_legacy_identity', 0, ?, 'function_call', ?)",
+    ).run(callId, callJson);
+    applyMigrations(database, [...base, embedMigration(reasoningCarriersMigration)], () => 1_700_000_000_000);
+    const store = new SqliteResponsesHistory(database, { nowMs: () => 1_700_000_000_000 });
+    try {
+      const request = decodeResponsesRequest(objectFromJson(
+        `{"model":"gpt","input":{"type":"function_call_output","call_id":"${callId}","output":"ok"}}`,
+      ));
+      const enriched = await store.enrich(
+        request,
+        await owned(store, "resp_legacy_identity", "github.com/1"),
+        SIGNAL,
+      );
+      expect(inputJson(enriched.input)).toEqual([
+        { type: "function_call", ...(callJson.includes("\"id\"") ? { id: "call_from_item" } : {}), call_id: callId, name: "legacy", arguments: "{}" },
+        { type: "function_call_output", call_id: callId, output: "ok" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
   it("writes new v1 checkpoints to authoritative replay rows", async () => {
     const { database, store } = history();
     try {

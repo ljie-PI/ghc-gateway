@@ -95,10 +95,10 @@ describe("auditable request projection", () => {
     const degradations = new ConversionDegradationCollector();
     const candidates: readonly ToolHistoryProjectionItem[] = [
       { kind: "item", item: text("before") },
-      { kind: "tool_call", callId: "call_1", binding: "function", item: call("call_1") },
-      { kind: "tool_call", callId: "call_2", binding: "function", item: call("call_2") },
-      { kind: "tool_result", callId: "call_2", binding: "function", item: result("call_2") },
-      { kind: "tool_result", callId: "call_1", binding: "function", item: result("call_1") },
+      { kind: "tool_call", callId: "call_1", bindingKey: "function", item: call("call_1") },
+      { kind: "tool_call", callId: "call_2", bindingKey: "function", item: call("call_2") },
+      { kind: "tool_result", callId: "call_2", bindingKey: "function", item: result("call_2") },
+      { kind: "tool_result", callId: "call_1", bindingKey: "function", item: result("call_1") },
       { kind: "item", item: text("after") },
     ];
 
@@ -110,15 +110,15 @@ describe("auditable request projection", () => {
     const degradations = new ConversionDegradationCollector();
     const candidates: readonly ToolHistoryProjectionItem[] = [
       { kind: "item", item: text("keep-a") },
-      { kind: "tool_call", callId: "call_bad", binding: "function" },
-      { kind: "tool_result", callId: "call_bad", binding: "function", item: result("call_bad") },
+      { kind: "tool_call", callId: "call_bad", bindingKey: "function" },
+      { kind: "tool_result", callId: "call_bad", bindingKey: "function", item: result("call_bad") },
       { kind: "item", item: text("keep-b") },
-      { kind: "tool_call", binding: "function", item: call("generated-id-must-not-bind") },
-      { kind: "tool_result", callId: "generated-id-must-not-bind", binding: "function", item: result("generated-id-must-not-bind") },
+      { kind: "tool_call", bindingKey: "function", item: call("generated-id-must-not-bind") },
+      { kind: "tool_result", callId: "generated-id-must-not-bind", bindingKey: "function", item: result("generated-id-must-not-bind") },
       { kind: "item", item: text("keep-c") },
-      { kind: "tool_call", callId: "call_incomplete", binding: "function", item: call("call_incomplete") },
+      { kind: "tool_call", callId: "call_incomplete", bindingKey: "function", item: call("call_incomplete") },
       { kind: "item", item: text("keep-d") },
-      { kind: "tool_result", callId: "call_orphan", binding: "function", item: result("call_orphan") },
+      { kind: "tool_result", callId: "call_orphan", bindingKey: "function", item: result("call_orphan") },
     ];
 
     expect(projectCompleteToolRounds(candidates, degradations)).toEqual([
@@ -130,11 +130,11 @@ describe("auditable request projection", () => {
   it("removes every occurrence of duplicate identities instead of selecting a winner", () => {
     const degradations = new ConversionDegradationCollector();
     const candidates: readonly ToolHistoryProjectionItem[] = [
-      { kind: "tool_call", callId: "call_same", binding: "function", item: call("call_same", "first") },
-      { kind: "tool_result", callId: "call_same", binding: "function", item: result("call_same") },
+      { kind: "tool_call", callId: "call_same", bindingKey: "function", item: call("call_same", "first") },
+      { kind: "tool_result", callId: "call_same", bindingKey: "function", item: result("call_same") },
       { kind: "item", item: text("boundary") },
-      { kind: "tool_call", callId: "call_same", binding: "function", item: call("call_same", "second") },
-      { kind: "tool_result", callId: "call_same", binding: "function", item: result("call_same") },
+      { kind: "tool_call", callId: "call_same", bindingKey: "function", item: call("call_same", "second") },
+      { kind: "tool_result", callId: "call_same", bindingKey: "function", item: result("call_same") },
     ];
 
     expect(projectCompleteToolRounds(candidates, degradations)).toEqual([text("boundary")]);
@@ -145,10 +145,10 @@ describe("auditable request projection", () => {
     const degradations = new ConversionDegradationCollector();
     const candidates: readonly ToolHistoryProjectionItem[] = [
       { kind: "item", item: text("before") },
-      { kind: "tool_call", callId: "call_good", binding: "function", item: call("call_good") },
-      { kind: "tool_call", callId: "call_bad", binding: "function" },
-      { kind: "tool_result", callId: "call_good", binding: "function", item: result("call_good") },
-      { kind: "tool_result", callId: "call_bad", binding: "function", item: result("call_bad") },
+      { kind: "tool_call", callId: "call_good", bindingKey: "function", item: call("call_good") },
+      { kind: "tool_call", callId: "call_bad", bindingKey: "function" },
+      { kind: "tool_result", callId: "call_good", bindingKey: "function", item: result("call_good") },
+      { kind: "tool_result", callId: "call_bad", bindingKey: "function", item: result("call_bad") },
       { kind: "item", item: text("after") },
     ];
 
@@ -160,12 +160,12 @@ describe("auditable request projection", () => {
     const degradations = new ConversionDegradationCollector();
     const candidates: readonly ToolHistoryProjectionItem[] = [
       { kind: "item", item: text("before") },
-      { kind: "tool_call", callId: "call_1", binding: "function", item: call("call_1") },
-      { kind: "tool_call", callId: "call_2", binding: "function", item: call("call_2") },
-      { kind: "tool_result", callId: "call_1", binding: "function", item: result("call_1") },
-      { kind: "tool_call", callId: "call_3", binding: "function", item: call("call_3") },
-      { kind: "tool_result", callId: "call_2", binding: "function", item: result("call_2") },
-      { kind: "tool_result", callId: "call_3", binding: "function", item: result("call_3") },
+      { kind: "tool_call", callId: "call_1", bindingKey: "function", item: call("call_1") },
+      { kind: "tool_call", callId: "call_2", bindingKey: "function", item: call("call_2") },
+      { kind: "tool_result", callId: "call_1", bindingKey: "function", item: result("call_1") },
+      { kind: "tool_call", callId: "call_3", bindingKey: "function", item: call("call_3") },
+      { kind: "tool_result", callId: "call_2", bindingKey: "function", item: result("call_2") },
+      { kind: "tool_result", callId: "call_3", bindingKey: "function", item: result("call_3") },
       { kind: "item", item: text("after") },
     ];
 
@@ -176,8 +176,8 @@ describe("auditable request projection", () => {
   it("rejects candidate IDs that disagree with decoded item IDs", () => {
     const degradations = new ConversionDegradationCollector();
     expect(projectCompleteToolRounds([
-      { kind: "tool_call", callId: "source_id", binding: "function", item: call("different_id") },
-      { kind: "tool_result", callId: "source_id", binding: "function", item: result("source_id") },
+      { kind: "tool_call", callId: "source_id", bindingKey: "function", item: call("different_id") },
+      { kind: "tool_result", callId: "source_id", bindingKey: "function", item: result("source_id") },
     ], degradations)).toEqual([]);
     expect(degradations.values()).toEqual(["tools.history_omitted"]);
   });
@@ -205,8 +205,8 @@ describe("auditable request projection", () => {
     expect(projectToolRequest({
       source: "responses",
       candidates: [
-        { kind: "tool_call", callId: "call_1", binding: "function", item: call("call_1") },
-        { kind: "tool_result", callId: "call_1", binding: "function", item: result("call_1") },
+        { kind: "tool_call", callId: "call_1", bindingKey: "function", item: call("call_1") },
+        { kind: "tool_result", callId: "call_1", bindingKey: "function", item: result("call_1") },
       ],
       tools: [tool("lookup")],
       toolChoice: { kind: "tool", name: "lookup" },
