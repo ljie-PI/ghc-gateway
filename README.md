@@ -105,7 +105,7 @@ Diagnostics:
 - Cover validation, protocol selection, conversion, upstream activity, output, and termination.
 - Reuse the HTTP response request ID for correlation.
 - Exclude prompts, responses, tool content, credentials, opaque IDs, and raw upstream errors.
-- Rotate at 10 MiB, retain up to five files, and prune records after seven days.
+- Rotate at 10 MiB, retain up to five files, and prune diagnostic files older than seven days.
 - Require `--diagnostics` on each start or restart that should enable recording.
 
 ## Automation
