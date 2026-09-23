@@ -1198,7 +1198,7 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
       if (!isWireJsonObject(item)) {
         unavailableCheckpoint();
       }
-      return replayItemFromRow(row, item);
+      return replayItemFromRow(formatVersion, row, item);
     });
     if (bytes !== checkpoint.replay_bytes) {
       unavailableCheckpoint();
@@ -1604,7 +1604,11 @@ function replayItemsEqual(left: readonly StoredReplayItem[], right: readonly Sto
   });
 }
 
-function replayItemFromRow(row: Readonly<ReplayItemRow>, item: WireJsonObject): StoredReplayItem {
+function replayItemFromRow(
+  formatVersion: ReplayFormatVersion,
+  row: Readonly<ReplayItemRow>,
+  item: WireJsonObject,
+): StoredReplayItem {
   const types = memberValues(item, "type");
   if (types.length !== 1 || types[0] !== row.item_kind || !isReplayItemKind(row.item_kind)) {
     unavailableCheckpoint();
@@ -1627,7 +1631,7 @@ function replayItemFromRow(row: Readonly<ReplayItemRow>, item: WireJsonObject): 
     unavailableCheckpoint();
   }
   const callId = strictCallIdFromItem(item);
-  const legacyCallId = legacyStoredCallIdFromItem(item);
+  const legacyCallId = formatVersion === 1 ? legacyStoredCallIdFromItem(item) : undefined;
   if (callId !== row.call_id && legacyCallId !== row.call_id) unavailableCheckpoint();
   const restoredItem = callId === row.call_id ? item : restoreLegacyStoredCallId(item, row.call_id);
   return {

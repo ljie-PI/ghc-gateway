@@ -957,6 +957,44 @@ describe("Responses continuation history", () => {
     }
   });
 
+  it.each([
+    ["item-id fallback", "{\"type\":\"function_call\",\"id\":\"call_v2\",\"name\":\"lookup\",\"arguments\":\"{}\"}"],
+    ["trimmed call ID", "{\"type\":\"function_call\",\"call_id\":\" call_v2 \",\"name\":\"lookup\",\"arguments\":\"{}\"}"],
+  ] as const)("rejects a v2 replay row using the legacy %s", async (_name, itemJson) => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint(
+        callRecord("resp_v2_identity", "call_v2", "lookup"),
+        ownership("github.com/1"),
+        "complete",
+        SIGNAL,
+      );
+      const receipt = await owned(store, "resp_v2_identity", "github.com/1");
+      const itemBytes = Buffer.byteLength(itemJson, "utf8");
+      database.prepare(
+        `UPDATE response_scoped_replay_items
+         SET item_json = ?, item_bytes = ?
+         WHERE account_id = ? AND response_id = ?`,
+      ).run(itemJson, itemBytes, "github.com/1", "resp_v2_identity");
+      database.prepare(
+        `UPDATE response_scoped_checkpoints
+         SET replay_bytes = ?
+         WHERE account_id = ? AND response_id = ?`,
+      ).run(itemBytes, "github.com/1", "resp_v2_identity");
+
+      const request = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call_v2\",\"output\":\"ok\"}}",
+      ));
+      await expect(store.enrich(
+        request,
+        receipt,
+        SIGNAL,
+      )).rejects.toMatchObject({ code: "checkpoint_unavailable" });
+    } finally {
+      database.close();
+    }
+  });
+
   it("writes new v1 checkpoints to authoritative replay rows", async () => {
     const { database, store } = history();
     try {

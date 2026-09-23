@@ -156,6 +156,21 @@ describe("auditable request projection", () => {
     expect(degradations.values()).toEqual(["tools.history_omitted"]);
   });
 
+  it("preserves a complete round adjacent to a malformed complete round", () => {
+    const degradations = new ConversionDegradationCollector();
+    const candidates: readonly ToolHistoryProjectionItem[] = [
+      { kind: "tool_call", callId: "call_bad", bindingKey: "function" },
+      { kind: "tool_result", callId: "call_bad", bindingKey: "function", item: result("call_bad") },
+      { kind: "tool_call", callId: "call_good", bindingKey: "function", item: call("call_good") },
+      { kind: "tool_result", callId: "call_good", bindingKey: "function", item: result("call_good") },
+    ];
+
+    expect(projectCompleteToolRounds(candidates, degradations)).toEqual([
+      call("call_good"), result("call_good"),
+    ]);
+    expect(degradations.values()).toEqual(["tools.history_omitted"]);
+  });
+
   it("removes the completed side of a round when a new call appears after partial results", () => {
     const degradations = new ConversionDegradationCollector();
     const candidates: readonly ToolHistoryProjectionItem[] = [

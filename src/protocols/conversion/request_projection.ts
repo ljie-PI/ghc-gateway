@@ -121,10 +121,10 @@ export function projectCompleteToolRounds(
     }
   }
 
-  // An invalid member invalidates every call and result in its contiguous tool round.
+  const roundBounds = toolRoundBounds(candidates);
   for (let index = 0; index < candidates.length; index += 1) {
     if (!omitted.has(index) || candidates[index]?.kind === "item") continue;
-    const [start, end] = toolRunBounds(candidates, index);
+    const [start, end] = roundBounds.get(index) ?? [index, index];
     for (let runIndex = start; runIndex <= end; runIndex += 1) {
       if (candidates[runIndex]?.kind !== "item") omitted.add(runIndex);
     }
@@ -151,12 +151,47 @@ export function projectCompleteToolRounds(
   });
 }
 
-function toolRunBounds(candidates: readonly ToolHistoryProjectionItem[], index: number): readonly [number, number] {
-  let start = index;
-  while (start > 0 && candidates[start - 1]?.kind !== "item") start -= 1;
-  let end = index;
-  while (end + 1 < candidates.length && candidates[end + 1]?.kind !== "item") end += 1;
-  return [start, end];
+function toolRoundBounds(
+  candidates: readonly ToolHistoryProjectionItem[],
+): ReadonlyMap<number, readonly [number, number]> {
+  const bounds = new Map<number, readonly [number, number]>();
+  let start: number | undefined;
+  let calls = new Set<string>();
+  let results = new Set<string>();
+  let hasUnboundCall = false;
+  const close = (end: number): void => {
+    if (start === undefined) return;
+    for (let index = start; index <= end; index += 1) bounds.set(index, [start, end]);
+    start = undefined;
+    calls = new Set();
+    results = new Set();
+    hasUnboundCall = false;
+  };
+  const complete = (): boolean => (
+    !hasUnboundCall
+    && calls.size > 0
+    && [...calls].every((callId) => results.has(callId))
+  );
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index]!;
+    if (candidate.kind === "item") {
+      close(index - 1);
+      continue;
+    }
+    if (candidate.kind === "tool_call" && start !== undefined && (calls.size === 0 || complete())) {
+      close(index - 1);
+    }
+    start ??= index;
+    if (candidate.kind === "tool_call") {
+      if (candidate.callId === undefined || candidate.callId.length === 0) hasUnboundCall = true;
+      else calls.add(candidate.callId);
+    } else if (candidate.callId !== undefined && candidate.callId.length > 0) {
+      results.add(candidate.callId);
+    }
+  }
+  close(candidates.length - 1);
+  return bounds;
 }
 
 function invalidRoundIdentities(
