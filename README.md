@@ -72,8 +72,7 @@ Key behavior:
 
 - Selects one compatible native or converted upstream protocol per request.
 - Supports streaming, tool calls, reasoning output, and compatible Responses continuations.
-- Rejects unsupported core inputs instead of silently discarding them.
-- Filters credentials, hop-by-hop headers, tracing headers, and private gateway headers.
+- Filters hop-by-hop headers, tracing headers, and private gateway headers.
 - Limits inference requests to 128 headers and 16 KiB of aggregate header data.
 - Keeps bounded continuation and reasoning state for up to `history.ttlDays`.
 
