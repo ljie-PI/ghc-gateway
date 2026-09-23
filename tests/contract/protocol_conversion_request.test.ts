@@ -1318,6 +1318,8 @@ describe("shared conversion request codecs", () => {
       input: [
         {
           type: "custom_tool_call",
+          id: 17,
+          status: "unknown",
           call_id: "call_custom",
           name: "render",
           input: "draw",
@@ -1325,14 +1327,22 @@ describe("shared conversion request codecs", () => {
         },
         {
           type: "custom_tool_call_output",
+          id: 17,
+          status: "unknown",
           call_id: "call_custom",
           output: "done",
           extension: true,
         },
       ],
+      stream_options: 17,
       tools: [{ type: "custom", name: "render", format: { type: "text", extension: true }, extension: true }],
     }), "target", capability(["chat"]));
     expect(converted.degradations).toContain("responses.extensions_omitted");
+    expect(converted.degradations).toContain("request.option_omitted");
+    expect(decoder.decode(converted.bytes)).not.toContain("\"extension\"");
+    expect(decoder.decode(converted.bytes)).not.toContain("\"id\":17");
+    expect(decoder.decode(converted.bytes)).not.toContain("\"status\":\"unknown\"");
+    expect(decoder.decode(converted.bytes)).not.toContain("stream_options");
   });
 
   it.each(["chat", "responses"] as const)("rejects a carrier hidden in an omitted %s extension", (source) => {

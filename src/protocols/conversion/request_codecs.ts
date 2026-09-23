@@ -213,11 +213,11 @@ function decodeChatRequest(body: WireJsonObject, carrierRecords?: ReadonlyMap<st
     "chat.extensions_omitted",
     degradations,
   );
-  decodeIndependentStreamOptions(
+  body = replaceOptionalMember(body, "stream_options", decodeIndependentStreamOptions(
     oneMember(body, "stream_options", "REQ-C-STREAM-OPTIONS"),
     "chat.extensions_omitted",
     degradations,
-  );
+  ));
   validateSingleChoice(oneMember(body, "n", "REQ-C-N"), "REQ-C-N");
   const items: SemanticRequestItem[] = [];
   const messages = requiredArray(oneMember(body, "messages", "REQ-C-MESSAGES"), "REQ-C-MESSAGES");
@@ -832,17 +832,17 @@ function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: ReadonlyM
     "responses.extensions_omitted",
     degradations,
   );
+  body = replaceOptionalMember(body, "stream_options", decodeIndependentStreamOptions(
+    oneMember(body, "stream_options", "REQ-R-STREAM-OPTIONS"),
+    "responses.extensions_omitted",
+    degradations,
+  ));
   const extended = prepareResponsesExtendedTools(body, degradations);
   let semanticBody = extended?.body ?? body;
   semanticBody = projectRequestMembers(
     semanticBody,
     RESPONSES_TOP_LEVEL,
     "REQ-R-TOP",
-    "responses.extensions_omitted",
-    degradations,
-  );
-  decodeIndependentStreamOptions(
-    oneMember(semanticBody, "stream_options", "REQ-R-STREAM-OPTIONS"),
     "responses.extensions_omitted",
     degradations,
   );
@@ -2918,17 +2918,34 @@ function decodeIndependentStreamOptions(
   value: WireJson | undefined,
   omission: "chat.extensions_omitted" | "responses.extensions_omitted",
   degradations: Set<ConversionDegradationRule>,
-): void {
-  projectIndependentOption(value, (candidate) => {
+): WireJsonObject | undefined {
+  const projected = projectIndependentOption(value, (candidate) => {
     if (!isWireJsonObject(candidate)) return { kind: "malformed" };
     const includeUsage = memberValues(candidate, "include_usage");
     if (includeUsage.length > 1 || (includeUsage[0] !== undefined && typeof includeUsage[0] !== "boolean")) {
       return { kind: "malformed" };
     }
     if (candidate.members.some((member) => member.key !== "include_usage")) degradations.add(omission);
-    return { kind: "value", value: undefined };
+    return {
+      kind: "value",
+      value: { kind: "object" as const, members: candidate.members.filter((member) => member.key === "include_usage") },
+    };
   }, { omission: "request.option_omitted", degradations });
   if (value !== undefined) degradations.add("request.option_omitted");
+  return projected;
+}
+
+function replaceOptionalMember(
+  object: WireJsonObject,
+  key: string,
+  value: WireJson | undefined,
+): WireJsonObject {
+  return {
+    kind: "object",
+    members: object.members.flatMap((member) => member.key !== key
+      ? [member]
+      : value === undefined ? [] : [{ key, value }]),
+  };
 }
 
 function messagesObject(value: WireJson | undefined, ruleId: string): WireJsonObject {

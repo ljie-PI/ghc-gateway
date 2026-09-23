@@ -358,6 +358,9 @@ export function decodeOpenaiChatCompletionsRequest(body: WireJsonObject): Decode
 }
 
 function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
+  if (duplicateMemberNames(body).length > 0) {
+    throw new GatewayFailureError({ kind: "invalid_request" });
+  }
   const modelValues = memberValues(body, "model");
   const streamValues = memberValues(body, "stream");
   if (modelValues.length > 1 || streamValues.length > 1) {

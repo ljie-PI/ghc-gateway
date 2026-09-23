@@ -22,7 +22,7 @@ export function decodeResponsesRequest(body: WireJsonObject): ResponsesRequest {
 }
 
 export function decodeResponsesPlanningRequest(body: WireJsonObject): ResponsesRequest {
-  assertNoDuplicateFields(body, ["model", "stream", "store", "input", "previous_response_id"]);
+  assertNoDuplicateTopLevelFields(body);
 
   const model = optionalModel(body);
   const stream = optionalBoolean(body, "stream", false, false);
@@ -38,14 +38,6 @@ export function decodeResponsesPlanningRequest(body: WireJsonObject): ResponsesR
     ...(input === undefined ? {} : { input }),
     ...(previous === undefined ? {} : { previousResponseId: previous }),
   };
-}
-
-function assertNoDuplicateFields(body: WireJsonObject, fields: readonly string[]): void {
-  for (const field of fields) {
-    if (memberValues(body, field).length > 1) {
-      throw new ResponsesRequestDecodeError(field, `duplicate Responses request field: ${field}`);
-    }
-  }
 }
 
 function assertNoDuplicateTopLevelFields(body: WireJsonObject): void {
