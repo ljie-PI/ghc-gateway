@@ -473,6 +473,11 @@ describe("Responses continuation history", () => {
       }, ownership("github.com/1"), "complete", SIGNAL))
         .rejects.toMatchObject({ code: "checkpoint_unavailable" });
       await expect(store.recordCheckpoint({
+        responseId: "resp_item_id_only",
+        output: outputFromJson("[{\"type\":\"function_call\",\"id\":\"item_not_a_call\",\"name\":\"a\",\"arguments\":\"{}\"}]"),
+      }, ownership("github.com/1"), "complete", SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
+      await expect(store.recordCheckpoint({
         responseId: "resp_duplicate_type",
         output: outputFromJson("[{\"type\":\"function_call\",\"type\":\"function_call\",\"call_id\":\"call\",\"name\":\"a\",\"arguments\":\"{}\"}]"),
       }, ownership("github.com/1"), "complete", SIGNAL))
@@ -483,6 +488,34 @@ describe("Responses continuation history", () => {
       }, ownership("github.com/1"), "complete", SIGNAL))
         .rejects.toMatchObject({ code: "checkpoint_unavailable" });
       expect(store.inspect()).toMatchObject({ revision: 0, count: 0, receiptCount: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("preserves exact call IDs without trimming or falling back to item IDs", async () => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint({
+        responseId: "resp_exact_call_id",
+        output: outputFromJson(
+          "[{\"type\":\"function_call\",\"id\":\"item_1\",\"call_id\":\" call_1 \",\"name\":\"lookup\",\"arguments\":\"{}\"}]",
+        ),
+      }, ownership("github.com/1"), "complete", SIGNAL);
+      expect(database.prepare(
+        "SELECT call_id FROM response_scoped_replay_items WHERE response_id = ? AND item_kind = 'function_call'",
+      ).get("resp_exact_call_id")).toEqual({ call_id: " call_1 " });
+
+      const receipt = await owned(store, "resp_exact_call_id", "github.com/1");
+      const exact = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\" call_1 \",\"output\":\"ok\"}}",
+      ));
+      await expect(store.enrich(exact, receipt, SIGNAL)).resolves.toBeDefined();
+      const normalized = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call_1\",\"output\":\"ok\"}}",
+      ));
+      await expect(store.enrich(normalized, receipt, SIGNAL))
+        .rejects.toMatchObject({ code: "checkpoint_unavailable" });
     } finally {
       database.close();
     }
@@ -876,6 +909,87 @@ describe("Responses continuation history", () => {
         { type: "function_call", call_id: "call_v1", name: "legacy", arguments: "{}" },
         { type: "function_call_output", call_id: "call_v1", output: "ok" },
       ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([
+    ["item-id fallback", "call_from_item", "{\"type\":\"function_call\",\"id\":\"call_from_item\",\"name\":\"legacy\",\"arguments\":\"{}\"}"],
+    ["trimmed call ID", "call_trimmed", "{\"type\":\"function_call\",\"call_id\":\" call_trimmed \",\"name\":\"legacy\",\"arguments\":\"{}\"}"],
+  ] as const)("reads a migration-042 v1 row using the legacy %s", async (_name, callId, callJson) => {
+    const database = new Database(":memory:");
+    const base = [
+      embedMigration(runtimeConfigMigration),
+      embedMigration(responsesHistoryMigration),
+      embedMigration(responsesContinuationMigration),
+    ];
+    applyMigrations(database, base, () => 1_700_000_000_000);
+    database.prepare(
+      `INSERT INTO response_route_receipts VALUES (
+        'github.com/1', 'resp_legacy_identity', 'gpt', 'https://api.githubcopilot.com',
+        'converted', 'chat', 'responses-chat-v1', 'complete', 1, ?, ?
+      )`,
+    ).run(1_700_000_000_000, 1_700_604_800_000);
+    database.prepare(
+      "INSERT INTO response_scoped_checkpoints VALUES ('github.com/1', 'resp_legacy_identity', 1, ?, ?)",
+    ).run(1_700_000_000_000, 1_700_604_800_000);
+    database.prepare(
+      "INSERT INTO response_scoped_calls VALUES ('github.com/1', 'resp_legacy_identity', 0, ?, 'function_call', ?)",
+    ).run(callId, callJson);
+    applyMigrations(database, [...base, embedMigration(reasoningCarriersMigration)], () => 1_700_000_000_000);
+    const store = new SqliteResponsesHistory(database, { nowMs: () => 1_700_000_000_000 });
+    try {
+      const request = decodeResponsesRequest(objectFromJson(
+        `{"model":"gpt","input":{"type":"function_call_output","call_id":"${callId}","output":"ok"}}`,
+      ));
+      const enriched = await store.enrich(
+        request,
+        await owned(store, "resp_legacy_identity", "github.com/1"),
+        SIGNAL,
+      );
+      expect(inputJson(enriched.input)).toEqual([
+        { type: "function_call", ...(callJson.includes("\"id\"") ? { id: "call_from_item" } : {}), call_id: callId, name: "legacy", arguments: "{}" },
+        { type: "function_call_output", call_id: callId, output: "ok" },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([
+    ["item-id fallback", "{\"type\":\"function_call\",\"id\":\"call_v2\",\"name\":\"lookup\",\"arguments\":\"{}\"}"],
+    ["trimmed call ID", "{\"type\":\"function_call\",\"call_id\":\" call_v2 \",\"name\":\"lookup\",\"arguments\":\"{}\"}"],
+  ] as const)("rejects a v2 replay row using the legacy %s", async (_name, itemJson) => {
+    const { database, store } = history();
+    try {
+      await store.recordCheckpoint(
+        callRecord("resp_v2_identity", "call_v2", "lookup"),
+        ownership("github.com/1"),
+        "complete",
+        SIGNAL,
+      );
+      const receipt = await owned(store, "resp_v2_identity", "github.com/1");
+      const itemBytes = Buffer.byteLength(itemJson, "utf8");
+      database.prepare(
+        `UPDATE response_scoped_replay_items
+         SET item_json = ?, item_bytes = ?
+         WHERE account_id = ? AND response_id = ?`,
+      ).run(itemJson, itemBytes, "github.com/1", "resp_v2_identity");
+      database.prepare(
+        `UPDATE response_scoped_checkpoints
+         SET replay_bytes = ?
+         WHERE account_id = ? AND response_id = ?`,
+      ).run(itemBytes, "github.com/1", "resp_v2_identity");
+
+      const request = decodeResponsesRequest(objectFromJson(
+        "{\"model\":\"gpt\",\"input\":{\"type\":\"function_call_output\",\"call_id\":\"call_v2\",\"output\":\"ok\"}}",
+      ));
+      await expect(store.enrich(
+        request,
+        receipt,
+        SIGNAL,
+      )).rejects.toMatchObject({ code: "checkpoint_unavailable" });
     } finally {
       database.close();
     }

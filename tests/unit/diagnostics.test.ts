@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { GatewayFailureError } from "../../src/gateway/failures.js";
 import { ConversionContractError } from "../../src/protocols/conversion/types.js";
+import { CONVERSION_DEGRADATION_RULES } from "../../src/protocols/conversion/degradations.js";
 import { diagnosticResponsesReasoning, diagnosticShape } from "../../src/protocols/conversion/diagnostics.js";
 import { isWireJsonObject, parseWireJson } from "../../src/serialization/wire_json.js";
 import { DiagnosticRecorder, DIAGNOSTIC_LIMITS, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
@@ -14,6 +15,15 @@ function recorder() {
 }
 
 describe("content-free request diagnostics", () => {
+  it("sanitizes every finite conversion degradation through the shared registry", async () => {
+    const { diagnostics, records } = recorder();
+    const trace = diagnostics.begin("req_degradations", "responses");
+    trace.set({ degradations: CONVERSION_DEGRADATION_RULES });
+    trace.finish();
+    await diagnostics.close();
+    expect(records.at(-1)?.degradations).toEqual(CONVERSION_DEGRADATION_RULES);
+  });
+
   it("preserves rule IDs without exposing causes, bodies, or arbitrary keys", async () => {
     const { diagnostics, records } = recorder();
     const trace = diagnostics.begin("req_example", "messages");

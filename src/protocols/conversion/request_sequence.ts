@@ -51,6 +51,10 @@ export class RequestSequenceTracker<TBinding> {
     return result;
   }
 
+  hasOpenCalls(): boolean {
+    return this.openCalls.size > 0;
+  }
+
   finish(): void {
     if (this.openCalls.size > 0) {
       this.reject("incomplete_round");

@@ -357,13 +357,11 @@ function projectExtendedInputItems(
       const content = isWireJsonObject(extracted.value)
         ? projectResponsesToolResultContentForCompatibility(extracted.value)
         : undefined;
-      const callId = compatibilityString(item, "call_id")?.trim()
-        || compatibilityString(item, "id")?.trim()
-        || "";
-      if (content !== undefined) {
+      const callId = compatibilityCallId(item);
+      if (content !== undefined && callId !== undefined) {
         state.output.push(toolMessage(callId, content));
       }
-      if (extracted.media.length > 0) {
+      if (extracted.media.length > 0 && callId !== undefined) {
         state.output.push(compatibilityMediaMessage(callId, extracted.media));
       }
       continue;
@@ -1272,9 +1270,8 @@ export function projectResponsesToolCallForCompatibility(
   chatNameForSource: (namespace: string | undefined, name: string) => string | undefined,
 ): WireJsonObject | undefined {
   const type = compatibilityString(item, "type");
-  const callId = compatibilityString(item, "call_id")?.trim()
-    || compatibilityString(item, "id")?.trim()
-    || "";
+  const callId = compatibilityCallId(item);
+  if (callId === undefined) return undefined;
   if (type === "function_call") {
     const sourceName = compatibilityString(item, "name") ?? "";
     const namespace = compatibilityString(item, "namespace");
@@ -1324,6 +1321,13 @@ function compatibilityArguments(value: WireJson | undefined): string {
 function compatibilityString(value: WireJsonObject, key: string): string | undefined {
   const member = memberValues(value, key)[0];
   return typeof member === "string" ? member : undefined;
+}
+
+function compatibilityCallId(value: WireJsonObject): string | undefined {
+  const callIds = memberValues(value, "call_id");
+  return callIds.length === 1 && typeof callIds[0] === "string" && callIds[0].length > 0
+    ? callIds[0]
+    : undefined;
 }
 
 function object(members: readonly (readonly [string, WireJson])[]): WireJsonObject {

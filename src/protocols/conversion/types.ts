@@ -7,16 +7,11 @@ import type {
   ReasoningCarrierRecord,
   ReasoningCarrierStore,
 } from "./reasoning_carriers.js";
+import type { ConversionDegradationRule } from "./degradations.js";
+
+export type { ConversionDegradationRule } from "./degradations.js";
 
 export type InferenceProtocol = "chat" | "messages" | "responses";
-
-export type ConversionDegradationRule =
-  | "cache.control_omitted"
-  | "reasoning.budget_coarsened"
-  | "reasoning.presentation_omitted"
-  | "reasoning.state_omitted"
-  | "sampling.top_k_omitted"
-  | "messages.extensions_omitted";
 
 export interface SemanticText {
   readonly type: "text";
