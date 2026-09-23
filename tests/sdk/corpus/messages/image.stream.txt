@@ -1,678 +1,368 @@
-event:message_start
-data:{"type":"message_start","message":{"id":"msg_K6k4KXoVEcGEWKK98B7Jiuzf","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":82,"cache_creation_input_tokens":0,"cache_read_input_tokens":629,"output_tokens":0,"service_tier":"standard","inference_geo":"not_available"}}}
+event: message_start
+data: {"message":{"container":null,"content":[],"id":"msg_011CfKtxhge6hgHr49QbaSZL","model":"claude-opus-5-5","role":"assistant","stop_details":null,"stop_reason":null,"stop_sequence":null,"type":"message","usage":{"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"inference_geo":"global","input_tokens":709,"output_tokens":10}},"type":"message_start"}
 
-event:content_block_start
-data:{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+event: content_block_start
+data: {"content_block":{"signature":"","thinking":"","type":"thinking"},"index":0,"type":"content_block_start"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Image"}}
+event: ping
+data: {"type":"ping"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-derived"}}
+event: content_block_delta
+data: {"delta":{"thinking":"","type":"thinking_delta"},"index":0,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" observations"}}
+event: content_block_delta
+data: {"delta":{"signature":"CAQS7wcKEAgSGAI4AUIIdGhpbmtpbmcSDDNLtE7IjDJ074XWGRoMzCiD+TJvk2DML9niIjB/YT1wNAq53IH0Vt+IMplDh6DzLBaYrz1epDfsaXPLr4XP1qaUv0MO7nXedf6qtvgqjAeqtoR//U6UVNtBqGAtFf5W/wkkaoVCPwIj1XUD2vNGFq2D96McZEhBjPP7OTzuVRdxrhy+LObNpiWMZHteXB7GjG9jw5MIau7gz1Oo5jnuSzFni3wHu00BfXd6kQAbQhQhfuI0rWgkYz4wj+hLMgqQ9LUAfFRx468ENaHtzMoyTX8ICZ1kfdYtEGfWqCtNQ0a1b4QpN+kS5oXK1kBNjCvtpNpdqWo/f11PiDXaQPrNsb3fK0ec1v4bl52nIcz0uJE82HJ/E+BAIm19l5WZ/TqAcXPNk5iYsG8NUUCYt0dUgD5X412UAUL8talQhoDz+1cWs5tZZJcJbLO1RD4AFFgHSQDg6a01ri5wP94rdPZaYNEiQRLoxpgEjcAySPbMDyYy0wKIfeNKPUynctrf/4+8fDs1B6QPABUO0mlRzyv5d/QPEBeEb4w4MRL9qtXGJao/FyD220XNa1NvJhKmdoZTrug521XyRs4XgwqJUoSpAfboIn2raCjBjKcxRFKa74T+5Mx6GY8Eim3OQ5aj+0ymRkSyp2KvpFBubc57oYmqY+biQpZ/bqj+ErzPuAX4sP4SMCzOwa5TkFpyxohTre9WEeTwe9dIgPeQqOiS5lzG+nOzdTabxoq92D2UglEAonycmjZ+Bsem4K6hNtmOELAK4XRv9vEeW0+AymL7VVAmdoh6/FrxL304Qd214cUo3X3rnINMjiAo+0xZT+RXvlUn9NGYfhNMartrJWkocO+OkP1e9ChTa2lJGX5VvGu/OtUxrQptsKQbcJ9A2o7ydtliwoErDA+LyVnEs/sNSQFfPCokt6Zuum9VvpM44y1TQU3j90teMVwyDstEFAhKVmb5QUOQR/iCTLJQ5Dwsm5W8djmJbIcQ7R52p/k8z4k25gF4edCsBa65WIDQy9AVb/JbZUXgfvgd6aTbLEXkanw9U/ax+luBkgkl/UaYse1LAdZzCFUgOmzEvGeOk+7Y288UrfMa9rfLkhOLi4O+ByBAycHqXoqDR3TlXdiWZ85aRhlG3yGtmsRKT1jMdRZhXWFheIF3It6N3oPBs9kr3kVNJFvaKGV3qARLT9WetqdoEs6XgEakrG/Cq17J5EI3BzDJztJeoRpYjXBE+04+ihiyY2pUiZKb0v4EdzIU9KHqDRHBTd5EP3Z/lWPzvF0RnPnO4sapX7WB6ZCFTTF/eygwzyw+0aStOFp8d0zbVxgB","type":"signature_delta"},"index":0,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" only"}}
+event: content_block_stop
+data: {"index":0,"type":"content_block_stop"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_start
+data: {"content_block":{"text":"","type":"text"},"index":1,"type":"content_block_start"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" The"}}
+event: content_block_delta
+data: {"delta":{"text":"**","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" reference"}}
+event: content_block_delta
+data: {"delta":{"text":"Visible","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" reads"}}
+event: content_block_delta
+data: {"delta":{"text":" Production Cues**\n\nThe","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" as"}}
+event: content_block_delta
+data: {"delta":{"text":" reference appears to show","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Verg"}}
+event: content_block_delta
+data: {"delta":{"text":" **Vergil** from *","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"il"}}
+event: content_block_delta
+data: {"delta":{"text":"Devil May Cry ","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" from"}}
+event: content_block_delta
+data: {"delta":{"text":"3*. He has sw","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" *"}}
+event: content_block_delta
+data: {"delta":{"text":"ept-back,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Dev"}}
+event: content_block_delta
+data: {"delta":{"text":" spiky silver-","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"il"}}
+event: content_block_delta
+data: {"delta":{"text":"white hair and a stern,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" May"}}
+event: content_block_delta
+data: {"delta":{"text":" down","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Cry"}}
+event: content_block_delta
+data: {"delta":{"text":"ward gl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"*"}}
+event: content_block_delta
+data: {"delta":{"text":"are.\n\n-","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"—"}}
+event: content_block_delta
+data: {"delta":{"text":" **Palette:** The","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"silver"}}
+event: content_block_delta
+data: {"delta":{"text":" dominant color is deep roy","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" swept"}}
+event: content_block_delta
+data: {"delta":{"text":"al blue.","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-back"}}
+event: content_block_delta
+data: {"delta":{"text":" Acc","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hair"}}
+event: content_block_delta
+data: {"delta":{"text":"ents include p","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"ale c","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" stern"}}
+event: content_block_delta
+data: {"delta":{"text":"yan embroidery at","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" expression"}}
+event: content_block_delta
+data: {"delta":{"text":" the collar and","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" chest, b","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" long"}}
+event: content_block_delta
+data: {"delta":{"text":"ronze-","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" royal"}}
+event: content_block_delta
+data: {"delta":{"text":"brown trim and","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"-blue"}}
+event: content_block_delta
+data: {"delta":{"text":" g","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" coat"}}
+event: content_block_delta
+data: {"delta":{"text":"loves, a cr","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" with"}}
+event: content_block_delta
+data: {"delta":{"text":"imson co","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" fl"}}
+event: content_block_delta
+data: {"delta":{"text":"at lining, and black underl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ared"}}
+event: content_block_delta
+data: {"delta":{"text":"ayers.\n- **Sil","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" skirt"}}
+event: content_block_delta
+data: {"delta":{"text":"houette:** A long,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+event: content_block_delta
+data: {"delta":{"text":" open, kn","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" structured"}}
+event: content_block_delta
+data: {"delta":{"text":"ee-to","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" shoulders"}}
+event: content_block_delta
+data: {"delta":{"text":"-cal","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"f fr","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" black"}}
+event: content_block_delta
+data: {"delta":{"text":"ock coat with a","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" inner"}}
+event: content_block_delta
+data: {"delta":{"text":" high collar. The","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" shirt"}}
+event: content_block_delta
+data: {"delta":{"text":" fl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"ared cuffs car","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" dark"}}
+event: content_block_delta
+data: {"delta":{"text":"ry rep","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" trousers"}}
+event: content_block_delta
+data: {"delta":{"text":"eating","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" diamond mot","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" brown"}}
+event: content_block_delta
+data: {"delta":{"text":"ifs, wor","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gloves"}}
+event: content_block_delta
+data: {"delta":{"text":"n over a fitted black z","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"ip","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+event: content_block_delta
+data: {"delta":{"text":" v","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
+event: content_block_delta
+data: {"delta":{"text":"est and d","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" kat"}}
+event: content_block_delta
+data: {"delta":{"text":"ark tr","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ana"}}
+event: content_block_delta
+data: {"delta":{"text":"ousers.\n- **Pr","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" with"}}
+event: content_block_delta
+data: {"delta":{"text":"op:** A drawn kat","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" dark"}}
+event: content_block_delta
+data: {"delta":{"text":"ana held diagonally across the","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sc"}}
+event: content_block_delta
+data: {"delta":{"text":" body and a long","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"abb"}}
+event: content_block_delta
+data: {"delta":{"text":" black scabbard with tr","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ard"}}
+event: content_block_delta
+data: {"delta":{"text":"ailing brown cords.","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+event: content_block_delta
+data: {"delta":{"text":"\n- **Mood:**","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Palette"}}
+event: content_block_delta
+data: {"delta":{"text":" Cold, compos","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" is"}}
+event: content_block_delta
+data: {"delta":{"text":"ed, a","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" dominated"}}
+event: content_block_delta
+data: {"delta":{"text":"rist","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" by"}}
+event: content_block_delta
+data: {"delta":{"text":"ocratic men","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" deep"}}
+event: content_block_delta
+data: {"delta":{"text":"ace.\n\n**Location and","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" blue"}}
+event: content_block_delta
+data: {"delta":{"text":" Lighting Implications**","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+event: content_block_delta
+data: {"delta":{"text":"\n\nChoose cool,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" black"}}
+event: content_block_delta
+data: {"delta":{"text":" rest","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" with"}}
+event: content_block_delta
+data: {"delta":{"text":"rained settings such","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cool"}}
+event: content_block_delta
+data: {"delta":{"text":" as stone archit","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" silver"}}
+event: content_block_delta
+data: {"delta":{"text":"ecture, over","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hair"}}
+event: content_block_delta
+data: {"delta":{"text":"cast pl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+event: content_block_delta
+data: {"delta":{"text":"azas, mis","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" warm"}}
+event: content_block_delta
+data: {"delta":{"text":"ty b","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" brown"}}
+event: content_block_delta
+data: {"delta":{"text":"ridges or bl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" leather"}}
+event: content_block_delta
+data: {"delta":{"text":"ue-hour r","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" accents"}}
+event: content_block_delta
+data: {"delta":{"text":"ooftops. These","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+event: content_block_delta
+data: {"delta":{"text":" will ech","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Sil"}}
+event: content_block_delta
+data: {"delta":{"text":"o the bl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hou"}}
+event: content_block_delta
+data: {"delta":{"text":"ue palette without compet","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ette"}}
+event: content_block_delta
+data: {"delta":{"text":"ing with it. Dus","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" is"}}
+event: content_block_delta
+data: {"delta":{"text":"k or over","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" vertical"}}
+event: content_block_delta
+data: {"delta":{"text":"cast skies give","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+event: content_block_delta
+data: {"delta":{"text":" so","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" commanding"}}
+event: content_block_delta
+data: {"delta":{"text":"ft, even","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_delta
+data: {"delta":{"text":" light that protects the coat's","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" high"}}
+event: content_block_delta
+data: {"delta":{"text":" subtle emb","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" collar"}}
+event: content_block_delta
+data: {"delta":{"text":"roidery. A hard r","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"im light","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" long"}}
+event: content_block_delta
+data: {"delta":{"text":" or","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" coat"}}
+event: content_block_delta
+data: {"delta":{"text":" a low","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" sun can","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" narrow"}}
+event: content_block_delta
+data: {"delta":{"text":" make","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" waist"}}
+event: content_block_delta
+data: {"delta":{"text":" the silver h","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":"air and bl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" blade"}}
+event: content_block_delta
+data: {"delta":{"text":"ade glint","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" diagonal"}}
+event: content_block_delta
+data: {"delta":{"text":". Avoid sa","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" across"}}
+event: content_block_delta
+data: {"delta":{"text":"turated war","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
+event: content_block_delta
+data: {"delta":{"text":"m environments that","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" body"}}
+event: content_block_delta
+data: {"delta":{"text":" would muddy the bl","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
+event: content_block_delta
+data: {"delta":{"text":"ue. Wind will help","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Mood"}}
+event: content_block_delta
+data: {"delta":{"text":" anim","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" is"}}
+event: content_block_delta
+data: {"delta":{"text":"ate the coat t","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" controlled"}}
+event: content_block_delta
+data: {"delta":{"text":"ails and","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" scabbard cords.","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" arist"}}
+event: content_block_delta
+data: {"delta":{"text":" Check local r","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ocratic"}}
+event: content_block_delta
+data: {"delta":{"text":"ules on","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
+event: content_block_delta
+data: {"delta":{"text":" public pr","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
+event: content_block_delta
+data: {"delta":{"text":"op we","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" quietly"}}
+event: content_block_delta
+data: {"delta":{"text":"apons.\n\n**Next","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" men"}}
+event: content_block_delta
+data: {"delta":{"text":" Step**\n\nWhich cities,","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"acing"}}
+event: content_block_delta
+data: {"delta":{"text":" and what","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" rather"}}
+event: content_block_delta
+data: {"delta":{"text":" date, should","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" than"}}
+event: content_block_delta
+data: {"delta":{"text":" I","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" chaotic"}}
+event: content_block_delta
+data: {"delta":{"text":" compare for weather and gol","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".\n\n"}}
+event: content_block_delta
+data: {"delta":{"text":"den or","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Production"}}
+event: content_block_delta
+data: {"delta":{"text":" blue-hour tim","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" guidance"}}
+event: content_block_delta
+data: {"delta":{"text":"ing?","type":"text_delta"},"index":1,"type":"content_block_delta"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":":"}}
+event: content_block_stop
+data: {"index":1,"type":"content_block_stop"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" choose"}}
+event: message_delta
+data: {"copilot_usage":{"token_details":[{"batch_size":1000000,"cost_per_batch":400000000000,"model":"claude-opus-5.5","token_count":709,"token_type":"input"},{"batch_size":1000000,"cost_per_batch":20000000000,"model":"claude-opus-5.5","token_count":0,"token_type":"cache_read"},{"batch_size":1000000,"cost_per_batch":500000000000,"model":"claude-opus-5.5","token_count":0,"token_type":"cache_write"},{"batch_size":1000000,"cost_per_batch":2000000000000,"model":"claude-opus-5.5","token_count":643,"token_type":"output"}],"total_nano_aiu":1569600000},"delta":{"container":null,"stop_details":null,"stop_reason":"end_turn","stop_sequence":null},"type":"message_delta","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":709,"output_tokens":643,"output_tokens_details":{"thinking_tokens":160}}}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" locations"}}
+event: message_stop
+data: {"type":"message_stop"}
 
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" with"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" strong"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" vertical"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"s"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" clean"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" geometry"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"—"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"stone"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" stair"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cases"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" modern"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ist"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" concrete"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cathedral"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" steps"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" manic"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ured"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gardens"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" with"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hed"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ges"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" iron"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" gates"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Avoid"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cluttered"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" street"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" scenes"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" bright"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" carnival"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" colors"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" For"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" lighting"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" favor"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" over"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cast"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" soft"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" light"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" or"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" open"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" shade"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" for"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" even"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" blue"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" saturation"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":";"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" if"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" shooting"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" near"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sunset"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":","}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" use"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" a"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" low"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" sun"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" as"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" rim"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" light"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" to"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" edge"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" silver"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" hair"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" kat"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ana"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" while"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" keeping"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" the"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" face"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" in"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" controlled"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" shadow"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" Ask"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" which"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cities"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" and"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" date"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" you"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" want"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" compared"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" so"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" I"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" can"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" pull"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" exact"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" daylight"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"/"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"weather"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" values"}}
-
-event:content_block_delta
-data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"."}}
-
-event:content_block_stop
-data:{"type":"content_block_stop","index":0}
-
-event:message_delta
-data:{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":82,"cache_creation_input_tokens":0,"cache_read_input_tokens":629,"output_tokens":231}}
-
-event:message_stop
-data:{"type":"message_stop"}
+data: [DONE]
 

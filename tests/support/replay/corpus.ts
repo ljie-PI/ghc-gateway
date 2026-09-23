@@ -32,25 +32,22 @@ function validateExchanges(value: unknown): asserts value is readonly ReplayExch
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_EXCHANGES) throw replayConfigurationError();
   const ids = new Set<string>();
   for (const exchange of value as unknown[]) {
-    if (!isRecord(exchange) || !hasOnlyKeys(exchange, ["version", "caseId", "family", "sourceProtocol", "targetProtocol", "logicalModel", "upstreamModel", "capturedAt", "generatedAt", "selection", "request", "response", "downstreamExpectation"])
+    if (!isRecord(exchange) || !hasOnlyKeys(exchange, ["version", "caseId", "family", "sourceProtocol", "targetProtocol", "logicalModel", "upstreamModel", "capturedAt", "selection", "request", "response"])
       || !isReplayId(exchange.caseId) || ids.has(exchange.caseId) || exchange.version !== 1 || exchange.family !== "replay"
       || !PROTOCOLS.has(String(exchange.sourceProtocol)) || !PROTOCOLS.has(String(exchange.targetProtocol))
       || !isReplayId(exchange.logicalModel) || !isReplayId(exchange.upstreamModel)
       || (exchange.capturedAt !== undefined && typeof exchange.capturedAt !== "string")
-      || (exchange.generatedAt !== undefined && typeof exchange.generatedAt !== "string")
       || (exchange.selection !== undefined && exchange.selection !== "explicit")
       || !isRecord(exchange.request) || !isRecord(exchange.response)) throw replayConfigurationError();
     ids.add(exchange.caseId);
     const { request, response } = exchange;
-    if (!hasOnlyKeys(request, ["method", "path", "headers", "bodyJson"])
+    if (!hasOnlyKeys(request, ["method", "path"])
       || request.method !== "POST" || !ROUTES.has(String(request.path))
-      || (request.headers !== undefined && !isStringRecord(request.headers))
       || !hasOnlyKeys(response, ["status", "headers", "bodyFile", "bodySha256", "stream"])
       || !Number.isInteger(response.status) || Number(response.status) < 200 || Number(response.status) > 599
       || !isRecord(response.headers) || typeof response.stream !== "boolean"
       || typeof response.bodyFile !== "string" || response.bodyFile.length === 0
-      || typeof response.bodySha256 !== "string" || !/^[a-f0-9]{64}$/u.test(response.bodySha256)
-      || !validExpectation(exchange.downstreamExpectation)) throw replayConfigurationError();
+      || typeof response.bodySha256 !== "string" || !/^[a-f0-9]{64}$/u.test(response.bodySha256)) throw replayConfigurationError();
     for (const [name, header] of Object.entries(response.headers)) {
       if (typeof header !== "string" || /^(authorization|proxy-authorization|set-cookie|cookie|x-api-key)$/iu.test(name)) throw replayConfigurationError();
       try {
@@ -61,35 +58,6 @@ function validateExchanges(value: unknown): asserts value is readonly ReplayExch
       }
     }
   }
-}
-
-function isStringRecord(value: unknown): value is Record<string, string> {
-  return isRecord(value) && Object.values(value).every((member) => typeof member === "string");
-}
-
-function validExpectation(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!isRecord(value) || !hasOnlyKeys(value, ["goldenFile", "expectedOutput", "textSha256", "minTextChars", "minTextDeltas", "expectedToolCall", "expectedToolCalls", "toolCallsCount", "hasUsage", "usage"])) return false;
-  if (value.goldenFile !== undefined && typeof value.goldenFile !== "string") return false;
-  if (value.textSha256 !== undefined && (typeof value.textSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(value.textSha256))) return false;
-  for (const key of ["minTextChars", "minTextDeltas", "toolCallsCount"] as const) {
-    const member = value[key];
-    if (member !== undefined && (!Number.isSafeInteger(member) || Number(member) < 0)) return false;
-  }
-  if (value.hasUsage !== undefined && typeof value.hasUsage !== "boolean") return false;
-  if (value.expectedToolCall !== undefined && (!isRecord(value.expectedToolCall)
-    || !hasOnlyKeys(value.expectedToolCall, ["name", "arguments"])
-    || typeof value.expectedToolCall.name !== "string" || typeof value.expectedToolCall.arguments !== "string")) return false;
-  if (value.expectedToolCalls !== undefined && (!Array.isArray(value.expectedToolCalls) || value.expectedToolCalls.length > MAX_REPLAY_STEPS
-    || value.expectedToolCalls.some((call) => !isRecord(call) || !hasOnlyKeys(call, ["name", "arguments"]) || typeof call.name !== "string"))) return false;
-  if (value.usage !== undefined) {
-    if (!isRecord(value.usage) || !hasOnlyKeys(value.usage, ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "visualTokens"])) return false;
-    for (const key of ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens"] as const) {
-      if (!Number.isSafeInteger(value.usage[key]) || Number(value.usage[key]) < 0) return false;
-    }
-    if (value.usage.visualTokens !== "not_reported" && (!Number.isSafeInteger(value.usage.visualTokens) || Number(value.usage.visualTokens) < 0)) return false;
-  }
-  return true;
 }
 
 /** Parse untrusted manifest text without exposing JSON diagnostics. */

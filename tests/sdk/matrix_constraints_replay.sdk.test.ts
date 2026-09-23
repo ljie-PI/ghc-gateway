@@ -1,14 +1,10 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import type OpenAI from "openai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  createSdkClients, executeChat, executeMessages, executeResponses, REPLAY_TARGETS, SDK_PROTOCOLS,
-  type SdkClients, type SdkProtocol,
-} from "./client.js";
+import { createSdkClients, REPLAY_TARGETS, SDK_PROTOCOLS, TEXT_TERMINAL, type SdkClients } from "./client.js";
 import { expectReasoningResult, expectUsage, readExpectedExchangeResult } from "./replay_expectations.js";
 import { type ReplaySdkHarness, startReplaySdkHarness } from "./replay_harness.js";
-
-const prompt = "Explain quantum entanglement in 20 words.";
+import { executeReasoning } from "./scenario_requests.js";
 
 describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", () => {
   let harness: ReplaySdkHarness;
@@ -28,17 +24,10 @@ describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", 
       const receiptStart = harness.receipts.length;
       harness.replayServer.selectScenario(exchangeId);
       try {
-        const result = await executeReasoning(downstream, target.model);
+        const { result } = await executeReasoning(clients, downstream, target.model);
         expect(expected.text.length).toBeGreaterThan(0);
         expect(result.text === expected.text, "all captured answer text remains separate from reasoning").toBe(true);
-        // The immutable legacy Chat fixture is truncated. Preserve that fact, never call it completed.
-        const terminal = (target.protocol === "chat"
-          ? { chat: "length", messages: "max_tokens", responses: "incomplete" }
-          : { chat: "stop", messages: "end_turn", responses: "completed" })[downstream];
-        expect(result.terminal === terminal, "native or converted fixture terminal outcome").toBe(true);
-        if (target.protocol === "chat" && downstream === "responses") {
-          expect((result.response as OpenAI.Responses.Response).incomplete_details?.reason === "max_output_tokens", "truncation reason is preserved").toBe(true);
-        }
+        expect(result.terminal === TEXT_TERMINAL[downstream], "native or converted fixture terminal outcome").toBe(true);
         expectUsage(result.response.usage, downstream, expected);
         expectReasoningResult(result, expected, downstream);
 
@@ -68,18 +57,4 @@ describe("nine-cell SDK-parsed reasoning and usage via production HTTP replay", 
       } finally { harness.replayServer.abortScenario(); }
     });
   });
-
-  function executeReasoning(downstream: SdkProtocol, model: string) {
-    switch (downstream) {
-    case "chat": return executeChat(clients.openai, {
-      model, messages: [{ role: "user", content: prompt }], reasoning_effort: "low",
-    }, "nonstream");
-    case "messages": return executeMessages(clients.anthropic, {
-      model, max_tokens: 64, messages: [{ role: "user", content: prompt }], output_config: { effort: "low" },
-    }, "nonstream");
-    case "responses": return executeResponses(clients.openai, {
-      model, input: prompt, reasoning: { effort: "low" }, max_output_tokens: 64,
-    }, "nonstream");
-    }
-  }
 });

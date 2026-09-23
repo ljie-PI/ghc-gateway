@@ -8,7 +8,7 @@ import { REPLAY_TARGETS } from "../sdk/client.js";
 import { matchesSessionRequest } from "../sdk/session_expectations.js";
 import {
   expectedForecastArguments, FORECAST_COMPARE_PROMPT, FORECAST_TOOL_OPENAI, IMAGE_ANALYSIS_SYSTEM,
-  MIXED_WEATHER_PROMPT, PARALLEL_WEATHER_PROMPT, PARIS_RESULT, SESSION_IMAGE_PROMPT,
+  MIXED_WEATHER_PROMPT, PARALLEL_WEATHER_PROMPT, PARIS_RESULT, REASONING_EFFORT, SESSION_IMAGE_PROMPT,
   SESSION_SHOT_LIST_PROMPT, SESSION_SYNTHESIS_PROMPT, SESSION_SYSTEM, TOKYO_RESULT,
   WEATHER_PARAMETERS, WEATHER_PROMPT, WEATHER_RESULT,
 } from "../sdk/scenarios.js";
@@ -51,9 +51,9 @@ describe("structured SDK replay catalogue", () => {
 
   it("initializes replay target model IDs independently of harness imports", () => {
     expect(REPLAY_TARGETS).toEqual([
-      { protocol: "chat", model: "gemini-3.5-flash" },
-      { protocol: "responses", model: "gpt-5.5" },
-      { protocol: "messages", model: "claude-sonnet-4" },
+      { protocol: "chat", model: "gemini-3.8-flash" },
+      { protocol: "responses", model: "gpt-6-astra" },
+      { protocol: "messages", model: "claude-opus-5.5" },
     ]);
   });
 
@@ -64,11 +64,11 @@ describe("structured SDK replay catalogue", () => {
       const base = protocol === "responses"
         ? { input: "Explain quantum entanglement in 20 words." }
         : { messages: [{ role: "user", content: "Explain quantum entanglement in 20 words." }] };
-      const reasoning = protocol === "chat" ? { reasoning_effort: "low" }
-        : protocol === "responses" ? { reasoning: { effort: "low" } } : { output_config: { effort: "low" } };
+      const reasoning = protocol === "chat" ? { reasoning_effort: REASONING_EFFORT }
+        : protocol === "responses" ? { reasoning: { effort: REASONING_EFFORT } } : { output_config: { effort: REASONING_EFFORT } };
       expect(matches({ ...base, ...reasoning })).toBe(protocol === downstream);
       expect(matches(base)).toBe(protocol !== downstream);
-      expect(matches(JSON.parse(JSON.stringify({ ...base, ...reasoning }).replace("\"low\"", "\"high\"")))).toBe(false);
+      expect(matches(JSON.parse(JSON.stringify({ ...base, ...reasoning }).replace(`"${REASONING_EFFORT}"`, "\"high\"")))).toBe(false);
       expect(matches({ ...base, thinking: { type: "enabled", budget_tokens: 8000 } })).toBe(false);
       expect(matches({ ...base, tools: [] })).toBe(false);
       expect(matches(protocol === "responses" ? { input: "wrong" } : { messages: [{ role: "user", content: "wrong" }] })).toBe(false);
@@ -184,11 +184,11 @@ describe("structured SDK replay catalogue", () => {
     const { scenarios } = await catalogue();
     const text = predicate(scenarios, "replay.chat.plain-text.nonstream");
     for (const deceptive of ["image", "Paris", "twice", "simultaneously", "quantum", "tool_result", "function_call_output", "{\"role\":\"tool\"}"]) {
-      expect(text({ model: "gemini-3.5-flash", messages: [{ role: "user", content: deceptive }] })).toBe(false);
+      expect(text({ model: "gemini-3.8-flash", messages: [{ role: "user", content: deceptive }] })).toBe(false);
     }
     const imageBase64 = (await readFile(new URL("../sdk/images/vergil.jpg", import.meta.url))).toString("base64");
     const image = predicate(scenarios, "replay.chat.image.nonstream");
-    const valid = { model: "gemini-3.5-flash", messages: [
+    const valid = { model: "gemini-3.8-flash", messages: [
       { role: "system", content: IMAGE_ANALYSIS_SYSTEM },
       { role: "user", content: [
         { type: "text", text: SESSION_IMAGE_PROMPT },
@@ -204,7 +204,7 @@ describe("structured SDK replay catalogue", () => {
   it("pins tool prompt, image, name and schema while bounding inspected collections", async () => {
     const { scenarios } = await catalogue();
     const parallel = predicate(scenarios, "replay.chat.parallel-tools.nonstream");
-    const validParallel = { model: "gemini-3.5-flash", messages: [{ role: "user", content: PARALLEL_WEATHER_PROMPT }], tools: [{
+    const validParallel = { model: "gemini-3.8-flash", messages: [{ role: "user", content: PARALLEL_WEATHER_PROMPT }], tools: [{
       type: "function", function: { name: "get_weather", parameters: { ...WEATHER_PARAMETERS, additionalProperties: false } },
     }] };
     expect(parallel(validParallel)).toBe(true);
@@ -215,28 +215,27 @@ describe("structured SDK replay catalogue", () => {
 
     const imageBase64 = (await readFile(new URL("../sdk/images/vergil.jpg", import.meta.url))).toString("base64");
     const mixed = predicate(scenarios, "replay.messages.mixed-image-tool.nonstream");
-    expect(mixed({ model: "claude-sonnet-4", messages: [{ role: "user", content: [
+    expect(mixed({ model: "claude-opus-5.5", messages: [{ role: "user", content: [
       { type: "text", text: MIXED_WEATHER_PROMPT },
       { type: "image", source: { type: "base64", media_type: "image/jpeg", data: imageBase64 } },
     ] }], tools: [{ name: "get_weather", input_schema: { ...WEATHER_PARAMETERS, additionalProperties: false } }] })).toBe(true);
   });
 
-  it("requires exact owned Responses continuation and call/result binding", async () => {
+  it("requires explicit Responses history and call/result binding, never upstream-owned continuation", async () => {
     const { manifest, scenarios } = await catalogue();
     const responseFile = manifest.exchanges.find((item) => item.caseId === "replay.responses.tool-call.nonstream")!.response.bodyFile;
     const fixed = JSON.parse(await readFile(new URL(`../sdk/corpus/${responseFile}`, import.meta.url), "utf8"));
     const call = fixed.output.find((item: { type: string }) => item.type === "function_call");
     const second = predicate(scenarios, "replay.responses.weather-roundtrip", 2);
-    const valid = { model: "gpt-5.5", previous_response_id: fixed.id, input: [
-      { type: "function_call_output", call_id: call.call_id, output: WEATHER_RESULT },
-    ] };
+    const functionCall = { type: "function_call", call_id: call.call_id, name: "get_weather", arguments: "{\"city\":\"Tokyo\"}" };
+    const output = { type: "function_call_output", call_id: call.call_id, output: WEATHER_RESULT };
+    const valid = { model: "gpt-6-astra", input: [{ role: "user", content: WEATHER_PROMPT }, functionCall, output] };
     expect(second(valid)).toBe(true);
-    expect(second({ ...valid, previous_response_id: "resp_unowned" })).toBe(false);
-    expect(second({ ...valid, input: [{ ...valid.input[0], call_id: "call_wrong" }] })).toBe(false);
-    expect(second({ ...valid, input: [
-      { type: "function_call", call_id: call.call_id, name: "get_weather", arguments: "{\"city\":\"Tokyo\"}" },
-      ...valid.input,
-    ] })).toBe(false);
+    expect(second({ ...valid, previous_response_id: fixed.id })).toBe(false);
+    expect(second({ model: "gpt-6-astra", previous_response_id: fixed.id, input: [output] })).toBe(false);
+    expect(second({ ...valid, input: [functionCall, output] })).toBe(false);
+    expect(second({ ...valid, input: [valid.input[0], functionCall, { ...output, call_id: "call_wrong" }] })).toBe(false);
+    expect(second({ ...valid, input: [valid.input[0], output, functionCall] })).toBe(false);
   });
 
   it("requires ordered weather call/result identity, complete arguments and exact JSON result", async () => {
@@ -245,11 +244,11 @@ describe("structured SDK replay catalogue", () => {
     const call = callResponse.content.find((item: { type: string }) => item.type === "tool_use");
     const first = predicate(scenarios, "replay.messages.weather-roundtrip", 1);
     const second = predicate(scenarios, "replay.messages.weather-roundtrip", 2);
-    const firstBody = { model: "claude-sonnet-4", messages: [{ role: "user", content: WEATHER_PROMPT }], tools: [{
+    const firstBody = { model: "claude-opus-5.5", messages: [{ role: "user", content: WEATHER_PROMPT }], tools: [{
       name: "get_weather", input_schema: WEATHER_PARAMETERS,
     }] };
     expect(first(firstBody)).toBe(true);
-    const valid = { model: "claude-sonnet-4", messages: [
+    const valid = { model: "claude-opus-5.5", messages: [
       { role: "user", content: WEATHER_PROMPT },
       { role: "assistant", content: [{ type: "tool_use", id: call.id, name: "get_weather", input: { city: "Tokyo" } }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: call.id, content: WEATHER_RESULT }] },

@@ -143,6 +143,19 @@ Use `node dist/src/cli/main.js` instead of `ghcg` when exercising the built CLI.
 GHC_GATEWAY_SDK_TESTS=1 npm run test:sdk
 ```
 
+The replay corpus in `tests/sdk/corpus` holds live Copilot responses for `gemini-3.8-flash`
+(Chat), `gpt-6-astra` (Responses) and `claude-opus-5.5` (Messages). The recorder sends the same
+official-SDK scenarios through the gateway and replaces only the selected cases, after every
+selected exchange validates. It uses the signed-in account and makes live inference requests only
+with `--execute`:
+
+```bash
+node scripts/tooling/bootstrap.mjs scripts/tooling/capture_upstream.ts --execute --model claude-opus-5.5 --scenario coherent-session
+```
+
+Without `--execute` it prints the plan. After recording, update the reported `sessionAssistantTextSha256`
+values in `tests/sdk/scenarios.ts` and the corpus digests in `tests/unit/sdk_corpus_manifest.test.ts`.
+
 ## License
 
 [MIT](LICENSE)

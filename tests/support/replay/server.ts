@@ -1,4 +1,5 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
+import { serveReplayCatalog } from "./catalog.js";
 import { isRecord, readReplayResponse, replayConfigurationError, validateReplayCorpus, validateReplayScenarios } from "./corpus.js";
 import type { ReplayExchangeRecord, ReplayReceipt, ReplayScenario } from "./types.js";
 
@@ -150,7 +151,7 @@ export class MockCopilotReplayServer {
     const pathname = (req.url ?? "").split("?")[0] ?? "";
     if (req.method === "GET" && (pathname === "/models" || pathname === "/v1/models")) {
       req.resume();
-      serveCatalog(res);
+      serveReplayCatalog(res);
       return;
     }
     if (this.inFlight !== undefined) {
@@ -277,15 +278,3 @@ function rejectRequest(req: IncomingMessage, res: ServerResponse, status: number
   res.end(JSON.stringify({ error }));
 }
 
-function serveCatalog(res: ServerResponse): void {
-  const catalogData = { data: [
-    { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", vendor: "Google", model_picker_enabled: true,
-      model_info: { supported_endpoints: ["/chat/completions"], supported_parameters: ["temperature", "top_p", "response_format"], max_input_tokens: 128_000, max_output_tokens: 64_000, chat_output_token_field: "max_tokens" } },
-    { id: "gpt-5.5", name: "GPT-5.5", vendor: "OpenAI", model_picker_enabled: true,
-      model_info: { supported_endpoints: ["/responses"], supported_parameters: ["temperature", "top_p", "response_format"], max_input_tokens: 128_000, max_output_tokens: 128_000 } },
-    { id: "claude-sonnet-4", name: "Claude Sonnet 4", vendor: "Anthropic", model_picker_enabled: true,
-      model_info: { supported_endpoints: ["/messages"], supported_parameters: ["temperature", "top_p"], max_input_tokens: 128_000, max_output_tokens: 16_384, default_output_tokens: 4_096 } },
-  ] };
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify(catalogData));
-}

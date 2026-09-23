@@ -1,18 +1,1 @@
-{
-  "id": "msg_01X9Z8Y7W6V5U4T3S2R1Q0P9_TOOL_RES",
-  "type": "message",
-  "role": "assistant",
-  "model": "claude-sonnet-4-20250514",
-  "content": [
-    {
-      "type": "text",
-      "text": "The weather in Tokyo is sunny."
-    }
-  ],
-  "stop_reason": "end_turn",
-  "stop_sequence": null,
-  "usage": {
-    "input_tokens": 80,
-    "output_tokens": 10
-  }
-}
+{"container":null,"content":[{"signature":"CAQSjQUKEAgSGAI4AUIIdGhpbmtpbmcSDCzR1SCsMC2f4BHslhoMq3ZPp4CuIUXbPNukIjBCgx7Owc5p7L7sNBFZkUZQn2EHTvPfuVQ1x/Q/nBDZ7PUMMiLl/M86yGROUrCQYdAqqgROb45HtoaNPU3JrshlG4KL2QsdGADMiyRrOjqZMtA0ffQKFY8GQNl5KY/QpFeLSfF7XaMNEgkLEsGNzQmSMzHyH+Z8pRpLuzpI6u4Q+QlhzBJvgVHA0h8SMpz7YlJW83hd5O6SvONo8QVgMGjvQ4fEHaZnqiwXshBypOQ95uaIPQb09lYOQ646xPDD8rOai/J3uIh2c+LDpo4VuiYPePR1kaQ/0wsSYxS0OIR0KJhlKNkbRwYGoGT/vTFlRqPJqahDjX857CRfRrbpRiGyNs5/GECW3uT4yLl2XneYqExfNyeH8oY35Ny+6JI4MH2RS3XcaElqihGeKHVsxYDWDtC2emL1WHVqp7rdq03UcbI4GA5LSxxb7bDPzxoWd+fNnrhq5voYXlX+HQW8aSOLdJPbO0j5Uf0f4q7iEx6vuVi2tTz55ZOd6u5h6kKFC7UWb/ncw76DlTW4i8o4lkGuSSeLDW7WktZEw1dKmOjheFPsvBpcJN9yi0gdocCxspqvcH9grGSub5NFJNGobJk4B8f3qOBXyZk0q6Byqw6eKYrCUEsHhyqUYnMz0FP1JXSVHjCEwToD3lNbaptLt0B0mIbqtBJD/l6huj5oOXGmaeCXbxehlzV+oOWDLUyNjWVF9SRmr8cbsmmRk+3Dj1VdYvYeUiUUYk3JRzsnoQ7X6ugdoq/XOHpuurOmqYCWlYhHDGcFOaTNieQRFqkpSidqcdKJyVZEpiP2GXLGPxgB","thinking":"","type":"thinking"},{"text":"It's currently **sunny** in Tokyo, with a temperature of **22°C** (about 72°F).","type":"text"}],"copilot_usage":{"token_details":[{"batch_size":1000000,"cost_per_batch":400000000000,"model":"claude-opus-5.5","token_count":95,"token_type":"input"},{"batch_size":1000000,"cost_per_batch":20000000000,"model":"claude-opus-5.5","token_count":0,"token_type":"cache_read"},{"batch_size":1000000,"cost_per_batch":500000000000,"model":"claude-opus-5.5","token_count":0,"token_type":"cache_write"},{"batch_size":1000000,"cost_per_batch":2000000000000,"model":"claude-opus-5.5","token_count":59,"token_type":"output"}],"total_nano_aiu":156000000},"id":"msg_011CfKunnwVusdV76C1Rtdv6","model":"claude-opus-5-5","role":"assistant","stop_details":null,"stop_reason":"end_turn","stop_sequence":null,"type":"message","usage":{"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"inference_geo":"global","input_tokens":95,"output_tokens":59,"output_tokens_details":{"thinking_tokens":23}}}

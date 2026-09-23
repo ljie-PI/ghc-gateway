@@ -7,45 +7,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T13:50:31.425Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:25:34.096Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": "Explain why a production HTTP gateway should enforce separate connection, first-byte, idle-stream, and total-request timeouts. Write 220-280 words with the headings Purpose, Failure modes, and Operational guidance. Explain cancellation propagation, connection-pool cleanup, partial streaming responses, and why one timeout cannot safely replace the others. Use complete paragraphs and finish with a one-sentence operational rule."
-            }
-          ],
-          "max_tokens": 2000,
-          "reasoning_effort": "low",
-          "stream": false
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/plain-text.nonstream.json",
-        "bodySha256": "1d11101fab744b89f3e4c95cc1bae9e31ef8ad1665528e9aa1414e2a81212b0d",
+        "bodySha256": "fc76388849ed68b8fe781848013ae828e3531ba170f65c66fadd733adb10ae0f",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "4ab15c1267d8c8f777c3c26784acdf52a7014bc8584f85f4e06b4900bfe498d6",
-        "minTextChars": 1000,
-        "usage": {
-          "inputTokens": 83,
-          "outputTokens": 353,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 849,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -54,49 +30,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T13:50:40.611Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:25:38.174Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": "Explain why a production HTTP gateway should enforce separate connection, first-byte, idle-stream, and total-request timeouts. Write 220-280 words with the headings Purpose, Failure modes, and Operational guidance. Explain cancellation propagation, connection-pool cleanup, partial streaming responses, and why one timeout cannot safely replace the others. Use complete paragraphs and finish with a one-sentence operational rule."
-            }
-          ],
-          "max_tokens": 2000,
-          "reasoning_effort": "low",
-          "stream": true,
-          "stream_options": {
-            "include_usage": true
-          }
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "chat/plain-text.stream.txt",
-        "bodySha256": "1eafc539cfc7bd432be3a0aeb7c10442f9c94fbd532065633939a744300de434",
+        "bodySha256": "416b26bcf7cc9db73a162bfa158e3d6e00d67a98cb418c06b2bc39de5608188a",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "438974e590ed26da85725c0f5b592ce74098820bd81e2822ee4d7d84c0860454",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 83,
-          "outputTokens": 283,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 1161,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -105,46 +53,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T14:08:04.742Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:26:41.723Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "image_url"
-                }
-              ]
-            }
-          ]
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/image.nonstream.json",
-        "bodySha256": "675e886cf6a73ca2de1ab05467b8d68ca9a52fcc739d84e02c2d476a9050aaed",
+        "bodySha256": "5b77df63ef3f69166dadcd921387767f9afd79d5c18db11bccac73ef0ae3c287",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "536cbb5e2ee0e92d24bf84537564c2ff7b41a2e1bc47fb1e471ab7e6c8b09d34",
-        "minTextChars": 1000,
-        "usage": {
-          "inputTokens": 1213,
-          "outputTokens": 214,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 774,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -153,48 +76,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T14:08:13.236Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:26:51.859Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "image_url"
-                }
-              ]
-            }
-          ],
-          "stream": true
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "chat/image.stream.txt",
-        "bodySha256": "c0ed05689ce31b8042548d9bb20a18624390e74d03a8bd1986822737ee4ceb54",
+        "bodySha256": "bb66a8d8f6af5600e84426ed4d494b304fbb54c905ca2175959930c24bd9fbb6",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "2b1439c1e77339b1917676b0f7e829eb8708cc33902a2616ad34f198a219fa18",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 1213,
-          "outputTokens": 193,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 1002,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -203,42 +99,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T13:50:50.274Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:36:53.797Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": "Explain why a production HTTP gateway should enforce separate connection, first-byte, idle-stream, and total-request timeouts. Write 220-280 words with the headings Purpose, Failure modes, and Operational guidance. Explain cancellation propagation, connection-pool cleanup, partial streaming responses, and why one timeout cannot safely replace the others. Use complete paragraphs and finish with a one-sentence operational rule.",
-          "max_output_tokens": 2000,
-          "reasoning": {
-            "effort": "low"
-          },
-          "stream": false
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/plain-text.nonstream.json",
-        "bodySha256": "7207b84800833f29c0b1f3e00ac80b2bae45440a7dfdedb640a5c7b785c5b141",
+        "bodySha256": "7a482a18e4c45e50269938b47c7a8ca540c170c52cfce4849c706ec69e05088d",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "a0c736569614299086e89a1b4b8b465f47884556a1e28a0b1aed49ff93ddf8e2",
-        "minTextChars": 1000,
-        "usage": {
-          "inputTokens": 83,
-          "outputTokens": 412,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 21,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -247,43 +122,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T13:50:59.150Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:37:07.484Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": "Explain why a production HTTP gateway should enforce separate connection, first-byte, idle-stream, and total-request timeouts. Write 220-280 words with the headings Purpose, Failure modes, and Operational guidance. Explain cancellation propagation, connection-pool cleanup, partial streaming responses, and why one timeout cannot safely replace the others. Use complete paragraphs and finish with a one-sentence operational rule.",
-          "max_output_tokens": 2000,
-          "reasoning": {
-            "effort": "low"
-          },
-          "stream": true
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "responses/plain-text.stream.txt",
-        "bodySha256": "a039d04e104c320a41bd3de3a837f1a1a6c9ae09258eb97c796f0826a8e105e6",
+        "bodySha256": "c7c9d6d0c9f328485826ce9323c38819eb4ddd6ab9a5d0f6aa22c5ffa7292882",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "778f8cc416ea44ebd87bf96c2a07902d4bce5adcbee1dd2ed86ccc6617ac2f51",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 83,
-          "outputTokens": 430,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 23,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -292,41 +145,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T14:08:20.018Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:37:56.770Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": [
-            {
-              "type": "input_image"
-            }
-          ]
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/image.nonstream.json",
-        "bodySha256": "d48e63234bb729cdb4005de83b5dd03f71f094514dee52b5cec07803ec61ce63",
+        "bodySha256": "686e7560c554a26bc02ee33d9c938ae3948f4ace04c9319b0457e787eec261bb",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "67f1b4642ecf5061b2deb697ac26bbb0d3cf244a7eed43fad78c2c4d17fd1630",
-        "minTextChars": 1000,
-        "usage": {
-          "inputTokens": 635,
-          "outputTokens": 233,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -335,43 +168,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T14:08:25.647Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:38:07.362Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": [
-            {
-              "type": "input_image"
-            }
-          ],
-          "stream": true
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "responses/image.stream.txt",
-        "bodySha256": "e424f85fb003f429ef5824fb49bdefe15d92582d8525938e28b39f99422d2592",
+        "bodySha256": "4342092f4117fe5f83ee5f449c4549cf04f768a76d66b1f2e3697547dd9699b2",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "c865c5d4c164b7a3c738249fb251871a8180b0ac7a3f217538ecea0dbaf9403a",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 635,
-          "outputTokens": 230,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -380,48 +191,22 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:37:28.326Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "max_tokens": 700,
-          "thinking": {
-            "type": "disabled"
-          },
-          "messages": [
-            {
-              "role": "user",
-              "content": "Explain why a production HTTP gateway should enforce separate connection, first-byte, idle-stream, and total-request timeouts. Write 220-280 words with the headings Purpose, Failure modes, and Operational guidance. Explain cancellation propagation, connection-pool cleanup, partial streaming responses, and why one timeout cannot safely replace the others. Use complete paragraphs and finish with a one-sentence operational rule."
-            }
-          ],
-          "stream": false
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/plain-text.nonstream.json",
-        "bodySha256": "e9e8e4ee2d2216a08b2f36c95d19781c3c77dea0ae9167c6827d3c12b2eb911a",
+        "bodySha256": "8bddfc53170e8a88041db8fc50933e926b52bcf567fe111ae13fd8e6145dd729",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "9c9b4c26a961306a09816c96afb65ebe7ca82620a941b48911c8013f731165a2",
-        "minTextChars": 1000,
-        "usage": {
-          "inputTokens": 94,
-          "outputTokens": 481,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:45:29.602Z"
+      }
     },
     {
       "version": 1,
@@ -429,49 +214,22 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:37:41.186Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "max_tokens": 700,
-          "thinking": {
-            "type": "disabled"
-          },
-          "messages": [
-            {
-              "role": "user",
-              "content": "Explain why a production HTTP gateway should enforce separate connection, first-byte, idle-stream, and total-request timeouts. Write 220-280 words with the headings Purpose, Failure modes, and Operational guidance. Explain cancellation propagation, connection-pool cleanup, partial streaming responses, and why one timeout cannot safely replace the others. Use complete paragraphs and finish with a one-sentence operational rule."
-            }
-          ],
-          "stream": true
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "messages/plain-text.stream.txt",
-        "bodySha256": "5322f91d53a64d9f61fbdd539bf9a8d3c67394cad72eb642d562043ffb95e54d",
+        "bodySha256": "4b288ae39b72180a29819814d4cf20b96045edba832434edb3054cae05130b8d",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "2c696685f237163a25d976e962df27bf4bfc2086cae8e62f576e20ee24a4345c",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 0,
-          "outputTokens": 545,
-          "cacheReadTokens": 94,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:45:48.782Z"
+      }
     },
     {
       "version": 1,
@@ -479,47 +237,22 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:27:30.006Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "image"
-                }
-              ]
-            }
-          ]
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/image.nonstream.json",
-        "bodySha256": "db4cd2fd318c7831e6a0c5c447e1abeb413707638dbcb121cd0aad49b0fba543",
+        "bodySha256": "2bc27322857dde97017750d1d3b23d1d9bb4ab0111c3f50bee348300e01c8610",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "c07a5b4ddfe5f51dfc29febd27619a8f2f49b8330b3f5fa441cffe7b23ea36a2",
-        "minTextChars": 1000,
-        "usage": {
-          "inputTokens": 711,
-          "outputTokens": 267,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:46:01.413Z"
+      }
     },
     {
       "version": 1,
@@ -527,49 +260,22 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:27:39.629Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "image"
-                }
-              ]
-            }
-          ],
-          "stream": true
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "messages/image.stream.txt",
-        "bodySha256": "b536616fb8e0a7013d78ea400403b6f020c1e178d9873193887b6067241e3af8",
+        "bodySha256": "c9ad1fd471e33d4b9478501eaaef4a02f9f503c236b32e870723c28ad69094aa",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "a18093ae274aa28dd768feb8b94400d62100672136b1487f24533bdd3737c997",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 82,
-          "outputTokens": 231,
-          "cacheReadTokens": 629,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T14:07:05.007Z"
+      }
     },
     {
       "version": 1,
@@ -577,36 +283,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T06:50:00Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:27:46.163Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": "What is the weather in Tokyo?"
-            }
-          ]
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/tool-call.nonstream.json",
-        "bodySha256": "1de987d9bc87bfe9476aa0270f5bef9de79a1420ba744e1326f7061bf66c8a3d",
+        "bodySha256": "83bce8b0d8f7c910ce5ab07bc56ffe0f5eff3337e3a2332fad4f3d6fa099c6e7",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "expectedToolCall": {
-          "name": "get_weather",
-          "arguments": "{\"city\":\"Tokyo\"}"
-        }
       }
     },
     {
@@ -615,32 +306,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T06:50:01Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:27:48.236Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "tool"
-            }
-          ]
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/tool-result.nonstream.json",
-        "bodySha256": "121bac089b0b9ec41d2c707bef9e6fa551908f082b246c177433c70063bd9854",
+        "bodySha256": "6bfa9c8ec7d22a7ce0606f7100acff92fdba055b8ca39163c4a5a0c188a79066",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "expectedOutput": "sunny"
       }
     },
     {
@@ -649,31 +329,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T06:50:02Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:38:13.129Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": "What is the weather in Tokyo?"
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/tool-call.nonstream.json",
-        "bodySha256": "b1f86dda3834dcf6475f0f6f2772d02c5156d4b0720a8993565720aad48f4bc5",
+        "bodySha256": "471fcaf0184b1def948959867910100c8bb359b46d2c0799764786e6c1818241",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "expectedToolCall": {
-          "name": "get_weather",
-          "arguments": "{\"city\":\"Tokyo\"}"
-        }
       }
     },
     {
@@ -682,32 +352,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T06:50:03Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:38:17.129Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": [
-            {
-              "type": "function_call_output"
-            }
-          ]
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/tool-result.nonstream.json",
-        "bodySha256": "f96a20ede85dc9f24a0231e12bdc1c480171974f779002c6cc38b7b3f29960b7",
+        "bodySha256": "dacc134979d81d40d23b986ac52a91a403345c1a2a9750750c2fd3a364413ea6",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "expectedOutput": "sunny"
       }
     },
     {
@@ -716,36 +375,21 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
-      "capturedAt": "2026-09-08T06:50:04Z",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:38:22.736Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "messages": [
-            {
-              "role": "user",
-              "content": "What is the weather in Tokyo?"
-            }
-          ]
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/tool-call.nonstream.json",
-        "bodySha256": "2ea6dd273c2cd18b210595e9797d9a7af90040c9268b930fd18ba22c522061e4",
+        "bodySha256": "427a9657d33a6d9be5ceec5bc59d7958755ad18aebf7b1ae16a0333a54390b49",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "expectedToolCall": {
-          "name": "get_weather",
-          "arguments": "{\"city\":\"Tokyo\"}"
-        }
       }
     },
     {
@@ -754,37 +398,21 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
-      "capturedAt": "2026-09-08T06:50:05Z",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:38:24.857Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "tool_result"
-                }
-              ]
-            }
-          ]
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/tool-result.nonstream.json",
-        "bodySha256": "d1d26bee64e16000d5c03b2f78b53be2b80cc5a954bad09731d3882fb12bed93",
+        "bodySha256": "39d832296061b21645209a66a83e43a96a7578b17ca12d9f7bcdf6cbf50ed19f",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "expectedOutput": "sunny"
       }
     },
     {
@@ -793,33 +421,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T07:15:00Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:28:07.722Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": "Get weather for Tokyo and Paris simultaneously using get_weather twice."
-            }
-          ]
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/parallel-tools.nonstream.json",
-        "bodySha256": "10d154a5b8a0d88f52135bb9ade14ee052be270ab4b979a61d35eb303008546a",
+        "bodySha256": "a5193d822b38249624e406fab9d532446bfbbb39589d37602f11a10a84320f0b",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "toolCallsCount": 2
       }
     },
     {
@@ -828,37 +444,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T07:15:01Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:28:46.419Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "image_url"
-                }
-              ]
-            }
-          ]
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/mixed-image-tool.nonstream.json",
-        "bodySha256": "ac71d87e9e3891205b85a87437d9111473ae07728168b6c0c37bab24724fc8df",
+        "bodySha256": "af9253d2820f176f0d902258d9f75ab541fa1d1246ae60452617c4e7a947619c",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "toolCallsCount": 1
       }
     },
     {
@@ -867,32 +467,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T07:15:02Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:28:54.409Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": [
-            {
-              "type": "input_image"
-            }
-          ]
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/mixed-image-tool.nonstream.json",
-        "bodySha256": "115c98a48a4242ee1bf94f4bcbb6b798f87d7af0df540e9250a39b0362ad216a",
+        "bodySha256": "1448f8e979f5aa11cfe66153eb71b0bae456f7b070f7883bef0bd3fe451c650a",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "toolCallsCount": 1
       }
     },
     {
@@ -901,28 +490,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T07:35:00Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:28:18.367Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": "Get weather for Tokyo and Paris simultaneously using get_weather twice."
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/parallel-tools.nonstream.json",
-        "bodySha256": "dbf928adb053e4e3b0fa13574737cca7cba77efe11c98a5ea2c0fd41d8349631",
+        "bodySha256": "e3eacbabe7610a77d74d09cb7c1346546abe14a97a335842db05ba59843b14c8",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "toolCallsCount": 2
       }
     },
     {
@@ -931,33 +513,21 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
-      "capturedAt": "2026-09-08T07:15:03Z",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:28:30.329Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "messages": [
-            {
-              "role": "user",
-              "content": "Get weather for Tokyo and Paris simultaneously using get_weather twice."
-            }
-          ]
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/parallel-tools.nonstream.json",
-        "bodySha256": "34eb1c2650074fe16bfd4d844b8891d941ca8061ed75e9912b3c8de3d76de9f1",
+        "bodySha256": "178338aba1038dcd38d2caa080736954001a0fe82afcb536303460fbfde54777",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "toolCallsCount": 2
       }
     },
     {
@@ -966,37 +536,21 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
-      "capturedAt": "2026-09-08T07:15:04Z",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:29:04.195Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "messages": [
-            {
-              "role": "user",
-              "content": [
-                {
-                  "type": "image"
-                }
-              ]
-            }
-          ]
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/mixed-image-tool.nonstream.json",
-        "bodySha256": "c4eddbd4243d141f482f38930ac4dd935022329f8a571e7dcde42e0f34970ce0",
+        "bodySha256": "5b423417f617a54287c9c1ee1842e8dc8f46cc5f3333eb0c7af1942f828561fd",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "toolCallsCount": 1
       }
     },
     {
@@ -1005,33 +559,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T07:45:00Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:19:58.502Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": "Explain quantum entanglement in 20 words."
-            }
-          ]
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/reasoning-effort.nonstream.json",
-        "bodySha256": "c47c088c9ea0aeb95811416770b0ce55b2b7075c66e68a50f7a72adde615228c",
+        "bodySha256": "038185860f3580ed8940e6678ae3f81cdbdd59cb3561bf8e85b684872d73f840",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "hasUsage": true
       }
     },
     {
@@ -1040,28 +582,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T07:45:01Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:20:09.048Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": "Explain quantum entanglement in 20 words."
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/reasoning-effort.nonstream.json",
-        "bodySha256": "c6a42bfe6038d3a5d57535429b3938351508dda13c08101e87c40dddecc7ebc1",
+        "bodySha256": "e500571cfcb817a97154e1f52651ff6915e08f7deb0ae3a79499cca5b9d4aabd",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "hasUsage": true
       }
     },
     {
@@ -1070,33 +605,21 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
-      "capturedAt": "2026-09-08T07:45:02Z",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:20:22.392Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "messages": [
-            {
-              "role": "user",
-              "content": "Explain quantum entanglement in 20 words."
-            }
-          ]
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/reasoning-effort.nonstream.json",
-        "bodySha256": "98b4b37be18fb7f8fd2d9111512eec0f573acb0b8b8e73a3f72e918600ca7387",
+        "bodySha256": "8f826fe2e8f2ca53af4b1577c31293d130885ce5ba8d864d05e4c82bfea98795",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "hasUsage": true
       }
     },
     {
@@ -1105,164 +628,21 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T13:50:43.591Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:28:11.695Z",
       "request": {
         "method": "POST",
-        "path": "/chat/completions",
-        "bodyJson": {
-          "model": "gemini-3.5-flash",
-          "messages": [
-            {
-              "role": "user",
-              "content": "Compare Tokyo, JP and Paris, FR for 2026-10-18 from 15:00 through 18:00 local time. Make exactly two parallel get_hourly_forecast calls, one per city. For both calls use metric units and request temperature_c, precipitation_probability, cloud_cover_percent, and wind_speed_kph. Do not recommend a city until the tool results arrive."
-            }
-          ],
-          "tools": [
-            {
-              "type": "function",
-              "function": {
-                "name": "get_hourly_forecast",
-                "description": "Return an hourly outdoor-shoot forecast for one city. Call once per city when comparing locations.",
-                "parameters": {
-                  "type": "object",
-                  "properties": {
-                    "location": {
-                      "type": "object",
-                      "properties": {
-                        "city": {
-                          "type": "string"
-                        },
-                        "country_code": {
-                          "type": "string",
-                          "minLength": 2,
-                          "maxLength": 2
-                        }
-                      },
-                      "required": [
-                        "city",
-                        "country_code"
-                      ],
-                      "additionalProperties": false
-                    },
-                    "date": {
-                      "type": "string",
-                      "description": "ISO date, YYYY-MM-DD"
-                    },
-                    "start_hour": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 23
-                    },
-                    "end_hour": {
-                      "type": "integer",
-                      "minimum": 1,
-                      "maximum": 24
-                    },
-                    "units": {
-                      "type": "string",
-                      "enum": [
-                        "metric",
-                        "imperial"
-                      ]
-                    },
-                    "fields": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "enum": [
-                          "temperature_c",
-                          "precipitation_probability",
-                          "cloud_cover_percent",
-                          "wind_speed_kph"
-                        ]
-                      },
-                      "minItems": 4,
-                      "maxItems": 4
-                    }
-                  },
-                  "required": [
-                    "location",
-                    "date",
-                    "start_hour",
-                    "end_hour",
-                    "units",
-                    "fields"
-                  ],
-                  "additionalProperties": false
-                }
-              }
-            }
-          ],
-          "tool_choice": "auto",
-          "parallel_tool_calls": true,
-          "max_tokens": 700,
-          "stream": true,
-          "stream_options": {
-            "include_usage": true
-          }
-        }
+        "path": "/chat/completions"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "chat/parallel-tools.stream.txt",
-        "bodySha256": "ec5ec28841fb493ce933a16d0bbd32e05fdcef19692dab181c48e0ce2fb80a14",
+        "bodySha256": "063936bb10f1baefdabed0c24d0526496859b3a27a8c6918bb2a5f4e906a88ec",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "expectedToolCalls": [
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "date": "2026-10-18",
-              "end_hour": 18,
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ],
-              "location": {
-                "city": "Tokyo",
-                "country_code": "JP"
-              },
-              "start_hour": 15,
-              "units": "metric"
-            }
-          },
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "date": "2026-10-18",
-              "end_hour": 18,
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ],
-              "location": {
-                "city": "Paris",
-                "country_code": "FR"
-              },
-              "start_hour": 15,
-              "units": "metric"
-            }
-          }
-        ],
-        "toolCallsCount": 2,
-        "usage": {
-          "inputTokens": 208,
-          "outputTokens": 188,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 329,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -1271,155 +651,21 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T13:51:02.144Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:28:23.099Z",
       "request": {
         "method": "POST",
-        "path": "/responses",
-        "bodyJson": {
-          "model": "gpt-5.5",
-          "input": "Compare Tokyo, JP and Paris, FR for 2026-10-18 from 15:00 through 18:00 local time. Make exactly two parallel get_hourly_forecast calls, one per city. For both calls use metric units and request temperature_c, precipitation_probability, cloud_cover_percent, and wind_speed_kph. Do not recommend a city until the tool results arrive.",
-          "tools": [
-            {
-              "type": "function",
-              "name": "get_hourly_forecast",
-              "description": "Return an hourly outdoor-shoot forecast for one city. Call once per city when comparing locations.",
-              "parameters": {
-                "type": "object",
-                "properties": {
-                  "location": {
-                    "type": "object",
-                    "properties": {
-                      "city": {
-                        "type": "string"
-                      },
-                      "country_code": {
-                        "type": "string",
-                        "minLength": 2,
-                        "maxLength": 2
-                      }
-                    },
-                    "required": [
-                      "city",
-                      "country_code"
-                    ],
-                    "additionalProperties": false
-                  },
-                  "date": {
-                    "type": "string",
-                    "description": "ISO date, YYYY-MM-DD"
-                  },
-                  "start_hour": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 23
-                  },
-                  "end_hour": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 24
-                  },
-                  "units": {
-                    "type": "string",
-                    "enum": [
-                      "metric",
-                      "imperial"
-                    ]
-                  },
-                  "fields": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "enum": [
-                        "temperature_c",
-                        "precipitation_probability",
-                        "cloud_cover_percent",
-                        "wind_speed_kph"
-                      ]
-                    },
-                    "minItems": 4,
-                    "maxItems": 4
-                  }
-                },
-                "required": [
-                  "location",
-                  "date",
-                  "start_hour",
-                  "end_hour",
-                  "units",
-                  "fields"
-                ],
-                "additionalProperties": false
-              },
-              "strict": true
-            }
-          ],
-          "tool_choice": "auto",
-          "parallel_tool_calls": true,
-          "max_output_tokens": 700,
-          "stream": true
-        }
+        "path": "/responses"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "responses/parallel-tools.stream.txt",
-        "bodySha256": "23a1000b90163f752c55c9301c7043eb63eed7da30dcd9800f26fad2a841d27a",
+        "bodySha256": "a76ff6c4dafca5ad3f080dd7259d1c1b29326c5a1290d9a1ea5ca177c3bce5b4",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "expectedToolCalls": [
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Tokyo",
-                "country_code": "JP"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          },
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Paris",
-                "country_code": "FR"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          }
-        ],
-        "toolCallsCount": 2,
-        "usage": {
-          "inputTokens": 256,
-          "outputTokens": 172,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 14,
-          "visualTokens": "not_reported"
-        }
       }
     },
     {
@@ -1428,164 +674,22 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:28:34.395Z",
       "request": {
         "method": "POST",
-        "path": "/v1/messages",
-        "bodyJson": {
-          "model": "claude-sonnet-4",
-          "max_tokens": 600,
-          "thinking": {
-            "type": "disabled"
-          },
-          "tools": [
-            {
-              "name": "get_hourly_forecast",
-              "description": "Return an hourly outdoor-shoot forecast for one city. Call once per city when comparing locations.",
-              "input_schema": {
-                "type": "object",
-                "properties": {
-                  "location": {
-                    "type": "object",
-                    "properties": {
-                      "city": {
-                        "type": "string"
-                      },
-                      "country_code": {
-                        "type": "string",
-                        "minLength": 2,
-                        "maxLength": 2
-                      }
-                    },
-                    "required": [
-                      "city",
-                      "country_code"
-                    ],
-                    "additionalProperties": false
-                  },
-                  "date": {
-                    "type": "string",
-                    "description": "ISO date, YYYY-MM-DD"
-                  },
-                  "start_hour": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 23
-                  },
-                  "end_hour": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 24
-                  },
-                  "units": {
-                    "type": "string",
-                    "enum": [
-                      "metric",
-                      "imperial"
-                    ]
-                  },
-                  "fields": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "enum": [
-                        "temperature_c",
-                        "precipitation_probability",
-                        "cloud_cover_percent",
-                        "wind_speed_kph"
-                      ]
-                    },
-                    "minItems": 4,
-                    "maxItems": 4
-                  }
-                },
-                "required": [
-                  "location",
-                  "date",
-                  "start_hour",
-                  "end_hour",
-                  "units",
-                  "fields"
-                ],
-                "additionalProperties": false
-              }
-            }
-          ],
-          "tool_choice": {
-            "type": "auto",
-            "disable_parallel_tool_use": false
-          },
-          "messages": [
-            {
-              "role": "user",
-              "content": "Compare Tokyo, JP and Paris, FR for 2026-10-18 from 15:00 through 18:00 local time. Make exactly two parallel get_hourly_forecast calls, one per city. For both calls use metric units and request temperature_c, precipitation_probability, cloud_cover_percent, and wind_speed_kph. Do not recommend a city until the tool results arrive."
-            }
-          ],
-          "stream": true
-        }
+        "path": "/v1/messages"
       },
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "messages/parallel-tools.stream.txt",
-        "bodySha256": "e1799aee1143985fadf16678fb8322fd1a717bfc0048da8f4e6333586defd31c",
+        "bodySha256": "c8b7ac950db3e1cf29c5ef520177a2fec6152cdeb9b655cadd936e8fdd98dd76",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "expectedToolCalls": [
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Tokyo",
-                "country_code": "JP"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          },
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Paris",
-                "country_code": "FR"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          }
-        ],
-        "toolCallsCount": 2,
-        "usage": {
-          "inputTokens": 345,
-          "outputTokens": 322,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:53:58.294Z"
+      }
     },
     {
       "version": 1,
@@ -1593,9 +697,10 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T14:08:04.742Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:38:43.606Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/chat/completions"
@@ -1603,25 +708,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "chat/session/turn-1-image-analysis.nonstream.json",
-        "bodySha256": "675e886cf6a73ca2de1ab05467b8d68ca9a52fcc739d84e02c2d476a9050aaed",
+        "bodySha256": "8c0afdd49457ed630e7f1f842239323c90b86b4249380397af691541065b8a89",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "536cbb5e2ee0e92d24bf84537564c2ff7b41a2e1bc47fb1e471ab7e6c8b09d34",
-        "minTextChars": 600,
-        "usage": {
-          "inputTokens": 1213,
-          "outputTokens": 214,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 774,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1629,9 +721,10 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T15:29:02.564Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:38:47.104Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/chat/completions"
@@ -1639,64 +732,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "chat/session/turn-2-parallel-tools.stream.txt",
-        "bodySha256": "1fb7eeffd04c68637481f5c227b23525ecad91bdc1fe6a72f9b2cb6e18bf5442",
+        "bodySha256": "599727828950f01d7252f594e912edc5580a09763b7ac353ba59121ecf1a83dc",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "expectedToolCalls": [
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "date": "2026-10-18",
-              "end_hour": 18,
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ],
-              "location": {
-                "city": "Tokyo",
-                "country_code": "JP"
-              },
-              "start_hour": 15,
-              "units": "metric"
-            }
-          },
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "date": "2026-10-18",
-              "end_hour": 18,
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ],
-              "location": {
-                "city": "Paris",
-                "country_code": "FR"
-              },
-              "start_hour": 15,
-              "units": "metric"
-            }
-          }
-        ],
-        "toolCallsCount": 2,
-        "usage": {
-          "inputTokens": 1635,
-          "outputTokens": 188,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 417,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1704,9 +745,10 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T15:29:14.299Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:39:03.124Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/chat/completions"
@@ -1714,26 +756,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "chat/session/turn-3-tool-results-synthesis.stream.txt",
-        "bodySha256": "96f11352f058617830c0d093059794a4c8578eda67aba3495a1395dfffd97d69",
+        "bodySha256": "14737d0c3c2e7bfd1fa51433d8324b2a7537d8d712f2eef9d2bcdd112f1faac4",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "78953b1d468eac92cad2420b2e6f3205780288b637444fb545971fd9930611d6",
-        "minTextChars": 600,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 2255,
-          "outputTokens": 382,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 1431,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1741,9 +769,10 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T15:29:25.115Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:39:23.413Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/chat/completions"
@@ -1751,26 +780,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "chat/session/turn-4-shot-list.stream.txt",
-        "bodySha256": "70414e401399a4c0fa1a2c9c770c2b1c20c86ca86724607c4e5906364fd8b33f",
+        "bodySha256": "46f06524fce36683f9929ed6be5d7e06705dfb11eb46665ec6b0aeebed93e0f5",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "3bdc24ddc4eb202b22fb946ee5ff896bb35d3078e0b4e4caeefb76427f66c246",
-        "minTextChars": 600,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 2724,
-          "outputTokens": 429,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 1274,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1778,9 +793,10 @@
       "family": "replay",
       "sourceProtocol": "chat",
       "targetProtocol": "chat",
-      "logicalModel": "gemini-3.5-flash",
-      "upstreamModel": "gemini-3.5-flash",
-      "capturedAt": "2026-09-08T15:29:37.359Z",
+      "logicalModel": "gemini-3.8-flash",
+      "upstreamModel": "gemini-3.8-flash",
+      "capturedAt": "2026-09-23T06:39:38.566Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/chat/completions"
@@ -1788,26 +804,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "chat/session/turn-5-provenance-audit.stream.txt",
-        "bodySha256": "b11988811e045241421732482d714570783ebd61cb12ea61d827519b6691c4c2",
+        "bodySha256": "8ea7c44540b751d6badf7e69f0ed493667b749e611160dad85a30c485483b25c",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "cdfe415a186f302fb3d5ef65734a2c7505e11869a52d1de0f589fe0a9d8c0ac6",
-        "minTextChars": 600,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 3232,
-          "outputTokens": 685,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 1442,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1815,9 +817,10 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T14:08:20.018Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:39:55.908Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/responses"
@@ -1825,25 +828,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "responses/session/turn-1-image-analysis.nonstream.json",
-        "bodySha256": "d48e63234bb729cdb4005de83b5dd03f71f094514dee52b5cec07803ec61ce63",
+        "bodySha256": "4ef448d5e9eb80e268dfbf4afffe636887a49d1c640a64c0422203525191b64f",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "67f1b4642ecf5061b2deb697ac26bbb0d3cf244a7eed43fad78c2c4d17fd1630",
-        "minTextChars": 600,
-        "usage": {
-          "inputTokens": 635,
-          "outputTokens": 233,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1851,9 +841,10 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T15:29:40.720Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:40:00.972Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/responses"
@@ -1861,64 +852,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "responses/session/turn-2-parallel-tools.stream.txt",
-        "bodySha256": "3be05196fa794c8286c23a6a46b904ff0d26a04a84b48b59bcfb3181e622dd76",
+        "bodySha256": "45fdd4cb8c288b007855ed3bf88fc24f2f7d95391392514c39fc435461bdcd6c",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "expectedToolCalls": [
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Tokyo",
-                "country_code": "JP"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          },
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Paris",
-                "country_code": "FR"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          }
-        ],
-        "toolCallsCount": 2,
-        "usage": {
-          "inputTokens": 1127,
-          "outputTokens": 156,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1926,9 +865,10 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T15:29:47.655Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:40:17.932Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/responses"
@@ -1936,26 +876,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "responses/session/turn-3-tool-results-synthesis.stream.txt",
-        "bodySha256": "9a2cf4b27b3b11870263966d731ca06c0325771b24520761367d61298861de89",
+        "bodySha256": "48491ce5bc8981e0d6275fecf67fc2724afbf9c0c8f9f7ae14afa5b1308ad76c",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "e8d6eb7480f5a41f41fa092f1c2276c55ab17e4056c203ff4fc5623ef197c4e1",
-        "minTextChars": 600,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 1692,
-          "outputTokens": 434,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -1963,9 +889,10 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T15:29:56.383Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:40:34.280Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/responses"
@@ -1973,26 +900,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "responses/session/turn-4-shot-list.stream.txt",
-        "bodySha256": "2719f0866323ebfdc92395bee542916f6525e837f05ef59424e11a2ff546af6d",
+        "bodySha256": "030eee15eb2b9f6393c8fdb1008adf0ed2376df730fa44f871fa5ec5975db12a",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "c68d9fe01a089ea7b4281c57640d257d278a54927db053c741ff0a8899d3cd80",
-        "minTextChars": 600,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 2210,
-          "outputTokens": 446,
-          "cacheReadTokens": 1664,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2000,9 +913,10 @@
       "family": "replay",
       "sourceProtocol": "responses",
       "targetProtocol": "responses",
-      "logicalModel": "gpt-5.5",
-      "upstreamModel": "gpt-5.5",
-      "capturedAt": "2026-09-08T15:35:07.735Z",
+      "logicalModel": "gpt-6-astra",
+      "upstreamModel": "gpt-6-astra",
+      "capturedAt": "2026-09-23T06:40:55.661Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/responses"
@@ -2010,26 +924,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "responses/session/turn-5-provenance-audit.stream.txt",
-        "bodySha256": "d984559fc8a452845ef6acfa911fb32b1665793eb23dabee2146392008b872f0",
+        "bodySha256": "bd0e30fcd8a69d4f8fd1dae7f38bf0e13a814b8595731919a5b2b2722392047c",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "33f6cb85539878dbefd470a40154e634eb6e56d775df38cf0f022c690f85a2cf",
-        "minTextChars": 600,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 2737,
-          "outputTokens": 747,
-          "cacheReadTokens": 2688,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 88,
-          "visualTokens": "not_reported"
-        }
-      },
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2037,8 +937,10 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:41:08.537Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/v1/messages"
@@ -2046,26 +948,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "application/json; charset=utf-8"
+          "content-type": "application/json"
         },
         "bodyFile": "messages/session/turn-1-image-analysis.nonstream.json",
-        "bodySha256": "db4cd2fd318c7831e6a0c5c447e1abeb413707638dbcb121cd0aad49b0fba543",
+        "bodySha256": "d006988f7b5bdc3127a133fc3a32368322a24da5f8aeaff92bb6da54c1500610",
         "stream": false
-      },
-      "downstreamExpectation": {
-        "textSha256": "c07a5b4ddfe5f51dfc29febd27619a8f2f49b8330b3f5fa441cffe7b23ea36a2",
-        "minTextChars": 1000,
-        "usage": {
-          "inputTokens": 711,
-          "outputTokens": 267,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:46:01.413Z",
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2073,8 +961,10 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:41:13.336Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/v1/messages"
@@ -2082,65 +972,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "messages/session/turn-2-parallel-tools.stream.txt",
-        "bodySha256": "b26da3d8fce36f376c9caff823c3ede5b838384c477142c3eb96445fbd6360fa",
+        "bodySha256": "47e41b4fc1412db76d55daa43592a1293c63d46b96e78ffe10a6470282370914",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "expectedToolCalls": [
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Tokyo",
-                "country_code": "JP"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          },
-          {
-            "name": "get_hourly_forecast",
-            "arguments": {
-              "location": {
-                "city": "Paris",
-                "country_code": "FR"
-              },
-              "date": "2026-10-18",
-              "start_hour": 15,
-              "end_hour": 18,
-              "units": "metric",
-              "fields": [
-                "temperature_c",
-                "precipitation_probability",
-                "cloud_cover_percent",
-                "wind_speed_kph"
-              ]
-            }
-          }
-        ],
-        "toolCallsCount": 2,
-        "usage": {
-          "inputTokens": 1323,
-          "outputTokens": 311,
-          "cacheReadTokens": 0,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:46:09.465Z",
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2148,8 +985,10 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:41:25.171Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/v1/messages"
@@ -2157,27 +996,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "messages/session/turn-3-tool-results-synthesis.stream.txt",
-        "bodySha256": "440612fae34ff0bcfa6c069cdfb94e3d129d9cf40bab20bff1e2f3c4314c0e8c",
+        "bodySha256": "6c3a734c8bc66c6cdf7e156fdac8a4a1f5b5d675bc074358a38ed8b1c01dad7e",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "29cd11052740b8c4ca882c71a5dfed99485ca8126d001e6244d3b392e15448e0",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 780,
-          "outputTokens": 408,
-          "cacheReadTokens": 1280,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:46:23.632Z",
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2185,8 +1009,10 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:41:35.848Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/v1/messages"
@@ -2194,27 +1020,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "messages/session/turn-4-shot-list.stream.txt",
-        "bodySha256": "64a71820b1df787731d513b8da95a9b9bad53dacedded5fedc5ec3f87f1bbe57",
+        "bodySha256": "40fc002477c2fa337dba4a598560c7f2ab92b4a63ea20e808ff544ba7b178fc6",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "e5afe8be69dc4e0fa01e1432330b14948b1eed1d920d457555ee59204cbd4b2f",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 516,
-          "outputTokens": 395,
-          "cacheReadTokens": 2048,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:46:39.663Z",
-      "selection": "explicit"
+      }
     },
     {
       "version": 1,
@@ -2222,8 +1033,10 @@
       "family": "replay",
       "sourceProtocol": "messages",
       "targetProtocol": "messages",
-      "logicalModel": "claude-sonnet-4",
-      "upstreamModel": "claude-sonnet-4",
+      "logicalModel": "claude-opus-5.5",
+      "upstreamModel": "claude-opus-5.5",
+      "capturedAt": "2026-09-23T06:41:49.870Z",
+      "selection": "explicit",
       "request": {
         "method": "POST",
         "path": "/v1/messages"
@@ -2231,27 +1044,12 @@
       "response": {
         "status": 200,
         "headers": {
-          "content-type": "text/event-stream; charset=utf-8"
+          "content-type": "text/event-stream"
         },
         "bodyFile": "messages/session/turn-5-provenance-audit.stream.txt",
-        "bodySha256": "26f0c5f606ae68f03ca78ce8e15b946c9b04e13ce54c7c1da3bceebb935f712e",
+        "bodySha256": "7ca25c3dbfdaa5f00b54443e7e46bf9f00dcccebbc841936c3f1c0251a3440f1",
         "stream": true
-      },
-      "downstreamExpectation": {
-        "textSha256": "6c51f9dc3a7b7bcbe07392a19f7c364f9da337ded3d8bd50ca6fde5636823251",
-        "minTextChars": 1000,
-        "minTextDeltas": 5,
-        "usage": {
-          "inputTokens": 492,
-          "outputTokens": 454,
-          "cacheReadTokens": 2560,
-          "cacheWriteTokens": 0,
-          "reasoningTokens": 0,
-          "visualTokens": "not_reported"
-        }
-      },
-      "capturedAt": "2026-09-08T13:46:52.509Z",
-      "selection": "explicit"
+      }
     }
   ],
   "responseSets": [

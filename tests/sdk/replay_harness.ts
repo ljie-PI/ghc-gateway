@@ -72,7 +72,7 @@ export async function startReplaySdkHarness(options: {
   await replayServer.start();
 
   try {
-    const gateway = await startHttpSdkGateway(`http://127.0.0.1:${REPLAY_SERVER_PORT}`, "req_sdk_replay");
+    const gateway = await startSdkGateway(`http://127.0.0.1:${REPLAY_SERVER_PORT}`, () => "req_sdk_replay");
     return {
       ...gateway, replayServer, corpus,
       get receipts() { return replayServer.recordedReceipts; },
@@ -95,7 +95,7 @@ export async function startSyntheticSdkHarness(): Promise<SyntheticSdkHarness> {
   assertOfflineSdkTestsEnabled();
   const upstream = await startCopilotHttpMock({ expectations: syntheticSdkFixtureCatalog() });
   try {
-    const gateway = await startHttpSdkGateway(upstream.origin, "req_sdk_loopback");
+    const gateway = await startSdkGateway(upstream.origin, () => "req_sdk_loopback");
     return {
       ...gateway, upstream,
       requests: (path) => upstream.requests.filter((request) => request.path === path),
@@ -126,10 +126,10 @@ export async function waitFor(check: () => boolean): Promise<void> {
   throw new Error("timed out waiting for SDK HTTP cleanup");
 }
 
-type HttpSdkGateway = Awaited<ReturnType<typeof startHttpSdkGateway>>;
+type HttpSdkGateway = Awaited<ReturnType<typeof startSdkGateway>>;
 
-/** One production application composer for both immutable recordings and synthetic HTTP cases. */
-async function startHttpSdkGateway(origin: string, requestId: string) {
+/** One production application composer for corpus recording, replay and synthetic HTTP cases. */
+export async function startSdkGateway(origin: string, createRequestId: () => string) {
   const port = await reserveLoopbackPort();
   const artifactRoot = path.resolve("artifacts", "test-data");
   await mkdir(artifactRoot, { recursive: true });
@@ -191,7 +191,7 @@ async function startHttpSdkGateway(origin: string, requestId: string) {
           copilot.forceClose(); modelsSource.forceClose(); endpointDiscovery.forceClose(); closeState();
         },
       },
-      dependencies: { createRequestId: () => requestId },
+      dependencies: { createRequestId },
     });
     await gateway.listen();
     const runningGateway = gateway;

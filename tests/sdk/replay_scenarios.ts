@@ -1,21 +1,20 @@
 import { readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
+import { REPLAY_MODELS } from "../support/replay/catalog.js";
 import type { ReplayExchangeRecord, ReplayScenario, ReplayScenarioManifest } from "../support/replay/types.js";
 import type { SdkProtocol, SdkToolCall } from "./client.js";
 import { matchesTextRequest } from "./replay_expectations.js";
 import { matchesSessionRequest } from "./session_expectations.js";
 import {
   FORECAST_COMPARE_PROMPT, FORECAST_PARAMETERS, MIXED_WEATHER_PROMPT, PARALLEL_WEATHER_PROMPT,
-  REASONING_PROMPT, SESSION_ASSISTANT_TEXT_SHA256, TEXT_SCENARIOS, WEATHER_PARAMETERS, WEATHER_PROMPT,
+  REASONING_EFFORT, REASONING_PROMPT, SESSION_ASSISTANT_TEXT_SHA256, TEXT_SCENARIOS, WEATHER_PARAMETERS, WEATHER_PROMPT,
   WEATHER_RESPONSES_PROMPT, WEATHER_RESULT,
 } from "./scenarios.js";
 import { SESSION_TURNS } from "./session_inputs.js";
 
 const MAX_COLLECTION = 64;
 const MAX_ARGUMENT_BYTES = 64 * 1024;
-const MODELS: Record<SdkProtocol, string> = {
-  chat: "gemini-3.5-flash", responses: "gpt-5.5", messages: "claude-sonnet-4",
-};
+const MODELS: Record<SdkProtocol, string> = REPLAY_MODELS;
 
 export function replayScenarioId(caseId: string): string {
   const weather = /^replay\.(chat|messages|responses)\.tool-(?:call|result)\.nonstream$/u.exec(caseId);
@@ -42,14 +41,12 @@ export async function createReplayScenarios(manifest: ReplayScenarioManifest, op
       matchesTextRequest(body, protocol, { prompt: REASONING_PROMPT }, undefined) && matchesReasoning(body, protocol, options.reasoningDownstream ?? protocol)));
 
     const toolCallId = await fixedToolCallId(manifest, `replay.${protocol}.tool-call.nonstream`, protocol);
-    const previousResponseId = protocol === "responses"
-      ? await fixedResponseId(manifest, `replay.${protocol}.tool-call.nonstream`) : undefined;
     scenarios.push({
       scenarioId: `replay.${protocol}.weather-roundtrip`, targetProtocol: protocol, model: MODELS[protocol],
       steps: [
         step(1, `replay.${protocol}.tool-call.nonstream`, false, (body) => matchesWeatherCall(body, protocol)),
         step(2, `replay.${protocol}.tool-result.nonstream`, false,
-          (body) => matchesWeatherResult(body, protocol, toolCallId, previousResponseId, options.toolDownstream ?? protocol)),
+          (body) => matchesWeatherResult(body, protocol, toolCallId, options.toolDownstream ?? protocol)),
       ],
     });
     for (const stream of [false, true]) {
@@ -99,9 +96,9 @@ function matchesReasoning(body: unknown, protocol: SdkProtocol, downstream: SdkP
   // native requests must still carry the authored effort rather than matching absence.
   if (downstream !== protocol) return request.reasoning_effort === undefined
     && request.reasoning === undefined && request.output_config === undefined && request.thinking === undefined;
-  if (protocol === "chat") return request.reasoning_effort === "low";
-  if (protocol === "responses") return record(request.reasoning)?.effort === "low";
-  return record(request.output_config)?.effort === "low";
+  if (protocol === "chat") return request.reasoning_effort === REASONING_EFFORT;
+  if (protocol === "responses") return record(request.reasoning)?.effort === REASONING_EFFORT;
+  return record(request.output_config)?.effort === REASONING_EFFORT;
 }
 
 function matchesWeatherCall(body: unknown, protocol: SdkProtocol): boolean {
@@ -189,9 +186,10 @@ function userProjection(body: unknown, protocol: SdkProtocol): { text: string; i
   return text === undefined ? undefined : { text, ...(image === undefined ? {} : { image }) };
 }
 
-function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: string, previousResponseId: string | undefined, downstream: SdkProtocol): boolean {
+function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: string, downstream: SdkProtocol): boolean {
   const request = record(body);
-  if (request === undefined || request.tools !== undefined) return false;
+  // Upstream-owned continuation is never recorded; every upstream request carries explicit history.
+  if (request === undefined || request.tools !== undefined || request.previous_response_id !== undefined) return false;
   const items = protocol === "responses" ? request.input : request.messages;
   if (!boundedArray(items, undefined, 8)) return false;
   const projected: unknown[][] = [];
@@ -246,9 +244,6 @@ function matchesWeatherResult(body: unknown, protocol: SdkProtocol, callId: stri
   }
   const result = projected.at(-1);
   if (!isDeepStrictEqual(result, ["result", callId, WEATHER_RESULT])) return false;
-  if (request.previous_response_id !== undefined) {
-    return protocol === "responses" && request.previous_response_id === previousResponseId && projected.length === 1;
-  }
   const callIndex = projected.findIndex((entry) => entry[0] === "call");
   // Only an explicitly selected Responses downstream continuation restores the minimal owned Chat call.
   const expectedCallIndex = protocol === "chat" && downstream === "responses" ? 0 : 1;
@@ -311,13 +306,6 @@ async function fixedToolCallId(manifest: ReplayScenarioManifest, caseId: string,
   if (protocol === "chat") id = record((id as unknown[])[0])?.id;
   else if (protocol === "messages") id = record((value.content as unknown[]).find((item) => record(item)?.type === "tool_use"))?.id;
   else id = record((value.output as unknown[]).find((item) => record(item)?.type === "function_call"))?.call_id;
-  if (typeof id !== "string" || id.length === 0) throw new Error("invalid replay configuration");
-  return id;
-}
-
-async function fixedResponseId(manifest: ReplayScenarioManifest, caseId: string): Promise<string> {
-  const raw = await readFile(new URL(`./corpus/${exchange(manifest, caseId).response.bodyFile}`, import.meta.url), "utf8");
-  const id = record(JSON.parse(raw))?.id;
   if (typeof id !== "string" || id.length === 0) throw new Error("invalid replay configuration");
   return id;
 }

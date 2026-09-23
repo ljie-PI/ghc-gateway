@@ -1,15 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import {
-  createSdkClients, executeChat, executeMessages, executeResponses, REPLAY_TARGETS, SDK_PROTOCOLS, sdkToolCalls,
-  type SdkClients, type SdkProtocol, type SdkProtocolResult,
-} from "./client.js";
+import { createSdkClients, REPLAY_TARGETS, SDK_PROTOCOLS, sdkToolCalls, TOOL_TERMINAL, type SdkClients } from "./client.js";
 import { expectUsage, readExpectedExchangeResult } from "./replay_expectations.js";
 import { type ReplaySdkHarness, startReplaySdkHarness } from "./replay_harness.js";
-import {
-  FORECAST_COMPARE_PROMPT, FORECAST_TOOL_ANTHROPIC, FORECAST_TOOL_OPENAI, FORECAST_TOOL_RESPONSES,
-  expectedForecastArguments,
-} from "./scenarios.js";
+import { executeForecastTools } from "./scenario_requests.js";
+import { expectedForecastArguments } from "./scenarios.js";
 
 describe("nine-cell parallel streaming tools with official SDK accumulation", () => {
   let harness: ReplaySdkHarness;
@@ -28,7 +23,7 @@ describe("nine-cell parallel streaming tools with official SDK accumulation", ()
       const expected = await readExpectedExchangeResult(exchange);
       const receiptStart = harness.receipts.length;
       harness.replayServer.selectScenario(exchangeId);
-      const value = await executeTools(downstream, target.model);
+      const value = await executeForecastTools(clients, downstream, target.model);
       const { result } = value;
       const calls = sdkToolCalls(value);
       expect(calls.length).toBe(2);
@@ -46,7 +41,7 @@ describe("nine-cell parallel streaming tools with official SDK accumulation", ()
       expect(result.text === expected.text, "complete ancillary tool text").toBe(true);
       expect(result.stream?.text === expected.text, "no duplicated or truncated streamed text").toBe(true);
       expect(result.stream?.terminalCount).toBe(1);
-      expect(result.terminal === { chat: "tool_calls", messages: "tool_use", responses: "completed" }[downstream], "normal tool terminal outcome").toBe(true);
+      expect(result.terminal === TOOL_TERMINAL[downstream], "normal tool terminal outcome").toBe(true);
       harness.replayServer.finishScenario();
       expect(harness.receipts.slice(receiptStart)).toEqual([
         { scenarioId: exchangeId, scenarioStep: 1, matchedCaseId: exchangeId },
@@ -55,30 +50,4 @@ describe("nine-cell parallel streaming tools with official SDK accumulation", ()
       // independently covered by protocol_conversion_response.test.ts, not fabricated capture frames.
     });
   });
-
-  async function executeTools(downstream: SdkProtocol, model: string): Promise<SdkProtocolResult> {
-    switch (downstream) {
-    case "chat": {
-      const result = await executeChat(clients.openai, {
-        model, messages: [{ role: "user", content: FORECAST_COMPARE_PROMPT }],
-        tools: [FORECAST_TOOL_OPENAI], tool_choice: "auto", parallel_tool_calls: true, max_tokens: 700,
-      }, "stream");
-      return { protocol: downstream, result };
-    }
-    case "messages": {
-      const result = await executeMessages(clients.anthropic, {
-        model, max_tokens: 700, messages: [{ role: "user", content: FORECAST_COMPARE_PROMPT }],
-        tools: [FORECAST_TOOL_ANTHROPIC], tool_choice: { type: "auto", disable_parallel_tool_use: false },
-      }, "stream");
-      return { protocol: downstream, result };
-    }
-    case "responses": {
-      const result = await executeResponses(clients.openai, {
-        model, input: FORECAST_COMPARE_PROMPT, tools: [FORECAST_TOOL_RESPONSES],
-        tool_choice: "auto", parallel_tool_calls: true, max_output_tokens: 700,
-      }, "stream");
-      return { protocol: downstream, result };
-    }
-    }
-  }
 });

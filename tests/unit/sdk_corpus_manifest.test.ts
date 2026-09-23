@@ -6,9 +6,9 @@ import { parseReplayManifest, parseReplayManifestText, validateReplayCorpus, val
 import { createReplayScenarios } from "../sdk/replay_scenarios.js";
 
 const corpusDirectory = path.resolve("tests/sdk/corpus");
-const corpusTreeGolden = "6436825597eb518d90f4073bc723864baf046317";
-const manifestBlobGolden = "bff6479799af67ff4adbc1ea5673d6bd8194df3c";
-const aggregateGolden = "dbb0561d508ce51dc4fefcda26cc56d65cfc2c0e6b50534dc43519a34d664c19";
+const corpusTreeGolden = "cebf3e4671156e8c48a7135bdc9c648975d5c27b";
+const manifestBlobGolden = "693c514fece630719c7bdea5fa1060b25d59ec89";
+const aggregateGolden = "469a2f00177ee5784c5171ab581c291f539aeeef3900ab23625ba2d5758418fa";
 
 function gitObjectHash(type: "blob" | "tree", bytes: Buffer): Buffer {
   return createHash("sha1").update(`${type} ${bytes.length}\0`).update(bytes).digest();

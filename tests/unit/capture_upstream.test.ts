@@ -3,7 +3,7 @@ import { runCaptureCli } from "../../scripts/tooling/capture_upstream.js";
 import type { BoundAccount } from "../../src/accounts/account_directory.js";
 import { resolveGitHubEnvironment } from "../../src/accounts/github_environment.js";
 
-const args = ["--execute", "--scenario", "long-text", "--mode", "nonstream", "--total-timeout-ms", "1000"];
+const args = ["--execute", "--model", "gemini-3.8-flash", "--scenario", "plain-text", "--total-timeout-ms", "1000"];
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason: unknown) => void;
@@ -31,7 +31,7 @@ describe("capture CLI resource ownership", () => {
     await runCaptureCli([], factory);
     expect(factory).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledOnce();
-    expect(JSON.parse(log.mock.calls[0]![0] as string)).toMatchObject({ executed: false, requests: 16 });
+    expect(JSON.parse(log.mock.calls[0]![0] as string)).toMatchObject({ executed: false, requests: 45 });
   });
 
   it.each(["timeout", "SIGINT", "SIGTERM"] as const)("closes late-created resources once after %s without delaying cancellation", async (cancel) => {

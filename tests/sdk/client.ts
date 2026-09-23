@@ -11,6 +11,9 @@ export const SDK_PROTOCOLS = ["chat", "messages", "responses"] as const;
 export type SdkProtocol = typeof SDK_PROTOCOLS[number];
 export const SDK_MODES = ["nonstream", "stream"] as const;
 export type SdkMode = typeof SDK_MODES[number];
+/** Normal SDK-parsed terminal outcomes for text answers and for tool-call turns. */
+export const TEXT_TERMINAL = { chat: "stop", messages: "end_turn", responses: "completed" } as const;
+export const TOOL_TERMINAL = { chat: "tool_calls", messages: "tool_use", responses: "completed" } as const;
 
 export const REPLAY_TARGETS = [
   { protocol: "chat", model: CHAT_MODEL },
