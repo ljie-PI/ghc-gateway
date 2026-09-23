@@ -369,15 +369,8 @@ export class SqliteResponsesHistory implements ResponsesHistory, ResponsesHistor
     if (originalItems === undefined) {
       throw new ResponsesContinuationError("checkpoint_unavailable", "continuation input is not replayable");
     }
-    let scoped: StoredResponse | undefined;
-    try {
-      scoped = this.readResponse(receipt.accountId, receipt.responseId);
-    } catch (error: unknown) {
-      if (error instanceof ResponsesContinuationError) {
-        throw error;
-      }
-      unavailableCheckpoint();
-    }
+    // Corrupt replay data surfaces as ResponsesContinuationError; storage errors propagate as failures.
+    const scoped = this.readResponse(receipt.accountId, receipt.responseId);
     if (scoped === undefined || scoped.formatVersion !== expectedFormatVersion) {
       unavailableCheckpoint();
     }

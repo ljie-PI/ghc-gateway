@@ -532,21 +532,37 @@ describe("Responses endpoint", () => {
   });
 
   it("fails continuation storage errors instead of sending without history", async () => {
-    const { gw, upstream, close } = await responsesGateway({
-      wrapHistory: (history) => ({
-        resolve: async () => { throw new Error("storage failure"); },
-        enrich: history.enrich.bind(history),
-        recordReceipt: history.recordReceipt.bind(history),
-        recordCheckpoint: history.recordCheckpoint.bind(history),
-      }),
-    });
-    try {
-      const response = await gw.fetch(responsesRequest({ model: "chat", previous_response_id: "resp_any", input: "hi" }));
-      expect(response.status).toBe(500);
-      await response.text();
-      expect(upstream.requests).toEqual([]);
-    } finally {
-      await close();
+    for (const failing of ["resolve", "enrich"] as const) {
+      const { gw, upstream, history, close } = await responsesGateway({
+        wrapHistory: (inner) => ({
+          resolve: failing === "resolve"
+            ? async () => { throw new Error("storage failure"); }
+            : inner.resolve.bind(inner),
+          enrich: failing === "enrich"
+            ? async () => { throw new Error("storage failure"); }
+            : inner.enrich.bind(inner),
+          recordReceipt: inner.recordReceipt.bind(inner),
+          recordCheckpoint: inner.recordCheckpoint.bind(inner),
+        }),
+      });
+      try {
+        await history.recordReceipt({
+          accountId: "github.com/1",
+          responseId: "resp_stored",
+          modelId: "chat",
+          upstreamOrigin: upstream.origin,
+          owner: "converted",
+          upstreamProtocol: "chat",
+          conversionVersion: "responses-chat-v2",
+          checkpointState: "complete",
+        }, new AbortController().signal);
+        const response = await gw.fetch(responsesRequest({ model: "chat", previous_response_id: "resp_stored", input: "hi" }));
+        expect(response.status, failing).toBe(500);
+        await response.text();
+        expect(upstream.requests).toEqual([]);
+      } finally {
+        await close();
+      }
     }
   });
 
