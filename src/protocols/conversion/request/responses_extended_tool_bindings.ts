@@ -1,7 +1,8 @@
 import { isWireJsonArray, isWireJsonObject, parseWireJson, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
+import { TOOL_RESULT_MEDIA_REPLACEMENT } from "../compatibility_markers.js";
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { type ResponsesToolCallBinding, type ResponsesToolResultBinding, type ResponsesToolSourceBinding } from "../types.js";
-import { invalid, unsupported } from "../wire.js";
+import { invalid } from "../wire.js";
 import { array, canonicalString, immutableWire, looksLikeNestedJson, type MutableState, object, optionalExtendedString, projectExtended, replaceMember, requiredObject, requiredString, single, sourceKey } from "./responses_extended_tool_shared.js";
 
 export function transformInput(state: MutableState, input: WireJson | undefined): WireJson {
@@ -124,8 +125,10 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
       if (resultValue === undefined) {
         invalid("REQ-R-EXT-RESULT-OUTPUT");
       }
-      if (containsMedia(resultValue)) {
-        unsupported("REQ-R-EXT-RESULT-MEDIA");
+      const hasMedia = containsMedia(resultValue);
+      if (hasMedia) {
+        if (containsReasoningCarrier(resultValue)) invalid("REQ-R-EXT-RESULT-MEDIA");
+        state.degradations.add("request.option_omitted");
       }
       const status = requestResultStatus(state, single(value, "status", "REQ-R-EXT-RESULT-STATUS"));
       const itemId = optionalItemId(state, value);
@@ -145,7 +148,8 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
         ["type", "function_call_output"],
         ...(itemId === undefined ? [] : [["id", itemId] as const]),
         ["call_id", callId],
-        ["output", type === "function_call_output" ? canonicalResult(resultValue) : canonicalString(sanitized)],
+        ["output", hasMedia ? TOOL_RESULT_MEDIA_REPLACEMENT
+          : type === "function_call_output" ? canonicalResult(resultValue) : canonicalString(sanitized)],
         ...(status === undefined ? [] : [["status", status] as const]),
       ]));
       continue;
