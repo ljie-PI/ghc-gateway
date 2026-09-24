@@ -63,5 +63,7 @@ export interface UpstreamByteStream {
   readonly status: number;
   readonly headers: Headers;
   readonly bytes: AsyncIterable<Uint8Array>;
+  /** Bounded prefix of a non-2xx body, read only so diagnostics can record the error type/code. */
+  readonly errorBody?: Uint8Array;
   cancel(): Promise<void>;
 }

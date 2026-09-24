@@ -243,8 +243,9 @@ export class HttpCopilotBackend implements CopilotBackend {
       clientHeaderFields,
     );
     if (response.status < 200 || response.status >= 300) {
+      const errorBody = await readErrorPrefix(response, firstByteTimeoutMs, signal);
       await response.cancel();
-      return { status: response.status, headers: response.headers, body: new Uint8Array() };
+      return { status: response.status, headers: response.headers, body: errorBody };
     }
     try {
       const bytes = await readResponseBody(response.bytes, maxBodyBytes, firstByteTimeoutMs, signal);
@@ -278,7 +279,15 @@ export class HttpCopilotBackend implements CopilotBackend {
       clientHeaderFields,
     );
     if (response.status < 200 || response.status >= 300) {
+      const errorBody = await readErrorPrefix(response, firstByteTimeoutMs, signal);
       await response.cancel();
+      return {
+        status: response.status,
+        headers: response.headers,
+        bytes: { [Symbol.asyncIterator]: async function* () { /* the error body was consumed */ } },
+        errorBody,
+        cancel: async () => await response.cancel(),
+      };
     }
     return response;
   }
@@ -750,6 +759,50 @@ function safeRedirectTarget(location: string, current: string): string {
 }
 
 async function* empty(): AsyncIterable<Uint8Array> {}
+
+const ERROR_PREFIX_BYTES = 8 * 1024;
+const ERROR_PREFIX_TIMEOUT_MS = 5_000;
+
+/**
+ * Reads at most ERROR_PREFIX_BYTES of a rejected upstream body. It is never returned to clients; only
+ * diagnostics parse identifier-shaped error type/code values from it. Failures yield what was read.
+ */
+async function readErrorPrefix(
+  lease: Pick<UpstreamByteStream, "bytes">,
+  firstByteTimeoutMs: number | undefined,
+  signal: AbortSignal,
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<IteratorResult<Uint8Array>>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ done: true, value: undefined }),
+      Math.min(firstByteTimeoutMs ?? ERROR_PREFIX_TIMEOUT_MS, ERROR_PREFIX_TIMEOUT_MS),
+    );
+  });
+  const iterator = lease.bytes[Symbol.asyncIterator]();
+  try {
+    while (total < ERROR_PREFIX_BYTES && !signal.aborted) {
+      const next = await Promise.race([iterator.next(), deadline]);
+      if (next.done === true) break;
+      const chunk = next.value.subarray(0, ERROR_PREFIX_BYTES - total);
+      chunks.push(chunk);
+      total += chunk.byteLength;
+    }
+  } catch {
+    // Diagnostics are best-effort; the status alone still reaches the client.
+  } finally {
+    clearTimeout(timer);
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
 
 async function readResponseBody(
   source: AsyncIterable<Uint8Array>,

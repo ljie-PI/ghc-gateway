@@ -71,6 +71,7 @@ If a catalog refresh removes the preferred model, select another model explicitl
 Key behavior:
 
 - Selects one compatible native or converted upstream protocol per request.
+- Native requests are forwarded unchanged apart from model mapping, as in cc-switch, and Copilot validates them. The gateway checks only the fields it routes on: duplicate top-level members, `model`, `stream`, Responses `previous_response_id`, and the Anthropic version and beta headers. It also checks gateway reasoning handles. Chat streams always report usage, so an invalid `stream_options` value is replaced with `{"include_usage":true}`.
 - Converted requests to a Chat upstream send the output budget as the model's declared token field. When the model doesn't declare one, the gateway uses `max_tokens`, or `max_completion_tokens` for OpenAI o-series models, as cc-switch does. Chat-only models such as the Gemini Flash family are therefore available for agent mapping.
 - Supports streaming, tool calls, reasoning output, and compatible Responses continuations.
 - Responses `previous_response_id` continuation is best-effort:
@@ -116,8 +117,9 @@ Diagnostics:
 
 - Write bounded JSONL structure summaries to `<data-dir>\logs\diagnostics.jsonl`.
 - Cover validation, protocol selection, conversion, upstream activity, output, and termination.
+- Record the rule ID of a gateway request rejection. For upstream 4xx responses, they record only an identifier-shaped `error.type` and `error.code`, such as `invalid_request_error`.
 - Reuse the HTTP response request ID for correlation.
-- Exclude prompts, responses, tool content, credentials, opaque IDs, and raw upstream errors.
+- Exclude prompts, responses, tool content, credentials, opaque IDs, and raw upstream error bodies or messages.
 - Rotate at 10 MiB, retain up to five files, and prune diagnostic files older than seven days.
 - Require `--diagnostics` on each start or restart that should enable recording.
 

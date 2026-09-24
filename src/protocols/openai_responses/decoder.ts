@@ -9,6 +9,7 @@ export class ResponsesRequestDecodeError extends Error {
   constructor(
     readonly field: string,
     message: string,
+    readonly ruleId: string,
   ) {
     super(message);
     this.name = "ResponsesRequestDecodeError";
@@ -65,6 +66,7 @@ function optionalPlanningString(body: WireJsonObject, field: string): string | u
     throw new ResponsesRequestDecodeError(
       field,
       `Responses request field ${field} must be a non-empty string or null`,
+      "REQ-NATIVE-PREVIOUS-RESPONSE-ID",
     );
   }
   return value;
@@ -78,7 +80,7 @@ function planningBoolean(body: WireJsonObject, field: string, defaultValue: bool
 function assertNoDuplicateTopLevelFields(body: WireJsonObject): void {
   const duplicate = duplicateMemberNames(body)[0];
   if (duplicate !== undefined) {
-    throw new ResponsesRequestDecodeError(duplicate, `duplicate Responses request field: ${duplicate}`);
+    throw new ResponsesRequestDecodeError(duplicate, `duplicate Responses request field: ${duplicate}`, "REQ-NATIVE-DUPLICATE-MEMBER");
   }
 }
 
@@ -88,7 +90,7 @@ function optionalModel(body: WireJsonObject): string | undefined {
     return undefined;
   }
   if (typeof value !== "string" || value.length === 0) {
-    throw new ResponsesRequestDecodeError("model", "Responses request field model must be a non-empty string when present");
+    throw new ResponsesRequestDecodeError("model", "Responses request field model must be a non-empty string when present", "REQ-NATIVE-MODEL");
   }
   return value;
 }
@@ -106,6 +108,7 @@ function optionalNonEmptyString(
     throw new ResponsesRequestDecodeError(
       field,
       `Responses request field ${field} must be a non-empty string or null`,
+      "REQ-NATIVE-PREVIOUS-RESPONSE-ID",
     );
   }
   return value;
@@ -122,7 +125,7 @@ function optionalBoolean(body: WireJsonObject, field: string, defaultValue: bool
     return defaultValue;
   }
   if (value !== true && value !== false) {
-    throw new ResponsesRequestDecodeError(field, `Responses request field ${field} must be a boolean or null`);
+    throw new ResponsesRequestDecodeError(field, `Responses request field ${field} must be a boolean or null`, "REQ-NATIVE-STREAM");
   }
   return value;
 }

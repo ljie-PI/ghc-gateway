@@ -23,7 +23,7 @@ import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt } from "../../gateway/request_attempt.js";
 import { boundedCleanup } from "../../gateway/stream_execution.js";
 import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
-import { duplicateMemberNames, memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
+import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import type { TelemetryRecorder } from "../../telemetry/recorder.js";
@@ -49,10 +49,16 @@ import {
   serializeNativeMessagesRequest,
   validatedNativeMessagesBody,
 } from "./native.js";
+import { validateMessagesRequestSecurity } from "./request_validation.js";
 import {
-  validateMessagesRequestSecurity,
-  validateNativeMessagesRequestEnvelope,
-} from "./request_validation.js";
+  assertNoDuplicateTopLevelMembers,
+  carrierRuleFailure,
+  requestRuleFailure,
+  routingModel,
+  routingStream,
+} from "../native_preflight.js";
+
+const HEADER_ORIGIN = { source: "request", phase: "headers" } as const;
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -108,7 +114,6 @@ async function executeAnthropicMessages(
   scope.diagnostics?.stage("request_validation");
   assertAnthropicVersion(request.headers, scope.diagnostics);
   const betaFeatures = readAnthropicBetaFeatures(request.headers, scope.diagnostics);
-  const strictFailure = captureFailure(() => validateNativeMessagesRequestEnvelope(request.body!));
   validateMessagesRequestSecurity(request.body);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
@@ -118,7 +123,7 @@ async function executeAnthropicMessages(
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
   if (dependencies.reasoningCarriers === undefined && reasoningCarrierTokens(request.body, "messages").length > 0) {
-    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    throw carrierRuleFailure("REQ-CARRIER-UNAVAILABLE");
   }
   const carrierClaim = dependencies.reasoningCarriers === undefined
     ? undefined
@@ -128,7 +133,7 @@ async function executeAnthropicMessages(
     && carrierClaim !== undefined
     && requestedModel.value !== carrierClaim.binding.modelId
   ) {
-    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    throw carrierRuleFailure("REQ-CARRIER-MODEL");
   }
   const effectiveModel = carrierClaim?.binding.modelId ?? requestedModel.value;
   const preference = effectiveModel === undefined ? dependencies.preferences.get(account.accountId) : null;
@@ -184,10 +189,10 @@ async function executeAnthropicMessages(
     scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
   if (plan.kind === "native") {
-    if (duplicateMemberNames(request.body).length > 0) {
-      throw new GatewayFailureError({ kind: "invalid_request" });
-    }
-    if (strictFailure !== undefined) throw strictFailure;
+    // Like cc-switch: forward unchanged apart from model mapping; Copilot validates the rest.
+    assertNoDuplicateTopLevelMembers(request.body);
+    routingModel(request.body);
+    routingStream(request.body);
     return withUpstreamProtocol(
       await executeNativeMessages(
         copilot,
@@ -203,14 +208,6 @@ async function executeAnthropicMessages(
     );
   }
 
-  function captureFailure(work: () => void): unknown | undefined {
-    try {
-      work();
-      return undefined;
-    } catch (error: unknown) {
-      return error;
-    }
-  }
   return withUpstreamProtocol(
     await executeConvertedMessages(
       dependencies,
@@ -383,7 +380,7 @@ function assertAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnosti
   });
   if (value === null || value.includes(",") || value.trim() !== "2023-06-01") {
     diagnostics?.stage("request_validation", { code: value === null ? "anthropic_version_missing" : "anthropic_version_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
+    throw requestRuleFailure("REQ-M-VERSION", HEADER_ORIGIN);
   }
 }
 
@@ -395,11 +392,11 @@ function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagno
   const encodedBytes = new TextEncoder().encode(values).byteLength;
   if (encodedBytes > ANTHROPIC_BETA_LIMITS.bytes) {
     diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
+    throw requestRuleFailure("REQ-M-BETA", HEADER_ORIGIN);
   }
   if (values.trim().length === 0) {
     diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
+    throw requestRuleFailure("REQ-M-BETA", HEADER_ORIGIN);
   }
   const features = values.split(",").map((value) => value.trim());
   if (
@@ -407,7 +404,7 @@ function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagno
     || !features.every(isMessagesBetaToken)
   ) {
     diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
+    throw requestRuleFailure("REQ-M-BETA", HEADER_ORIGIN);
   }
   const supported = new Set<string>(MESSAGES_BETA_FEATURES);
   diagnostics?.set({

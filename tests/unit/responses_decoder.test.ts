@@ -48,6 +48,14 @@ describe("Responses request decoder", () => {
     expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":false,\"stream\":true}").field).toBe("stream");
   });
 
+  it("names the diagnostic rule for each native routing rejection", () => {
+    expect(expectDecodeError("{\"model\":4}").ruleId).toBe("REQ-NATIVE-MODEL");
+    expect(expectDecodeError("{\"model\":\"gpt\",\"model\":\"other\"}").ruleId).toBe("REQ-NATIVE-DUPLICATE-MEMBER");
+    expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":\"true\"}").ruleId).toBe("REQ-NATIVE-STREAM");
+    expect(expectDecodeError("{\"model\":\"gpt\",\"previous_response_id\":\"\"}").ruleId)
+      .toBe("REQ-NATIVE-PREVIOUS-RESPONSE-ID");
+  });
+
   it("applies stream default without coercing preserved fields", () => {
     const decoded = decodeResponsesRequest(objectFromJson([
       "{\"metadata\":{\"temperature\":0.7},",

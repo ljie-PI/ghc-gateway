@@ -18,6 +18,7 @@ import {
   type ReasoningCarrierStore,
 } from "./reasoning_carriers.js";
 import type { InferenceProtocol } from "./types.js";
+import { carrierRuleFailure } from "../native_preflight.js";
 
 export interface ReasoningCarrierClaim {
   readonly binding: ReasoningCarrierBinding;
@@ -39,7 +40,7 @@ export function claimReasoningCarriers(
     }
     return { binding, tokens };
   } catch (error: unknown) {
-    if (error instanceof ReasoningCarrierError) unavailable(error);
+    if (error instanceof ReasoningCarrierError) unavailable();
     throw error;
   }
 }
@@ -54,7 +55,7 @@ export function resolveReasoningCarriers(
     if (!sameBinding(claim.binding, expected)) unavailable();
     return new Map(claim.tokens.map((token) => [token, store.resolve(token, expected)]));
   } catch (error: unknown) {
-    if (error instanceof ReasoningCarrierError) unavailable(error);
+    if (error instanceof ReasoningCarrierError) unavailable();
     throw error;
   }
 }
@@ -160,11 +161,6 @@ function upstreamOrigin(endpoint: string): string {
   }
 }
 
-function unavailable(cause?: unknown): never {
-  throw new GatewayFailureError({
-    kind: "invalid_request",
-    source: "converter",
-    phase: "convert",
-    ...(cause === undefined ? {} : { cause }),
-  });
+function unavailable(): never {
+  throw carrierRuleFailure("REQ-CARRIER-UNAVAILABLE");
 }

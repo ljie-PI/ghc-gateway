@@ -45,6 +45,7 @@ import {
   ResponsesRequestDecodeError,
 } from "./decoder.js";
 import { consumeResponsesPreviousResponseId } from "./dto.js";
+import { carrierRuleFailure, requestRuleFailure } from "../native_preflight.js";
 import {
   type ResponsesContinuationOwnership,
   type ResponsesHistory,
@@ -185,7 +186,7 @@ async function prepareResponsesExecution(
     : claimReasoningCarriers(body, "responses", account.accountId, dependencies.reasoningCarriers);
   if (decoded.model !== undefined && initialCarrierClaim !== undefined
     && decoded.model !== initialCarrierClaim.binding.modelId) {
-    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+    throw carrierRuleFailure("REQ-CARRIER-MODEL");
   }
   const continuation = await resolveResponsesContinuation(
     dependencies.history, decoded.previousResponseId, account.accountId, scope.signal,
@@ -259,20 +260,19 @@ function decodeRequest(body: WireJsonObject) {
   try {
     return decodeResponsesPlanningRequest(body);
   } catch (error: unknown) {
-    if (error instanceof ResponsesRequestDecodeError) {
-      throw new GatewayFailureError({ kind: "invalid_request", cause: error });
-    }
+    if (error instanceof ResponsesRequestDecodeError) throw requestRuleFailure(error.ruleId);
     throw error;
   }
 }
 
+/** Native Responses requests are forwarded unchanged apart from model mapping; only routing fields are checked. */
 function captureStrictDecodeFailure(body: WireJsonObject): GatewayFailureError | undefined {
   try {
     decodeResponsesRequest(body);
     return undefined;
   } catch (error: unknown) {
     return error instanceof ResponsesRequestDecodeError
-      ? new GatewayFailureError({ kind: "invalid_request", cause: error })
+      ? requestRuleFailure(error.ruleId)
       : new GatewayFailureError({ kind: "internal", cause: error });
   }
 }

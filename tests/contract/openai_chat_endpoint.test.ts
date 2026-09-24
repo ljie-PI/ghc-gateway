@@ -367,7 +367,7 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
-  it("rejects stream-true non-object stream_options", async () => {
+  it("replaces stream-true non-object stream_options with usage reporting instead of rejecting", async () => {
     const backend = new CapturingCopilotBackend({
       chatStream: {
         status: 200,
@@ -379,8 +379,11 @@ describe("OpenAI Chat endpoint", () => {
     const { gw, close } = await openAiGateway(backend);
     try {
       const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true,\"stream_options\":null}"));
-      expect(response.status).toBe(400);
-      expect(backend.chatStreamRequests).toHaveLength(0);
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(backend.chatStreamRequests).toHaveLength(1);
+      expect(new TextDecoder().decode(backend.chatStreamRequests[0]!.body))
+        .toBe("{\"model\":\"gpt\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}");
     } finally {
       await close();
     }
@@ -398,7 +401,7 @@ describe("OpenAI Chat endpoint", () => {
     });
     try {
       const response = await gw.fetch(jsonRequest(
-        "{\"model\":\"responses\",\"stream\":true,\"stream_options\":null,\"messages\":[],\"n\":2}",
+        "{\"model\":\"responses\",\"stream\":\"yes\",\"messages\":[],\"n\":2}",
       ));
       expect(response.status).toBe(400);
       expect(backend.responsesRequests).toEqual([]);

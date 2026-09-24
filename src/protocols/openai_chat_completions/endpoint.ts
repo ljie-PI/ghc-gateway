@@ -22,7 +22,6 @@ import {
   boundedCleanup,
 } from "../../gateway/stream_execution.js";
 import {
-  duplicateMemberNames,
   isWireJsonArray,
   isWireJsonObject,
   memberValues,
@@ -52,6 +51,12 @@ import {
   nativeChatCompletionsUsage,
   validatedNativeChatCompletionsBody,
 } from "./native.js";
+import {
+  assertNoDuplicateTopLevelMembers,
+  carrierRuleFailure,
+  routingModel,
+  routingStream,
+} from "../native_preflight.js";
 
 export interface OpenaiChatCompletionsRouteDependencies {
   readonly directory: AccountDirectory;
@@ -120,7 +125,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
           : claimReasoningCarriers(decoded.body, "chat", account.accountId, dependencies.reasoningCarriers);
         if (decoded.requestedModel !== undefined && carrierClaim !== undefined
           && decoded.requestedModel !== carrierClaim.binding.modelId) {
-          throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+          throw carrierRuleFailure("REQ-CARRIER-MODEL");
         }
         const requestedModel = carrierClaim?.binding.modelId ?? decoded.requestedModel;
         const preference = requestedModel === undefined
@@ -335,31 +340,14 @@ function attemptUsage(value: Readonly<SemanticUsage>) {
   };
 }
 
+/** Native Chat requests are forwarded unchanged apart from model mapping; only routing fields are checked. */
 export function decodeOpenaiChatCompletionsRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
-  if (duplicateMemberNames(body).length > 0) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-
-  const model = memberValues(body, "model")[0];
-  if (model !== undefined && (typeof model !== "string" || model.length === 0)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-
-  const streamValue = memberValues(body, "stream")[0];
-  if (streamValue !== undefined && streamValue !== true && streamValue !== false) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  if (streamValue === true) {
-    const streamOptions = memberValues(body, "stream_options")[0];
-    if (streamOptions !== undefined) {
-      validateStreamOptions(streamOptions);
-    }
-  }
-
+  assertNoDuplicateTopLevelMembers(body);
+  const model = routingModel(body);
   return {
     body,
     ...(model === undefined ? {} : { requestedModel: model }),
-    stream: streamValue === true,
+    stream: routingStream(body),
   };
 }
 
@@ -541,33 +529,19 @@ function upstreamCallFailure(error: unknown, signal: AbortSignal): GatewayFailur
   );
 }
 
+/** Keeps client stream options and forces usage reporting, which accounting needs; bad values are replaced. */
 function prepareStreamOptions(value: WireJson): WireJsonObject {
-  validateStreamOptions(value);
   if (!isWireJsonObject(value)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
+    return { kind: "object", members: [{ key: "include_usage", value: true }] };
   }
-  const includeUsageCount = value.members.filter((member) => member.key === "include_usage").length;
-  if (includeUsageCount > 1) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  if (includeUsageCount === 0) {
-    return { kind: "object", members: [...value.members, { key: "include_usage", value: true }] };
-  }
-  return {
-    kind: "object",
-    members: value.members.map((member) => member.key === "include_usage"
-      ? { key: member.key, value: true }
-      : member),
-  };
-}
-
-function validateStreamOptions(value: WireJson): void {
-  if (!isWireJsonObject(value)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  if (value.members.filter((member) => member.key === "include_usage").length > 1) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
+  let seen = false;
+  const members = value.members.flatMap((member) => {
+    if (member.key !== "include_usage") return [member];
+    if (seen) return [];
+    seen = true;
+    return [{ key: member.key, value: true }];
+  });
+  return { kind: "object", members: seen ? members : [...members, { key: "include_usage", value: true }] };
 }
 
 function hasVisionInput(body: WireJsonObject): boolean {
