@@ -64,7 +64,7 @@ If the selected model is no longer available, use `ghcg models set` to select an
 | `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
 | `POST` | `/v1/responses` | OpenAI Responses |
 | `POST` | `/v1/messages` | Anthropic Messages |
-| `GET` | `/v1/models` | OpenAI models; Anthropic format when `anthropic-version` is present |
+| `GET` | `/v1/models` | OpenAI models and effective capabilities; Anthropic format when `anthropic-version` is present |
 | `GET` | `/healthz` | Liveness check |
 | `GET` | `/readyz` | Readiness check |
 | `GET` | `/` | Admin UI |
