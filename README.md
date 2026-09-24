@@ -71,6 +71,7 @@ If a catalog refresh removes the preferred model, select another model explicitl
 Key behavior:
 
 - Selects one compatible native or converted upstream protocol per request.
+- OpenAI `/v1/models` entries include conservative effective capability metadata such as `supported_reasoning_efforts`, context windows, input modalities, tool calling, reasoning summaries, verbosity, and search support. Missing, malformed, conflicting, or route-unproven declarations are advertised as unsupported.
 - Converted requests to a Chat upstream send the output budget as the model's declared token field. When the model doesn't declare one, the gateway uses `max_tokens`, or `max_completion_tokens` for OpenAI o-series models, as cc-switch does. Chat-only models such as the Gemini Flash family are therefore available for agent mapping.
 - Supports streaming, tool calls, reasoning output, and compatible Responses continuations.
 - Responses `previous_response_id` continuation is best-effort:
