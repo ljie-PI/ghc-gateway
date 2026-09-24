@@ -1,10 +1,10 @@
+import { containsReasoningCarrier } from "./reasoning_carriers.js";
 import type { WireJson, WireJsonObject } from "../../serialization/wire_json.js";
 import {
   type ConversionDegradationRecorder,
   type ConversionDegradationRule,
 } from "./degradations.js";
 import {
-  ConversionContractError,
   type SemanticRequestItem,
   type SemanticTool,
   type SemanticToolCallItem,
@@ -253,18 +253,17 @@ export function reconcileProjectedToolControls(input: Readonly<{
   readonly degradations: ConversionDegradationRecorder;
 }>): { readonly toolChoice?: SemanticToolChoice; readonly parallelToolCalls?: boolean } {
   const names = new Set(input.tools.map((tool) => tool.name));
-  if (
+  const toolChoice = (
     (input.toolChoice?.kind === "tool" && !names.has(input.toolChoice.name))
     || (input.toolChoice?.kind === "required" && names.size === 0)
-  ) {
-    throw new ConversionContractError("invalid_request", "REQ-TOOL-CHOICE-REMOVED");
-  }
+  ) ? undefined : input.toolChoice;
+  if (input.toolChoice !== undefined && toolChoice === undefined) input.degradations.add("request.option_omitted");
   const parallelToolCalls = names.size === 0 ? undefined : input.parallelToolCalls;
   if (input.parallelToolCalls !== undefined && parallelToolCalls === undefined) {
     input.degradations.add("tools.parallel_control_omitted");
   }
   return {
-    ...(input.toolChoice === undefined ? {} : { toolChoice: input.toolChoice }),
+    ...(toolChoice === undefined ? {} : { toolChoice }),
     ...(parallelToolCalls === undefined ? {} : { parallelToolCalls }),
   };
 }
@@ -283,15 +282,26 @@ export function projectToolRequest(input: Readonly<{
   readonly parallelToolCalls?: boolean;
 } {
   const items = projectCompleteToolRounds(input.candidates, input.degradations);
-  const controls = reconcileProjectedToolControls(input);
+  const seen = new Set<string>();
+  const tools = input.tools.filter((tool) => {
+    if (seen.has(tool.name)) {
+      if ([tool.name, tool.description, tool.sourceName, tool.namespace, tool.parameters]
+        .some((value) => value !== undefined && containsReasoningCarrier(value))) invalid("REQ-TOOL-DUPLICATE");
+      input.degradations.add("request.option_omitted");
+      return false;
+    }
+    seen.add(tool.name);
+    return true;
+  });
+  const controls = reconcileProjectedToolControls({ ...input, tools });
   validateSemanticBindings({
     source: input.source,
     stream: false,
     instructions: [],
     items,
-    tools: input.tools,
+    tools,
     ...controls,
     degradations: [],
   });
-  return { items, tools: input.tools, ...controls };
+  return { items, tools, ...controls };
 }

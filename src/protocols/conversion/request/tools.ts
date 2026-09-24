@@ -1,9 +1,9 @@
 import { isWireJsonArray, isWireJsonObject, parseWireJson, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { projectToolRequest } from "../request_projection.js";
-import { isOpenaiStrictSchemaCompatible } from "../strict_schema.js";
+import { cleanChatToolSchema, isOpenaiStrictSchemaCompatible } from "../strict_schema.js";
 import { type ConversionDegradationRule, type SemanticRequestItem, type SemanticTool, type SemanticToolChoice, type SemanticToolResultItem } from "../types.js";
-import { invalid, jsonObjectString, oneMember, optionalBoolean, optionalString, requiredObject, requiredString, unsupported, wireObject } from "../wire.js";
+import { invalid, jsonObjectString, oneMember, optionalBoolean, optionalString, requiredObject, requiredString, wireObject } from "../wire.js";
 import { decodeToolResultContent } from "./content.js";
 import { MESSAGES_SENSITIVE_EXTENSION_FIELDS, optionalChoiceString, optionalDiscriminator, optionalProtocolArray, optionalProtocolObject, projectMessagesMembers, projectRequestMembers, requestObject, TOOL_SENSITIVE_EXTENSION_FIELDS, validateCacheControl } from "./projection.js";
 
@@ -196,7 +196,8 @@ export function decodeMessagesTools(
     }
     const decoded = semanticTool(tool, "input_schema", "REQ-M-TOOL", false);
     if (decoded.strict === true && !isOpenaiStrictSchemaCompatible(decoded.parameters)) {
-      unsupported("REQ-M-TOOL-STRICT-SCHEMA");
+      degradations.add("request.option_omitted");
+      return [{ ...decoded, strict: undefined }];
     }
     return [decoded];
   });
@@ -236,14 +237,15 @@ export function decodeResponsesTools(
       return [];
     }
     const decoded = semanticTool(tool, "parameters", "REQ-R-TOOL");
-    if (decoded.strict !== undefined) {
-      return [decoded];
+    const compatible = isOpenaiStrictSchemaCompatible(decoded.parameters);
+    if (decoded.strict === true && !compatible) {
+      degradations.add("request.option_omitted");
+      return [{ ...decoded, strict: undefined }];
     }
-    if (!isOpenaiStrictSchemaCompatible(decoded.parameters)) {
-      if (allowCompatibilityStrictOmission) {
-        return [decoded];
-      }
-      unsupported("REQ-R-TOOL-STRICT-AUTO");
+    if (decoded.strict !== undefined) return [decoded];
+    if (!compatible) {
+      if (!allowCompatibilityStrictOmission) degradations.add("request.option_omitted");
+      return [decoded];
     }
     return [{ ...decoded, strict: true }];
   });
@@ -477,13 +479,15 @@ export function projectSemanticToolRequest(
   });
 }
 
-export function encodeChatTool(tool: SemanticTool): WireJsonObject {
+export function encodeChatTool(tool: SemanticTool, degradations?: Set<ConversionDegradationRule>): WireJsonObject {
+  const cleaned = cleanChatToolSchema(tool.parameters);
+  if (cleaned.changed) degradations?.add("request.option_omitted");
   return wireObject([
     ["type", "function"],
     ["function", wireObject([
       ["name", tool.name],
       ["description", tool.description ?? (tool.sourceName === undefined ? undefined : null)],
-      ["parameters", tool.parameters],
+      ["parameters", cleaned.schema],
       ["strict", tool.kind === "custom" || tool.kind === "tool_search" ? undefined : tool.strict],
     ])],
   ]);

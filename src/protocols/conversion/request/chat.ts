@@ -305,7 +305,7 @@ export function encodeChatRequest(
       ["stop", targetRequest.stop === undefined ? undefined : wireArray(targetRequest.stop)],
       ["stream", targetRequest.stream ? true : undefined],
       ["stream_options", targetRequest.stream ? wireObject([["include_usage", true]]) : undefined],
-      ["tools", hasTools ? wireArray(targetRequest.tools.map(encodeChatTool)) : undefined],
+      ["tools", hasTools ? wireArray(targetRequest.tools.map((tool) => encodeChatTool(tool, targetDegradations))) : undefined],
       ["tool_choice", hasTools ? encodeChatToolChoice(targetRequest.toolChoice) : undefined],
       ["parallel_tool_calls", hasTools ? targetParallel.value : undefined],
       ["response_format", encodeChatOutputFormat(targetRequest.outputFormat)],
@@ -318,7 +318,7 @@ export function encodeChatRequest(
       ...targetRequest.responseBindings.chatPrefixMembers
         .filter((member) => member.key !== "parallel_tool_calls")
         .map((member) => [member.key, member.value] as const),
-      ["tools", hasTools ? wireArray(targetRequest.tools.map(encodeChatTool)) : undefined],
+      ["tools", hasTools ? wireArray(targetRequest.tools.map((tool) => encodeChatTool(tool, targetDegradations))) : undefined],
       ["tool_choice", hasTools ? encodeChatToolChoice(targetRequest.toolChoice) : undefined],
       ["parallel_tool_calls", hasTools ? targetParallel.value : undefined],
       ...(budget === undefined ? [] : [[tokenField, wireNumber(budget)] as const]),

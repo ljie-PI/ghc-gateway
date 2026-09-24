@@ -3,8 +3,11 @@ import {
   isWireJsonArray,
   isWireJsonObject,
   memberValues,
+  type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
+import { containsReasoningCarrier } from "./reasoning_carriers.js";
+import { invalid } from "./wire.js";
 
 export function isOpenaiStrictSchemaCompatible(
   schema: WireJsonObject,
@@ -104,4 +107,42 @@ export function isOpenaiStrictSchemaCompatible(
     }
   }
   return true;
+}
+
+export function cleanChatToolSchema(schema: WireJsonObject): { readonly schema: WireJsonObject; readonly changed: boolean } {
+  const result = cleanSchemaValue(schema, true, 0);
+  return { schema: result.value as WireJsonObject, changed: result.changed };
+}
+
+function cleanSchemaValue(value: WireJson, root: boolean, depth: number): { readonly value: WireJson; readonly changed: boolean } {
+  if (depth > 32) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+  if (isWireJsonArray(value)) {
+    let changed = false;
+    const items = value.items.map((item) => { const cleaned = cleanSchemaValue(item, false, depth + 1); changed ||= cleaned.changed; return cleaned.value; });
+    return { value: changed ? { ...value, items } : value, changed };
+  }
+  if (!isWireJsonObject(value)) return { value, changed: false };
+  let changed = false;
+  let hasType = false;
+  let hasProperties = false;
+  const members: Array<{ readonly key: string; readonly value: WireJson }> = [];
+  for (const member of value.members) {
+    if (member.key === "propertyNames" || (member.key === "format" && member.value === "uri")) {
+      if (containsReasoningCarrier(member.value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+      changed = true;
+      continue;
+    }
+    if (member.key === "type") hasType = true;
+    if (member.key === "properties") hasProperties = true;
+    let child = cleanSchemaValue(member.value, false, depth + 1);
+    if (member.key === "properties" && !isWireJsonObject(child.value)) {
+      if (containsReasoningCarrier(child.value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+      child = { value: { kind: "object", members: [] }, changed: true };
+    }
+    changed ||= child.changed;
+    members.push({ key: member.key, value: child.value });
+  }
+  if (root && !hasType) { members.unshift({ key: "type", value: "object" }); changed = true; }
+  if (root && !hasProperties) { members.push({ key: "properties", value: { kind: "object", members: [] } }); changed = true; }
+  return { value: changed ? Object.freeze({ kind: "object", members: Object.freeze(members) }) : value, changed };
 }
