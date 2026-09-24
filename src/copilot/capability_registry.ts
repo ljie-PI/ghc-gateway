@@ -2,6 +2,7 @@ import type { BoundAccount } from "../accounts/account_directory.js";
 import type { CatalogSnapshot, CopilotCatalogModel, CopilotModelCatalog } from "./model_catalog.js";
 import {
   effectiveField,
+  resolveChatOutputTokenField,
   resolveDefaultOutputTokens,
   sameProtocols,
   UNKNOWN_DECLARATIONS,
@@ -76,11 +77,10 @@ export class ModelCapabilityRegistry {
   modelsUsableForAgentMapping(
     snapshot: Readonly<CapabilityCatalogSnapshot>,
   ): readonly EffectiveModelCapabilitySnapshot[] {
+    // Every effective profile carries a Chat token field, so chat-only models need no declaration.
     return snapshot.models.filter((model) => model.protocols.value !== null
       && model.protocols.value.length > 0
-      && model.defaultOutputTokens.valid
-      && (!model.protocols.value.every((protocol) => protocol === "chat")
-        || model.profile.chatOutputTokenField.value !== null));
+      && model.defaultOutputTokens.valid);
   }
 
   async close(): Promise<void> {
@@ -117,10 +117,15 @@ export class ModelCapabilityRegistry {
       live.maxOutputTokens,
       fallback.maxOutputTokens,
     );
-    const chatOutputTokenField = effectiveField(
+    const declaredChatOutputTokenField = effectiveField(
       live.chatOutputTokenField,
       fallback.chatOutputTokenField,
     );
+    // Undeclared fields keep source "unknown" but carry the value the Chat encoder sends.
+    const chatOutputTokenField = {
+      ...declaredChatOutputTokenField,
+      value: resolveChatOutputTokenField(model.id, declaredChatOutputTokenField),
+    };
     const supportedParameters = effectiveField(
       live.supportedParameters,
       fallback.supportedParameters,

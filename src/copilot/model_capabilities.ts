@@ -116,6 +116,20 @@ export function resolveModelReasoningEffort(
   return { kind: "unsupported" };
 }
 
+/**
+ * The Chat output-token field for a model. A declared field wins; otherwise this follows cc-switch
+ * (`is_openai_o_series` in `proxy/providers/transform.rs`): OpenAI o-series models (`o` followed by
+ * a digit) take `max_completion_tokens` and every other Chat model takes `max_tokens`, which is also
+ * what Copilot's own client sends to `/chat/completions`.
+ */
+export function resolveChatOutputTokenField(
+  modelId: string,
+  declared: Pick<EffectiveCapabilityField<ChatOutputTokenField>, "value">,
+): ChatOutputTokenField {
+  if (declared.value !== null) return declared.value;
+  return /^o\d/u.test(modelId) ? "max_completion_tokens" : "max_tokens";
+}
+
 export interface BuiltinModelCapabilities {
   readonly revision: string;
   readonly capabilities: DeclaredModelCapabilities;

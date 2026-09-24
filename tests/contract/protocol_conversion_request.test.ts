@@ -1348,24 +1348,49 @@ describe("shared conversion request codecs", () => {
     ]);
   });
 
-  it("rejects a Responses output budget when the Chat token dialect is unavailable", () => {
+  it.each([
+    ["target", null, "max_tokens"],
+    ["o3-mini", null, "max_completion_tokens"],
+    ["o4-mini", null, "max_completion_tokens"],
+    ["gpt-4o", null, "max_tokens"],
+    ["target", "max_completion_tokens", "max_completion_tokens"],
+    ["o3-mini", "max_tokens", "max_tokens"],
+  ] as const)("uses the %s Chat token field declared as %s like cc-switch: %s", (modelId, declared, expected) => {
     const base = capability(["chat"]);
-    expect(() => prepareConvertedRequest("responses", "chat", body({
+    const converted = prepareConvertedRequest("responses", "chat", body({
       model: "source",
       input: "hi",
       max_output_tokens: 9,
-    }), "target", {
+    }), modelId, {
       ...base,
+      modelId,
       profile: {
         ...base.profile,
-        chatOutputTokenField: {
-          value: null,
-          source: "unknown",
-          conflict: false,
-          liveState: "missing",
-        },
+        chatOutputTokenField: declared === null
+          ? { value: null, source: "unknown", conflict: false, liveState: "missing" }
+          : { value: declared, source: "live", conflict: false, liveState: "value" },
       },
-    })).toThrow();
+    });
+    const sent = decoded(converted.bytes);
+    expect(sent[expected]).toBe(9);
+    expect(sent[expected === "max_tokens" ? "max_completion_tokens" : "max_tokens"]).toBeUndefined();
+  });
+
+  it("maps a Messages output budget to max_tokens for an undeclared Chat model", () => {
+    const base = capability(["chat"]);
+    const converted = prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hi" }],
+    }), "gemini-3.8-flash", {
+      ...base,
+      modelId: "gemini-3.8-flash",
+      profile: {
+        ...base.profile,
+        chatOutputTokenField: { value: null, source: "unknown", conflict: false, liveState: "missing" },
+      },
+    });
+    expect(decoded(converted.bytes)).toMatchObject({ model: "gemini-3.8-flash", max_tokens: 64 });
   });
 
   it.each(["chat", "messages"] as const)(
