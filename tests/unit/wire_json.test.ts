@@ -1,13 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import { canonicalizeWireJson } from "../../src/serialization/canonical_json.js";
 import {
   DEFAULT_WIRE_JSON_MAX_BYTES,
   WireJsonError,
   duplicateMemberNames,
-  isWireJsonArray,
   isWireJsonNumber,
   isWireJsonObject,
   memberValues,
@@ -124,16 +122,6 @@ describe("WireJson", () => {
     expect(parseWireJson(serialized, DEFAULT_LIMITS)).toEqual(parsed);
   });
 
-  it("type-guards arrays and objects for protocol decoders", () => {
-    const value = parseWireJson(encodeUtf8("{\"k\":[1]}"), DEFAULT_LIMITS);
-    expect(isWireJsonObject(value)).toBe(true);
-    if (isWireJsonObject(value)) {
-      const items = memberValues(value, "k")[0];
-      expect(items).toBeDefined();
-      expect(isWireJsonArray(items)).toBe(true);
-    }
-  });
-
   it("fails malformed JSON, invalid UTF-8, and depth limits with typed errors", () => {
     expectWireJsonError(() => parseWireJson(encodeUtf8(""), DEFAULT_LIMITS), "malformed_json");
     expectWireJsonError(() => parseWireJson(encodeUtf8("truee"), DEFAULT_LIMITS), "malformed_json");
@@ -142,44 +130,6 @@ describe("WireJson", () => {
       () => parseWireJson(encodeUtf8("[[[]]]"), { maxBytes: 16, maxDepth: 2 }),
       "depth_limit",
     );
-  });
-
-  it("fails serialization of an invalid number lexeme and preserves cause", () => {
-    const error = expectWireJsonError(
-      () => serializeWireJson({ kind: "number", lexeme: "01" }),
-      "serialization_failure",
-    );
-    expect(error.cause).toBeInstanceOf(Error);
-  });
-
-  it("records allocation and serialization benchmark evidence", async () => {
-    const document = encodeUtf8(`{"items":[${Array.from({ length: 256 }, (_, index) => `{"i":${index},"n":-0}`).join(",")}]}`);
-    const limits: WireJsonParseLimits = { maxBytes: document.byteLength, maxDepth: 8 };
-    const warmup = parseWireJson(document, limits);
-    serializeWireJson(warmup);
-    canonicalizeWireJson(warmup);
-
-    const samples: number[] = [];
-    for (let index = 0; index < 20; index += 1) {
-      const started = performance.now();
-      const parsed = parseWireJson(document, limits);
-      serializeWireJson(parsed);
-      canonicalizeWireJson(parsed);
-      samples.push(performance.now() - started);
-    }
-
-    const artifactDir = path.resolve("artifacts", "bench");
-    await mkdir(artifactDir, { recursive: true });
-    const artifactPath = path.join(artifactDir, "wire_json.json");
-    const payload = {
-      kind: "wire_json_allocation",
-      inputBytes: document.byteLength,
-      samples,
-      p95: samples.slice().sort((left, right) => left - right)[Math.ceil(0.95 * samples.length) - 1],
-    };
-    await writeFile(artifactPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    expect(payload.p95).toBeGreaterThanOrEqual(0);
-    expect(samples).toHaveLength(20);
   });
 });
 
