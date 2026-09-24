@@ -314,20 +314,37 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
-  it("rejects duplicate top-level keys, invalid preference, and unknown explicit models before chat", async () => {
+  it.each([
+    ["duplicate members", "{\"model\":\"gpt\",\"\\u006dodel\":\"gpt\",\"messages\":[]}", "{\"model\":\"gpt\",\"model\":\"gpt\",\"messages\":[]}"],
+    ["non-string model", "{\"model\":4,\"messages\":[]}", "{\"model\":\"gpt\",\"messages\":[]}"],
+    ["non-boolean stream", "{\"model\":\"gpt\",\"stream\":\"yes\",\"messages\":[]}", "{\"model\":\"gpt\",\"stream\":\"yes\",\"messages\":[]}"],
+  ])("forwards %s to native Chat instead of rejecting them", async (_name, body, upstreamBody) => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{\"choices\":[]}") },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest(body));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(backend.chatRequests).toHaveLength(1);
+      expect(decoder.decode(backend.chatRequests[0]!.body)).toBe(upstreamBody);
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects requests without a usable model and unknown explicit models before chat", async () => {
     const backend = new CapturingCopilotBackend({
       chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
     });
     const { gw, close } = await openAiGateway(backend, { preferred: "invalid", requestId: "req_error" });
     try {
-      const duplicate = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"\\u006dodel\":\"gpt\"}"));
-      expect(duplicate.status).toBe(400);
-      expect(await duplicate.text()).toBe(
-        "{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
-      );
-
       const missing = await gw.fetch(jsonRequest("{\"messages\":[]}"));
       expect(missing.status).toBe(400);
+      expect(await missing.text()).toBe(
+        "{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      );
 
       const unknown = await gw.fetch(jsonRequest("{\"model\":\"unknown\",\"messages\":[]}"));
       expect(unknown.status).toBe(404);
@@ -367,7 +384,7 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
-  it("rejects stream-true non-object stream_options", async () => {
+  it("replaces stream-true non-object stream_options with usage reporting instead of rejecting", async () => {
     const backend = new CapturingCopilotBackend({
       chatStream: {
         status: 200,
@@ -379,29 +396,11 @@ describe("OpenAI Chat endpoint", () => {
     const { gw, close } = await openAiGateway(backend);
     try {
       const response = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"stream\":true,\"stream_options\":null}"));
-      expect(response.status).toBe(400);
-      expect(backend.chatStreamRequests).toHaveLength(0);
-    } finally {
-      await close();
-    }
-  });
-
-  it("keeps strict 400 precedence when converted planning also fails", async () => {
-    const backend = new CapturingCopilotBackend({});
-    const { gw, close } = await openAiGateway(backend, {
-      capiFetch: async () => ({
-        data: [{
-          id: "responses", name: "Responses", vendor: "test", model_picker_enabled: true,
-          model_info: { supported_endpoints: ["/responses"] },
-        }],
-      }),
-    });
-    try {
-      const response = await gw.fetch(jsonRequest(
-        "{\"model\":\"responses\",\"stream\":true,\"stream_options\":null,\"messages\":[],\"n\":2}",
-      ));
-      expect(response.status).toBe(400);
-      expect(backend.responsesRequests).toEqual([]);
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(backend.chatStreamRequests).toHaveLength(1);
+      expect(new TextDecoder().decode(backend.chatStreamRequests[0]!.body))
+        .toBe("{\"model\":\"gpt\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}");
     } finally {
       await close();
     }

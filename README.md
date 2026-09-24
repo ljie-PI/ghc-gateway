@@ -70,6 +70,8 @@ If the selected model is no longer available, use `ghcg models set` to select an
 | `GET` | `/` | Admin UI |
 | `GET`, `POST`, `PUT`, `DELETE` | `/admin/api/v1/*` | Admin API and event stream |
 
+When the selected model supports the requested API, the request is forwarded unchanged except for the model name, and Copilot validates it.
+
 ## Configuration
 
 Global options are `--data-dir <path>` and `--json`. Startup settings use CLI values first, then environment variables, then defaults:
@@ -93,7 +95,7 @@ ghcg start --diagnostics
 ghcg restart --diagnostics
 ```
 
-Diagnostics are written to `<data-dir>/logs/diagnostics.jsonl`. They use request IDs for correlation and exclude prompts, responses, tool content, credentials, internal identifiers, and provider error bodies. Files rotate at 10 MiB, retain up to five files, and are removed after seven days.
+Diagnostics are written to `<data-dir>/logs/diagnostics.jsonl`. They use request IDs for correlation and exclude prompts, responses, tool content, credentials, internal identifiers, and provider error bodies. For provider errors, only the error type and code are recorded. Files rotate at 10 MiB, retain up to five files, and are removed after seven days.
 
 Diagnostics must be enabled again on each start or restart.
 

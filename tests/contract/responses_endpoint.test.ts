@@ -60,25 +60,11 @@ describe("Responses endpoint", () => {
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/openai/v1/responses", { method: "POST" }))).status).toBe(404);
       expect((await gw.fetch(new Request("http://127.0.0.1:31400/v1/responses/compact", { method: "POST" }))).status).toBe(404);
 
-      const malformedContinuation = await gw.fetch(responsesRequest({
-        model: "native",
-        previous_response_id: 8,
-        input: "hi",
-      }));
-      expect(malformedContinuation.status).toBe(400);
-      await malformedContinuation.text();
-
       const unknown = await gw.fetch(responsesRequest({ model: "missing", input: "hi" }));
       expect(unknown.status).toBe(404);
       expect(await unknown.text()).toBe("{\"error\":{\"message\":\"model not found\",\"type\":\"not_found_error\",\"param\":null,\"code\":null}}");
       expect(upstream.requests).toEqual([]);
       expect(usageUpdates).toMatchObject([
-        {
-          protocol: "openai_responses_unknown",
-          outcome: "client_error",
-          accountId: "unbound",
-          resolvedModel: "unresolved",
-        },
         {
           protocol: "openai_responses_unknown",
           outcome: "client_error",
@@ -88,6 +74,27 @@ describe("Responses endpoint", () => {
           errorCount: 1,
         },
       ]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("forwards unusable routing values natively and drops an unusable continuation on converted routes", async () => {
+    const decoded = (body: Uint8Array) => JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>;
+    const { gw, upstream, close } = await responsesGateway({ expectations: [
+      { method: "POST", path: "/responses", body: (body) => decoded(body).previous_response_id === 8,
+        reply: { status: 200, headers: {}, body: text("{\"id\":\"resp_1\",\"output\":[]}") } },
+      { method: "POST", path: "/chat/completions", body: (body) => !("previous_response_id" in decoded(body)),
+        reply: { status: 200, headers: {}, body: text("{\"id\":\"chatcmpl_1\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}") } },
+    ] });
+    try {
+      const native = await gw.fetch(responsesRequest({ model: "native", previous_response_id: 8, input: "hi" }));
+      expect(native.status).toBe(200);
+      await native.text();
+      const converted = await gw.fetch(responsesRequest({ model: "chat", previous_response_id: "", input: "hi" }));
+      expect(converted.status).toBe(200);
+      await converted.text();
+      expect(upstream.requests).toHaveLength(2);
     } finally {
       await close();
     }

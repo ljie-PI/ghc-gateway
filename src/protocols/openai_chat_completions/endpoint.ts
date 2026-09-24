@@ -22,7 +22,6 @@ import {
   boundedCleanup,
 } from "../../gateway/stream_execution.js";
 import {
-  duplicateMemberNames,
   isWireJsonArray,
   isWireJsonObject,
   memberValues,
@@ -103,62 +102,51 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
       }
 
       scope.diagnostics?.stage("request_validation");
-      const strictFailure = captureFailure(() => decodeOpenaiChatCompletionsRequest(request.body!));
-      const decoded = decodeOpenaiChatCompletionsPlanningRequest(request.body);
-      let account: Awaited<ReturnType<typeof bindAccount>>;
-      let carrierClaim: ReturnType<typeof claimReasoningCarriers> | undefined;
-      let resolved: ResolvedModel;
-      let copilot: BoundCopilot;
-      let plan: ReturnType<typeof planProtocolExecution>;
-      try {
-        if (decoded.requestedModel !== undefined) usage.setRequestedModel(decoded.requestedModel);
-        scope.diagnostics?.stage("account_binding");
-        account = await bindAccount(dependencies.directory, scope.signal);
-        usage.setAccount(account.accountId);
-        carrierClaim = dependencies.reasoningCarriers === undefined
-          ? undefined
-          : claimReasoningCarriers(decoded.body, "chat", account.accountId, dependencies.reasoningCarriers);
-        if (decoded.requestedModel !== undefined && carrierClaim !== undefined
-          && decoded.requestedModel !== carrierClaim.binding.modelId) {
-          throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
-        }
-        const requestedModel = carrierClaim?.binding.modelId ?? decoded.requestedModel;
-        const preference = requestedModel === undefined
-          ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
-          : null;
-        scope.diagnostics?.stage("model_resolution");
-        const catalog = await loadCatalog(dependencies, account, scope.signal);
-        resolved = resolveOpenaiChatCompletionsModel({
-          ...decoded,
-          ...(requestedModel === undefined ? {} : { requestedModel }),
-        }, catalog, preference);
-        usage.setResolvedModel(resolved.upstreamModel);
-        scope.diagnostics?.stage("account_binding");
-        copilot = await bindCopilot(dependencies.copilot, account, scope);
-        const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
-          accountId: account.accountId,
-          modelId: resolved.upstreamModel,
-          endpoint: copilot.target.endpoint,
-          sourceProtocol: carrierClaim.binding.sourceProtocol,
-          wireProtocol: "chat",
-        });
-        const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
-          ? undefined
-          : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
-        plan = planProtocolExecution({
-          diagnostics: scope.diagnostics,
-          source: "chat",
-          body: decoded.body,
-          stream: decoded.stream,
-          capability: resolved.capability,
-          resolvedModel: resolved.upstreamModel,
-          ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
-          ...(carrierRecords === undefined ? {} : { carrierRecords }),
-        });
-      } catch (error: unknown) {
-        if (strictFailure !== undefined) throw strictFailure;
-        throw error;
+      const decoded = decodeOpenaiChatCompletionsRequest(request.body);
+      if (decoded.requestedModel !== undefined) usage.setRequestedModel(decoded.requestedModel);
+      scope.diagnostics?.stage("account_binding");
+      const account = await bindAccount(dependencies.directory, scope.signal);
+      usage.setAccount(account.accountId);
+      const carrierClaim = dependencies.reasoningCarriers === undefined
+        ? undefined
+        : claimReasoningCarriers(decoded.body, "chat", account.accountId, dependencies.reasoningCarriers);
+      if (decoded.requestedModel !== undefined && carrierClaim !== undefined
+        && decoded.requestedModel !== carrierClaim.binding.modelId) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
       }
+      const requestedModel = carrierClaim?.binding.modelId ?? decoded.requestedModel;
+      const preference = requestedModel === undefined
+        ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
+        : null;
+      scope.diagnostics?.stage("model_resolution");
+      const catalog = await loadCatalog(dependencies, account, scope.signal);
+      const resolved = resolveOpenaiChatCompletionsModel({
+        ...decoded,
+        ...(requestedModel === undefined ? {} : { requestedModel }),
+      }, catalog, preference);
+      usage.setResolvedModel(resolved.upstreamModel);
+      scope.diagnostics?.stage("account_binding");
+      const copilot = await bindCopilot(dependencies.copilot, account, scope);
+      const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
+        accountId: account.accountId,
+        modelId: resolved.upstreamModel,
+        endpoint: copilot.target.endpoint,
+        sourceProtocol: carrierClaim.binding.sourceProtocol,
+        wireProtocol: "chat",
+      });
+      const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
+        ? undefined
+        : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
+      const plan = planProtocolExecution({
+        diagnostics: scope.diagnostics,
+        source: "chat",
+        body: decoded.body,
+        stream: decoded.stream,
+        capability: resolved.capability,
+        resolvedModel: resolved.upstreamModel,
+        ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
+        ...(carrierRecords === undefined ? {} : { carrierRecords }),
+      });
       if (plan.kind === "converted") {
         const outputBinding = dependencies.reasoningCarriers === undefined || plan.target !== "responses" ? undefined : carrierBinding({
           accountId: account.accountId,
@@ -172,7 +160,6 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
           plan.target,
         );
       }
-      if (strictFailure !== undefined) throw strictFailure;
       const prepared = prepareOpenaiChatCompletionsRequest(decoded, resolved);
       scope.diagnostics?.shape("upstream_request", () => diagnosticShape(prepared.body));
       scope.diagnostics?.stage("upstream_request");
@@ -335,35 +322,11 @@ function attemptUsage(value: Readonly<SemanticUsage>) {
   };
 }
 
+/**
+ * Reads only the members the gateway routes on. Values it cannot use are treated as absent and the body
+ * is forwarded as-is, like cc-switch, so the upstream validates them.
+ */
 export function decodeOpenaiChatCompletionsRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
-  if (duplicateMemberNames(body).length > 0) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-
-  const model = memberValues(body, "model")[0];
-  if (model !== undefined && (typeof model !== "string" || model.length === 0)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-
-  const streamValue = memberValues(body, "stream")[0];
-  if (streamValue !== undefined && streamValue !== true && streamValue !== false) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  if (streamValue === true) {
-    const streamOptions = memberValues(body, "stream_options")[0];
-    if (streamOptions !== undefined) {
-      validateStreamOptions(streamOptions);
-    }
-  }
-
-  return {
-    body,
-    ...(model === undefined ? {} : { requestedModel: model }),
-    stream: streamValue === true,
-  };
-}
-
-function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
   const modelValue = memberValues(body, "model")[0];
   const model = typeof modelValue === "string" && modelValue.length > 0 ? modelValue : undefined;
   const streamValue = memberValues(body, "stream")[0];
@@ -375,14 +338,6 @@ function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): Decod
   };
 }
 
-function captureFailure(work: () => void): unknown | undefined {
-  try {
-    work();
-    return undefined;
-  } catch (error: unknown) {
-    return error;
-  }
-}
 
 export function prepareOpenaiChatCompletionsRequest(
   decoded: DecodedOpenaiChatCompletionsRequest,
@@ -541,33 +496,19 @@ function upstreamCallFailure(error: unknown, signal: AbortSignal): GatewayFailur
   );
 }
 
+/** Keeps client stream options and forces usage reporting, which accounting needs; bad values are replaced. */
 function prepareStreamOptions(value: WireJson): WireJsonObject {
-  validateStreamOptions(value);
   if (!isWireJsonObject(value)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
+    return { kind: "object", members: [{ key: "include_usage", value: true }] };
   }
-  const includeUsageCount = value.members.filter((member) => member.key === "include_usage").length;
-  if (includeUsageCount > 1) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  if (includeUsageCount === 0) {
-    return { kind: "object", members: [...value.members, { key: "include_usage", value: true }] };
-  }
-  return {
-    kind: "object",
-    members: value.members.map((member) => member.key === "include_usage"
-      ? { key: member.key, value: true }
-      : member),
-  };
-}
-
-function validateStreamOptions(value: WireJson): void {
-  if (!isWireJsonObject(value)) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  if (value.members.filter((member) => member.key === "include_usage").length > 1) {
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
+  let seen = false;
+  const members = value.members.flatMap((member) => {
+    if (member.key !== "include_usage") return [member];
+    if (seen) return [];
+    seen = true;
+    return [{ key: member.key, value: true }];
+  });
+  return { kind: "object", members: seen ? members : [...members, { key: "include_usage", value: true }] };
 }
 
 function hasVisionInput(body: WireJsonObject): boolean {

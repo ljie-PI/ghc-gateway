@@ -445,6 +445,57 @@ describe("Copilot transport", () => {
     expect(headers.has("authorization")).toBe(true);
   });
 
+  it("keeps only a bounded prefix of rejected bodies, outside the response body", async () => {
+    const store = new MemoryCredentialStore();
+    const bound = account();
+    await store.putGeneration(bound.accountId, 1, {
+      generation: 1,
+      githubToken: "g",
+      copilotToken: "c",
+      copilotExpiresAtMs: Date.now() + 120_000,
+    });
+    let stalledCancelled = false;
+    const replies = [
+      () => new Response("x".repeat(20_000), { status: 400 }),
+      () => new Response(new ReadableStream<Uint8Array>({
+        start: (controller) => controller.enqueue(new TextEncoder().encode("{\"error\":")),
+        cancel: () => { stalledCancelled = true; },
+      }), { status: 400 }),
+    ];
+    const backend = new HttpCopilotBackend({
+      credentials: store,
+      accountCoordinator: new AccountCoordinator(),
+      refreshCopilotToken: async () => ({ token: "unused", expiresAtMs: Date.now() + 120_000 }),
+      endpointDiscovery: testEndpointDiscovery(async () => null),
+      fetchImpl: async () => replies.shift()!(),
+    });
+    const copilot = await backend.bind(bound, new AbortController().signal);
+    const request = {
+      model: "gpt",
+      body: new TextEncoder().encode("{}"),
+      hasVisionInput: false,
+      nonstreamBodyBytes: 1_000,
+      connectTimeoutMs: 1_000,
+      firstByteTimeoutMs: 50,
+      signal: new AbortController().signal,
+    };
+
+    const buffered = await copilot.completeChat({ ...request, stream: false });
+    expect(buffered.status).toBe(400);
+    expect(buffered.body.byteLength).toBe(0);
+    expect(buffered.errorBody?.byteLength).toBe(8 * 1024);
+
+    const started = Date.now();
+    const stream = await copilot.openChatStream({ ...request, stream: true });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(new TextDecoder().decode(stream.errorBody)).toBe("{\"error\":");
+    expect(stalledCancelled).toBe(true);
+    const drained: Uint8Array[] = [];
+    for await (const chunk of stream.bytes) drained.push(chunk);
+    expect(drained).toHaveLength(0);
+    await stream.cancel();
+  });
+
   it("completes the first outbound request through the lazy Undici transport", async () => {
     const server = createServer((request, response) => {
       expect(request.url).toBe("/chat/completions");

@@ -39,11 +39,7 @@ import {
   shouldDropUnresolvedPreviousResponseId,
   validateContinuationTarget,
 } from "./continuation.js";
-import {
-  decodeResponsesPlanningRequest,
-  decodeResponsesRequest,
-  ResponsesRequestDecodeError,
-} from "./decoder.js";
+import { decodeResponsesRequest } from "./decoder.js";
 import { consumeResponsesPreviousResponseId } from "./dto.js";
 import {
   type ResponsesContinuationOwnership,
@@ -127,23 +123,11 @@ async function executeOpenaiResponses(
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   scope.diagnostics?.stage("request_validation");
-  const strictFailure = captureStrictDecodeFailure(request.body);
-  const decoded = decodeRequest(request.body);
-  let prepared: Awaited<ReturnType<typeof prepareResponsesExecution>>;
-  try {
-    prepared = await prepareResponsesExecution(dependencies, request.body, decoded, scope, usage);
-  } catch (error: unknown) {
-    if (error instanceof GatewayFailureError && (
-      error.failure.kind === "continuation_conflict"
-      || error.failure.kind === "continuation_unavailable"
-      || error.failure.kind === "continuation_persistence"
-    )) throw error;
-    if (strictFailure !== undefined) throw strictFailure;
-    throw error;
-  }
-  const { account, bound, ownership, plan, planningRequest, resolved } = prepared;
+  const decoded = decodeResponsesRequest(request.body);
+  const { account, bound, ownership, plan, planningRequest, resolved } = await prepareResponsesExecution(
+    dependencies, request.body, decoded, scope, usage,
+  );
   if (plan.kind === "native") {
-    if (strictFailure !== undefined) throw strictFailure;
     const nativePlan = createNativeResponsesPlan(planningRequest, resolved, bound.target.endpoint);
     return withUpstreamProtocol(decoded.stream
       ? await nativeStreamResponse(
@@ -170,7 +154,7 @@ async function executeOpenaiResponses(
 async function prepareResponsesExecution(
   dependencies: OpenaiResponsesRouteDependencies,
   body: WireJsonObject,
-  decoded: ReturnType<typeof decodeResponsesPlanningRequest>,
+  decoded: ReturnType<typeof decodeResponsesRequest>,
   scope: Readonly<RequestScope>,
   usage: RequestAttempt,
 ) {
@@ -232,13 +216,13 @@ async function prepareResponsesExecution(
   const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
     ? undefined
     : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
-  if (shouldDropUnresolvedPreviousResponseId(
-    planningRequest.previousResponseId,
-    continuation,
-    plansNativeExecution(resolved.capability.protocols.value, "responses", forcedTarget),
-  )) {
+  const nativeExecution = plansNativeExecution(resolved.capability.protocols.value, "responses", forcedTarget);
+  if (shouldDropUnresolvedPreviousResponseId(planningRequest.previousResponseId, continuation, nativeExecution)) {
     planningRequest = consumeResponsesPreviousResponseId(planningRequest);
     historyOmitted = true;
+  } else if (!nativeExecution && planningRequest.previousResponseId === undefined) {
+    // An unusable previous_response_id value cannot be resolved; converted routes drop it.
+    planningRequest = consumeResponsesPreviousResponseId(planningRequest);
   }
   if (historyOmitted) scope.diagnostics?.stage("continuation", { degradations: ["continuation.history_omitted"] });
   const plan = planProtocolExecution({
@@ -255,27 +239,6 @@ async function prepareResponsesExecution(
   return { account, bound, ownership, plan, planningRequest, resolved };
 }
 
-function decodeRequest(body: WireJsonObject) {
-  try {
-    return decodeResponsesPlanningRequest(body);
-  } catch (error: unknown) {
-    if (error instanceof ResponsesRequestDecodeError) {
-      throw new GatewayFailureError({ kind: "invalid_request", cause: error });
-    }
-    throw error;
-  }
-}
-
-function captureStrictDecodeFailure(body: WireJsonObject): GatewayFailureError | undefined {
-  try {
-    decodeResponsesRequest(body);
-    return undefined;
-  } catch (error: unknown) {
-    return error instanceof ResponsesRequestDecodeError
-      ? new GatewayFailureError({ kind: "invalid_request", cause: error })
-      : new GatewayFailureError({ kind: "internal", cause: error });
-  }
-}
 
 async function nativeNonstreamResponse(
   history: ResponsesHistory,

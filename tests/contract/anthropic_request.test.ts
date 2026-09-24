@@ -12,6 +12,243 @@ import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
+const NATIVE_MESSAGES_SHAPES = [
+  ["top-level continuation", { previous_response_id: "resp_external" }],
+  ["message ownership field", { messages: [{ role: "user", content: "hi", tool_call_id: "call_1" }] }],
+  ["numeric content", { messages: [{ role: "user", content: 1 }] }],
+  ["missing tool input", { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup" }] }] }],
+  ["unclosed tool call", { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] }] }],
+  ["duplicate tool call ID", {
+    messages: [{ role: "assistant", content: [
+      { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+      { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+    ] }],
+  }],
+  ["duplicate tool result", {
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+      { role: "user", content: [
+        { type: "tool_result", tool_use_id: "call_1", content: "ok" },
+        { type: "tool_result", tool_use_id: "call_1", content: "again" },
+      ] },
+    ],
+  }],
+  ["new call after a partial parallel result", {
+    messages: [
+      { role: "assistant", content: [
+        { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+        { type: "tool_use", id: "call_2", name: "lookup", input: {} },
+      ] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "call_3", name: "lookup", input: {} }] },
+    ],
+  }],
+  ["interleaved tool round", {
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+      { role: "user", content: "interleaved" },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
+    ],
+  }],
+  ["unknown block in tool round", {
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+      { role: "user", content: [{ type: "document", source: { type: "text", data: "interleaved" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
+    ],
+  }],
+  ["top-level ownership field", { tool_call_id: "call_1" }],
+  ["metadata ownership field", { metadata: { tool_call_id: "call_1" } }],
+  ["carrier-shaped tool input", {
+    messages: [{
+      role: "assistant",
+      content: [{
+        type: "tool_use",
+        id: "call_1",
+        name: "lookup",
+        input: { type: "thinking", signature: "ghcg-rsn-v1:synthetic" },
+      }],
+    }],
+  }],
+  ["carrier-shaped top-level extension", {
+    optional_extension: { type: "thinking", signature: "ghcg-rsn-v1:synthetic" },
+  }],
+  ["carrier-shaped text", {
+    messages: [{ role: "user", content: "ghcg-rsn-v1:synthetic" }],
+  }],
+  ["duplicate image source type", { duplicateImageSourceType: true }],
+  ["temperature out of range", { temperature: 2 }],
+  ["top_p out of range", { top_p: -1 }],
+  ["invalid output effort", { output_config: { effort: 1 } }],
+  ["empty stop sequence", { stop_sequences: [""] }],
+  ["empty tool name", { tools: [{ name: "", input_schema: {} }] }],
+  ["assistant image", {
+    messages: [{
+      role: "assistant",
+      content: [{ type: "image", source: { type: "url", url: "https://example.com/x" } }],
+    }],
+  }],
+  ["invalid tool-result error", {
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok", is_error: "yes" }] },
+    ],
+  }],
+  ["invalid MCP result content", {
+    messages: [{
+      role: "assistant",
+      content: [
+        { type: "mcp_tool_use", id: "mcp_1", name: "lookup", server_name: "docs", input: {} },
+        { type: "mcp_tool_result", tool_use_id: "mcp_1", content: { unexpected: true } },
+      ],
+    }],
+  }],
+  ["invalid managed result ownership", {
+    messages: [{
+      role: "assistant",
+      content: [
+        { type: "server_tool_use", id: "srv_1", name: "web_search", input: {} },
+        { type: "web_search_tool_result", tool_use_id: "srv_1", content: [{ tool_call_id: "external" }] },
+      ],
+    }],
+  }],
+  ["browser state for non-browser tool", {
+    tools: [{ name: "lookup", input_schema: {} }],
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+      { role: "user", content: [{
+        type: "tool_result",
+        tool_use_id: "call_1",
+        content: [{ type: "browser_state", tabs: [] }],
+      }] },
+    ],
+  }],
+  ["browser state with wrong toolset", {
+    tools: [{ type: "browser_toolset_20260801" }],
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "navigate", toolset_name: "computer_toolset_20260801", input: {} }] },
+      { role: "user", content: [{
+        type: "tool_result",
+        tool_use_id: "call_1",
+        toolset_name: "computer_toolset_20260801",
+        content: [{ type: "browser_state", tabs: [] }],
+      }] },
+    ],
+  }],
+  ["user thinking carrier", {
+    messages: [{
+      role: "user",
+      content: [{ type: "thinking", thinking: "plan", signature: "ghcg-rsn-v1:synthetic" }],
+    }],
+  }],
+  ["invalid parallel choice", {
+    tools: [{ name: "lookup", input_schema: {} }],
+    tool_choice: { type: "auto", disable_parallel_tool_use: "yes" },
+  }],
+  ["duplicate tool names", {
+    tools: [{ name: "lookup", input_schema: {} }, { name: "lookup", input_schema: {} }],
+  }],
+  ["missing chosen tool", {
+    tools: [{ name: "lookup", input_schema: {} }],
+    tool_choice: { type: "tool", name: "missing" },
+  }],
+  ["parallel choice without tools", { tool_choice: { type: "auto", disable_parallel_tool_use: true } }],
+  ["invalid tool strict", { tools: [{ name: "lookup", input_schema: {}, strict: "yes" }] }],
+  ["malformed output format", { output_config: { format: { type: "json_schema", schema: "wrong" } } }],
+  ["malformed output format name", { output_config: { format: { type: "json_schema", name: 1, schema: {} } } }],
+  ["malformed output format description", { output_config: { format: { type: "json_schema", description: 1, schema: {} } } }],
+  ["empty output effort", { output_config: { effort: "" } }],
+  ["empty output format name", { output_config: { format: { type: "json_schema", name: "", schema: {} } } }],
+  ["invalid tool description", { tools: [{ name: "lookup", description: 1, input_schema: {} }] }],
+  ["invalid image URL", {
+    messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "not-a-url" } }] }],
+  }],
+  ["invalid base64 image", {
+    messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "%%%" } }] }],
+  }],
+  ["empty thinking signature", {
+    messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "plan", signature: "" }] }],
+  }],
+  ["invalid input image detail", {
+    messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
+      {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "call_1",
+          content: [{ type: "input_image", image_url: "https://example.com/x", detail: 1 }],
+        }],
+      },
+    ],
+  }],
+  ["malformed document", {
+    messages: [{ role: "user", content: [{ type: "document", source: 17 }] }],
+  }],
+  ["document text source missing media type", {
+    messages: [{ role: "user", content: [{ type: "document", source: { type: "text", data: "reference" } }] }],
+  }],
+  ["invalid document citations", {
+    messages: [{ role: "user", content: [{
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "reference" },
+      citations: { enabled: "yes" },
+    }] }],
+  }],
+  ["invalid document title", {
+    messages: [{ role: "user", content: [{
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: "reference" },
+      title: 1,
+    }] }],
+  }],
+  ["duplicate tool input key", { duplicateToolInput: true }],
+  ["duplicate tool schema key", { duplicateToolSchema: true }],
+  ["duplicate core", { duplicateMaxTokens: true }],
+] as const;
+
+/** Native Messages rejects only misplaced gateway reasoning carriers (#329); Copilot validates the rest. */
+const NATIVE_MESSAGES_REJECTED: ReadonlySet<string> = new Set([
+  "carrier-shaped tool input",
+  "carrier-shaped top-level extension",
+  "carrier-shaped text",
+  "user thinking carrier",
+]);
+
+function nativeMessagesCatalog() {
+  return { data: [{
+    id: "native-messages",
+    name: "native-messages",
+    vendor: "github",
+    model_picker_enabled: true,
+    model_info: { supported_endpoints: ["/v1/messages"] },
+  }] };
+}
+
+function nativeMessagesRequest(extra: (typeof NATIVE_MESSAGES_SHAPES)[number][1]): Request {
+  const { duplicateImageSourceType, duplicateMaxTokens, duplicateToolInput, duplicateToolSchema, ...bodyExtra } = extra as typeof extra & {
+    readonly duplicateImageSourceType?: boolean;
+    readonly duplicateMaxTokens?: boolean;
+    readonly duplicateToolInput?: boolean;
+    readonly duplicateToolSchema?: boolean;
+  };
+  const base = { model: "native-messages", max_tokens: 16, messages: [{ role: "user", content: "hi" }], ...bodyExtra };
+  const body = duplicateMaxTokens
+    ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"max_tokens\":17,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+    : duplicateImageSourceType
+      ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"type\":\"url\",\"url\":\"https://example.com/x\"}}]}]}"
+      : duplicateToolInput
+        ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"lookup\",\"input\":{\"q\":1,\"q\":2}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":\"ok\"}]}]}"
+        : duplicateToolSchema
+          ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"lookup\",\"input_schema\":{\"type\":\"object\",\"type\":\"array\"}}]}"
+          : JSON.stringify(base);
+  return new Request("http://127.0.0.1:31400/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+    body,
+  });
+}
+
 describe("Anthropic request route", () => {
   it("rolls back SQLite, registry, real transport and HTTP listener when gateway construction fails", async () => {
     const backendClose = vi.spyOn(HttpCopilotBackend.prototype, "close");
@@ -201,240 +438,81 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it.each([
-    ["top-level continuation", { previous_response_id: "resp_external" }],
-    ["message ownership field", { messages: [{ role: "user", content: "hi", tool_call_id: "call_1" }] }],
-    ["numeric content", { messages: [{ role: "user", content: 1 }] }],
-    ["missing tool input", { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup" }] }] }],
-    ["unclosed tool call", { messages: [{ role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] }] }],
-    ["duplicate tool call ID", {
-      messages: [{ role: "assistant", content: [
-        { type: "tool_use", id: "call_1", name: "lookup", input: {} },
-        { type: "tool_use", id: "call_1", name: "lookup", input: {} },
-      ] }],
-    }],
-    ["duplicate tool result", {
-      messages: [
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
-        { role: "user", content: [
-          { type: "tool_result", tool_use_id: "call_1", content: "ok" },
-          { type: "tool_result", tool_use_id: "call_1", content: "again" },
-        ] },
-      ],
-    }],
-    ["new call after a partial parallel result", {
-      messages: [
-        { role: "assistant", content: [
-          { type: "tool_use", id: "call_1", name: "lookup", input: {} },
-          { type: "tool_use", id: "call_2", name: "lookup", input: {} },
-        ] },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
-        { role: "assistant", content: [{ type: "tool_use", id: "call_3", name: "lookup", input: {} }] },
-      ],
-    }],
-    ["interleaved tool round", {
-      messages: [
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
-        { role: "user", content: "interleaved" },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
-      ],
-    }],
-    ["unknown block in tool round", {
-      messages: [
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
-        { role: "user", content: [{ type: "document", source: { type: "text", data: "interleaved" } }] },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok" }] },
-      ],
-    }],
-    ["top-level ownership field", { tool_call_id: "call_1" }],
-    ["metadata ownership field", { metadata: { tool_call_id: "call_1" } }],
-    ["carrier-shaped tool input", {
-      messages: [{
-        role: "assistant",
-        content: [{
-          type: "tool_use",
-          id: "call_1",
-          name: "lookup",
-          input: { type: "thinking", signature: "ghcg-rsn-v1:synthetic" },
+  it.each(NATIVE_MESSAGES_SHAPES.filter(([name]) => NATIVE_MESSAGES_REJECTED.has(name)))(
+    "still rejects misplaced gateway reasoning carriers on native Messages: %s",
+    async (_name, extra) => {
+      const { gw, upstream, close } = await anthropicGateway({ expectations: [], catalogFetch: nativeMessagesCatalog });
+      try {
+        const response = await gw.fetch(nativeMessagesRequest(extra));
+        expect(response.status).toBe(400);
+        await response.text();
+        expect(upstream.requests).toHaveLength(0);
+      } finally {
+        await close();
+      }
+    },
+  );
+
+  it.each(NATIVE_MESSAGES_SHAPES.filter(([name]) => !NATIVE_MESSAGES_REJECTED.has(name)))(
+    "forwards other native Messages shapes unchanged for Copilot to validate, like cc-switch: %s",
+    async (_name, extra) => {
+      const { gw, upstream, close } = await anthropicGateway({
+        catalogFetch: nativeMessagesCatalog,
+        expectations: [{
+          method: "POST", path: "/v1/messages", body: () => true,
+          reply: { status: 200, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({
+            id: "msg_1", type: "message", role: "assistant", model: "native-messages",
+            content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null,
+            usage: { input_tokens: 1, output_tokens: 1 },
+          })) },
         }],
-      }],
-    }],
-    ["carrier-shaped top-level extension", {
-      optional_extension: { type: "thinking", signature: "ghcg-rsn-v1:synthetic" },
-    }],
-    ["carrier-shaped text", {
-      messages: [{ role: "user", content: "ghcg-rsn-v1:synthetic" }],
-    }],
-    ["duplicate image source type", { duplicateImageSourceType: true }],
-    ["temperature out of range", { temperature: 2 }],
-    ["top_p out of range", { top_p: -1 }],
-    ["invalid output effort", { output_config: { effort: 1 } }],
-    ["empty stop sequence", { stop_sequences: [""] }],
-    ["empty tool name", { tools: [{ name: "", input_schema: {} }] }],
-    ["assistant image", {
-      messages: [{
-        role: "assistant",
-        content: [{ type: "image", source: { type: "url", url: "https://example.com/x" } }],
-      }],
-    }],
-    ["invalid tool-result error", {
-      messages: [
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "ok", is_error: "yes" }] },
-      ],
-    }],
-    ["invalid MCP result content", {
-      messages: [{
-        role: "assistant",
-        content: [
-          { type: "mcp_tool_use", id: "mcp_1", name: "lookup", server_name: "docs", input: {} },
-          { type: "mcp_tool_result", tool_use_id: "mcp_1", content: { unexpected: true } },
-        ],
-      }],
-    }],
-    ["invalid managed result ownership", {
-      messages: [{
-        role: "assistant",
-        content: [
-          { type: "server_tool_use", id: "srv_1", name: "web_search", input: {} },
-          { type: "web_search_tool_result", tool_use_id: "srv_1", content: [{ tool_call_id: "external" }] },
-        ],
-      }],
-    }],
-    ["browser state for non-browser tool", {
-      tools: [{ name: "lookup", input_schema: {} }],
-      messages: [
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
-        { role: "user", content: [{
-          type: "tool_result",
-          tool_use_id: "call_1",
-          content: [{ type: "browser_state", tabs: [] }],
-        }] },
-      ],
-    }],
-    ["browser state with wrong toolset", {
-      tools: [{ type: "browser_toolset_20260801" }],
-      messages: [
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "navigate", toolset_name: "computer_toolset_20260801", input: {} }] },
-        { role: "user", content: [{
-          type: "tool_result",
-          tool_use_id: "call_1",
-          toolset_name: "computer_toolset_20260801",
-          content: [{ type: "browser_state", tabs: [] }],
-        }] },
-      ],
-    }],
-    ["user thinking carrier", {
-      messages: [{
-        role: "user",
-        content: [{ type: "thinking", thinking: "plan", signature: "ghcg-rsn-v1:synthetic" }],
-      }],
-    }],
-    ["invalid parallel choice", {
-      tools: [{ name: "lookup", input_schema: {} }],
-      tool_choice: { type: "auto", disable_parallel_tool_use: "yes" },
-    }],
-    ["duplicate tool names", {
-      tools: [{ name: "lookup", input_schema: {} }, { name: "lookup", input_schema: {} }],
-    }],
-    ["missing chosen tool", {
-      tools: [{ name: "lookup", input_schema: {} }],
-      tool_choice: { type: "tool", name: "missing" },
-    }],
-    ["parallel choice without tools", { tool_choice: { type: "auto", disable_parallel_tool_use: true } }],
-    ["invalid tool strict", { tools: [{ name: "lookup", input_schema: {}, strict: "yes" }] }],
-    ["malformed output format", { output_config: { format: { type: "json_schema", schema: "wrong" } } }],
-    ["malformed output format name", { output_config: { format: { type: "json_schema", name: 1, schema: {} } } }],
-    ["malformed output format description", { output_config: { format: { type: "json_schema", description: 1, schema: {} } } }],
-    ["empty output effort", { output_config: { effort: "" } }],
-    ["empty output format name", { output_config: { format: { type: "json_schema", name: "", schema: {} } } }],
-    ["invalid tool description", { tools: [{ name: "lookup", description: 1, input_schema: {} }] }],
-    ["invalid image URL", {
-      messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "not-a-url" } }] }],
-    }],
-    ["invalid base64 image", {
-      messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "%%%" } }] }],
-    }],
-    ["empty thinking signature", {
-      messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "plan", signature: "" }] }],
-    }],
-    ["invalid input image detail", {
-      messages: [
-        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "lookup", input: {} }] },
-        {
-          role: "user",
-          content: [{
-            type: "tool_result",
-            tool_use_id: "call_1",
-            content: [{ type: "input_image", image_url: "https://example.com/x", detail: 1 }],
-          }],
-        },
-      ],
-    }],
-    ["malformed document", {
-      messages: [{ role: "user", content: [{ type: "document", source: 17 }] }],
-    }],
-    ["document text source missing media type", {
-      messages: [{ role: "user", content: [{ type: "document", source: { type: "text", data: "reference" } }] }],
-    }],
-    ["invalid document citations", {
-      messages: [{ role: "user", content: [{
-        type: "document",
-        source: { type: "text", media_type: "text/plain", data: "reference" },
-        citations: { enabled: "yes" },
-      }] }],
-    }],
-    ["invalid document title", {
-      messages: [{ role: "user", content: [{
-        type: "document",
-        source: { type: "text", media_type: "text/plain", data: "reference" },
-        title: 1,
-      }] }],
-    }],
-    ["duplicate tool input key", { duplicateToolInput: true }],
-    ["duplicate tool schema key", { duplicateToolSchema: true }],
-    ["duplicate core", { duplicateMaxTokens: true }],
-  ] as const)("rejects malformed native Messages core before inference: %s", async (_name, extra) => {
-    const { duplicateImageSourceType, duplicateMaxTokens, duplicateToolInput, duplicateToolSchema, ...bodyExtra } = extra as typeof extra & {
-      readonly duplicateImageSourceType?: boolean;
-      readonly duplicateMaxTokens?: boolean;
-      readonly duplicateToolInput?: boolean;
-      readonly duplicateToolSchema?: boolean;
-    };
+      });
+      try {
+        const request = nativeMessagesRequest(extra);
+        const sent = await request.clone().text();
+        const response = await gw.fetch(request);
+        expect(response.status).toBe(200);
+        await response.text();
+        expect(upstream.requests).toHaveLength(1);
+        expect(new TextDecoder().decode(upstream.requests[0]!.body)).toBe(sent);
+      } finally {
+        await close();
+      }
+    },
+  );
+
+  it("forwards Claude Code 2.1.281 mid-conversation system messages natively", async () => {
     const { gw, upstream, close } = await anthropicGateway({
-      expectations: [],
-      catalogFetch: () => ({ data: [{
-        id: "native-messages",
-        name: "native-messages",
-        vendor: "github",
-        model_picker_enabled: true,
-        model_info: { supported_endpoints: ["/v1/messages"] },
-      }] }),
+      catalogFetch: nativeMessagesCatalog,
+      expectations: [{
+        method: "POST", path: "/v1/messages", body: () => true,
+        reply: { status: 200, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({
+          id: "msg_1", type: "message", role: "assistant", model: "native-messages",
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        })) },
+      }],
     });
     try {
-      const base = {
+      const request = anthropicRequest({
         model: "native-messages",
         max_tokens: 16,
-        messages: [{ role: "user", content: "hi" }],
-        ...bodyExtra,
-      };
-      const body = duplicateMaxTokens
-        ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"max_tokens\":17,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
-        : duplicateImageSourceType
-          ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"type\":\"url\",\"url\":\"https://example.com/x\"}}]}]}"
-          : duplicateToolInput
-            ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"lookup\",\"input\":{\"q\":1,\"q\":2}}]},{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"call_1\",\"content\":\"ok\"}]}]}"
-            : duplicateToolSchema
-              ? "{\"model\":\"native-messages\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"tools\":[{\"name\":\"lookup\",\"input_schema\":{\"type\":\"object\",\"type\":\"array\"}}]}"
-              : JSON.stringify(base);
-      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/messages", {
-        method: "POST",
-        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
-        body,
-      }));
-      expect(response.status).toBe(400);
+        system: [{ type: "text", text: "You are Claude Code." }],
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hi" }] },
+          { role: "system", content: [{ type: "text", text: "reminder", cache_control: { type: "ephemeral" } }] },
+        ],
+        thinking: { type: "adaptive" },
+        context_management: { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
+        output_config: { effort: "high" },
+        metadata: { user_id: "user" },
+        stream: false,
+      });
+      const sent = await request.clone().text();
+      const response = await gw.fetch(request);
+      expect(response.status).toBe(200);
       await response.text();
-      expect(upstream.requests).toHaveLength(0);
+      expect(new TextDecoder().decode(upstream.requests[0]!.body)).toBe(sent);
     } finally {
       await close();
     }
@@ -607,21 +685,34 @@ describe("Anthropic request route", () => {
   });
 
   it.each([
-    ["empty token", "claude-code-20250219,"],
-    ["token count", Array.from({ length: 65 }, (_, index) => `beta-${index}`).join(",")],
-    ["byte count", "a".repeat(8 * 1024 + 1)],
-    ["whitespace byte count", " ".repeat(8 * 1024 + 1)],
-  ])("rejects structurally invalid bounded beta lists: %s", async (_name, beta) => {
-    const { gw, upstream, close } = await anthropicGateway({ expectations: [] });
+    ["empty token", "claude-code-20250219,", "claude-code-20250219"],
+    ["malformed token", "claude-code-20250219,bad token", "claude-code-20250219"],
+    ["token count", Array.from({ length: 65 }, (_, index) => `beta-${index}`).join(","),
+      Array.from({ length: 64 }, (_, index) => `beta-${index}`).join(",")],
+    ["byte count", "a".repeat(8 * 1024 + 1), null],
+    ["whitespace byte count", " ".repeat(8 * 1024 + 1), null],
+  ])("drops unusable beta tokens instead of rejecting the request: %s", async (_name, beta, forwarded) => {
+    const { gw, upstream, close } = await anthropicGateway({
+      catalogFetch: nativeMessagesCatalog,
+      expectations: [{
+        method: "POST", path: "/v1/messages", body: () => true,
+        reply: { status: 200, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({
+          id: "msg_1", type: "message", role: "assistant", model: "native-messages",
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        })) },
+      }],
+    });
     try {
       const response = await gw.fetch(anthropicRequest({
-        model: "gpt",
+        model: "native-messages",
         max_tokens: 16,
         messages: [{ role: "user", content: "hi" }],
       }, { "anthropic-beta": beta }));
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(200);
       await response.text();
-      expect(upstream.requests).toHaveLength(0);
+      expect(upstream.requests).toHaveLength(1);
+      expect(upstream.requests[0]!.headers.get("anthropic-beta")).toBe(forwarded);
     } finally {
       await close();
     }
@@ -651,7 +742,7 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("requires the exact Messages version header and never forwards it to Chat", async () => {
+  it("accepts any Messages version header and never forwards it to Chat", async () => {
     const { gw, capturedRequests, close } = await anthropicGateway();
     try {
       for (const [name, headers] of [
@@ -669,16 +760,17 @@ describe("Anthropic request route", () => {
           headers: actualHeaders,
           body: JSON.stringify({ model: "gpt", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
         }));
-        expect(response.status, name).toBe(400);
-        expect(response.headers.get("request-id")).toBe("req_test_1");
-        expect(await response.text()).toBe("{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid request\"},\"request_id\":\"req_test_1\"}");
+        expect(response.status, name).toBe(200);
+        await response.text();
       }
 
       const ok = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 1, messages: [{ role: "user", content: "hi" }], stream: false }));
       expect(ok.status).toBe(200);
-      expect(capturedRequests).toHaveLength(1);
-      expect(new TextDecoder().decode(capturedRequests[0]?.body)).not.toContain("anthropic-version");
-      expect(capturedRequests[0]?.headers.has("anthropic-version")).toBe(false);
+      expect(capturedRequests).toHaveLength(5);
+      for (const captured of capturedRequests) {
+        expect(new TextDecoder().decode(captured.body)).not.toContain("anthropic-version");
+        expect(captured.headers.has("anthropic-version")).toBe(false);
+      }
     } finally {
       await close();
     }

@@ -91,6 +91,9 @@ export interface DiagnosticFields {
   readonly httpStatus?: number;
   readonly upstreamStatus?: number;
   readonly code?: typeof CODES[number];
+  /** Upstream rejection identifiers only (for example `invalid_request_error`); never messages or content. */
+  readonly upstreamErrorType?: string;
+  readonly upstreamErrorCode?: string;
   readonly messagesVersion?: "missing" | "supported" | "unsupported";
   readonly messagesBetas?: readonly typeof MESSAGE_BETAS[number][];
   readonly unknownBetaCount?: number;
@@ -411,6 +414,8 @@ function sanitizeDiagnosticFields(value: Readonly<DiagnosticFields>): Diagnostic
     ...(httpStatus(value.httpStatus) ? { httpStatus: value.httpStatus } : {}),
     ...(httpStatus(value.upstreamStatus) ? { upstreamStatus: value.upstreamStatus } : {}),
     ...(member(CODES, value.code) === undefined ? {} : { code: member(CODES, value.code)! }),
+    ...(upstreamErrorIdentifier(value.upstreamErrorType) ? { upstreamErrorType: value.upstreamErrorType } : {}),
+    ...(upstreamErrorIdentifier(value.upstreamErrorCode) ? { upstreamErrorCode: value.upstreamErrorCode } : {}),
     ...(member(["missing", "supported", "unsupported"] as const, value.messagesVersion) === undefined
       ? {} : { messagesVersion: value.messagesVersion }),
     ...(value.messagesBetas === undefined ? {} : { messagesBetas: MESSAGE_BETAS.filter((item) => value.messagesBetas?.slice(0, MESSAGE_BETAS.length).includes(item)) }),
@@ -479,6 +484,11 @@ function member<T extends string>(values: readonly T[], value: unknown): T | und
 
 function httpStatus(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599;
+}
+
+/** Lowercase snake/dot identifiers such as `invalid_request_error`; anything else could be content. */
+function upstreamErrorIdentifier(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z0-9_.]{0,63}$/u.test(value);
 }
 
 function count(value: unknown): value is number {

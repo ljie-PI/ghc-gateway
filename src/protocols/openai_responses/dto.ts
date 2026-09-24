@@ -60,7 +60,7 @@ export function withResponsesRequestInput(
 export function consumeResponsesPreviousResponseId(
   request: Readonly<ResponsesRequest>,
 ): ResponsesRequest {
-  if (request.previousResponseId === undefined) {
+  if (!request.body.members.some((member) => member.key === "previous_response_id")) {
     return request as ResponsesRequest;
   }
   return {

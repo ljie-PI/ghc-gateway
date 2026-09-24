@@ -7,10 +7,7 @@ import {
   type WireJson,
   type WireJsonObject,
 } from "../../src/serialization/wire_json.js";
-import {
-  decodeResponsesRequest,
-  ResponsesRequestDecodeError,
-} from "../../src/protocols/openai_responses/decoder.js";
+import { decodeResponsesRequest } from "../../src/protocols/openai_responses/decoder.js";
 
 const LIMITS = { maxBytes: 4096, maxDepth: 16 } as const;
 
@@ -28,24 +25,13 @@ function numberLexeme(value: WireJson | undefined): string | undefined {
     : undefined;
 }
 
-function expectDecodeError(json: string): ResponsesRequestDecodeError {
-  try {
-    decodeResponsesRequest(objectFromJson(json));
-  } catch (error: unknown) {
-    expect(error).toBeInstanceOf(ResponsesRequestDecodeError);
-    return error as ResponsesRequestDecodeError;
-  }
-  throw new Error("expected decode error");
-}
-
 describe("Responses request decoder", () => {
-  it("allows missing model but rejects invalid model and duplicate control fields", () => {
-    expect(decodeResponsesRequest(objectFromJson("{}")).model).toBeUndefined();
-    expect(expectDecodeError("{\"model\":null}").field).toBe("model");
-    expect(expectDecodeError("{\"model\":4}").field).toBe("model");
-    expect(expectDecodeError("{\"model\":\"\",\"input\":\"hi\"}").field).toBe("model");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"model\":\"other\"}").field).toBe("model");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":false,\"stream\":true}").field).toBe("stream");
+  it("treats unusable routing values as absent instead of rejecting them", () => {
+    for (const json of ["{}", "{\"model\":null}", "{\"model\":4}", "{\"model\":\"\",\"input\":\"hi\"}"]) {
+      expect(decodeResponsesRequest(objectFromJson(json)).model).toBeUndefined();
+    }
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"model\":\"other\"}")).model).toBe("gpt");
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"stream\":false,\"stream\":true}")).stream).toBe(false);
   });
 
   it("applies stream default without coercing preserved fields", () => {
@@ -71,27 +57,27 @@ describe("Responses request decoder", () => {
     ]);
   });
 
-  it("validates stream and continuation controls without coercion", () => {
+  it("reads stream and continuation controls without coercing the body", () => {
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"stream\":true}")).stream).toBe(true);
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"store\":false}")).store).toBe(false);
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"resp_1\"}"))
       .previousResponseId).toBe("resp_1");
     expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\" resp_1 \"}"))
       .previousResponseId).toBe(" resp_1 ");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"previous_response_id\":\"\"}").field)
-      .toBe("previous_response_id");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":\"true\"}").field).toBe("stream");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"stream\":null}").field).toBe("stream");
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":\"\"}"))
+      .previousResponseId).toBeUndefined();
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"stream\":\"true\"}")).stream).toBe(false);
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"stream\":null}")).stream).toBe(false);
     const rawStore = decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"store\":{\"raw\":true}}"));
     expect(rawStore.store).toBeUndefined();
     expect(rawStore.body.members[1]?.key).toBe("store");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"previous_response_id\":8}").field)
-      .toBe("previous_response_id");
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"previous_response_id\":8}"))
+      .previousResponseId).toBeUndefined();
   });
 
-  it("rejects duplicate top-level unknown fields but preserves nested duplicates and number lexemes", () => {
-    expect(expectDecodeError("{\"model\":\"gpt\",\"metadata\":{},\"metadata\":{}}").field).toBe("metadata");
-    expect(expectDecodeError("{\"model\":\"gpt\",\"x\":1,\"\\u0078\":2}").field).toBe("x");
+  it("forwards duplicate members, nested duplicates and number lexemes unchanged", () => {
+    expect(decodeResponsesRequest(objectFromJson("{\"model\":\"gpt\",\"metadata\":{},\"metadata\":{}}")).body.members)
+      .toHaveLength(3);
 
     const decoded = decodeResponsesRequest(objectFromJson([
       "{\"metadata\":{\"a\":-0,\"a\":1e+6,\"nested\":[9007199254740993]},",

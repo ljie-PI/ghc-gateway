@@ -23,7 +23,7 @@ import type { RequestScope } from "../../gateway/request_scope.js";
 import { createRequestAttempt } from "../../gateway/request_attempt.js";
 import { boundedCleanup } from "../../gateway/stream_execution.js";
 import { createConvertedStreamResponse } from "../../gateway/converted_stream_response.js";
-import { duplicateMemberNames, memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
+import { memberValues, type WireJsonObject } from "../../serialization/wire_json.js";
 import { resolveModel } from "../model_catalog/resolver.js";
 import { reconcilePreferredModelIfCurrent } from "../model_catalog/preferred.js";
 import type { TelemetryRecorder } from "../../telemetry/recorder.js";
@@ -49,10 +49,7 @@ import {
   serializeNativeMessagesRequest,
   validatedNativeMessagesBody,
 } from "./native.js";
-import {
-  validateMessagesRequestSecurity,
-  validateNativeMessagesRequestEnvelope,
-} from "./request_validation.js";
+import { validateMessagesRequestSecurity } from "./request_validation.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -106,9 +103,8 @@ async function executeAnthropicMessages(
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   scope.diagnostics?.stage("request_validation");
-  assertAnthropicVersion(request.headers, scope.diagnostics);
+  observeAnthropicVersion(request.headers, scope.diagnostics);
   const betaFeatures = readAnthropicBetaFeatures(request.headers, scope.diagnostics);
-  const strictFailure = captureFailure(() => validateNativeMessagesRequestEnvelope(request.body!));
   validateMessagesRequestSecurity(request.body);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
@@ -184,10 +180,6 @@ async function executeAnthropicMessages(
     scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
   if (plan.kind === "native") {
-    if (duplicateMemberNames(request.body).length > 0) {
-      throw new GatewayFailureError({ kind: "invalid_request" });
-    }
-    if (strictFailure !== undefined) throw strictFailure;
     return withUpstreamProtocol(
       await executeNativeMessages(
         copilot,
@@ -203,14 +195,6 @@ async function executeAnthropicMessages(
     );
   }
 
-  function captureFailure(work: () => void): unknown | undefined {
-    try {
-      work();
-      return undefined;
-    } catch (error: unknown) {
-      return error;
-    }
-  }
   return withUpstreamProtocol(
     await executeConvertedMessages(
       dependencies,
@@ -376,39 +360,35 @@ function measureBuffered<T>(dependencies: AnthropicMessagesRouteDependencies, wo
     : dependencies.performanceObserver.measure("buffered", work);
 }
 
-function assertAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnostics): void {
+/** Copilot is always called with anthropic-version 2023-06-01; the client's value is only observed. */
+function observeAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnostics): void {
   const value = headers.get("anthropic-version");
   diagnostics?.set({
     messagesVersion: value === null ? "missing" : value.trim() === "2023-06-01" ? "supported" : "unsupported",
   });
-  if (value === null || value.includes(",") || value.trim() !== "2023-06-01") {
-    diagnostics?.stage("request_validation", { code: value === null ? "anthropic_version_missing" : "anthropic_version_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
 }
 
+/** Forwards well-formed beta tokens within the limits; malformed or excess tokens are dropped, not rejected. */
 function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagnostics): readonly MessagesBetaToken[] {
   const values = headers.get("anthropic-beta");
   if (values === null) {
     return [];
   }
-  const encodedBytes = new TextEncoder().encode(values).byteLength;
-  if (encodedBytes > ANTHROPIC_BETA_LIMITS.bytes) {
-    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
+  const features: MessagesBetaToken[] = [];
+  let bytes = 0;
+  let dropped = false;
+  for (const candidate of values.split(",").map((value) => value.trim())) {
+    if (candidate.length === 0) continue;
+    const size = new TextEncoder().encode(candidate).byteLength + (features.length === 0 ? 0 : 1);
+    if (!isMessagesBetaToken(candidate) || features.length >= ANTHROPIC_BETA_LIMITS.tokens
+      || bytes + size > ANTHROPIC_BETA_LIMITS.bytes) {
+      dropped = true;
+      continue;
+    }
+    features.push(candidate);
+    bytes += size;
   }
-  if (values.trim().length === 0) {
-    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
-  const features = values.split(",").map((value) => value.trim());
-  if (
-    features.length > ANTHROPIC_BETA_LIMITS.tokens
-    || !features.every(isMessagesBetaToken)
-  ) {
-    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw new GatewayFailureError({ kind: "invalid_request" });
-  }
+  if (dropped) diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
   const supported = new Set<string>(MESSAGES_BETA_FEATURES);
   diagnostics?.set({
     messagesBetas: features.filter((feature): feature is typeof MESSAGES_BETA_FEATURES[number] => supported.has(feature)),
