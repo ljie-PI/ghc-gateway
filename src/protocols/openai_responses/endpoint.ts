@@ -41,11 +41,10 @@ import {
 } from "./continuation.js";
 import {
   decodeResponsesPlanningRequest,
-  decodeResponsesRequest,
   ResponsesRequestDecodeError,
 } from "./decoder.js";
 import { consumeResponsesPreviousResponseId } from "./dto.js";
-import { carrierRuleFailure, requestRuleFailure } from "../native_preflight.js";
+import { nativeRoutingFailure } from "../native_routing.js";
 import {
   type ResponsesContinuationOwnership,
   type ResponsesHistory,
@@ -77,6 +76,7 @@ import type {
 } from "../conversion/types.js";
 import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
 import {
+  assertCarrierModel,
   carrierBinding,
   claimReasoningCarriers,
   resolveReasoningCarriers,
@@ -128,7 +128,7 @@ async function executeOpenaiResponses(
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   scope.diagnostics?.stage("request_validation");
-  const strictFailure = captureStrictDecodeFailure(request.body);
+  const nativeRoutingRejection = nativeRoutingFailure(request.body);
   const decoded = decodeRequest(request.body);
   let prepared: Awaited<ReturnType<typeof prepareResponsesExecution>>;
   try {
@@ -139,12 +139,12 @@ async function executeOpenaiResponses(
       || error.failure.kind === "continuation_unavailable"
       || error.failure.kind === "continuation_persistence"
     )) throw error;
-    if (strictFailure !== undefined) throw strictFailure;
+    if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
     throw error;
   }
   const { account, bound, ownership, plan, planningRequest, resolved } = prepared;
   if (plan.kind === "native") {
-    if (strictFailure !== undefined) throw strictFailure;
+    if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
     const nativePlan = createNativeResponsesPlan(planningRequest, resolved, bound.target.endpoint);
     return withUpstreamProtocol(decoded.stream
       ? await nativeStreamResponse(
@@ -184,10 +184,7 @@ async function prepareResponsesExecution(
   const initialCarrierClaim = dependencies.reasoningCarriers === undefined
     ? undefined
     : claimReasoningCarriers(body, "responses", account.accountId, dependencies.reasoningCarriers);
-  if (decoded.model !== undefined && initialCarrierClaim !== undefined
-    && decoded.model !== initialCarrierClaim.binding.modelId) {
-    throw carrierRuleFailure("REQ-CARRIER-MODEL");
-  }
+  assertCarrierModel(decoded.model, initialCarrierClaim);
   const continuation = await resolveResponsesContinuation(
     dependencies.history, decoded.previousResponseId, account.accountId, scope.signal,
   );
@@ -201,7 +198,7 @@ async function prepareResponsesExecution(
     if (continuationReceipt !== undefined) {
       throw new GatewayFailureError({ kind: "continuation_conflict", source: "continuation", phase: "resume" });
     }
-    throw new GatewayFailureError({ kind: resolution.kind });
+    throw new GatewayFailureError(resolution);
   }
   const resolved = resolution;
   usage.setResolvedModel(resolved.upstreamModel);
@@ -260,20 +257,10 @@ function decodeRequest(body: WireJsonObject) {
   try {
     return decodeResponsesPlanningRequest(body);
   } catch (error: unknown) {
-    if (error instanceof ResponsesRequestDecodeError) throw requestRuleFailure(error.ruleId);
+    if (error instanceof ResponsesRequestDecodeError) {
+      throw new GatewayFailureError({ kind: "invalid_request", ruleId: error.ruleId, cause: error });
+    }
     throw error;
-  }
-}
-
-/** Native Responses requests are forwarded unchanged apart from model mapping; only routing fields are checked. */
-function captureStrictDecodeFailure(body: WireJsonObject): GatewayFailureError | undefined {
-  try {
-    decodeResponsesRequest(body);
-    return undefined;
-  } catch (error: unknown) {
-    return error instanceof ResponsesRequestDecodeError
-      ? requestRuleFailure(error.ruleId)
-      : new GatewayFailureError({ kind: "internal", cause: error });
   }
 }
 

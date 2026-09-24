@@ -245,7 +245,7 @@ export class HttpCopilotBackend implements CopilotBackend {
     if (response.status < 200 || response.status >= 300) {
       const errorBody = await readErrorPrefix(response, firstByteTimeoutMs, signal);
       await response.cancel();
-      return { status: response.status, headers: response.headers, body: errorBody };
+      return { status: response.status, headers: response.headers, body: new Uint8Array(), errorBody };
     }
     try {
       const bytes = await readResponseBody(response.bytes, maxBodyBytes, firstByteTimeoutMs, signal);
@@ -284,7 +284,7 @@ export class HttpCopilotBackend implements CopilotBackend {
       return {
         status: response.status,
         headers: response.headers,
-        bytes: { [Symbol.asyncIterator]: async function* () { /* the error body was consumed */ } },
+        bytes: empty(),
         errorBody,
         cancel: async () => await response.cancel(),
       };

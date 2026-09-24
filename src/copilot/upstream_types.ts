@@ -56,7 +56,10 @@ export interface MessagesUpstreamRequest extends UpstreamRequestLimits {
 export interface UpstreamByteResponse {
   readonly status: number;
   readonly headers: Headers;
+  /** Empty for non-2xx responses; see errorBody. */
   readonly body: Uint8Array;
+  /** Bounded prefix of a non-2xx body, read only so diagnostics can record the error type/code. */
+  readonly errorBody?: Uint8Array;
 }
 
 export interface UpstreamByteStream {

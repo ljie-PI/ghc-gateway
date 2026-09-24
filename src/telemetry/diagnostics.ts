@@ -271,13 +271,12 @@ export class DiagnosticRecorder {
         failureSeen = true;
         record(() => {
           const value = failureFromUnknown(error, origin ?? diagnosticOrigin(stage, fields.stream));
-          const cause = value.cause;
+          const ruleId = value.ruleId ?? (value.cause instanceof ConversionContractError ? value.cause.ruleId : undefined);
           failure = {
             kind: value.kind,
             ...(value.source === undefined ? {} : { source: value.source }),
             ...(value.phase === undefined ? {} : { phase: value.phase }),
-            ...(cause instanceof ConversionContractError && /^REQ-[A-Z0-9-]{1,100}$/u.test(cause.ruleId)
-              ? { ruleId: cause.ruleId } : {}),
+            ...(ruleId !== undefined && /^REQ-[A-Z0-9-]{1,100}$/u.test(ruleId) ? { ruleId } : {}),
           };
           outcome = failureOutcome(value);
           emit("request_failed", { failure, outcome });

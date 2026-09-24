@@ -6,7 +6,7 @@ export function observeDiagnosticUpstream(
   diagnostics: RequestDiagnostics | undefined,
 ): UpstreamByteResponse {
   if (diagnostics === undefined) return upstream;
-  observeHeaders(upstream.status, diagnostics, upstream.status >= 400 ? upstream.body : undefined);
+  observeHeaders(upstream.status, diagnostics, upstream.errorBody);
   diagnostics.bytes("upstream", upstream.body.byteLength);
   if (upstream.status >= 200 && upstream.status < 300) diagnostics.stage("upstream_output");
   return upstream;

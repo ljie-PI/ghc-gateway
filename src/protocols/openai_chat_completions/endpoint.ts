@@ -42,6 +42,7 @@ import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/
 import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
 import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
 import {
+  assertCarrierModel,
   carrierBinding,
   claimReasoningCarriers,
   resolveReasoningCarriers,
@@ -51,12 +52,7 @@ import {
   nativeChatCompletionsUsage,
   validatedNativeChatCompletionsBody,
 } from "./native.js";
-import {
-  assertNoDuplicateTopLevelMembers,
-  carrierRuleFailure,
-  routingModel,
-  routingStream,
-} from "../native_preflight.js";
+import { nativeRoutingFailure } from "../native_routing.js";
 
 export interface OpenaiChatCompletionsRouteDependencies {
   readonly directory: AccountDirectory;
@@ -108,7 +104,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
       }
 
       scope.diagnostics?.stage("request_validation");
-      const strictFailure = captureFailure(() => decodeOpenaiChatCompletionsRequest(request.body!));
+      const nativeRoutingRejection = nativeRoutingFailure(request.body);
       const decoded = decodeOpenaiChatCompletionsPlanningRequest(request.body);
       let account: Awaited<ReturnType<typeof bindAccount>>;
       let carrierClaim: ReturnType<typeof claimReasoningCarriers> | undefined;
@@ -123,10 +119,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
         carrierClaim = dependencies.reasoningCarriers === undefined
           ? undefined
           : claimReasoningCarriers(decoded.body, "chat", account.accountId, dependencies.reasoningCarriers);
-        if (decoded.requestedModel !== undefined && carrierClaim !== undefined
-          && decoded.requestedModel !== carrierClaim.binding.modelId) {
-          throw carrierRuleFailure("REQ-CARRIER-MODEL");
-        }
+        assertCarrierModel(decoded.requestedModel, carrierClaim);
         const requestedModel = carrierClaim?.binding.modelId ?? decoded.requestedModel;
         const preference = requestedModel === undefined
           ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
@@ -161,7 +154,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
           ...(carrierRecords === undefined ? {} : { carrierRecords }),
         });
       } catch (error: unknown) {
-        if (strictFailure !== undefined) throw strictFailure;
+        if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
         throw error;
       }
       if (plan.kind === "converted") {
@@ -177,7 +170,7 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
           plan.target,
         );
       }
-      if (strictFailure !== undefined) throw strictFailure;
+      if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
       const prepared = prepareOpenaiChatCompletionsRequest(decoded, resolved);
       scope.diagnostics?.shape("upstream_request", () => diagnosticShape(prepared.body));
       scope.diagnostics?.stage("upstream_request");
@@ -340,15 +333,11 @@ function attemptUsage(value: Readonly<SemanticUsage>) {
   };
 }
 
-/** Native Chat requests are forwarded unchanged apart from model mapping; only routing fields are checked. */
+/** Decodes a request bound for a native Chat upstream; only its routing members are checked. */
 export function decodeOpenaiChatCompletionsRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
-  assertNoDuplicateTopLevelMembers(body);
-  const model = routingModel(body);
-  return {
-    body,
-    ...(model === undefined ? {} : { requestedModel: model }),
-    stream: routingStream(body),
-  };
+  const failure = nativeRoutingFailure(body);
+  if (failure !== undefined) throw failure;
+  return decodeOpenaiChatCompletionsPlanningRequest(body);
 }
 
 function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
@@ -363,14 +352,6 @@ function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): Decod
   };
 }
 
-function captureFailure(work: () => void): unknown | undefined {
-  try {
-    work();
-    return undefined;
-  } catch (error: unknown) {
-    return error;
-  }
-}
 
 export function prepareOpenaiChatCompletionsRequest(
   decoded: DecodedOpenaiChatCompletionsRequest,
@@ -421,7 +402,7 @@ function resolveOpenaiChatCompletionsModel(
 ): ResolvedModel {
   const resolved = resolveModel(catalog, decoded.requestedModel, preference);
   if ("kind" in resolved) {
-    throw new GatewayFailureError({ kind: resolved.kind });
+    throw new GatewayFailureError(resolved);
   }
   return resolved;
 }

@@ -13,7 +13,7 @@ export interface ResolvedModel {
 }
 
 export type ModelResolveError =
-  | { readonly kind: "invalid_request" }
+  | { readonly kind: "invalid_request"; readonly ruleId: "REQ-MODEL-EMPTY" | "REQ-MODEL-UNSELECTED" }
   | { readonly kind: "model_not_found" };
 
 export function resolveModel(
@@ -24,7 +24,7 @@ export function resolveModel(
   const ids = new Set(catalog.models.map((model) => model.modelId));
   if (requested !== undefined) {
     if (requested.length === 0) {
-      return { kind: "invalid_request" };
+      return { kind: "invalid_request", ruleId: "REQ-MODEL-EMPTY" };
     }
     if (!ids.has(requested)) {
       return { kind: "model_not_found" };
@@ -32,7 +32,7 @@ export function resolveModel(
     return resolved(catalog, requested, "explicit", requested);
   }
   if (preferred === null || preferred.validity !== "valid" || preferred.modelId.length === 0 || !ids.has(preferred.modelId)) {
-    return { kind: "invalid_request" };
+    return { kind: "invalid_request", ruleId: "REQ-MODEL-UNSELECTED" };
   }
   return resolved(catalog, undefined, "preferred", preferred.modelId);
 }

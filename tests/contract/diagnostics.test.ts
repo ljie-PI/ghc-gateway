@@ -161,6 +161,56 @@ describe("diagnostic failure contracts", () => {
     }
   });
 
+  it("records the upstream error type and code for a native Messages rejection", async () => {
+    const { diagnostics, records } = collector();
+    const harness = await anthropicGateway({
+      gatewayDependencies: { diagnostics },
+      catalogFetch: () => ({ data: [{
+        id: "native-messages", name: "native-messages", vendor: "github", model_picker_enabled: true,
+        model_info: { supported_endpoints: ["/v1/messages"] },
+      }] }),
+      expectations: [{
+        method: "POST", path: "/v1/messages", body: () => true,
+        reply: {
+          status: 400,
+          body: Buffer.from(JSON.stringify({
+            type: "error",
+            error: { type: "invalid_request_error", code: "invalid_value", message: "PRIVATE_UPSTREAM_MESSAGE" },
+          })),
+        },
+      }],
+    });
+    try {
+      const response = await harness.gw.fetch(anthropicRequest({ ...body, model: "native-messages" }));
+      expect(response.status).toBe(400);
+      expect(await response.text()).not.toContain("PRIVATE");
+      await diagnostics.close();
+      expect(records.find((record) => record.stage === "upstream_headers" && record.event === "stage")).toMatchObject({
+        upstreamStatus: 400, upstreamErrorType: "invalid_request_error", upstreamErrorCode: "invalid_value",
+      });
+      expect(records.at(-1)).toMatchObject({ upstreamProtocol: "messages", failure: { kind: "upstream_http" } });
+      expect(JSON.stringify(records)).not.toContain("PRIVATE");
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
+  it("records a rule ID when no model is requested or preferred", async () => {
+    const { diagnostics, records } = collector();
+    const harness = await anthropicGateway({ gatewayDependencies: { diagnostics }, expectations: [] });
+    try {
+      const response = await harness.gw.fetch(anthropicRequest({ max_tokens: body.max_tokens, messages: body.messages }));
+      expect(response.status).toBe(400);
+      await response.text();
+      await diagnostics.close();
+      expect(records.at(-1)?.failure).toMatchObject({ kind: "invalid_request", ruleId: "REQ-MODEL-UNSELECTED" });
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
   it("distinguishes postcommit failure from the HTTP 200 already delivered", async () => {
     const { diagnostics, records } = collector();
     const harness = await anthropicGateway({

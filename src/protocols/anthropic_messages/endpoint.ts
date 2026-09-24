@@ -16,6 +16,7 @@ import {
 } from "../../copilot/failures.js";
 import {
   GatewayFailureError,
+  invalidRequestFailure,
   safeRetryAfter,
 } from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
@@ -38,8 +39,10 @@ import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gatewa
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
 import {
+  assertCarrierModel,
   carrierBinding,
   claimReasoningCarriers,
+  reasoningCarrierFailure,
   reasoningCarrierTokens,
   resolveReasoningCarriers,
 } from "../conversion/reasoning_carrier_preflight.js";
@@ -50,15 +53,7 @@ import {
   validatedNativeMessagesBody,
 } from "./native.js";
 import { validateMessagesRequestSecurity } from "./request_validation.js";
-import {
-  assertNoDuplicateTopLevelMembers,
-  carrierRuleFailure,
-  requestRuleFailure,
-  routingModel,
-  routingStream,
-} from "../native_preflight.js";
-
-const HEADER_ORIGIN = { source: "request", phase: "headers" } as const;
+import { nativeRoutingFailure } from "../native_routing.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -115,6 +110,7 @@ async function executeAnthropicMessages(
   assertAnthropicVersion(request.headers, scope.diagnostics);
   const betaFeatures = readAnthropicBetaFeatures(request.headers, scope.diagnostics);
   validateMessagesRequestSecurity(request.body);
+  const nativeRoutingRejection = nativeRoutingFailure(request.body);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
     usage.setRequestedModel(requestedModel.value);
@@ -123,25 +119,19 @@ async function executeAnthropicMessages(
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
   if (dependencies.reasoningCarriers === undefined && reasoningCarrierTokens(request.body, "messages").length > 0) {
-    throw carrierRuleFailure("REQ-CARRIER-UNAVAILABLE");
+    throw reasoningCarrierFailure("REQ-CARRIER-UNAVAILABLE");
   }
   const carrierClaim = dependencies.reasoningCarriers === undefined
     ? undefined
     : claimReasoningCarriers(request.body, "messages", account.accountId, dependencies.reasoningCarriers);
-  if (
-    requestedModel.value !== undefined
-    && carrierClaim !== undefined
-    && requestedModel.value !== carrierClaim.binding.modelId
-  ) {
-    throw carrierRuleFailure("REQ-CARRIER-MODEL");
-  }
+  assertCarrierModel(requestedModel.value, carrierClaim);
   const effectiveModel = carrierClaim?.binding.modelId ?? requestedModel.value;
   const preference = effectiveModel === undefined ? dependencies.preferences.get(account.accountId) : null;
   scope.diagnostics?.stage("model_resolution");
   const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
   const resolved = resolveModel(catalog, effectiveModel, preference);
   if ("kind" in resolved) {
-    throw new GatewayFailureError({ kind: resolved.kind });
+    throw new GatewayFailureError(resolved);
   }
   usage.setResolvedModel(resolved.upstreamModel);
   const stream = readStream(request.body);
@@ -189,10 +179,7 @@ async function executeAnthropicMessages(
     scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
   if (plan.kind === "native") {
-    // Like cc-switch: forward unchanged apart from model mapping; Copilot validates the rest.
-    assertNoDuplicateTopLevelMembers(request.body);
-    routingModel(request.body);
-    routingStream(request.body);
+    if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
     return withUpstreamProtocol(
       await executeNativeMessages(
         copilot,
@@ -380,7 +367,7 @@ function assertAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnosti
   });
   if (value === null || value.includes(",") || value.trim() !== "2023-06-01") {
     diagnostics?.stage("request_validation", { code: value === null ? "anthropic_version_missing" : "anthropic_version_unsupported" });
-    throw requestRuleFailure("REQ-M-VERSION", HEADER_ORIGIN);
+    throw invalidRequestFailure("REQ-M-VERSION");
   }
 }
 
@@ -392,11 +379,11 @@ function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagno
   const encodedBytes = new TextEncoder().encode(values).byteLength;
   if (encodedBytes > ANTHROPIC_BETA_LIMITS.bytes) {
     diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw requestRuleFailure("REQ-M-BETA", HEADER_ORIGIN);
+    throw invalidRequestFailure("REQ-M-BETA");
   }
   if (values.trim().length === 0) {
     diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw requestRuleFailure("REQ-M-BETA", HEADER_ORIGIN);
+    throw invalidRequestFailure("REQ-M-BETA");
   }
   const features = values.split(",").map((value) => value.trim());
   if (
@@ -404,7 +391,7 @@ function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagno
     || !features.every(isMessagesBetaToken)
   ) {
     diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw requestRuleFailure("REQ-M-BETA", HEADER_ORIGIN);
+    throw invalidRequestFailure("REQ-M-BETA");
   }
   const supported = new Set<string>(MESSAGES_BETA_FEATURES);
   diagnostics?.set({
