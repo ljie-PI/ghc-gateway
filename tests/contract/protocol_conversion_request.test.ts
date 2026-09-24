@@ -1413,15 +1413,24 @@ describe("shared conversion request codecs", () => {
     }), "target", capability([target]));
     const sent = decoded(converted.bytes);
     expect(sent).not.toHaveProperty("include");
-    expect(converted.degradations.includes("responses.extensions_omitted")).toBe(degraded);
+    expect(converted.degradations.includes("request.option_omitted")).toBe(degraded);
+    expect(converted.degradations).not.toContain("responses.extensions_omitted");
   });
 
-  it("rejects a reasoning carrier hidden in include instead of dropping it", () => {
-    expect(() => prepareConvertedRequest("responses", "chat", body({
+  it("keeps the first of duplicate include members like other recognized fields", () => {
+    const converted = prepareConvertedRequest("responses", "chat", rawBody(
+      "{\"model\":\"source\",\"input\":\"hi\",\"include\":[\"reasoning.encrypted_content\"],\"include\":[\"message.output_text.logprobs\"]}",
+    ), "target", capability(["chat"]));
+    expect(decoded(converted.bytes)).not.toHaveProperty("include");
+    expect(converted.degradations).not.toContain("request.option_omitted");
+  });
+
+  it.each(["chat", "messages"] as const)("rejects a reasoning carrier hidden in include when converting to %s", (target) => {
+    expect(() => prepareConvertedRequest("responses", target, body({
       model: "source",
       input: "hi",
       include: ["ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef"],
-    }), "target", capability(["chat"]))).toThrow();
+    }), "target", capability([target]))).toThrow("invalid_request");
   });
 
   it.each(["chat", "messages"] as const)(
