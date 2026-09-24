@@ -171,6 +171,7 @@ const RESPONSES_TOP_LEVEL = new Set([
   "n",
   "stop",
   "metadata",
+  "include",
 ]);
 
 interface EncodeContext {
@@ -927,6 +928,10 @@ function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: ReadonlyM
     "responses.extensions_omitted",
     degradations,
   );
+  body = replaceOptionalMember(body, "include", decodeResponsesInclude(
+    oneMember(body, "include", "REQ-R-INCLUDE"),
+    degradations,
+  ));
   body = replaceOptionalMember(body, "stream_options", decodeIndependentStreamOptions(
     oneMember(body, "stream_options", "REQ-R-STREAM-OPTIONS"),
     "responses.extensions_omitted",
@@ -3485,6 +3490,27 @@ function optionalDiscriminator(
   if (typeof value === "string" && value.length > 0) return value;
   if (value !== undefined && containsReasoningCarrier(value)) invalid(ruleId);
   degradations.add("request.option_omitted");
+  return undefined;
+}
+
+/** Output items a converted Responses reply already satisfies: gateway reasoning carriers. */
+const SATISFIED_RESPONSES_INCLUDES = new Set(["reasoning.encrypted_content"]);
+
+/**
+ * Codex sends `include` on every Responses request. Converted routes, like cc-switch, never forward
+ * it: an empty list or `reasoning.encrypted_content` is already met by the converted output, and
+ * other or malformed values are omitted. A carrier token is never silently dropped.
+ */
+function decodeResponsesInclude(
+  value: WireJson | undefined,
+  degradations: Set<ConversionDegradationRule>,
+): undefined {
+  projectIndependentOption(safeIndependentOption(value, "REQ-R-INCLUDE"), (candidate) => (
+    isWireJsonArray(candidate)
+      && candidate.items.every((item) => typeof item === "string" && SATISFIED_RESPONSES_INCLUDES.has(item))
+      ? { kind: "value", value: undefined }
+      : { kind: "malformed" }
+  ), { omission: "request.option_omitted", degradations });
   return undefined;
 }
 

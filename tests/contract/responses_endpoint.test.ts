@@ -2,6 +2,7 @@ import { AccountCoordinator } from "../../src/accounts/account_coordinator.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it } from "vitest";
 import { AccountDirectory } from "../../src/accounts/account_directory.js";
 import { MemoryCredentialStore } from "../../src/accounts/credential_store.js";
@@ -122,6 +123,32 @@ describe("Responses endpoint", () => {
         outputTokens: 0,
         cacheTokens: 0,
       }]);
+    } finally {
+      await close();
+    }
+  });
+
+  it("forwards include natively and drops it on converted routes for Codex", async () => {
+    const decodedBody = (body: Uint8Array) => JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>;
+    const chatReply = "{\"id\":\"chatcmpl_1\",\"object\":\"chat.completion\",\"created\":1,\"model\":\"chat\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}";
+    const { gw, upstream, close } = await responsesGateway({ expectations: [
+      { method: "POST", path: "/responses", body: (body) => isDeepStrictEqual(decodedBody(body).include, ["reasoning.encrypted_content"]),
+        reply: { status: 200, headers: {}, body: text("{\"id\":\"resp_1\",\"output\":[]}") } },
+      { method: "POST", path: "/chat/completions", body: (body) => !("include" in decodedBody(body)), times: 2,
+        reply: { status: 200, headers: {}, body: text(chatReply) } },
+    ] });
+    try {
+      for (const [model, include] of [
+        ["native", ["reasoning.encrypted_content"]],
+        ["chat", ["reasoning.encrypted_content"]],
+        ["chat", []],
+      ] as const) {
+        const response = await gw.fetch(responsesRequest({ model, input: "hi", store: false, include }));
+        expect(response.status, model).toBe(200);
+        await response.text();
+      }
+      expect(upstream.requests.map((entry) => entry.path)).toEqual(["/responses", "/chat/completions", "/chat/completions"]);
+      upstream.assertSatisfied();
     } finally {
       await close();
     }
