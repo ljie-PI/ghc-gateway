@@ -1,7 +1,8 @@
 import { GatewayFailureError } from "../../../gateway/failures.js";
 import { isWireJsonArray, isWireJsonObject, memberValues, parseWireJson, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
 import { TOOL_RESULT_ERROR_MARKER, TOOL_RESULT_MEDIA_REPLACEMENT, toolResultMediaReference } from "../compatibility_markers.js";
-import { type ResponsesToolBindingLedger, type ResponsesToolSourceBinding, type SemanticResponse, type SemanticResponseItem } from "../types.js";
+import { containsReasoningCarrier } from "../reasoning_carriers.js";
+import { type ConversionDegradationRule, type ResponsesToolBindingLedger, type ResponsesToolSourceBinding, type SemanticResponse, type SemanticResponseItem } from "../types.js";
 import { invalid } from "../wire.js";
 import { array, canonicalString, looksLikeNestedJson, type MutableState, object, single, sourceKey } from "./responses_extended_tool_shared.js";
 
@@ -92,12 +93,14 @@ export function projectExtendedChatMessages(body: WireJsonObject, state: Mutable
   return projectResponsesMessages(
     body,
     (namespace, name) => state.bySourceKey.get(sourceKey(namespace, name))?.chatName,
+    state.degradations,
   );
 }
 
 function projectResponsesMessages(
   body: WireJsonObject,
   resolveChatName: (namespace: string | undefined, name: string) => string | undefined,
+  degradations: Set<ConversionDegradationRule>,
 ): WireJsonObject[] {
   const messageState: ExtendedMessageState = { output: [], pendingReasoning: [] };
   for (const instruction of compatibilityInstructionMessages(memberValues(body, "instructions")[0])) {
@@ -109,7 +112,7 @@ function projectResponsesMessages(
     messageState.output.push(chatMessage("user", input));
   } else {
     const items = isWireJsonArray(input) ? input.items : input === undefined ? [] : [input];
-    projectExtendedInputItems(items, messageState, resolveChatName);
+    projectExtendedInputItems(items, messageState, resolveChatName, degradations);
   }
   flushPendingReasoning(messageState);
   return mergeSystemMessages(messageState.output);
@@ -119,6 +122,7 @@ function projectExtendedInputItems(
   items: readonly WireJson[],
   state: ExtendedMessageState,
   resolveChatName: (namespace: string | undefined, name: string) => string | undefined,
+  degradations: Set<ConversionDegradationRule>,
 ): void {
   let calls: WireJsonObject[] = [];
   const flushCalls = (): void => {
@@ -168,7 +172,7 @@ function projectExtendedInputItems(
       }
       continue;
     }
-    const message = projectExtendedMessage(item);
+    const message = projectExtendedMessage(item, degradations);
     if (message !== undefined) {
       const role = projectedChatRole(item);
       if (role !== "assistant") {
@@ -182,19 +186,47 @@ function projectExtendedInputItems(
   flushCalls();
 }
 
-function projectExtendedMessage(item: WireJsonObject): WireJsonObject | undefined {
+function projectExtendedMessage(
+  item: WireJsonObject,
+  degradations: Set<ConversionDegradationRule>,
+): WireJsonObject | undefined {
   const type = single(item, "type", "REQ-R-EXT-ITEM-TYPE");
   if (type !== undefined && type !== "message") {
     return undefined;
   }
+  const role = projectedChatRole(item);
   const content = single(item, "content", "REQ-R-EXT-MESSAGE-CONTENT");
   if (isWireJsonArray(content)) {
     const parts = content.items
-      .map(projectExtendedContentPart)
+      .map((value) => {
+        const part = projectExtendedContentPart(value);
+        if (role === "system" && part === undefined) {
+          if (containsReasoningCarrier(value)) invalid("REQ-R-EXT-MESSAGE-CONTENT");
+          degradations.add("responses.extensions_omitted");
+        }
+        return part;
+      })
       .filter((part): part is WireJsonObject => part !== undefined);
-    return chatMessage(projectedChatRole(item), chatContentFromParts(parts));
+    if (role === "system") {
+      const text = parts.flatMap((part) => {
+        if (single(part, "type", "REQ-R-EXT-CONTENT-TYPE") !== "text") {
+          degradations.add("responses.extensions_omitted");
+          return [];
+        }
+        const value = single(part, "text", "REQ-R-EXT-CONTENT-TEXT");
+        return typeof value === "string" && value.length > 0 ? [value] : [];
+      });
+      if (parts.length !== text.length) degradations.add("responses.extensions_omitted");
+      return text.length === 0 ? undefined : chatMessage("system", text.join("\n\n"));
+    }
+    return chatMessage(role, chatContentFromParts(parts));
   }
-  return chatMessage(projectedChatRole(item), content ?? null);
+  if (role === "system" && typeof content !== "string") {
+    if (content !== undefined && containsReasoningCarrier(content)) invalid("REQ-R-EXT-MESSAGE-CONTENT");
+    if (content !== undefined) degradations.add("responses.extensions_omitted");
+    return undefined;
+  }
+  return chatMessage(role, content ?? null);
 }
 
 function projectExtendedContentPart(value: WireJson): WireJsonObject | undefined {

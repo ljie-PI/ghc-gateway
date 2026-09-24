@@ -192,25 +192,6 @@ function requiredBinding(
   return binding;
 }
 
-export function validateInstructionOrdering(input: WireJson | undefined): void {
-  const items = isWireJsonArray(input) ? input.items : isWireJsonObject(input) ? [input] : [];
-  let ordinarySeen = false;
-  for (const item of items) {
-    if (!isWireJsonObject(item) || (single(item, "type", "REQ-R-EXT-INSTRUCTION") !== undefined
-      && single(item, "type", "REQ-R-EXT-INSTRUCTION") !== "message")) {
-      ordinarySeen = true;
-      continue;
-    }
-    const role = single(item, "role", "REQ-R-EXT-INSTRUCTION-ROLE");
-    if (role === "developer" || (role === "system" && ordinarySeen)) {
-      unsupported("REQ-R-EXT-INSTRUCTION-ORDER");
-    }
-    if (role !== "system") {
-      ordinarySeen = true;
-    }
-  }
-}
-
 function containsMedia(value: WireJson, depth = 0): boolean {
   if (depth > 32) {
     invalid("REQ-R-EXT-RESULT-MEDIA-DEPTH");

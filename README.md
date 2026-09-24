@@ -72,6 +72,8 @@ If the selected model is no longer available, use `ghcg models set` to select an
 
 When the selected model supports the requested API, the request is forwarded unchanged except for the model name, and Copilot validates it.
 
+Converted requests use best-effort protocol mapping like cc-switch: unsupported target options may be omitted or conservatively coerced with content-free degradation diagnostics, while Gateway reasoning state remains fail-closed.
+
 ## Configuration
 
 Global options are `--data-dir <path>` and `--json`. Startup settings use CLI values first, then environment variables, then defaults:

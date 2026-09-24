@@ -75,51 +75,7 @@ export function parallelCallsForTarget(
       degradations: [],
     };
   }
-  if (request.parallelToolCalls) unsupported("REQ-TARGET-PARALLEL-CAPABILITY");
   return { degradations: ["tools.parallel_control_omitted"] };
-}
-
-export function validateConditionalTargetParameters(
-  request: Readonly<SemanticRequest>,
-  capability: Readonly<EffectiveModelCapabilitySnapshot>,
-  target: InferenceProtocol,
-): void {
-  const supported = capability.profile.supportedParameters.value;
-  const hasToolSemantics = request.tools.length > 0
-    || request.toolChoice?.kind === "required"
-    || request.toolChoice?.kind === "tool"
-    || request.items.some((item) => item.type === "tool_call" || item.type === "tool_result");
-  if (hasToolSemantics && !capability.capabilities.toolCalling) {
-    unsupported("REQ-TARGET-TOOL-CAPABILITY");
-  }
-  if (request.parallelToolCalls === true && !capability.capabilities.parallelToolCalling) {
-    unsupported("REQ-TARGET-PARALLEL-CAPABILITY");
-  }
-  const hasImages = request.instructions.some((part) => part.type === "image")
-    || request.items.some((item) => (
-      (item.type === "message" || item.type === "tool_result")
-      && item.content.some((part) => part.type === "image")
-    ));
-  if (hasImages && !capability.capabilities.inputModalities.includes("image")) {
-    unsupported("REQ-TARGET-IMAGE-CAPABILITY");
-  }
-  if (request.temperature !== undefined && supported?.includes("temperature") !== true) {
-    unsupported("REQ-TARGET-TEMPERATURE-CAPABILITY");
-  }
-  if (request.topP !== undefined && supported?.includes("top_p") !== true) {
-    unsupported("REQ-TARGET-TOP-P-CAPABILITY");
-  }
-  if (request.outputFormat === undefined) {
-    return;
-  }
-  const formatKeys = target === "chat"
-    ? ["response_format"]
-    : target === "responses"
-      ? ["text.format", "response_format"]
-      : ["output_config.format", "output_config"];
-  if (!formatKeys.some((key) => supported?.includes(key) === true)) {
-    unsupported("REQ-TARGET-FORMAT-CAPABILITY");
-  }
 }
 
 export function outputBudget(explicit: number | undefined, capability: EffectiveModelCapabilitySnapshot): number {

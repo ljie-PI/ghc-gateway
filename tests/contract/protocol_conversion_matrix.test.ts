@@ -71,11 +71,10 @@ describe("protocol conversion matrix", () => {
         stop: ["END"],
       }));
       expect(response.status).toBe(200);
-      expect(capturedOperations(harness)).toEqual(["messages"]);
-      expect(JSON.parse(decoder.decode(harness.messagesBodies[0]))).toMatchObject({
-        model: "responses-messages",
-        stop_sequences: ["END"],
-      });
+      expect(capturedOperations(harness)).toEqual(["responses"]);
+      expect(decoder.decode(harness.responsesBodies[0])).toBe(
+        "{\"model\":\"responses-messages\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hi\"}]}]}",
+      );
 
     } finally {
       await harness.close();

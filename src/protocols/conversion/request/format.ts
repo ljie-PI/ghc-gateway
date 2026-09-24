@@ -2,7 +2,7 @@ import { isWireJsonObject, type WireJson, type WireJsonObject } from "../../../s
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { isOpenaiStrictSchemaCompatible } from "../strict_schema.js";
 import { type ConversionDegradationRule, type SemanticOutputFormat, type SemanticReasoning } from "../types.js";
-import { invalid, oneMember, optionalBoolean, optionalString, unsupported, wireObject } from "../wire.js";
+import { invalid, oneMember, optionalBoolean, optionalString, wireObject } from "../wire.js";
 import { optionalChoiceString, optionalProtocolObject, projectMessagesMembers, projectRequestMembers, replaceOptionalMember } from "./projection.js";
 
 export function decodeChatOutputFormat(
@@ -83,30 +83,22 @@ export function decodeMessagesOutputFormat(
     "REQ-M-FORMAT-DESCRIPTION",
   );
   const strict = optionalBoolean(oneMember(object, "strict", "REQ-M-FORMAT-STRICT"), "REQ-M-FORMAT-STRICT");
-  if (strict === false) {
-    degradations.add("request.option_omitted");
-    return undefined;
-  }
   const schema = optionalProtocolObject(
     oneMember(object, "schema", "REQ-M-FORMAT-SCHEMA"),
     "REQ-M-FORMAT-SCHEMA",
     degradations,
   );
   if (schema === undefined) return undefined;
-  validateOpenaiStrictSchema(schema, true);
+  const strictCompatible = isOpenaiStrictSchemaCompatible(schema, true);
+  const strictEnabled = strict !== false && strictCompatible;
+  if (!strictEnabled) degradations.add("request.option_omitted");
   return {
     kind: "json_schema",
     name: optionalString(oneMember(object, "name", "REQ-M-FORMAT-NAME"), "REQ-M-FORMAT-NAME") ?? "response",
     ...(description === undefined ? {} : { description }),
     schema,
-    strict: true,
+    ...(strictEnabled ? { strict: true } : {}),
   };
-}
-
-function validateOpenaiStrictSchema(schema: WireJsonObject, root = false, depth = 0): void {
-  if (!isOpenaiStrictSchemaCompatible(schema, root, depth)) {
-    unsupported("REQ-M-FORMAT-STRICT-SCHEMA");
-  }
 }
 
 export function decodeResponsesOutputFormat(
@@ -133,7 +125,7 @@ export function decodeResponsesOutputFormat(
     ? undefined
     : optionalProtocolObject(responseFormat, "REQ-R-FORMAT", degradations);
   if (textFormat !== undefined && responseFormatObject !== undefined) {
-    invalid("REQ-R-FORMAT-CONFLICT");
+    degradations.add("request.option_omitted");
   }
   const value = textFormat ?? responseFormatObject;
   if (value === undefined) {
@@ -270,7 +262,7 @@ export function encodeMessagesOutputConfig(
     ["format", format === undefined
       ? undefined
       : format.kind === "json_object"
-        ? undefined
+        ? wireObject([["type", "json_schema"], ["schema", wireObject([["type", "object"]])]])
         : wireObject([["type", "json_schema"], ["schema", format.schema]])],
   ]);
 }
