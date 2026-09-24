@@ -25,6 +25,7 @@ import type {
   UpstreamByteStream,
 } from "../../src/copilot/upstream_types.js";
 import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
+import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -101,6 +102,7 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   readonly capiError?: CapiFetchError;
   readonly capiFetch?: (signal: AbortSignal) => Promise<CapiModelsResponse>;
   readonly throwingPreferences?: boolean;
+  readonly diagnostics?: DiagnosticRecorder;
 } = {}): Promise<{ readonly gw: Gateway; readonly close: () => Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-openai-chat-"));
   const database = openDatabase({
@@ -140,9 +142,10 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
       return capi;
     },
   }, () => new Date("2026-08-30T05:00:00.000Z"));
-  const dependencies: { readonly createRequestId?: () => string } = options.requestId === undefined
-    ? {}
-    : { createRequestId: () => options.requestId ?? "req_test" };
+  const dependencies = {
+    ...(options.requestId === undefined ? {} : { createRequestId: () => options.requestId ?? "req_test" }),
+    ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+  };
   const routeDependencies = {
     directory: accounts,
     registry: testModelCapabilityRegistry(catalog),
@@ -337,6 +340,29 @@ describe("OpenAI Chat endpoint", () => {
       expect(backend.chatRequests).toHaveLength(0);
     } finally {
       await close();
+    }
+  });
+
+  it.each([
+    ["{\"model\":\"gpt\",\"\\u006dodel\":\"gpt\"}", "REQ-NATIVE-DUPLICATE-MEMBER"],
+    ["{\"model\":4,\"messages\":[]}", "REQ-NATIVE-MODEL"],
+    ["{\"model\":\"gpt\",\"stream\":\"yes\",\"messages\":[]}", "REQ-NATIVE-STREAM"],
+    ["[]", "REQ-BODY-NOT-OBJECT"],
+  ])("records the rule ID of a native Chat rejection: %s", async (body, ruleId) => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const backend = new CapturingCopilotBackend({});
+    const { gw, close } = await openAiGateway(backend, { diagnostics });
+    try {
+      const response = await gw.fetch(jsonRequest(body));
+      expect(response.status).toBe(400);
+      await response.text();
+      await diagnostics.close();
+      expect(backend.chatRequests).toHaveLength(0);
+      expect(records.at(-1)?.failure).toMatchObject({ kind: "invalid_request", ruleId });
+    } finally {
+      await close();
+      await diagnostics.close();
     }
   });
 

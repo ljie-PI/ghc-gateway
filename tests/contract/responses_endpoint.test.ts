@@ -93,6 +93,27 @@ describe("Responses endpoint", () => {
     }
   });
 
+  it.each([
+    [{ model: "native", stream: "yes", input: "hi" }, "REQ-NATIVE-STREAM"],
+    [{ model: "native", stream: null, input: "hi" }, "REQ-NATIVE-STREAM"],
+    [{ model: "native", previous_response_id: "", input: "hi" }, "REQ-R-PREVIOUS-RESPONSE-ID"],
+  ])("records the rule ID of a native Responses rejection: %j", async (body, ruleId) => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
+    const { gw, upstream, close } = await responsesGateway({ diagnostics, expectations: [] });
+    try {
+      const response = await gw.fetch(responsesRequest(body));
+      expect(response.status).toBe(400);
+      await response.text();
+      await diagnostics.close();
+      expect(upstream.requests).toEqual([]);
+      expect(records.at(-1)?.failure).toMatchObject({ kind: "invalid_request", ruleId });
+    } finally {
+      await close();
+      await diagnostics.close();
+    }
+  });
+
   it("executes native non-stream without Chat bridge or local history", async () => {
     const usageUpdates: UsageUpdate[] = [];
     const expectations: HttpExpectation[] = [{ method: "POST", path: "/responses", body: jsonStream(false), reply: {

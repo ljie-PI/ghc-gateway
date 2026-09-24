@@ -530,8 +530,11 @@ describe("Anthropic request route", () => {
   });
 
   it("rejects a gateway carrier when no carrier store can claim it", async () => {
+    const records: DiagnosticRecord[] = [];
+    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
     const { gw, upstream, close } = await anthropicGateway({
       expectations: [],
+      gatewayDependencies: { diagnostics },
       catalogFetch: () => ({ data: [{
         id: "native-messages",
         name: "native-messages",
@@ -552,8 +555,11 @@ describe("Anthropic request route", () => {
       expect(response.status).toBe(400);
       await response.text();
       expect(upstream.requests).toHaveLength(0);
+      await diagnostics.close();
+      expect(records.at(-1)?.failure).toMatchObject({ kind: "invalid_request", ruleId: "REQ-CARRIER-UNAVAILABLE" });
     } finally {
       await close();
+      await diagnostics.close();
     }
   });
 

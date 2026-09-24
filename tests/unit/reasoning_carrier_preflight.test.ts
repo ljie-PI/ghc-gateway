@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { parseWireJson, isWireJsonObject } from "../../src/serialization/wire_json.js";
 import {
+  assertCarrierModel,
   carrierBinding,
   claimReasoningCarriers,
   resolveReasoningCarriers,
 } from "../../src/protocols/conversion/reasoning_carrier_preflight.js";
+import { GatewayFailureError } from "../../src/gateway/failures.js";
 import type {
   ReasoningCarrierBinding,
   ReasoningCarrierRecord,
@@ -52,6 +54,26 @@ describe("reasoning carrier preflight", () => {
     ]) {
       expect(() => resolveReasoningCarriers(claim, expected, store)).toThrowError(/invalid_request/u);
     }
+  });
+
+  it("names the diagnostic rule for unavailable carriers and a conflicting requested model", () => {
+    const store = carrierStore(binding, carrierRecord(token));
+    const claim = claimReasoningCarriers(object({
+      messages: [{ role: "assistant", reasoning_items: [{ type: "reasoning", encrypted_content: token }] }],
+    }), "chat", binding.accountId, store);
+    const ruleOf = (work: () => unknown): string | undefined => {
+      try {
+        work();
+      } catch (error: unknown) {
+        return error instanceof GatewayFailureError ? error.failure.ruleId : undefined;
+      }
+      return undefined;
+    };
+    expect(ruleOf(() => resolveReasoningCarriers(claim, { ...binding, modelId: "other" }, store)))
+      .toBe("REQ-CARRIER-UNAVAILABLE");
+    expect(ruleOf(() => assertCarrierModel("other", claim))).toBe("REQ-CARRIER-MODEL");
+    expect(() => assertCarrierModel(binding.modelId, claim)).not.toThrow();
+    expect(() => assertCarrierModel(undefined, claim)).not.toThrow();
   });
 
   it("derives source-bound conversion versions", () => {
