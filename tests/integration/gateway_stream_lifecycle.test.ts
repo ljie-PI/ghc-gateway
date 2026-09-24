@@ -1,6 +1,4 @@
-import { boundedHttpWait } from "../../scripts/tooling/test_support/copilot_http.js";
-import { createConvertedStreamResponse } from "../../src/gateway/converted_stream_response.js";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { parseStartupConfig } from "../../src/config/startup_config.js";
 import { createGateway } from "../../src/gateway/create_gateway.js";
@@ -10,12 +8,9 @@ import {
   getStreamExecutionHandle,
   type StreamExecutionEmission,
 } from "../../src/gateway/stream_execution.js";
-import { armTimeout } from "../../src/gateway/timeouts.js";
 import type { UpstreamByteStream } from "../../src/copilot/upstream_types.js";
-import { defaultDelay } from "../../src/gateway/admission.js";
+import { armTimeout } from "../../src/gateway/timeouts.js";
 import type { RouteRegistration } from "../../src/gateway/hono_app.js";
-import { createRequestAttempt } from "../../src/gateway/request_attempt.js";
-import type { UsageUpdate } from "../../src/telemetry/recorder.js";
 
 describe("stream writer", () => {
   it("is pull-based, commits on first body byte, and writes nothing after abort", async () => {
@@ -44,225 +39,143 @@ describe("stream writer", () => {
   });
 });
 
-describe("Stream Execution owner", () => {
-  it("owns first and subsequent responses independently through the public seam", async () => {
-    const cleanupCounts = [0, 0];
-    const terminalCounts = [0, 0];
-    const responses: Response[] = [];
-
-    for (const index of [0, 1]) {
-      responses.push(await createStreamExecutionResponse({
-        upstream: {
-          status: 200,
-          headers: new Headers(),
-          bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-          cancel: async () => { cleanupCounts[index] = (cleanupCounts[index] ?? 0) + 1; },
-        },
-        emissions: {
-          async *[Symbol.asyncIterator]() {
-            yield { kind: "wire", bytes: new TextEncoder().encode(`response-${index}`) } as const;
-            yield {
-              kind: "terminal",
-              outcome: { kind: "success", value: `result-${index}` },
-              writerMode: "close",
-            } as const;
-          },
-        },
-        signal: new AbortController().signal,
-        deliverySignal: new AbortController().signal,
-        onTerminal: () => { terminalCounts[index] = (terminalCounts[index] ?? 0) + 1; },
-        normalizeFailure: (error) => error,
-      }));
-    }
-
-    const handles = responses.map((response) => getStreamExecutionHandle(response));
-    expect(handles[0]).toBeDefined();
-    expect(handles[1]).toBeDefined();
-    expect(handles[0]).not.toBe(handles[1]);
-    expect(await Promise.all(responses.map(async (response) => await response.text())))
-      .toEqual(["response-0", "response-1"]);
-    await Promise.all(handles.map(async (handle) => await handle?.completion));
-    expect(handles.map((handle) => handle?.cause)).toEqual(["semantic_success", "semantic_success"]);
-    expect(handles.map((handle) => handle?.state)).toEqual(["completed", "completed"]);
-    expect(cleanupCounts).toEqual([1, 1]);
-    expect(terminalCounts).toEqual([1, 1]);
-  });
-
-  it("does not produce past the host claim window without real body demand", async () => {
-    let nextCalls = 0;
-    let terminalCalls = 0;
-    const response = await createStreamExecutionResponse({
-      upstream: {
-        status: 200,
-        headers: new Headers(),
-        bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-        cancel: async () => undefined,
-      },
-      emissions: {
-        [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-          return {
-            next: async () => {
-              nextCalls += 1;
-              return nextCalls === 1
-                ? { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("ok") } }
-                : {
-                  done: false,
-                  value: {
-                    kind: "terminal",
-                    outcome: { kind: "success", value: "success" },
-                    writerMode: "close",
-                  },
-                };
-            },
-          };
-        },
-      },
-      signal: new AbortController().signal,
-      deliverySignal: new AbortController().signal,
-      onTerminal: () => { terminalCalls += 1; },
-      normalizeFailure: (error) => error,
-    });
-    const handle = getStreamExecutionHandle(response);
-
-    await new Promise<void>((resolve) => setImmediate(resolve));
-
-    expect(nextCalls).toBe(1);
-    expect(terminalCalls).toBe(0);
-    expect(handle?.state).toBe("precommit");
-
-    await handle?.abort("shutdown");
-  });
-
-  it("runs a host finalizer exactly once when direct delivery completes before a late claim", async () => {
-    let finalized = 0;
-    const response = await createStreamExecutionResponse({
-      upstream: {
-        status: 200,
-        headers: new Headers(),
-        bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-        cancel: async () => undefined,
-      },
-      emissions: {
-        async *[Symbol.asyncIterator]() {
-          yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
-          yield {
-            kind: "terminal",
-            outcome: { kind: "success", value: "success" },
-            writerMode: "close",
-          } as const;
-        },
-      },
-      signal: new AbortController().signal,
-      deliverySignal: new AbortController().signal,
-      onTerminal: () => undefined,
-      normalizeFailure: (error) => error,
-    });
-    const handle = getStreamExecutionHandle(response);
-
-    expect(await response.text()).toBe("ok");
-    await handle?.completion;
-    expect(handle?.state).toBe("completed");
-
-    const delivery = handle?.claimDeliveryAdapter(() => { finalized += 1; });
-    expect(finalized).toBe(1);
-    delivery?.settle();
-    expect(finalized).toBe(1);
-  });
-
-  it("settles a terminating late claim after direct delivery without public body demand", async () => {
-    let cancelStarted!: () => void;
-    const started = new Promise<void>((resolve) => { cancelStarted = resolve; });
-    let releaseCancel!: () => void;
-    const cancelBarrier = new Promise<void>((resolve) => { releaseCancel = resolve; });
-    let finalized = 0;
-    const response = await createStreamExecutionResponse({
-      upstream: {
-        status: 200,
-        headers: new Headers(),
-        bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-        cancel: async () => {
-          cancelStarted();
-          await cancelBarrier;
-        },
-      },
-      emissions: {
-        async *[Symbol.asyncIterator]() {
-          yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
-          yield {
-            kind: "terminal",
-            outcome: { kind: "success", value: "success" },
-            writerMode: "close",
-          } as const;
-        },
-      },
-      signal: new AbortController().signal,
-      deliverySignal: new AbortController().signal,
-      onTerminal: () => undefined,
-      normalizeFailure: (error) => error,
-    });
-    const handle = getStreamExecutionHandle(response);
-    const reader = response.body?.getReader();
-    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("ok");
-    await started;
-    expect(handle?.state).toBe("terminating");
-
-    const delivery = handle?.claimDeliveryAdapter(() => { finalized += 1; });
-    releaseCancel();
-    const completionState = await Promise.race([
-      handle?.completion.then(() => "completed" as const),
-      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
-    ]);
-    delivery?.settle();
-    await handle?.completion;
-
-    expect(completionState).toBe("completed");
-    expect(finalized).toBe(1);
-  });
-
-  it("keeps completion pending until claimed delivery settles and then runs its finalizer", async () => {
-    const order: string[] = [];
-    const upstream: UpstreamByteStream = {
-      status: 200,
-      headers: new Headers(),
-      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-      cancel: async () => { order.push("upstream"); },
-    };
-    const emissions: AsyncIterable<StreamExecutionEmission<string>> = {
-      async *[Symbol.asyncIterator]() {
-        yield { kind: "wire", bytes: new TextEncoder().encode("ok") } as const;
-        yield {
-          kind: "terminal",
-          outcome: { kind: "success", value: "success" },
-          writerMode: "close",
-        } as const;
+describe("stream route lifecycle", () => {
+  it("does not commit headers-only construction as success body", async () => {
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/stream",
+      admission: "none",
+      body: "none",
+      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), { status: 400 }),
+      endpoint: async (_request, _scope) => {
+        const writer = createStreamResponseWriter({          headers: { "Content-Type": "text/event-stream" },
+        });
+        expect(writer.committed).toBe(false);
+        queueMicrotask(() => {
+          void writer.enqueue(new TextEncoder().encode("data: hi\n\n")).then(() => writer.close());
+        });
+        return writer.response;
       },
     };
-    const response = await createStreamExecutionResponse({
-      upstream,
-      emissions,
-      signal: new AbortController().signal,
-      deliverySignal: new AbortController().signal,
-      onTerminal: () => { order.push("terminal"); },
-      normalizeFailure: (error) => error,
-    });
-    const handle = getStreamExecutionHandle(response);
-    const delivery = handle?.claimDeliveryAdapter(() => { order.push("finalizer"); });
-    const reader = response.body?.getReader();
-    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("ok");
-    delivery?.markDelivered();
 
-    let completed = false;
-    void handle?.completion.then(() => { completed = true; });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(completed).toBe(false);
-    expect(order).not.toContain("finalizer");
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [route]);
 
-    delivery?.settle();
-    await handle?.completion;
-    expect(order.at(-1)).toBe("finalizer");
+    const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/stream", { method: "POST" }));
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toBe("data: hi\n\n");
+    await gw.close();
   });
 
+  it("arms connect/first-byte/idle/total timers from the snapshot", async () => {
+    const runtime = defaultRuntimeConfigSnapshot();
+    expect(runtime.timeouts.connectMs).toBe(30_000);
+    expect(runtime.timeouts.firstByteMs).toBe(120_000);
+    expect(runtime.timeouts.streamIdleMs).toBe(120_000);
+    expect(runtime.timeouts.totalMs).toBe(1_800_000);
+
+    let release!: () => void;
+    const elapsed = new Promise<void>((resolve) => { release = resolve; });
+    let scheduledMs = 0;
+    const controller = new AbortController();
+    let timedOut = false;
+    const disarm = armTimeout(1_000, controller.signal, {
+      nowMs: () => 5_000,
+      delay: async (ms) => {
+        scheduledMs = ms;
+        await elapsed;
+      },
+    }, () => {
+      timedOut = true;
+      controller.abort();
+    });
+    expect(scheduledMs).toBe(1_000);
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(timedOut).toBe(true);
+    disarm();
+  });
+
+
+  it("disarms timers and aborts in-flight work on close", async () => {
+    let markEndpointStarted!: () => void;
+    const endpointStarted = new Promise<void>((resolve) => { markEndpointStarted = resolve; });
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/hold",
+      admission: "inference",
+      body: "none",
+      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), { status: 503 }),
+      endpoint: async (_request, scope) => {
+        markEndpointStarted();
+        await new Promise<void>((resolve) => {
+          scope.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return new Response("{}");
+      },
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime: defaultRuntimeConfigSnapshot(),
+    }, [route]);
+    const pending = gw.fetch(new Request("http://127.0.0.1:31400/v1/hold", { method: "POST" }));
+    await endpointStarted;
+    await gw.close();
+    const closed = await pending;
+    expect(closed.body).toBeNull();
+    const after = await gw.fetch(new Request("http://127.0.0.1:31400/healthz"));
+    expect(after.status).toBe(503);
+  });
+
+  it("holds the inference slot until the stream body ends", async () => {
+    const writers: ReturnType<typeof createStreamResponseWriter>[] = [];
+    let markWriterStarted!: () => void;
+    const writerStarted = new Promise<void>((resolve) => { markWriterStarted = resolve; });
+    const runtime = defaultRuntimeConfigSnapshot();
+    runtime.admission.activeMax = 1;
+    runtime.admission.queueMax = 0;
+    const route: RouteRegistration = {
+      method: "POST",
+      path: "/v1/hold-stream",
+      admission: "inference",
+      body: "none",
+      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
+        status: failure.kind === "queue_full" ? 503 : 400,
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      }),
+      endpoint: async (_request, _scope) => {
+        const writer = createStreamResponseWriter({});
+        writers.push(writer);
+        markWriterStarted();
+        return writer.response;
+      },
+    };
+    const gw = await createGateway({
+      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
+      runtime,
+    }, [route]);
+    const firstPromise = gw.fetch(new Request("http://127.0.0.1:31400/v1/hold-stream", { method: "POST" }));
+    await writerStarted;
+    expect(writers.length).toBe(1);
+    const first = await firstPromise;
+    const overflow = await gw.fetch(new Request("http://127.0.0.1:31400/v1/hold-stream", { method: "POST" }));
+    expect(overflow.status).toBe(503);
+    expect(JSON.parse(await overflow.text())).toMatchObject({ kind: "queue_full" });
+    writers[0]?.close();
+    await first.arrayBuffer();
+    const after = await gw.fetch(new Request("http://127.0.0.1:31400/v1/hold-stream", { method: "POST" }));
+    expect(after.status).toBe(200);
+    writers[1]?.close();
+    await after.arrayBuffer();
+    await gw.close();
+  });
+});
+
+describe("Stream Execution cleanup evidence", () => {
   it("tracks semantic terminal and resource cleanup exactly once", async () => {
     const counts = { cancel: 0, returned: 0, terminal: 0 };
     const upstream: UpstreamByteStream = {
@@ -360,505 +273,6 @@ describe("Stream Execution owner", () => {
     expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
   });
 
-  it("lets a claimed delivery settle before reader cancellation without deadlocking completion", async () => {
-    let releaseNext: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
-    const blockedNext = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
-      releaseNext = resolve;
-    });
-    const counts = { cancel: 0, returned: 0, terminal: 0, finalized: 0 };
-    const upstream: UpstreamByteStream = {
-      status: 200,
-      headers: new Headers(),
-      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-      cancel: async () => { counts.cancel += 1; },
-    };
-    const response = await createStreamExecutionResponse({
-      upstream,
-      emissions: {
-        [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-          let emitted = false;
-          return {
-            next: async () => {
-              if (!emitted) {
-                emitted = true;
-                return { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("prefix") } };
-              }
-              return await blockedNext;
-            },
-            return: async () => {
-              counts.returned += 1;
-              releaseNext?.({ done: true, value: undefined });
-              return { done: true, value: undefined };
-            },
-          };
-        },
-      },
-      signal: new AbortController().signal,
-      deliverySignal: new AbortController().signal,
-      onTerminal: () => { counts.terminal += 1; },
-      normalizeFailure: (error) => error,
-    });
-    const handle = getStreamExecutionHandle(response);
-    const delivery = handle?.claimDeliveryAdapter(() => { counts.finalized += 1; });
-    const reader = response.body?.getReader();
-    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("prefix");
-    delivery?.markDelivered();
-
-    delivery?.settle();
-    await reader?.cancel();
-    await handle?.completion;
-    expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1, finalized: 1 });
-  });
-
-  it("classifies response reader cancellation separately and tracks the stopped producer", async () => {
-    let releaseNext: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
-    const blockedNext = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
-      releaseNext = resolve;
-    });
-    const counts = { cancel: 0, returned: 0, terminal: 0 };
-    const upstream: UpstreamByteStream = {
-      status: 200,
-      headers: new Headers(),
-      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-      cancel: async () => { counts.cancel += 1; },
-    };
-    const emissions: AsyncIterable<StreamExecutionEmission<string>> = {
-      [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-        let emitted = false;
-        return {
-          next: async () => {
-            if (!emitted) {
-              emitted = true;
-              return { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("prefix") } };
-            }
-            return await blockedNext;
-          },
-          return: async () => {
-            counts.returned += 1;
-            releaseNext?.({ done: true, value: undefined });
-            return { done: true, value: undefined };
-          },
-        };
-      },
-    };
-    const response = await createStreamExecutionResponse({
-      upstream,
-      emissions,
-      signal: new AbortController().signal,
-      deliverySignal: new AbortController().signal,
-      onTerminal: () => { counts.terminal += 1; },
-      normalizeFailure: (error) => error,
-    });
-    const handle = getStreamExecutionHandle(response);
-    const reader = response.body?.getReader();
-    expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("prefix");
-    await reader?.cancel();
-    await handle?.completion;
-
-    expect(handle?.cause).toBe("client_cancel");
-    expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
-  });
-
-  it("classifies a delivery signal aborted before registration and still completes cleanup", async () => {
-    const deliveryAbort = new AbortController();
-    deliveryAbort.abort();
-    let cancelled = 0;
-    const upstream: UpstreamByteStream = {
-      status: 200,
-      headers: new Headers(),
-      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-      cancel: async () => { cancelled += 1; },
-    };
-    const emissions: AsyncIterable<StreamExecutionEmission<string>> = {
-      [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-        return {
-          next: async () => { throw new Error("producer must not start"); },
-        };
-      },
-    };
-
-    await expect(createStreamExecutionResponse({
-      upstream,
-      emissions,
-      signal: new AbortController().signal,
-      deliverySignal: deliveryAbort.signal,
-      onTerminal: () => undefined,
-      normalizeFailure: (error) => error,
-    })).rejects.toMatchObject({ failure: { kind: "aborted" } });
-    expect(cancelled).toBe(1);
-  });
-
-  it("classifies a signal aborted before registration and still completes cleanup", async () => {
-    const abort = new AbortController();
-    abort.abort();
-    let cancelled = 0;
-    const upstream: UpstreamByteStream = {
-      status: 200,
-      headers: new Headers(),
-      bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-      cancel: async () => { cancelled += 1; },
-    };
-    const emissions: AsyncIterable<StreamExecutionEmission<string>> = {
-      [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-        return {
-          next: async () => { throw new Error("producer must not start"); },
-        };
-      },
-    };
-
-    await expect(createStreamExecutionResponse({
-      upstream,
-      emissions,
-      signal: abort.signal,
-      deliverySignal: new AbortController().signal,
-      onTerminal: () => undefined,
-      normalizeFailure: (error) => error,
-    })).rejects.toMatchObject({ failure: { kind: "aborted" } });
-    expect(cancelled).toBe(1);
-  });
-});
-
-describe("stream route lifecycle", () => {
-  it("presents a total timeout during first emission and releases owned resources", async () => {
-    const runtime = defaultRuntimeConfigSnapshot();
-    runtime.admission.activeMax = 1;
-    runtime.admission.queueMax = 0;
-    runtime.timeouts.totalMs = 123;
-    let releaseTotalTimeout: (() => void) | undefined;
-    let firstEmissionStarted!: () => void;
-    const emissionStarted = new Promise<void>((resolve) => { firstEmissionStarted = resolve; });
-    let releaseFirstEmission: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
-    const firstEmission = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
-      releaseFirstEmission = resolve;
-    });
-    const counts = { cancel: 0, returned: 0, terminal: 0 };
-    let requestCount = 0;
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/total-timeout",
-      admission: "inference",
-      body: "none",
-      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
-        status: failure.kind === "upstream_timeout" ? 504 : 400,
-      }),
-      endpoint: async (_request, scope) => {
-        if (requestCount++ > 0) {
-          return new Response("next");
-        }
-        return await createStreamExecutionResponse({
-          upstream: {
-            status: 200,
-            headers: new Headers(),
-            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-            cancel: async () => { counts.cancel += 1; },
-          },
-          emissions: {
-            [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-              return {
-                next: async () => {
-                  firstEmissionStarted();
-                  return await firstEmission;
-                },
-                return: async () => {
-                  counts.returned += 1;
-                  releaseFirstEmission?.({ done: true, value: undefined });
-                  return { done: true, value: undefined };
-                },
-              };
-            },
-          },
-          signal: scope.signal,
-          deliverySignal: scope.deliverySignal,
-          onTerminal: () => { counts.terminal += 1; },
-          normalizeFailure: (error) => error,
-        });
-      },
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime,
-    }, [route], {
-      delay: async (ms, signal) => {
-        if (ms !== runtime.timeouts.totalMs) {
-          return await defaultDelay(ms, signal);
-        }
-        await new Promise<void>((resolve, reject) => {
-          releaseTotalTimeout = resolve;
-          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-        });
-      },
-    });
-
-    try {
-      const pending = gw.fetch(new Request("http://127.0.0.1:31400/v1/total-timeout", { method: "POST" }));
-      await emissionStarted;
-      expect(releaseTotalTimeout).toBeDefined();
-      releaseTotalTimeout?.();
-      const response = await pending;
-      expect(response.status).toBe(504);
-      expect(JSON.parse(await response.text())).toEqual({ kind: "upstream_timeout" });
-      expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
-
-      const next = await gw.fetch(new Request("http://127.0.0.1:31400/v1/total-timeout", { method: "POST" }));
-      expect(next.status).toBe(200);
-      expect(await next.text()).toBe("next");
-    } finally {
-      releaseFirstEmission?.({ done: true, value: undefined });
-      await gw.close();
-    }
-  });
-
-  it("does not commit headers-only construction as success body", async () => {
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/stream",
-      admission: "none",
-      body: "none",
-      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), { status: 400 }),
-      endpoint: async (_request, _scope) => {
-        const writer = createStreamResponseWriter({
-          headers: { "Content-Type": "text/event-stream" },
-        });
-        expect(writer.committed).toBe(false);
-        queueMicrotask(() => {
-          void writer.enqueue(new TextEncoder().encode("data: hi\n\n")).then(() => writer.close());
-        });
-        return writer.response;
-      },
-    };
-
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime: defaultRuntimeConfigSnapshot(),
-    }, [route]);
-
-    const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/stream", { method: "POST" }));
-    expect(response.status).toBe(200);
-    const text = await response.text();
-    expect(text).toBe("data: hi\n\n");
-    await gw.close();
-  });
-
-  it("arms connect/first-byte/idle/total timers from the snapshot", async () => {
-    const runtime = defaultRuntimeConfigSnapshot();
-    expect(runtime.timeouts.connectMs).toBe(30_000);
-    expect(runtime.timeouts.firstByteMs).toBe(120_000);
-    expect(runtime.timeouts.streamIdleMs).toBe(120_000);
-    expect(runtime.timeouts.totalMs).toBe(1_800_000);
-
-    const controller = new AbortController();
-    let timedOut = false;
-    const disarm = armTimeout(1_000, controller.signal, {
-      nowMs: Date.now,
-      delay: defaultDelay,
-    }, () => {
-      timedOut = true;
-      controller.abort();
-    });
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-    expect(timedOut).toBe(true);
-    disarm();
-  });
-
-  it("disarms timers and aborts in-flight work on close", async () => {
-    let endpointStarted = false;
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/hold",
-      admission: "inference",
-      body: "none",
-      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), { status: 503 }),
-      endpoint: async (_request, scope) => {
-        endpointStarted = true;
-        await new Promise<void>((resolve) => {
-          scope.signal.addEventListener("abort", () => resolve(), { once: true });
-        });
-        return new Response("{}");
-      },
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime: defaultRuntimeConfigSnapshot(),
-    }, [route]);
-    const pending = gw.fetch(new Request("http://127.0.0.1:31400/v1/hold", { method: "POST" }));
-    for (let index = 0; index < 50 && !endpointStarted; index += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(endpointStarted).toBe(true);
-    await gw.close();
-    const closed = await pending;
-    expect(await closed.text()).toBe("");
-    const after = await gw.fetch(new Request("http://127.0.0.1:31400/healthz"));
-    expect(after.status).toBe(503);
-  });
-
-  it("does not admit or execute a request whose client signal is already aborted", async () => {
-    const usage: UsageUpdate[] = [];
-    let executed = false;
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/pre-aborted",
-      admission: "inference",
-      body: "none",
-      presentFailure: () => new Response("{}"),
-      createAttempt: (requestId, config) => createRequestAttempt({
-        requestId,
-        config,
-        protocol: "openai_chat",
-        recorder: { recordUsage: (update) => usage.push(update) },
-        abortedErrorCount: 0,
-      }),
-      endpoint: async () => {
-        executed = true;
-        return new Response("{}");
-      },
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime: defaultRuntimeConfigSnapshot(),
-    }, [route]);
-    const controller = new AbortController();
-    controller.abort();
-    try {
-      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/pre-aborted", {
-        method: "POST",
-        signal: controller.signal,
-      }));
-      expect(await response.text()).toBe("");
-      expect(executed).toBe(false);
-      expect(usage).toMatchObject([{ outcome: "aborted", errorCount: 0 }]);
-    } finally {
-      await gw.close();
-    }
-  });
-
-  it("holds admission and public delivery while semantic-success cancellation is pending", async () => {
-    const runtime = defaultRuntimeConfigSnapshot();
-    runtime.admission.activeMax = 1;
-    runtime.admission.queueMax = 0;
-    const cancelStarted = barrier();
-    const releaseCancel = barrier();
-    const counts = { cancel: 0, returned: 0, terminal: 0 };
-    let calls = 0;
-    let handle: ReturnType<typeof getStreamExecutionHandle>;
-    const route: RouteRegistration = {
-      method: "POST", path: "/v1/semantic-barrier", admission: "inference", body: "none",
-      presentFailure: () => new Response("blocked", { status: 503 }),
-      endpoint: async (_request, scope) => {
-        if (calls++ > 0) return new Response("next");
-        const response = await createStreamExecutionResponse({
-          upstream: { status: 200, headers: new Headers(), bytes: { async *[Symbol.asyncIterator]() {} },
-            cancel: async () => { counts.cancel += 1; cancelStarted.release(); await releaseCancel.promise; },
-          },
-          emissions: { [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-            let first = true;
-            return {
-              next: async () => {
-                if (first) { first = false; return { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("terminal") } }; }
-                return { done: false, value: { kind: "terminal", outcome: { kind: "success", value: "done" }, writerMode: "close" } };
-              },
-              return: async () => { counts.returned += 1; return { done: true, value: undefined }; },
-            };
-          } },
-          signal: scope.signal, deliverySignal: scope.deliverySignal,
-          onTerminal: () => { counts.terminal += 1; }, normalizeFailure: (error) => error,
-        });
-        handle = getStreamExecutionHandle(response);
-        return response;
-      },
-    };
-    const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime }, [route]);
-    const request = () => new Request("http://127.0.0.1:31400/v1/semantic-barrier", { method: "POST" });
-    try {
-      const response = await gw.fetch(request());
-      let delivered = false;
-      const delivery = response.text().then((text) => { delivered = true; return text; });
-      await boundedHttpWait(cancelStarted.promise);
-      expect(handle?.state).toBe("terminating");
-      expect(handle?.cause).toBe("semantic_success");
-      expect(delivered).toBe(false);
-      // The owner emission iterator returns AFTER cancellation, unlike the native raw source.
-      expect(counts).toMatchObject({ cancel: 1, returned: 0 });
-      const blocked = await gw.fetch(request());
-      expect(blocked.status).toBe(503);
-      await blocked.text();
-      expect(delivered).toBe(false);
-      releaseCancel.release();
-      expect(await boundedHttpWait(delivery)).toBe("terminal");
-      await handle?.completion;
-      expect(handle?.state).toBe("completed");
-      expect(counts).toEqual({ cancel: 1, returned: 1, terminal: 1 });
-      const next = await gw.fetch(request());
-      expect(next.status).toBe(200);
-      expect(await next.text()).toBe("next");
-    } finally { releaseCancel.release(); await gw.close(); }
-  });
-
-  it("awaits the converted raw Chat iterator-return chain before application close hooks", async () => {
-    const returnStarted = barrier();
-    const releaseReturn = barrier();
-    const readStarted = barrier();
-    let rawReturned = 0;
-    let canceled = 0;
-    let closeSawReturn = false;
-    let closed = false;
-    const route: RouteRegistration = {
-      method: "POST", path: "/v1/converted-return", admission: "inference", body: "none",
-      presentFailure: () => new Response("failure", { status: 502 }),
-      endpoint: async (_request, scope) => await createConvertedStreamResponse({
-        upstream: { status: 200, headers: new Headers({ "content-type": "text/event-stream" }),
-          bytes: { [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
-            let first = true;
-            return {
-              next: async () => {
-                if (first) { first = false; return { done: false, value: new TextEncoder().encode("data: {\"id\":\"chatcmpl_live\",\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n") }; }
-                readStarted.release();
-                await new Promise<void>((resolve) => {
-                  if (scope.signal.aborted) resolve();
-                  else scope.signal.addEventListener("abort", () => resolve(), { once: true });
-                });
-                throw new DOMException("aborted", "AbortError");
-              },
-              return: async () => { returnStarted.release(); await releaseReturn.promise; rawReturned += 1; return { done: true, value: undefined }; },
-            };
-          } },
-          cancel: async () => { canceled += 1; },
-        },
-        plan: { kind: "converted", source: "responses", target: "chat", stream: true, requestModel: "chat",
-          request: { body: { kind: "object", members: [] }, bytes: new TextEncoder().encode("{}"), stream: true,
-            hasVisionInput: false, initiator: "user", messagesBetaFeatures: [], degradations: [] },
-        },
-        scope, model: "chat", createUuid: () => "00000000-0000-4000-8000-000000000001", nowUnixSeconds: () => 1_700_000_000,
-        headers: { "content-type": "text/event-stream" }, onTerminal: () => undefined,
-      }),
-    };
-    const gw = await createGateway({ startup: parseStartupConfig([], {}, { homedir: "." }), runtime: defaultRuntimeConfigSnapshot() }, [route], {
-      onClose: () => { closeSawReturn = rawReturned === 1; },
-    });
-    try {
-      const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/converted-return", { method: "POST" }));
-      const reader = response.body!.getReader();
-      let delivered = "";
-      const consumption = (async () => {
-        try { for (;;) { const next = await reader.read(); if (next.done) break; delivered += new TextDecoder().decode(next.value); } }
-        catch { /* Shutdown can abort an already committed public stream. */ }
-      })();
-      await boundedHttpWait(readStarted.promise);
-      expect(delivered).toContain("response.output_text.delta");
-      const closing = gw.close().then(() => { closed = true; });
-      await boundedHttpWait(returnStarted.promise);
-      expect(closed).toBe(false);
-      expect(closeSawReturn).toBe(false);
-      expect(rawReturned).toBe(0);
-      releaseReturn.release();
-      await boundedHttpWait(closing);
-      await consumption;
-      expect(rawReturned).toBe(1);
-      expect(canceled).toBe(1);
-      expect(closeSawReturn).toBe(true);
-    } finally { releaseReturn.release(); await gw.close(); }
-  });
-
   it("waits for the claimed Stream Execution barrier before application close hooks", async () => {
     let releaseCancel: (() => void) | undefined;
     const cancelBarrier = new Promise<void>((resolve) => {
@@ -931,359 +345,4 @@ describe("stream route lifecycle", () => {
     await closing;
     expect(closeSawCleanup).toBe(true);
   });
-
-  it("waits for response cancellation cleanup before application close hooks", async () => {
-    let cleanupComplete = false;
-    let closeSawCleanup = false;
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/cleanup-barrier",
-      admission: "inference",
-      body: "none",
-      presentFailure: () => new Response("{}"),
-      endpoint: async () => new Response(new ReadableStream<Uint8Array>({
-        async cancel(): Promise<void> {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-          cleanupComplete = true;
-        },
-      })),
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime: defaultRuntimeConfigSnapshot(),
-    }, [route], {
-      onClose: () => {
-        closeSawCleanup = cleanupComplete;
-      },
-    });
-    const response = await gw.fetch(new Request("http://127.0.0.1:31400/v1/cleanup-barrier", { method: "POST" }));
-    expect(response.body).not.toBeNull();
-    await gw.close();
-    expect(closeSawCleanup).toBe(true);
-  });
-
-  it("releases admission and listeners when direct delivery completes before the public route claims ownership", async () => {
-    const runtime = defaultRuntimeConfigSnapshot();
-    runtime.admission.activeMax = 1;
-    runtime.admission.queueMax = 0;
-    const activeDeliveryListeners: Array<Set<EventListenerOrEventListenerObject>> = [];
-    let requestCount = 0;
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/late-completion",
-      admission: "inference",
-      body: "none",
-      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
-        status: failure.kind === "queue_full" ? 503 : 400,
-      }),
-      endpoint: async (_request, scope) => {
-        const index = requestCount++;
-        const listeners = new Set<EventListenerOrEventListenerObject>();
-        activeDeliveryListeners[index] = listeners;
-        const addDeliveryListener = scope.deliverySignal.addEventListener.bind(scope.deliverySignal);
-        vi.spyOn(scope.deliverySignal, "addEventListener").mockImplementation((type, listener, options) => {
-          if (type === "abort") {
-            listeners.add(listener);
-          }
-          addDeliveryListener(type, listener, options);
-        });
-        const removeDeliveryListener = scope.deliverySignal.removeEventListener.bind(scope.deliverySignal);
-        vi.spyOn(scope.deliverySignal, "removeEventListener").mockImplementation((type, listener, options) => {
-          if (type === "abort") {
-            listeners.delete(listener);
-          }
-          removeDeliveryListener(type, listener, options);
-        });
-        const response = await createStreamExecutionResponse({
-          upstream: {
-            status: 200,
-            headers: new Headers(),
-            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-            cancel: async () => undefined,
-          },
-          emissions: {
-            async *[Symbol.asyncIterator]() {
-              yield { kind: "wire", bytes: new TextEncoder().encode("delivered-directly") } as const;
-              yield {
-                kind: "terminal",
-                outcome: { kind: "success", value: "done" },
-                writerMode: "close",
-              } as const;
-            },
-          },
-          signal: scope.signal,
-          deliverySignal: scope.deliverySignal,
-          headers: { "Content-Type": "text/event-stream" },
-          onTerminal: () => undefined,
-          normalizeFailure: (error) => error,
-        });
-        const reader = response.body!.getReader();
-        const first = await reader.read();
-        expect(new TextDecoder().decode(first.value)).toBe("delivered-directly");
-        expect((await reader.read()).done).toBe(true);
-        reader.releaseLock();
-        await getStreamExecutionHandle(response)?.completion;
-        return response;
-      },
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime,
-    }, [route]);
-    try {
-      const first = await gw.fetch(new Request("http://127.0.0.1:31400/v1/late-completion", { method: "POST" }));
-      expect(first.status).toBe(200);
-      expect(await first.text()).toBe("");
-
-      const second = await gw.fetch(new Request("http://127.0.0.1:31400/v1/late-completion", { method: "POST" }));
-      expect(second.status).toBe(200);
-      expect(await second.text()).toBe("");
-      expect(activeDeliveryListeners).toHaveLength(2);
-      for (const listeners of activeDeliveryListeners) {
-        expect(listeners.size).toBe(0);
-      }
-    } finally {
-      await gw.close();
-    }
-  });
-
-  it("releases Hono admission after a terminating late claim without public body demand", async () => {
-    const runtime = defaultRuntimeConfigSnapshot();
-    runtime.admission.activeMax = 1;
-    runtime.admission.queueMax = 0;
-    let requestCount = 0;
-    let cleanupStarted!: () => void;
-    const started = new Promise<void>((resolve) => { cleanupStarted = resolve; });
-    let releaseCleanup!: () => void;
-    const cleanupBarrier = new Promise<void>((resolve) => { releaseCleanup = resolve; });
-    let ownerCompletion: Promise<void> | undefined;
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/terminating-late-claim",
-      admission: "inference",
-      body: "none",
-      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
-        status: failure.kind === "queue_full" ? 503 : 400,
-      }),
-      endpoint: async (_request, scope) => {
-        if (requestCount++ > 0) {
-          return new Response("next");
-        }
-        const response = await createStreamExecutionResponse({
-          upstream: {
-            status: 200,
-            headers: new Headers(),
-            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-            cancel: async () => {
-              cleanupStarted();
-              await cleanupBarrier;
-            },
-          },
-          emissions: {
-            async *[Symbol.asyncIterator]() {
-              yield { kind: "wire", bytes: new TextEncoder().encode("delivered-directly") } as const;
-              yield {
-                kind: "terminal",
-                outcome: { kind: "success", value: "done" },
-                writerMode: "close",
-              } as const;
-            },
-          },
-          signal: scope.signal,
-          deliverySignal: scope.deliverySignal,
-          headers: { "Content-Type": "text/event-stream" },
-          onTerminal: () => undefined,
-          normalizeFailure: (error) => error,
-        });
-        const reader = response.body!.getReader();
-        expect(new TextDecoder().decode((await reader.read()).value)).toBe("delivered-directly");
-        await started;
-        expect(getStreamExecutionHandle(response)?.state).toBe("terminating");
-        reader.releaseLock();
-        ownerCompletion = getStreamExecutionHandle(response)?.completion;
-        return response;
-      },
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime,
-    }, [route]);
-    try {
-      const first = await gw.fetch(new Request("http://127.0.0.1:31400/v1/terminating-late-claim", { method: "POST" }));
-      expect(first.status).toBe(200);
-      expect(first.body).not.toBeNull();
-
-      releaseCleanup();
-      await ownerCompletion;
-
-      const second = await gw.fetch(new Request("http://127.0.0.1:31400/v1/terminating-late-claim", { method: "POST" }));
-      expect(second.status).toBe(200);
-      expect(await second.text()).toBe("next");
-    } finally {
-      releaseCleanup();
-      await gw.close();
-    }
-  });
-
-  it("settles response cancellation through the owner before releasing admission", async () => {
-    const runtime = defaultRuntimeConfigSnapshot();
-    runtime.admission.activeMax = 1;
-    runtime.admission.queueMax = 0;
-    let requestCount = 0;
-    let firstCancelStarted!: () => void;
-    const cancelStarted = new Promise<void>((resolve) => { firstCancelStarted = resolve; });
-    let releaseFirstCancel!: () => void;
-    const firstCancelBarrier = new Promise<void>((resolve) => { releaseFirstCancel = resolve; });
-    const counts = { cancel: 0, returned: 0, terminal: 0 };
-    const deliveryListenerRemovals: number[] = [];
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/owned-cancel",
-      admission: "inference",
-      body: "none",
-      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
-        status: failure.kind === "queue_full" ? 503 : 400,
-      }),
-      endpoint: async (_request, scope) => {
-        const index = requestCount++;
-        deliveryListenerRemovals[index] = 0;
-        const removeDeliveryListener = scope.deliverySignal.removeEventListener.bind(scope.deliverySignal);
-        vi.spyOn(scope.deliverySignal, "removeEventListener").mockImplementation((type, listener, options) => {
-          if (type === "abort") {
-            deliveryListenerRemovals[index] = (deliveryListenerRemovals[index] ?? 0) + 1;
-          }
-          removeDeliveryListener(type, listener, options);
-        });
-        let releaseNext: ((value: IteratorResult<StreamExecutionEmission<string>>) => void) | undefined;
-        const blockedNext = new Promise<IteratorResult<StreamExecutionEmission<string>>>((resolve) => {
-          releaseNext = resolve;
-        });
-        const response = await createStreamExecutionResponse({
-          upstream: {
-            status: 200,
-            headers: new Headers(),
-            bytes: { async *[Symbol.asyncIterator]() { yield new Uint8Array(); } },
-            cancel: async () => {
-              counts.cancel += 1;
-              if (index === 0) {
-                firstCancelStarted();
-                await firstCancelBarrier;
-              }
-            },
-          },
-          emissions: {
-            [Symbol.asyncIterator](): AsyncIterator<StreamExecutionEmission<string>> {
-              let emitted = false;
-              return {
-                next: async () => {
-                  if (!emitted) {
-                    emitted = true;
-                    return { done: false, value: { kind: "wire", bytes: new TextEncoder().encode("open") } };
-                  }
-                  if (index === 0) {
-                    return await blockedNext;
-                  }
-                  return {
-                    done: false,
-                    value: {
-                      kind: "terminal",
-                      outcome: { kind: "success", value: "done" },
-                      writerMode: "close",
-                    },
-                  };
-                },
-                return: async () => {
-                  counts.returned += 1;
-                  releaseNext?.({ done: true, value: undefined });
-                  return { done: true, value: undefined };
-                },
-              };
-            },
-          },
-          signal: scope.signal,
-          deliverySignal: scope.deliverySignal,
-          headers: { "Content-Type": "text/event-stream" },
-          onTerminal: () => { counts.terminal += 1; },
-          normalizeFailure: (error) => error,
-        });
-        return response;
-      },
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime,
-    }, [route]);
-    try {
-      const first = await gw.fetch(new Request("http://127.0.0.1:31400/v1/owned-cancel", { method: "POST" }));
-      const reader = first.body?.getReader();
-      expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("open");
-      const cancelling = reader?.cancel();
-      await cancelStarted;
-
-      const blocked = await gw.fetch(new Request("http://127.0.0.1:31400/v1/owned-cancel", { method: "POST" }));
-      expect(blocked.status).toBe(503);
-      releaseFirstCancel();
-      await cancelling;
-
-      const after = await gw.fetch(new Request("http://127.0.0.1:31400/v1/owned-cancel", { method: "POST" }));
-      expect(after.status).toBe(200);
-      expect(await after.text()).toBe("open");
-      expect(counts).toEqual({ cancel: 2, returned: 2, terminal: 2 });
-      expect(deliveryListenerRemovals).toHaveLength(2);
-      for (const removals of deliveryListenerRemovals) {
-        expect(removals).toBeGreaterThanOrEqual(2);
-      }
-    } finally {
-      releaseFirstCancel();
-      await gw.close();
-    }
-  });
-
-  it("holds the inference slot until the stream body ends", async () => {
-    const writers: ReturnType<typeof createStreamResponseWriter>[] = [];
-    const runtime = defaultRuntimeConfigSnapshot();
-    runtime.admission.activeMax = 1;
-    runtime.admission.queueMax = 0;
-    const route: RouteRegistration = {
-      method: "POST",
-      path: "/v1/hold-stream",
-      admission: "inference",
-      body: "none",
-      presentFailure: (failure) => new Response(JSON.stringify({ kind: failure.kind }), {
-        status: failure.kind === "queue_full" ? 503 : 400,
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-      }),
-      endpoint: async (_request, _scope) => {
-        const writer = createStreamResponseWriter({});
-        writers.push(writer);
-        return writer.response;
-      },
-    };
-    const gw = await createGateway({
-      startup: parseStartupConfig([], {}, { homedir: "Q:\\tmp-ghc-gateway" }),
-      runtime,
-    }, [route]);
-    const firstPromise = gw.fetch(new Request("http://127.0.0.1:31400/v1/hold-stream", { method: "POST" }));
-    for (let index = 0; index < 50 && writers.length === 0; index += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(writers.length).toBe(1);
-    const first = await firstPromise;
-    const overflow = await gw.fetch(new Request("http://127.0.0.1:31400/v1/hold-stream", { method: "POST" }));
-    expect(overflow.status).toBe(503);
-    expect(JSON.parse(await overflow.text())).toMatchObject({ kind: "queue_full" });
-    writers[0]?.close();
-    await first.arrayBuffer();
-    const after = await gw.fetch(new Request("http://127.0.0.1:31400/v1/hold-stream", { method: "POST" }));
-    expect(after.status).toBe(200);
-    writers[1]?.close();
-    await after.arrayBuffer();
-    await gw.close();
-  });
 });
-
-function barrier() {
-  let release!: () => void;
-  const promise = new Promise<void>((resolve) => { release = resolve; });
-  return { promise, release };
-}

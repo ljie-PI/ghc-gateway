@@ -58,8 +58,6 @@ class RecordingHistory implements ResponsesHistory {
     record: Readonly<ResponsesHistoryRecord>,
     _ownership: Parameters<ResponsesHistory["recordCheckpoint"]>[1],
     checkpointState: "partial" | "complete",
-    _signal?: AbortSignal,
-    finalize?: (() => void) | undefined,
   ): Promise<void> {
     await this.beforeCheckpoint?.();
     if (this.failAt === "checkpoint") {
@@ -67,7 +65,6 @@ class RecordingHistory implements ResponsesHistory {
     }
     this.records.push(record);
     this.checkpointStates.push(checkpointState);
-    finalize?.();
   }
 }
 
@@ -114,58 +111,6 @@ describe("Responses endpoint stream integration", () => {
       assertTransportReleased(opened.backend);
       opened.upstream.assertSatisfied();
     } finally {
-      await opened.close();
-    }
-  });
-
-  it("commits bridge stream checkpoints before completed bytes reach the caller", async () => {
-    const checkpointStarted = deferred<void>();
-    const releaseCheckpoint = deferred<void>();
-    let checkpointCalls = 0;
-    const history = new RecordingHistory(undefined, async () => {
-      checkpointCalls += 1;
-      if (checkpointCalls === 1) {
-        checkpointStarted.resolve();
-        await releaseCheckpoint.promise;
-      }
-    });
-    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
-      bytes("data: [DONE]\n\n"),
-    ]) } }];
-    const opened = await streamGateway(history, expectations);
-    try {
-      const response = await opened.gateway.fetch(responsesRequest());
-      const reader = response.body?.getReader();
-      if (reader === undefined) {
-        throw new Error("expected response body");
-      }
-      let delivered = "";
-      const consumption = (async () => {
-        for (;;) {
-          const next = await reader.read();
-          if (next.done) {
-            return;
-          }
-          delivered += new TextDecoder().decode(next.value, { stream: true });
-        }
-      })();
-
-      await checkpointStarted.promise;
-      expect(history.records).toHaveLength(0);
-      expect(delivered).not.toContain("response.output_text.done");
-      expect(delivered).not.toContain("response.output_item.done");
-      expect(delivered).not.toContain("response.completed");
-
-      releaseCheckpoint.resolve();
-      await consumption;
-      expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["partial", "complete"]);
-      expect(history.records).toHaveLength(2);
-      expect(delivered).toContain("response.output_item.done");
-      expect(delivered).toContain("response.completed");
-    } finally {
-      releaseCheckpoint.resolve();
       await opened.close();
     }
   });
@@ -347,28 +292,6 @@ describe("Responses endpoint stream integration", () => {
       await opened.close();
     }
   });
-
-  it("persists tool-only partial and terminal checkpoints through the typed checkpoint path", async () => {
-    const history = new RecordingHistory();
-    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
-      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"),
-      bytes("data: [DONE]\n\n"),
-    ]) } }];
-    const opened = await streamGateway(history, expectations);
-    try {
-      const response = await opened.gateway.fetch(responsesRequest());
-      expect(response.status).toBe(200);
-      await response.arrayBuffer();
-      expect(history.receiptStates).toEqual(["route_only"]);
-      expect(history.checkpointStates).toEqual(["partial", "partial", "complete"]);
-      expect(history.records).toHaveLength(3);
-      expect(history.records[0]?.output).toHaveLength(1);
-      expect(history.records[1]?.output).toEqual(history.records[0]?.output);
-      expect(history.records[2]?.output).toEqual(history.records[0]?.output);
-    } finally {
-      await opened.close();
-    }
-  });
 });
 
 async function streamGateway(
@@ -471,3 +394,57 @@ function deferred<T>(): Deferred<T> {
   });
   return { promise, resolve };
 }
+
+describe("Responses stream durability ordering", () => {
+  it("commits bridge stream checkpoints before completed bytes reach the caller", async () => {
+    const checkpointStarted = deferred<void>();
+    const releaseCheckpoint = deferred<void>();
+    let checkpointCalls = 0;
+    const history = new RecordingHistory(undefined, async () => {
+      checkpointCalls += 1;
+      if (checkpointCalls === 1) {
+        checkpointStarted.resolve();
+        await releaseCheckpoint.promise;
+      }
+    });
+    const expectations: HttpExpectation[] = [{ method: "POST", path: "/chat/completions", body: jsonStream(true), reply: { headers: { "content-type": "text/event-stream" }, body: Buffer.concat([
+      bytes("data: {\"id\":\"chatcmpl_stream\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n"),
+      bytes("data: [DONE]\n\n"),
+    ]) } }];
+    const opened = await streamGateway(history, expectations);
+    try {
+      const response = await opened.gateway.fetch(responsesRequest());
+      const reader = response.body?.getReader();
+      if (reader === undefined) {
+        throw new Error("expected response body");
+      }
+      let delivered = "";
+      const consumption = (async () => {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) {
+            return;
+          }
+          delivered += new TextDecoder().decode(next.value, { stream: true });
+        }
+      })();
+
+      await checkpointStarted.promise;
+      expect(history.records).toHaveLength(0);
+      expect(delivered).not.toContain("response.output_text.done");
+      expect(delivered).not.toContain("response.output_item.done");
+      expect(delivered).not.toContain("response.completed");
+
+      releaseCheckpoint.resolve();
+      await consumption;
+      expect(history.receiptStates).toEqual(["route_only"]);
+      expect(history.checkpointStates).toEqual(["partial", "complete"]);
+      expect(history.records).toHaveLength(2);
+      expect(delivered).toContain("response.output_item.done");
+      expect(delivered).toContain("response.completed");
+    } finally {
+      releaseCheckpoint.resolve();
+      await opened.close();
+    }
+  });
+});

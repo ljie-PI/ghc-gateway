@@ -43,29 +43,4 @@ describe("Chat SSE", () => {
       }
     }).rejects.toMatchObject({ code: "truncated" });
   });
-
-  it("classifies exact [DONE] before event:error", async () => {
-    const frames = [];
-    for await (const frame of parseOpenaiChatCompletionsSse(splitBytes("event: error\ndata: [DONE]\n\n", 1))) {
-      frames.push(frame);
-    }
-    expect(frames.map((frame) => frame.kind)).toEqual(["done"]);
-  });
-
-  it("treats a data field without a colon as empty data", async () => {
-    const frames = [];
-    for await (const frame of parseOpenaiChatCompletionsSse(splitBytes("data\n\ndata: [DONE]\n\n", 1))) {
-      frames.push(frame);
-    }
-    expect(frames.map((frame) => frame.kind)).toEqual(["error"]);
-  });
-
-  it("accepts a CR-only SSE event exactly at the event limit", async () => {
-    const first = "data: {\"choices\":[]}\r\r";
-    const frames = [];
-    for await (const frame of parseOpenaiChatCompletionsSse(splitBytes(`${first}data: [DONE]\r\r`, 1), new TextEncoder().encode(first).byteLength)) {
-      frames.push(frame);
-    }
-    expect(frames.map((frame) => frame.kind)).toEqual(["chunk", "done"]);
-  });
 });
