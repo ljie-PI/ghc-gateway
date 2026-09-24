@@ -78,6 +78,7 @@ Key behavior:
   - Converted routes restore the previous response's tool calls from local history and never send the ID upstream.
   - When the history can't be restored, the request is still sent without it rather than failing. This happens when the ID is unknown, expired or from another account, has no checkpoint, or the turn is text-only.
   - A mismatched model, route or upstream origin for known history still returns 409.
+- Converted Responses requests accept the `include` field that Codex always sends, without forwarding it. `reasoning.encrypted_content` is already met by the gateway's reasoning items, and other values are dropped. Native Responses requests forward `include` unchanged.
 - Converted Messages-to-Responses output keeps signature-only thinking as an empty reasoning item before later text or tool items. Its hidden thinking text and provider signature are not shown; eligible tool continuations use bounded opaque state.
 - Chat and Responses requests converted to a Messages upstream get Anthropic `cache_control` breakpoints, as in cc-switch, so repeated turns can hit prompt caching:
   - Positions: the last tool, the end of `system`, the newest cacheable message block and, in longer histories, the second-newest user message.

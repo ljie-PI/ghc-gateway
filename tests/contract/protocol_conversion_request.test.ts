@@ -1393,6 +1393,37 @@ describe("shared conversion request codecs", () => {
     expect(decoded(converted.bytes)).toMatchObject({ model: "gemini-3.8-flash", max_tokens: 64 });
   });
 
+  it.each([
+    ["chat", "omitted", undefined, false],
+    ["chat", "empty", [], false],
+    ["chat", "encrypted reasoning", ["reasoning.encrypted_content"], false],
+    ["chat", "unsupported value", ["reasoning.encrypted_content", "message.output_text.logprobs"], true],
+    ["chat", "malformed value", "reasoning.encrypted_content", true],
+    ["messages", "omitted", undefined, false],
+    ["messages", "empty", [], false],
+    ["messages", "encrypted reasoning", ["reasoning.encrypted_content"], false],
+    ["messages", "unsupported value", ["file_search_call.results"], true],
+  ] as const)("accepts Codex's include field when converting Responses to %s (%s)", (target, _label, include, degraded) => {
+    const converted = prepareConvertedRequest("responses", target, body({
+      model: "source",
+      input: "hi",
+      stream: true,
+      store: false,
+      ...(include === undefined ? {} : { include }),
+    }), "target", capability([target]));
+    const sent = decoded(converted.bytes);
+    expect(sent).not.toHaveProperty("include");
+    expect(converted.degradations.includes("responses.extensions_omitted")).toBe(degraded);
+  });
+
+  it("rejects a reasoning carrier hidden in include instead of dropping it", () => {
+    expect(() => prepareConvertedRequest("responses", "chat", body({
+      model: "source",
+      input: "hi",
+      include: ["ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef"],
+    }), "target", capability(["chat"]))).toThrow();
+  });
+
   it.each(["chat", "messages"] as const)(
     "rejects a Responses tool result without required output before converting to %s",
     (target) => {
