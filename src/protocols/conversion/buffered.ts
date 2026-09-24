@@ -24,7 +24,7 @@ import type {
 import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
 import { chatCompletionsUsageFromCounters } from "../openai_chat_completions/native.js";
-import { restoreResponsesExtendedTools } from "./responses_extended_tools.js";
+import { restoreResponsesExtendedTools } from "./request/responses_extended_tool_history.js";
 import { chatReasoningState, decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import { diagnosticShape } from "./diagnostics.js";

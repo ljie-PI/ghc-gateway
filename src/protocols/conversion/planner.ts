@@ -5,7 +5,7 @@ import {
 } from "../../copilot/model_capabilities.js";
 import { GatewayFailureError } from "../../gateway/failures.js";
 import type { WireJsonObject } from "../../serialization/wire_json.js";
-import { PROTOCOL_REQUEST_CODECS } from "./request_codecs.js";
+import { PROTOCOL_REQUEST_CODECS } from "./request/index.js";
 import { protocolTargets } from "./routing.js";
 import { diagnosticShape } from "./diagnostics.js";
 import { validateSemanticBindings } from "./request_sequence.js";
