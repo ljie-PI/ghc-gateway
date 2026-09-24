@@ -25,7 +25,6 @@ import type {
   UpstreamByteStream,
 } from "../../src/copilot/upstream_types.js";
 import { testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
-import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -102,7 +101,6 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
   readonly capiError?: CapiFetchError;
   readonly capiFetch?: (signal: AbortSignal) => Promise<CapiModelsResponse>;
   readonly throwingPreferences?: boolean;
-  readonly diagnostics?: DiagnosticRecorder;
 } = {}): Promise<{ readonly gw: Gateway; readonly close: () => Promise<void> }> {
   const dir = await mkdtemp(path.join(tmpdir(), "ghc-gateway-openai-chat-"));
   const database = openDatabase({
@@ -142,10 +140,9 @@ async function openAiGateway(backend: CapturingCopilotBackend, options: {
       return capi;
     },
   }, () => new Date("2026-08-30T05:00:00.000Z"));
-  const dependencies = {
-    ...(options.requestId === undefined ? {} : { createRequestId: () => options.requestId ?? "req_test" }),
-    ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
-  };
+  const dependencies: { readonly createRequestId?: () => string } = options.requestId === undefined
+    ? {}
+    : { createRequestId: () => options.requestId ?? "req_test" };
   const routeDependencies = {
     directory: accounts,
     registry: testModelCapabilityRegistry(catalog),
@@ -317,20 +314,37 @@ describe("OpenAI Chat endpoint", () => {
     }
   });
 
-  it("rejects duplicate top-level keys, invalid preference, and unknown explicit models before chat", async () => {
+  it.each([
+    ["duplicate members", "{\"model\":\"gpt\",\"\\u006dodel\":\"gpt\",\"messages\":[]}", "{\"model\":\"gpt\",\"model\":\"gpt\",\"messages\":[]}"],
+    ["non-string model", "{\"model\":4,\"messages\":[]}", "{\"model\":\"gpt\",\"messages\":[]}"],
+    ["non-boolean stream", "{\"model\":\"gpt\",\"stream\":\"yes\",\"messages\":[]}", "{\"model\":\"gpt\",\"stream\":\"yes\",\"messages\":[]}"],
+  ])("forwards %s to native Chat instead of rejecting them", async (_name, body, upstreamBody) => {
+    const backend = new CapturingCopilotBackend({
+      chat: { status: 200, headers: new Headers(), body: encoder.encode("{\"choices\":[]}") },
+    });
+    const { gw, close } = await openAiGateway(backend);
+    try {
+      const response = await gw.fetch(jsonRequest(body));
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(backend.chatRequests).toHaveLength(1);
+      expect(decoder.decode(backend.chatRequests[0]!.body)).toBe(upstreamBody);
+    } finally {
+      await close();
+    }
+  });
+
+  it("rejects requests without a usable model and unknown explicit models before chat", async () => {
     const backend = new CapturingCopilotBackend({
       chat: { status: 200, headers: new Headers(), body: encoder.encode("{}") },
     });
     const { gw, close } = await openAiGateway(backend, { preferred: "invalid", requestId: "req_error" });
     try {
-      const duplicate = await gw.fetch(jsonRequest("{\"model\":\"gpt\",\"\\u006dodel\":\"gpt\"}"));
-      expect(duplicate.status).toBe(400);
-      expect(await duplicate.text()).toBe(
-        "{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
-      );
-
       const missing = await gw.fetch(jsonRequest("{\"messages\":[]}"));
       expect(missing.status).toBe(400);
+      expect(await missing.text()).toBe(
+        "{\"error\":{\"message\":\"invalid request\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":null}}",
+      );
 
       const unknown = await gw.fetch(jsonRequest("{\"model\":\"unknown\",\"messages\":[]}"));
       expect(unknown.status).toBe(404);
@@ -340,29 +354,6 @@ describe("OpenAI Chat endpoint", () => {
       expect(backend.chatRequests).toHaveLength(0);
     } finally {
       await close();
-    }
-  });
-
-  it.each([
-    ["{\"model\":\"gpt\",\"\\u006dodel\":\"gpt\"}", "REQ-NATIVE-DUPLICATE-MEMBER"],
-    ["{\"model\":4,\"messages\":[]}", "REQ-NATIVE-MODEL"],
-    ["{\"model\":\"gpt\",\"stream\":\"yes\",\"messages\":[]}", "REQ-NATIVE-STREAM"],
-    ["[]", "REQ-BODY-NOT-OBJECT"],
-  ])("records the rule ID of a native Chat rejection: %s", async (body, ruleId) => {
-    const records: DiagnosticRecord[] = [];
-    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
-    const backend = new CapturingCopilotBackend({});
-    const { gw, close } = await openAiGateway(backend, { diagnostics });
-    try {
-      const response = await gw.fetch(jsonRequest(body));
-      expect(response.status).toBe(400);
-      await response.text();
-      await diagnostics.close();
-      expect(backend.chatRequests).toHaveLength(0);
-      expect(records.at(-1)?.failure).toMatchObject({ kind: "invalid_request", ruleId });
-    } finally {
-      await close();
-      await diagnostics.close();
     }
   });
 
@@ -410,27 +401,6 @@ describe("OpenAI Chat endpoint", () => {
       expect(backend.chatStreamRequests).toHaveLength(1);
       expect(new TextDecoder().decode(backend.chatStreamRequests[0]!.body))
         .toBe("{\"model\":\"gpt\",\"stream\":true,\"stream_options\":{\"include_usage\":true}}");
-    } finally {
-      await close();
-    }
-  });
-
-  it("keeps strict 400 precedence when converted planning also fails", async () => {
-    const backend = new CapturingCopilotBackend({});
-    const { gw, close } = await openAiGateway(backend, {
-      capiFetch: async () => ({
-        data: [{
-          id: "responses", name: "Responses", vendor: "test", model_picker_enabled: true,
-          model_info: { supported_endpoints: ["/responses"] },
-        }],
-      }),
-    });
-    try {
-      const response = await gw.fetch(jsonRequest(
-        "{\"model\":\"responses\",\"stream\":\"yes\",\"messages\":[],\"n\":2}",
-      ));
-      expect(response.status).toBe(400);
-      expect(backend.responsesRequests).toEqual([]);
     } finally {
       await close();
     }

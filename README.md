@@ -95,7 +95,7 @@ ghcg start --diagnostics
 ghcg restart --diagnostics
 ```
 
-Diagnostics are written to `<data-dir>/logs/diagnostics.jsonl`. They use request IDs for correlation and exclude prompts, responses, tool content, credentials, internal identifiers, and provider error bodies. A gateway rejection records its rule ID, and a provider error records only its error type and code. Files rotate at 10 MiB, retain up to five files, and are removed after seven days.
+Diagnostics are written to `<data-dir>/logs/diagnostics.jsonl`. They use request IDs for correlation and exclude prompts, responses, tool content, credentials, internal identifiers, and provider error bodies. For provider errors, only the error type and code are recorded. Files rotate at 10 MiB, retain up to five files, and are removed after seven days.
 
 Diagnostics must be enabled again on each start or restart.
 

@@ -16,7 +16,6 @@ import {
 } from "../../copilot/failures.js";
 import {
   GatewayFailureError,
-  invalidRequestFailure,
   safeRetryAfter,
 } from "../../gateway/failures.js";
 import type { DecodedHttpRequest, RouteRegistration } from "../../gateway/hono_app.js";
@@ -39,10 +38,8 @@ import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gatewa
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
 import {
-  assertCarrierModel,
   carrierBinding,
   claimReasoningCarriers,
-  reasoningCarrierFailure,
   reasoningCarrierTokens,
   resolveReasoningCarriers,
 } from "../conversion/reasoning_carrier_preflight.js";
@@ -53,7 +50,6 @@ import {
   validatedNativeMessagesBody,
 } from "./native.js";
 import { validateMessagesRequestSecurity } from "./request_validation.js";
-import { nativeRoutingFailure } from "../native_routing.js";
 
 export interface AnthropicMessagesRouteDependencies {
   readonly directory: AccountDirectory;
@@ -107,10 +103,9 @@ async function executeAnthropicMessages(
     throw new GatewayFailureError({ kind: "invalid_request" });
   }
   scope.diagnostics?.stage("request_validation");
-  assertAnthropicVersion(request.headers, scope.diagnostics);
+  observeAnthropicVersion(request.headers, scope.diagnostics);
   const betaFeatures = readAnthropicBetaFeatures(request.headers, scope.diagnostics);
   validateMessagesRequestSecurity(request.body);
-  const nativeRoutingRejection = nativeRoutingFailure(request.body);
   const requestedModel = readRequestedModel(request.body);
   if (requestedModel.value !== undefined) {
     usage.setRequestedModel(requestedModel.value);
@@ -119,19 +114,25 @@ async function executeAnthropicMessages(
   const account = await bindAccount(dependencies, scope.signal);
   usage.setAccount(account.accountId);
   if (dependencies.reasoningCarriers === undefined && reasoningCarrierTokens(request.body, "messages").length > 0) {
-    throw reasoningCarrierFailure("REQ-CARRIER-UNAVAILABLE");
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
   }
   const carrierClaim = dependencies.reasoningCarriers === undefined
     ? undefined
     : claimReasoningCarriers(request.body, "messages", account.accountId, dependencies.reasoningCarriers);
-  assertCarrierModel(requestedModel.value, carrierClaim);
+  if (
+    requestedModel.value !== undefined
+    && carrierClaim !== undefined
+    && requestedModel.value !== carrierClaim.binding.modelId
+  ) {
+    throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
+  }
   const effectiveModel = carrierClaim?.binding.modelId ?? requestedModel.value;
   const preference = effectiveModel === undefined ? dependencies.preferences.get(account.accountId) : null;
   scope.diagnostics?.stage("model_resolution");
   const catalog = await loadCatalog(dependencies, account, preference, scope.signal);
   const resolved = resolveModel(catalog, effectiveModel, preference);
   if ("kind" in resolved) {
-    throw new GatewayFailureError(resolved);
+    throw new GatewayFailureError({ kind: resolved.kind });
   }
   usage.setResolvedModel(resolved.upstreamModel);
   const stream = readStream(request.body);
@@ -179,7 +180,6 @@ async function executeAnthropicMessages(
     scope.diagnostics?.stage("planning", { degradations: plan.request.degradations });
   }
   if (plan.kind === "native") {
-    if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
     return withUpstreamProtocol(
       await executeNativeMessages(
         copilot,
@@ -360,39 +360,35 @@ function measureBuffered<T>(dependencies: AnthropicMessagesRouteDependencies, wo
     : dependencies.performanceObserver.measure("buffered", work);
 }
 
-function assertAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnostics): void {
+/** Copilot is always called with anthropic-version 2023-06-01; the client's value is only observed. */
+function observeAnthropicVersion(headers: Headers, diagnostics?: RequestDiagnostics): void {
   const value = headers.get("anthropic-version");
   diagnostics?.set({
     messagesVersion: value === null ? "missing" : value.trim() === "2023-06-01" ? "supported" : "unsupported",
   });
-  if (value === null || value.includes(",") || value.trim() !== "2023-06-01") {
-    diagnostics?.stage("request_validation", { code: value === null ? "anthropic_version_missing" : "anthropic_version_unsupported" });
-    throw invalidRequestFailure("REQ-M-VERSION");
-  }
 }
 
+/** Forwards well-formed beta tokens within the limits; malformed or excess tokens are dropped, not rejected. */
 function readAnthropicBetaFeatures(headers: Headers, diagnostics?: RequestDiagnostics): readonly MessagesBetaToken[] {
   const values = headers.get("anthropic-beta");
   if (values === null) {
     return [];
   }
-  const encodedBytes = new TextEncoder().encode(values).byteLength;
-  if (encodedBytes > ANTHROPIC_BETA_LIMITS.bytes) {
-    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw invalidRequestFailure("REQ-M-BETA");
+  const features: MessagesBetaToken[] = [];
+  let bytes = 0;
+  let dropped = false;
+  for (const candidate of values.split(",").map((value) => value.trim())) {
+    if (candidate.length === 0) continue;
+    const size = new TextEncoder().encode(candidate).byteLength + (features.length === 0 ? 0 : 1);
+    if (!isMessagesBetaToken(candidate) || features.length >= ANTHROPIC_BETA_LIMITS.tokens
+      || bytes + size > ANTHROPIC_BETA_LIMITS.bytes) {
+      dropped = true;
+      continue;
+    }
+    features.push(candidate);
+    bytes += size;
   }
-  if (values.trim().length === 0) {
-    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw invalidRequestFailure("REQ-M-BETA");
-  }
-  const features = values.split(",").map((value) => value.trim());
-  if (
-    features.length > ANTHROPIC_BETA_LIMITS.tokens
-    || !features.every(isMessagesBetaToken)
-  ) {
-    diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
-    throw invalidRequestFailure("REQ-M-BETA");
-  }
+  if (dropped) diagnostics?.stage("request_validation", { code: "anthropic_beta_unsupported" });
   const supported = new Set<string>(MESSAGES_BETA_FEATURES);
   diagnostics?.set({
     messagesBetas: features.filter((feature): feature is typeof MESSAGES_BETA_FEATURES[number] => supported.has(feature)),

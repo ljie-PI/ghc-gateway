@@ -19,13 +19,13 @@ export async function readWireJsonObjectBody(
 
   const bytes = await readLimitedBytes(request, maxBytes, signal);
   if (bytes.byteLength === 0) {
-    throw new GatewayFailureError({ kind: "invalid_request", ruleId: "REQ-BODY-EMPTY" });
+    throw new GatewayFailureError({ kind: "invalid_request" });
   }
 
   try {
     const value = parseWireJson(bytes, { maxBytes, maxDepth: 64 });
     if (!isWireJsonObject(value)) {
-      throw new GatewayFailureError({ kind: "invalid_request", ruleId: "REQ-BODY-NOT-OBJECT" });
+      throw new GatewayFailureError({ kind: "invalid_request" });
     }
     return value;
   } catch (error: unknown) {
@@ -35,7 +35,7 @@ export async function readWireJsonObjectBody(
     if (error instanceof WireJsonError && error.code === "byte_limit") {
       throw new GatewayFailureError({ kind: "body_too_large", cause: error });
     }
-    throw new GatewayFailureError({ kind: "invalid_request", ruleId: "REQ-BODY-JSON", cause: error });
+    throw new GatewayFailureError({ kind: "invalid_request", cause: error });
   }
 }
 

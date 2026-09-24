@@ -17,8 +17,6 @@ function collector() {
 
 describe("diagnostic failure contracts", () => {
   it.each([
-    { headers: { "anthropic-version": "PRIVATE_VERSION" }, input: body, code: "anthropic_version_unsupported", rule: "REQ-M-VERSION" },
-    { headers: { "anthropic-beta": "PRIVATE_BETA," }, input: body, code: "anthropic_beta_unsupported", rule: "REQ-M-BETA" },
     { headers: {}, input: { ...body, messages: "PRIVATE_MESSAGES" }, code: undefined, rule: "REQ-M-MESSAGES" },
   ])("identifies local rejection without exposing input: $code $rule", async ({ headers, input, code, rule }) => {
     const { diagnostics, records } = collector();
@@ -41,6 +39,27 @@ describe("diagnostic failure contracts", () => {
     }
   });
 
+  it("forwards unknown Messages version and malformed beta values while recording only their shape", async () => {
+    const { diagnostics, records } = collector();
+    const harness = await anthropicGateway({ gatewayDependencies: { diagnostics } });
+    try {
+      const response = await harness.gw.fetch(anthropicRequest(body, {
+        "anthropic-version": "PRIVATE_VERSION",
+        "anthropic-beta": "PRIVATE BETA,claude-code-20250219",
+      }));
+      expect(response.status).toBe(200);
+      await response.text();
+      await diagnostics.close();
+      expect(harness.upstream.requests).toHaveLength(1);
+      expect(records.at(-1)).toMatchObject({ messagesVersion: "unsupported", messagesBetas: ["claude-code-20250219"] });
+      expect(records.some((record) => record.code === "anthropic_beta_unsupported")).toBe(true);
+      expect(JSON.stringify(records)).not.toContain("PRIVATE");
+    } finally {
+      await harness.close();
+      await diagnostics.close();
+    }
+  });
+
   it("identifies malformed JSON as request decoding rather than admission", async () => {
     const { diagnostics, records } = collector();
     const harness = await anthropicGateway({ gatewayDependencies: { diagnostics }, expectations: [] });
@@ -53,35 +72,9 @@ describe("diagnostic failure contracts", () => {
       await response.text();
       await diagnostics.close();
       expect(records.find((record) => record.event === "request_failed")).toMatchObject({
-        stage: "request_decode", failure: { kind: "invalid_request", source: "request", phase: "decode", ruleId: "REQ-BODY-JSON" },
+        stage: "request_decode", failure: { kind: "invalid_request", source: "request", phase: "decode" },
       });
       expect(JSON.stringify(records)).not.toContain("PRIVATE");
-    } finally {
-      await harness.close();
-      await diagnostics.close();
-    }
-  });
-
-  it.each([
-    ["an empty body", () => new Request("http://127.0.0.1:31400/v1/messages", {
-      method: "POST", headers: { "content-type": "application/json" }, body: "",
-    }), "REQ-BODY-EMPTY"],
-    ["too many header fields", () => {
-      const headers = new Headers({ "content-type": "application/json", "anthropic-version": "2023-06-01" });
-      for (let index = 0; index < 130; index += 1) headers.set(`x-extra-${index}`, "1");
-      return new Request("http://127.0.0.1:31400/v1/messages", { method: "POST", headers, body: JSON.stringify(body) });
-    }, "REQ-HEADER-FIELDS"],
-  ])("records the rule ID when rejecting %s", async (_name, request, ruleId) => {
-    const { diagnostics, records } = collector();
-    const harness = await anthropicGateway({ gatewayDependencies: { diagnostics }, expectations: [] });
-    try {
-      const response = await harness.gw.fetch(request());
-      expect(response.status).toBe(400);
-      await response.text();
-      await diagnostics.close();
-      expect(records.find((record) => record.event === "request_failed")?.failure).toMatchObject({
-        kind: "invalid_request", ruleId,
-      });
     } finally {
       await harness.close();
       await diagnostics.close();
@@ -216,21 +209,6 @@ describe("diagnostic failure contracts", () => {
       });
       expect(records.at(-1)).toMatchObject({ upstreamProtocol: "messages", failure: { kind: "upstream_http" } });
       expect(JSON.stringify(records)).not.toContain("PRIVATE");
-    } finally {
-      await harness.close();
-      await diagnostics.close();
-    }
-  });
-
-  it("records a rule ID when no model is requested or preferred", async () => {
-    const { diagnostics, records } = collector();
-    const harness = await anthropicGateway({ gatewayDependencies: { diagnostics }, expectations: [] });
-    try {
-      const response = await harness.gw.fetch(anthropicRequest({ max_tokens: body.max_tokens, messages: body.messages }));
-      expect(response.status).toBe(400);
-      await response.text();
-      await diagnostics.close();
-      expect(records.at(-1)?.failure).toMatchObject({ kind: "invalid_request", ruleId: "REQ-MODEL-UNSELECTED" });
     } finally {
       await harness.close();
       await diagnostics.close();

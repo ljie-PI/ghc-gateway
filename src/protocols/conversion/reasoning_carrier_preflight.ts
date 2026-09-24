@@ -1,4 +1,4 @@
-import { GatewayFailureError, invalidRequestFailure } from "../../gateway/failures.js";
+import { GatewayFailureError } from "../../gateway/failures.js";
 import {
   isWireJsonArray,
   isWireJsonObject,
@@ -39,23 +39,9 @@ export function claimReasoningCarriers(
     }
     return { binding, tokens };
   } catch (error: unknown) {
-    if (error instanceof ReasoningCarrierError) unavailable();
+    if (error instanceof ReasoningCarrierError) unavailable(error);
     throw error;
   }
-}
-
-/** A carrier claim pins the model it was issued for; a request naming another model is ambiguous. */
-export function assertCarrierModel(
-  requestedModel: string | undefined,
-  claim: Readonly<ReasoningCarrierClaim> | undefined,
-): void {
-  if (requestedModel !== undefined && claim !== undefined && requestedModel !== claim.binding.modelId) {
-    throw reasoningCarrierFailure("REQ-CARRIER-MODEL");
-  }
-}
-
-export function reasoningCarrierFailure(ruleId: "REQ-CARRIER-UNAVAILABLE" | "REQ-CARRIER-MODEL"): GatewayFailureError {
-  return invalidRequestFailure(ruleId, { source: "converter", phase: "convert" });
 }
 
 export function resolveReasoningCarriers(
@@ -68,7 +54,7 @@ export function resolveReasoningCarriers(
     if (!sameBinding(claim.binding, expected)) unavailable();
     return new Map(claim.tokens.map((token) => [token, store.resolve(token, expected)]));
   } catch (error: unknown) {
-    if (error instanceof ReasoningCarrierError) unavailable();
+    if (error instanceof ReasoningCarrierError) unavailable(error);
     throw error;
   }
 }
@@ -174,6 +160,11 @@ function upstreamOrigin(endpoint: string): string {
   }
 }
 
-function unavailable(): never {
-  throw reasoningCarrierFailure("REQ-CARRIER-UNAVAILABLE");
+function unavailable(cause?: unknown): never {
+  throw new GatewayFailureError({
+    kind: "invalid_request",
+    source: "converter",
+    phase: "convert",
+    ...(cause === undefined ? {} : { cause }),
+  });
 }

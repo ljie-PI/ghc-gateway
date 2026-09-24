@@ -11,7 +11,6 @@ import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
 import { CapiFetchError } from "../../src/copilot/models_source.js";
 import { TokenRefreshError } from "../../src/copilot/token_refresh.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
-import { DiagnosticRecorder, type DiagnosticRecord } from "../../src/telemetry/diagnostics.js";
 
 const NATIVE_MESSAGES_SHAPES = [
   ["top-level continuation", { previous_response_id: "resp_external" }],
@@ -208,15 +207,12 @@ const NATIVE_MESSAGES_SHAPES = [
   ["duplicate core", { duplicateMaxTokens: true }],
 ] as const;
 
-/** Native Messages keeps only routing and gateway-carrier checks (#329); Copilot validates the rest. */
-const NATIVE_MESSAGES_REJECTED: ReadonlyMap<string, string> = new Map([
-  ["top-level continuation", "REQ-M-OWNERSHIP-FIELD"],
-  ["top-level ownership field", "REQ-M-OWNERSHIP-FIELD"],
-  ["carrier-shaped tool input", "REQ-M-CARRIER-SLOT"],
-  ["carrier-shaped top-level extension", "REQ-M-CARRIER-SLOT"],
-  ["carrier-shaped text", "REQ-M-CARRIER-SLOT"],
-  ["user thinking carrier", "REQ-M-CARRIER-SLOT"],
-  ["duplicate core", "REQ-NATIVE-DUPLICATE-MEMBER"],
+/** Native Messages rejects only misplaced gateway reasoning carriers (#329); Copilot validates the rest. */
+const NATIVE_MESSAGES_REJECTED: ReadonlySet<string> = new Set([
+  "carrier-shaped tool input",
+  "carrier-shaped top-level extension",
+  "carrier-shaped text",
+  "user thinking carrier",
 ]);
 
 function nativeMessagesCatalog() {
@@ -443,23 +439,16 @@ describe("Anthropic request route", () => {
   });
 
   it.each(NATIVE_MESSAGES_SHAPES.filter(([name]) => NATIVE_MESSAGES_REJECTED.has(name)))(
-    "still rejects routing and carrier ambiguity on native Messages: %s",
-    async (name, extra) => {
-      const records: DiagnosticRecord[] = [];
-      const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
-      const { gw, upstream, close } = await anthropicGateway({
-        expectations: [], catalogFetch: nativeMessagesCatalog, gatewayDependencies: { diagnostics },
-      });
+    "still rejects misplaced gateway reasoning carriers on native Messages: %s",
+    async (_name, extra) => {
+      const { gw, upstream, close } = await anthropicGateway({ expectations: [], catalogFetch: nativeMessagesCatalog });
       try {
         const response = await gw.fetch(nativeMessagesRequest(extra));
         expect(response.status).toBe(400);
         await response.text();
         expect(upstream.requests).toHaveLength(0);
-        await diagnostics.close();
-        expect(records.at(-1)?.failure?.ruleId).toBe(NATIVE_MESSAGES_REJECTED.get(name));
       } finally {
         await close();
-        await diagnostics.close();
       }
     },
   );
@@ -530,11 +519,8 @@ describe("Anthropic request route", () => {
   });
 
   it("rejects a gateway carrier when no carrier store can claim it", async () => {
-    const records: DiagnosticRecord[] = [];
-    const diagnostics = new DiagnosticRecorder({ write: (record) => records.push(record) });
     const { gw, upstream, close } = await anthropicGateway({
       expectations: [],
-      gatewayDependencies: { diagnostics },
       catalogFetch: () => ({ data: [{
         id: "native-messages",
         name: "native-messages",
@@ -555,11 +541,8 @@ describe("Anthropic request route", () => {
       expect(response.status).toBe(400);
       await response.text();
       expect(upstream.requests).toHaveLength(0);
-      await diagnostics.close();
-      expect(records.at(-1)?.failure).toMatchObject({ kind: "invalid_request", ruleId: "REQ-CARRIER-UNAVAILABLE" });
     } finally {
       await close();
-      await diagnostics.close();
     }
   });
 
@@ -702,21 +685,34 @@ describe("Anthropic request route", () => {
   });
 
   it.each([
-    ["empty token", "claude-code-20250219,"],
-    ["token count", Array.from({ length: 65 }, (_, index) => `beta-${index}`).join(",")],
-    ["byte count", "a".repeat(8 * 1024 + 1)],
-    ["whitespace byte count", " ".repeat(8 * 1024 + 1)],
-  ])("rejects structurally invalid bounded beta lists: %s", async (_name, beta) => {
-    const { gw, upstream, close } = await anthropicGateway({ expectations: [] });
+    ["empty token", "claude-code-20250219,", "claude-code-20250219"],
+    ["malformed token", "claude-code-20250219,bad token", "claude-code-20250219"],
+    ["token count", Array.from({ length: 65 }, (_, index) => `beta-${index}`).join(","),
+      Array.from({ length: 64 }, (_, index) => `beta-${index}`).join(",")],
+    ["byte count", "a".repeat(8 * 1024 + 1), null],
+    ["whitespace byte count", " ".repeat(8 * 1024 + 1), null],
+  ])("drops unusable beta tokens instead of rejecting the request: %s", async (_name, beta, forwarded) => {
+    const { gw, upstream, close } = await anthropicGateway({
+      catalogFetch: nativeMessagesCatalog,
+      expectations: [{
+        method: "POST", path: "/v1/messages", body: () => true,
+        reply: { status: 200, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({
+          id: "msg_1", type: "message", role: "assistant", model: "native-messages",
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        })) },
+      }],
+    });
     try {
       const response = await gw.fetch(anthropicRequest({
-        model: "gpt",
+        model: "native-messages",
         max_tokens: 16,
         messages: [{ role: "user", content: "hi" }],
       }, { "anthropic-beta": beta }));
-      expect(response.status).toBe(400);
+      expect(response.status).toBe(200);
       await response.text();
-      expect(upstream.requests).toHaveLength(0);
+      expect(upstream.requests).toHaveLength(1);
+      expect(upstream.requests[0]!.headers.get("anthropic-beta")).toBe(forwarded);
     } finally {
       await close();
     }
@@ -746,7 +742,7 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("requires the exact Messages version header and never forwards it to Chat", async () => {
+  it("accepts any Messages version header and never forwards it to Chat", async () => {
     const { gw, capturedRequests, close } = await anthropicGateway();
     try {
       for (const [name, headers] of [
@@ -764,16 +760,17 @@ describe("Anthropic request route", () => {
           headers: actualHeaders,
           body: JSON.stringify({ model: "gpt", max_tokens: 1, messages: [{ role: "user", content: "hi" }] }),
         }));
-        expect(response.status, name).toBe(400);
-        expect(response.headers.get("request-id")).toBe("req_test_1");
-        expect(await response.text()).toBe("{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"invalid request\"},\"request_id\":\"req_test_1\"}");
+        expect(response.status, name).toBe(200);
+        await response.text();
       }
 
       const ok = await gw.fetch(anthropicRequest({ model: "gpt", max_tokens: 1, messages: [{ role: "user", content: "hi" }], stream: false }));
       expect(ok.status).toBe(200);
-      expect(capturedRequests).toHaveLength(1);
-      expect(new TextDecoder().decode(capturedRequests[0]?.body)).not.toContain("anthropic-version");
-      expect(capturedRequests[0]?.headers.has("anthropic-version")).toBe(false);
+      expect(capturedRequests).toHaveLength(5);
+      for (const captured of capturedRequests) {
+        expect(new TextDecoder().decode(captured.body)).not.toContain("anthropic-version");
+        expect(captured.headers.has("anthropic-version")).toBe(false);
+      }
     } finally {
       await close();
     }

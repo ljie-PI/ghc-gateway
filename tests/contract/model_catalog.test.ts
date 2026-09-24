@@ -865,10 +865,9 @@ describe("model resolver", () => {
     const catalog = await registrySnapshotFromDiscovery(bound("github.com/1"), discovered);
     const resolved = resolveModel(catalog, undefined, { modelId: "gpt", validity: "valid" });
     expect(resolved).toMatchObject({ source: "preferred", upstreamModel: "gpt" });
-    expect(resolveModel(catalog, undefined, { modelId: "gpt", validity: "invalid" }))
-      .toEqual({ kind: "invalid_request", ruleId: "REQ-MODEL-UNSELECTED" });
+    expect(resolveModel(catalog, undefined, { modelId: "gpt", validity: "invalid" })).toEqual({ kind: "invalid_request" });
     expect(resolveModel(catalog, "nope", { modelId: "gpt", validity: "valid" })).toEqual({ kind: "model_not_found" });
-    expect(resolveModel(catalog, "", null)).toEqual({ kind: "invalid_request", ruleId: "REQ-MODEL-EMPTY" });
+    expect(resolveModel(catalog, "", null)).toEqual({ kind: "invalid_request" });
   });
 });
 

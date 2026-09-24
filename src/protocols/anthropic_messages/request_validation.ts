@@ -1,21 +1,12 @@
 import {
-  duplicateMemberNames,
   isWireJsonArray,
   isWireJsonObject,
   memberValues,
   type WireJson,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
-import { invalidRequestFailure } from "../../gateway/failures.js";
+import { GatewayFailureError } from "../../gateway/failures.js";
 import { isReasoningCarrier } from "../conversion/reasoning_carriers.js";
-
-const OWNERSHIP_FIELDS = new Set([
-  "call_id", "data", "encrypted_content", "previous_response_id", "reasoning", "reasoning_content", "reasoning_details",
-  "reasoning_items", "reasoning_text", "signature", "thinking_blocks", "tool_call_id", "tool_use_id",
-  "thinking", "redacted_thinking",
-]);
-
-const REQUEST_DECODE = { source: "request", phase: "decode" } as const;
 
 /**
  * Security checks shared by native and converted Messages requests. Everything else is validated by
@@ -23,11 +14,6 @@ const REQUEST_DECODE = { source: "request", phase: "decode" } as const;
  * handles, so they may appear only in the thinking slots the carrier store resolves.
  */
 export function validateMessagesRequestSecurity(body: WireJsonObject): void {
-  const duplicates = new Set(duplicateMemberNames(body));
-  if ([...OWNERSHIP_FIELDS].some((key) => duplicates.has(key))) throw invalidRequestFailure("REQ-M-OWNERSHIP-DUPLICATE", REQUEST_DECODE);
-  if (body.members.some((member) => OWNERSHIP_FIELDS.has(member.key) && member.key !== "thinking")) {
-    throw invalidRequestFailure("REQ-M-OWNERSHIP-FIELD", REQUEST_DECODE);
-  }
   rejectCarrierOutsideDocumentedSlots(body, new Set());
 }
 
@@ -74,15 +60,19 @@ function validateCarrierBlock(value: WireJson, seen: Set<string>, assistant: boo
     if (!allowed) {
       rejectAnyCarrier(member.value);
     } else if (typeof member.value === "string" && isReasoningCarrier(member.value)) {
-      if (seen.has(member.value)) throw invalidRequestFailure("REQ-M-CARRIER-DUPLICATE", REQUEST_DECODE);
+      if (seen.has(member.value)) throw invalid();
       seen.add(member.value);
     }
   }
 }
 
+function invalid(): GatewayFailureError {
+  return new GatewayFailureError({ kind: "invalid_request", source: "request", phase: "decode" });
+}
+
 function rejectAnyCarrier(value: WireJson): void {
   if (typeof value === "string") {
-    if (isReasoningCarrier(value)) throw invalidRequestFailure("REQ-M-CARRIER-SLOT", REQUEST_DECODE);
+    if (isReasoningCarrier(value)) throw invalid();
     return;
   }
   if (isWireJsonArray(value)) {

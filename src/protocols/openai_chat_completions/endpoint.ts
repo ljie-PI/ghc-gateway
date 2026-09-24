@@ -42,7 +42,6 @@ import { diagnosticShape, observeDiagnosticProtocolStatus } from "../conversion/
 import { observeDiagnosticStream, observeDiagnosticUpstream } from "../../gateway/diagnostic_upstream.js";
 import type { ReasoningCarrierBinding, ReasoningCarrierStore } from "../conversion/reasoning_carriers.js";
 import {
-  assertCarrierModel,
   carrierBinding,
   claimReasoningCarriers,
   resolveReasoningCarriers,
@@ -52,7 +51,6 @@ import {
   nativeChatCompletionsUsage,
   validatedNativeChatCompletionsBody,
 } from "./native.js";
-import { nativeRoutingFailure } from "../native_routing.js";
 
 export interface OpenaiChatCompletionsRouteDependencies {
   readonly directory: AccountDirectory;
@@ -104,59 +102,51 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
       }
 
       scope.diagnostics?.stage("request_validation");
-      const nativeRoutingRejection = nativeRoutingFailure(request.body);
-      const decoded = decodeOpenaiChatCompletionsPlanningRequest(request.body);
-      let account: Awaited<ReturnType<typeof bindAccount>>;
-      let carrierClaim: ReturnType<typeof claimReasoningCarriers> | undefined;
-      let resolved: ResolvedModel;
-      let copilot: BoundCopilot;
-      let plan: ReturnType<typeof planProtocolExecution>;
-      try {
-        if (decoded.requestedModel !== undefined) usage.setRequestedModel(decoded.requestedModel);
-        scope.diagnostics?.stage("account_binding");
-        account = await bindAccount(dependencies.directory, scope.signal);
-        usage.setAccount(account.accountId);
-        carrierClaim = dependencies.reasoningCarriers === undefined
-          ? undefined
-          : claimReasoningCarriers(decoded.body, "chat", account.accountId, dependencies.reasoningCarriers);
-        assertCarrierModel(decoded.requestedModel, carrierClaim);
-        const requestedModel = carrierClaim?.binding.modelId ?? decoded.requestedModel;
-        const preference = requestedModel === undefined
-          ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
-          : null;
-        scope.diagnostics?.stage("model_resolution");
-        const catalog = await loadCatalog(dependencies, account, scope.signal);
-        resolved = resolveOpenaiChatCompletionsModel({
-          ...decoded,
-          ...(requestedModel === undefined ? {} : { requestedModel }),
-        }, catalog, preference);
-        usage.setResolvedModel(resolved.upstreamModel);
-        scope.diagnostics?.stage("account_binding");
-        copilot = await bindCopilot(dependencies.copilot, account, scope);
-        const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
-          accountId: account.accountId,
-          modelId: resolved.upstreamModel,
-          endpoint: copilot.target.endpoint,
-          sourceProtocol: carrierClaim.binding.sourceProtocol,
-          wireProtocol: "chat",
-        });
-        const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
-          ? undefined
-          : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
-        plan = planProtocolExecution({
-          diagnostics: scope.diagnostics,
-          source: "chat",
-          body: decoded.body,
-          stream: decoded.stream,
-          capability: resolved.capability,
-          resolvedModel: resolved.upstreamModel,
-          ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
-          ...(carrierRecords === undefined ? {} : { carrierRecords }),
-        });
-      } catch (error: unknown) {
-        if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
-        throw error;
+      const decoded = decodeOpenaiChatCompletionsRequest(request.body);
+      if (decoded.requestedModel !== undefined) usage.setRequestedModel(decoded.requestedModel);
+      scope.diagnostics?.stage("account_binding");
+      const account = await bindAccount(dependencies.directory, scope.signal);
+      usage.setAccount(account.accountId);
+      const carrierClaim = dependencies.reasoningCarriers === undefined
+        ? undefined
+        : claimReasoningCarriers(decoded.body, "chat", account.accountId, dependencies.reasoningCarriers);
+      if (decoded.requestedModel !== undefined && carrierClaim !== undefined
+        && decoded.requestedModel !== carrierClaim.binding.modelId) {
+        throw new GatewayFailureError({ kind: "invalid_request", source: "converter", phase: "convert" });
       }
+      const requestedModel = carrierClaim?.binding.modelId ?? decoded.requestedModel;
+      const preference = requestedModel === undefined
+        ? (dependencies.preferences ?? dependencies.directory.preferences).get(account.accountId)
+        : null;
+      scope.diagnostics?.stage("model_resolution");
+      const catalog = await loadCatalog(dependencies, account, scope.signal);
+      const resolved = resolveOpenaiChatCompletionsModel({
+        ...decoded,
+        ...(requestedModel === undefined ? {} : { requestedModel }),
+      }, catalog, preference);
+      usage.setResolvedModel(resolved.upstreamModel);
+      scope.diagnostics?.stage("account_binding");
+      const copilot = await bindCopilot(dependencies.copilot, account, scope);
+      const inboundBinding = carrierClaim === undefined ? undefined : carrierBinding({
+        accountId: account.accountId,
+        modelId: resolved.upstreamModel,
+        endpoint: copilot.target.endpoint,
+        sourceProtocol: carrierClaim.binding.sourceProtocol,
+        wireProtocol: "chat",
+      });
+      const carrierRecords = dependencies.reasoningCarriers === undefined || inboundBinding === undefined
+        ? undefined
+        : resolveReasoningCarriers(carrierClaim, inboundBinding, dependencies.reasoningCarriers);
+      const plan = planProtocolExecution({
+        diagnostics: scope.diagnostics,
+        source: "chat",
+        body: decoded.body,
+        stream: decoded.stream,
+        capability: resolved.capability,
+        resolvedModel: resolved.upstreamModel,
+        ...(carrierClaim === undefined ? {} : { forcedTarget: carrierClaim.binding.sourceProtocol }),
+        ...(carrierRecords === undefined ? {} : { carrierRecords }),
+      });
       if (plan.kind === "converted") {
         const outputBinding = dependencies.reasoningCarriers === undefined || plan.target !== "responses" ? undefined : carrierBinding({
           accountId: account.accountId,
@@ -170,7 +160,6 @@ export function createOpenaiChatCompletionsRoute(dependencies: OpenaiChatComplet
           plan.target,
         );
       }
-      if (nativeRoutingRejection !== undefined) throw nativeRoutingRejection;
       const prepared = prepareOpenaiChatCompletionsRequest(decoded, resolved);
       scope.diagnostics?.shape("upstream_request", () => diagnosticShape(prepared.body));
       scope.diagnostics?.stage("upstream_request");
@@ -333,14 +322,11 @@ function attemptUsage(value: Readonly<SemanticUsage>) {
   };
 }
 
-/** Decodes a request bound for a native Chat upstream; only its routing members are checked. */
+/**
+ * Reads only the members the gateway routes on. Values it cannot use are treated as absent and the body
+ * is forwarded as-is, like cc-switch, so the upstream validates them.
+ */
 export function decodeOpenaiChatCompletionsRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
-  const failure = nativeRoutingFailure(body);
-  if (failure !== undefined) throw failure;
-  return decodeOpenaiChatCompletionsPlanningRequest(body);
-}
-
-function decodeOpenaiChatCompletionsPlanningRequest(body: WireJsonObject): DecodedOpenaiChatCompletionsRequest {
   const modelValue = memberValues(body, "model")[0];
   const model = typeof modelValue === "string" && modelValue.length > 0 ? modelValue : undefined;
   const streamValue = memberValues(body, "stream")[0];
@@ -402,7 +388,7 @@ function resolveOpenaiChatCompletionsModel(
 ): ResolvedModel {
   const resolved = resolveModel(catalog, decoded.requestedModel, preference);
   if ("kind" in resolved) {
-    throw new GatewayFailureError(resolved);
+    throw new GatewayFailureError({ kind: resolved.kind });
   }
   return resolved;
 }

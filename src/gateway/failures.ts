@@ -33,8 +33,6 @@ export interface GatewayFailureOrigin {
 interface GatewayFailureDetails {
   readonly source?: GatewayFailureSource;
   readonly phase?: GatewayFailurePhase;
-  /** Identifies which gateway check rejected the request; recorded only in content-free diagnostics. */
-  readonly ruleId?: string;
   readonly cause?: unknown;
 }
 
@@ -114,11 +112,6 @@ export class GatewayFailureError extends Error {
     super(failure.kind);
     this.name = "GatewayFailureError";
   }
-}
-
-/** A gateway request rejection whose rule ID diagnostics record. */
-export function invalidRequestFailure(ruleId: string, origin?: Readonly<GatewayFailureOrigin>): GatewayFailureError {
-  return new GatewayFailureError({ kind: "invalid_request", ...origin, ruleId });
 }
 
 export function isGatewayFailureError(error: unknown): error is GatewayFailureError {

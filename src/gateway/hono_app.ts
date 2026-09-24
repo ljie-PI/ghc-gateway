@@ -269,7 +269,7 @@ async function handleRoute(
       : { ok: true as const, fields: [] };
     if (!capture.ok) {
       diagnostics?.stage("request_validation");
-      throw new GatewayFailureError({ kind: "invalid_request", source: "request", phase: "headers", ruleId: "REQ-HEADER-FIELDS" });
+      throw new GatewayFailureError({ kind: "invalid_request", source: "request", phase: "headers" });
     }
     const url = new URL(request.url);
     let decoded: DecodedHttpRequest = { url, headers: request.headers, headerFields: capture.fields };
