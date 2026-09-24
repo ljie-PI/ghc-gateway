@@ -553,6 +553,27 @@ describe("model capability registry", () => {
     ]);
   });
 
+  it("resolves an undeclared Chat token field once, like cc-switch, while keeping declared fields", async () => {
+    const harness = await createHarness({
+      "github.com/1": [
+        model("gemini-flash", { supported_endpoints: ["/chat/completions"], max_output_tokens: 8000 }),
+        model("o3-mini", { supported_endpoints: ["/chat/completions"], max_output_tokens: 8000 }),
+        model("declared", {
+          supported_endpoints: ["/chat/completions"],
+          max_output_tokens: 8000,
+          chat_output_token_field: "max_completion_tokens",
+        }),
+      ],
+    });
+    const snapshot = await harness.registry.get(harness.account1, signal);
+    expect(snapshot.models.map((item) => [item.modelId, item.profile.chatOutputTokenField.value, item.profile.chatOutputTokenField.source]))
+      .toEqual([
+        ["gemini-flash", "max_tokens", "unknown"],
+        ["o3-mini", "max_completion_tokens", "unknown"],
+        ["declared", "max_completion_tokens", "live"],
+      ]);
+  });
+
   it("derives bounded output defaults from declarations and ceilings", async () => {
     const harness = await createHarness({
       "github.com/1": [
