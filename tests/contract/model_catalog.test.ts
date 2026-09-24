@@ -17,6 +17,7 @@ import {
   BUILTIN_MODEL_CAPABILITIES_REVISION,
   productionModelInfoLookup,
 } from "../../src/copilot/model_metadata.js";
+import { parseLiveModelCapabilities, type BuiltinModelCapabilityLookup } from "../../src/copilot/model_capabilities.js";
 import { registrySnapshotFromDiscovery, testModelCapabilityRegistry } from "./model_capability_registry_harness.js";
 import { CapiFetchError, HttpCopilotModelsSource } from "../../src/copilot/models_source.js";
 import { defaultRuntimeConfigSnapshot } from "../../src/config/schema.js";
@@ -195,6 +196,15 @@ describe("CAPI parse and cache", () => {
       id: "native", object: "model", created: 1_677_610_602, owned_by: "openai",
       max_input_tokens: 128_000,
       max_output_tokens: 64_000,
+      supported_reasoning_efforts: [],
+      input_modalities: ["text"],
+      supports_tool_calls: false,
+      supports_parallel_tool_calls: false,
+      supports_reasoning_summaries: false,
+      supports_verbosity: false,
+      supports_search: false,
+      context_window_tokens: 128_000,
+      max_context_window_tokens: 144_000,
     });
     expect(JSON.parse(serializeAnthropicModels(effective)).data[0]).toEqual({
       type: "model", id: "native", display_name: "native", created_at: "2023-02-28T18:56:42Z",
@@ -914,30 +924,168 @@ describe("listing routes", () => {
 });
 
 describe("serializers", () => {
-  it("omits routing metadata from public OpenAI objects", async () => {
+  it("exposes effective public capabilities without routing metadata", async () => {
     const discovered = {
       accountId: "a",
       fetchedAt: "2026-08-30T05:00:00Z",
       generation: 1,
       credentialGeneration: 1,
-      models: parseCapiModels({ data: [{
-        id: "m", name: "M", vendor: "v", model_picker_enabled: true,
-        capabilities: { supported_endpoints: ["/v1/responses"] },
-      }] }),
+      models: parseCapiModels({ data: [
+        {
+          id: "full", name: "Full", vendor: "v", model_picker_enabled: true,
+          supported_endpoints: ["/v1/responses"],
+          supported_parameters: ["reasoning"],
+          capabilities: {
+            limits: { max_prompt_tokens: 128_000, max_context_window_tokens: 144_000, max_output_tokens: 64_000 },
+            supports: {
+              reasoning_effort: ["high", "future", "low"],
+              tool_calls: true,
+              parallel_tool_calls: true,
+              vision: true,
+              reasoning_summaries: true,
+              verbosity: true,
+              tool_search: true,
+            },
+          },
+        },
+        {
+          id: "unproven", name: "Unproven", vendor: "v", model_picker_enabled: true,
+          supported_endpoints: ["/v1/responses"],
+          supported_reasoning_efforts: ["low", "high"],
+        },
+        {
+          id: "conflicting", name: "Conflicting", vendor: "v", model_picker_enabled: true,
+          supported_endpoints: ["/v1/responses"],
+          max_input_tokens: 128_000,
+          supported_parameters: ["reasoning"],
+          supported_reasoning_efforts: ["low"],
+          capabilities: {
+            limits: { max_context_window_tokens: 144_000 },
+            supports: { reasoning_effort: ["low"] },
+          },
+        },
+        {
+          id: "malformed", name: "Malformed", vendor: "v", model_picker_enabled: true,
+          supported_endpoints: ["/v1/responses"],
+          capabilities: {
+            limits: { max_context_window_tokens: null },
+            supports: {
+              reasoning_effort: "high",
+              tool_calls: 1,
+              parallel_tool_calls: null,
+              vision: [],
+              reasoning_summaries: "yes",
+              verbosity: {},
+              tool_search: "yes",
+            },
+          },
+        },
+        {
+          id: "missing", name: "Missing", vendor: "v", model_picker_enabled: true,
+        },
+      ] }),
     };
-    const catalog = await registrySnapshotFromDiscovery(bound("a"), discovered);
-    const openai = JSON.parse(serializeOpenaiModels(catalog)) as { data: Array<Record<string, unknown>> };
-    expect(openai.data[0]?.supported_endpoints).toBeUndefined();
-    expect(openai.data[0]?.supportedEndpoints).toBeUndefined();
-    expect(openai.data[0]?.routing).toBeUndefined();
-    expect(openai.data[0]?.mode).toBeUndefined();
+    const builtins: BuiltinModelCapabilityLookup = {
+      get: (modelId) => modelId === "conflicting"
+        ? {
+          revision: "serializer-conflict",
+          capabilities: parseLiveModelCapabilities({
+            supported_endpoints: ["/v1/chat/completions"],
+            max_input_tokens: 64_000,
+          }),
+        }
+        : null,
+    };
+    const catalog = await registrySnapshotFromDiscovery(bound("a"), discovered, builtins);
+    const conflicting = catalog.models.find((model) => model.modelId === "conflicting")!;
+    expect(conflicting).toMatchObject({
+      protocols: { value: ["responses"], conflict: true },
+      maxInputTokens: { value: 128_000, conflict: true },
+      capabilities: {
+        reasoningLevels: ["low"],
+        reasoningSummaries: true,
+        contextWindowTokens: 128_000,
+        maxContextWindowTokens: 144_000,
+      },
+    });
+    const serialized = serializeOpenaiModels(catalog);
+    const openai = JSON.parse(serialized) as { data: Array<Record<string, unknown>> };
+    expect(serializeOpenaiModels({ ...catalog, models: [catalog.models[0]!] })).toBe(
+      "{\"data\":[{\"id\":\"full\",\"object\":\"model\",\"created\":1677610602,\"owned_by\":\"openai\",\"max_input_tokens\":128000,\"max_output_tokens\":64000,\"supported_reasoning_efforts\":[\"low\",\"high\"],\"input_modalities\":[\"text\",\"image\"],\"supports_tool_calls\":true,\"supports_parallel_tool_calls\":true,\"supports_reasoning_summaries\":true,\"supports_verbosity\":true,\"supports_search\":true,\"context_window_tokens\":128000,\"max_context_window_tokens\":144000}],\"object\":\"list\"}",
+    );
+    expect(openai.data).toEqual([
+      {
+        id: "full", object: "model", created: 1_677_610_602, owned_by: "openai",
+        max_input_tokens: 128_000,
+        max_output_tokens: 64_000,
+        supported_reasoning_efforts: ["low", "high"],
+        input_modalities: ["text", "image"],
+        supports_tool_calls: true,
+        supports_parallel_tool_calls: true,
+        supports_reasoning_summaries: true,
+        supports_verbosity: true,
+        supports_search: true,
+        context_window_tokens: 128_000,
+        max_context_window_tokens: 144_000,
+      },
+      {
+        id: "unproven", object: "model", created: 1_677_610_602, owned_by: "openai",
+        supported_reasoning_efforts: [],
+        input_modalities: ["text"],
+        supports_tool_calls: false,
+        supports_parallel_tool_calls: false,
+        supports_reasoning_summaries: false,
+        supports_verbosity: false,
+        supports_search: false,
+      },
+      {
+        id: "conflicting", object: "model", created: 1_677_610_602, owned_by: "openai",
+        max_input_tokens: 128_000,
+        supported_reasoning_efforts: [],
+        input_modalities: ["text"],
+        supports_tool_calls: false,
+        supports_parallel_tool_calls: false,
+        supports_reasoning_summaries: false,
+        supports_verbosity: false,
+        supports_search: false,
+      },
+      {
+        id: "malformed", object: "model", created: 1_677_610_602, owned_by: "openai",
+        supported_reasoning_efforts: [],
+        input_modalities: ["text"],
+        supports_tool_calls: false,
+        supports_parallel_tool_calls: false,
+        supports_reasoning_summaries: false,
+        supports_verbosity: false,
+        supports_search: false,
+      },
+      {
+        id: "missing", object: "model", created: 1_677_610_602, owned_by: "openai",
+        supported_reasoning_efforts: [],
+        input_modalities: ["text"],
+        supports_tool_calls: false,
+        supports_parallel_tool_calls: false,
+        supports_reasoning_summaries: false,
+        supports_verbosity: false,
+        supports_search: false,
+      },
+    ]);
+    for (const item of openai.data) {
+      expect(item.supported_endpoints).toBeUndefined();
+      expect(item.supportedEndpoints).toBeUndefined();
+      expect(item.routing).toBeUndefined();
+      expect(item.mode).toBeUndefined();
+    }
 
     const anthropic = JSON.parse(serializeAnthropicModels(catalog)) as { data: Array<Record<string, unknown>> };
-    expect(anthropic.data[0]?.display_name).toBe("m");
-    expect(anthropic.data[0]?.supported_endpoints).toBeUndefined();
-    expect(anthropic.data[0]?.supportedEndpoints).toBeUndefined();
-    expect(anthropic.data[0]?.routing).toBeUndefined();
-    expect(anthropic.data[0]?.mode).toBeUndefined();
+    expect(anthropic.data.map((item) => item.display_name)).toEqual(["full", "unproven", "conflicting", "malformed", "missing"]);
+    for (const item of anthropic.data) {
+      expect(item.supported_reasoning_efforts).toBeUndefined();
+      expect(item.supported_endpoints).toBeUndefined();
+      expect(item.supportedEndpoints).toBeUndefined();
+      expect(item.routing).toBeUndefined();
+      expect(item.mode).toBeUndefined();
+    }
   });
 });
 
