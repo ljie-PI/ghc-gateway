@@ -7,9 +7,10 @@ import { type ConversionDegradationRule, type EncodedConversionRequest, type Sem
 import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, requiredArray, requiredString, unsupported, wireArray, wireNumber, wireObject } from "../wire.js";
 import { decodeChatContent, encodeChatContent, encodeChatImage, textContent, toolResultText } from "./content.js";
 import { decodeChatOutputFormat, encodeChatOutputFormat } from "./format.js";
-import { aliasedPositiveInteger, decodeIndependentStreamOptions, outputBudget, parallelCallsForTarget, reasoningForTarget, reasoningFromEffort, validateConditionalTargetParameters, validateSingleChoice } from "./limits.js";
-import { appendMember, appendObjectArrayMember, carrierState, encodedRequest, independentMetadata, optionalProtocolArray, projectRequestMembers, reasoningProjection, replaceOptionalMember, requestObject, requiredCarrier, requireProjection } from "./projection.js";
+import { aliasedPositiveInteger, decodeIndependentStreamOptions, outputBudget, parallelCallsForTarget, reasoningForTarget, reasoningFromEffort, validateSingleChoice } from "./limits.js";
+import { appendMember, appendObjectArrayMember, carrierState, applyUnsupportedImageFallback, encodedRequest, independentMetadata, metadataForTarget, replaceUnsupportedChatMessageImages, optionalProtocolArray, projectRequestMembers, reasoningProjection, replaceOptionalMember, requestObject, requiredCarrier, requireProjection } from "./projection.js";
 import { decodeChatToolCall, decodeChatToolChoice, decodeChatTools, encodeChatTool, encodeChatToolCall, encodeChatToolChoice, projectSemanticToolRequest } from "./tools.js";
+import { collectTargetInstructions } from "./instructions.js";
 import { type EncodeContext } from "./types.js";
 
 const CHAT_TOP_LEVEL = new Set([
@@ -259,51 +260,75 @@ export function encodeChatRequest(
   if (request.responseBindings !== undefined && request.stream) {
     unsupported("REQ-R-EXT-STREAM");
   }
-  validateConditionalTargetParameters(request, context.capability, "chat");
-  const targetReasoning = reasoningForTarget(context.capability, "chat", request.reasoning);
+  const instructionProjection = request.responseBindings === undefined
+    ? collectTargetInstructions(request, "chat.extensions_omitted")
+    : { instructions: request.instructions, items: request.items, degradations: [] };
+  const projectedRequest = Object.freeze({
+    ...request,
+    instructions: instructionProjection.instructions,
+    items: instructionProjection.items,
+  });
+  const targetRequest = applyUnsupportedImageFallback(
+    projectedRequest,
+    context.capability.capabilities.inputModalities.includes("image"),
+  );
+  const targetDegradations = new Set<ConversionDegradationRule>(instructionProjection.degradations);
+  const targetReasoning = reasoningForTarget(context.capability, "chat", targetRequest.reasoning);
   const reasoning = targetReasoning.reasoning;
-  const reasoningDegradations = targetReasoning.degradations;
-  const targetParallel = parallelCallsForTarget(request, context.capability);
-  const messages = request.responseBindings === undefined
-    ? encodeChatMessages(request)
-    : request.responseBindings.chatMessages;
-  const budget = request.source === "messages"
-    ? outputBudget(request.maxOutputTokens, context.capability)
-    : request.maxOutputTokens;
+  for (const degradation of targetReasoning.degradations) targetDegradations.add(degradation);
+  const targetParallel = parallelCallsForTarget(targetRequest, context.capability);
+  for (const degradation of targetParallel.degradations) targetDegradations.add(degradation);
+  const hasTools = targetRequest.tools.length > 0;
+  if (!hasTools && targetRequest.toolChoice !== undefined) targetDegradations.add("request.option_omitted");
+  if (!hasTools && targetRequest.parallelToolCalls !== undefined) targetDegradations.add("tools.parallel_control_omitted");
+  let messages = targetRequest.responseBindings === undefined
+    ? encodeChatMessages(targetRequest)
+    : targetRequest.responseBindings.chatMessages;
+  if (targetRequest.responseBindings !== undefined
+    && !context.capability.capabilities.inputModalities.includes("image")) {
+    const fallback = replaceUnsupportedChatMessageImages(messages);
+    messages = [...fallback.messages];
+    if (fallback.replaced) targetDegradations.add("request.option_omitted");
+  }
+  const budget = targetRequest.source === "messages"
+    ? outputBudget(targetRequest.maxOutputTokens, context.capability)
+    : targetRequest.maxOutputTokens;
   const tokenField = resolveChatOutputTokenField(context.capability.modelId, context.capability.profile.chatOutputTokenField);
-  const body = request.responseBindings === undefined
+  const metadata = metadataForTarget(targetRequest, "chat", targetDegradations);
+  const body = targetRequest.responseBindings === undefined
     ? wireObject([
       ["model", context.resolvedModel],
       ["messages", wireArray(messages)],
       ...(budget === undefined ? [] : [[tokenField, wireNumber(budget)] as const]),
-      ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
-      ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
-      ["stop", request.stop === undefined ? undefined : wireArray(request.stop)],
-      ["stream", request.stream ? true : undefined],
-      ["stream_options", request.stream ? wireObject([["include_usage", true]]) : undefined],
-      ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
-      ["tool_choice", encodeChatToolChoice(request.toolChoice)],
-      ["parallel_tool_calls", targetParallel.value],
-      ["response_format", encodeChatOutputFormat(request.outputFormat)],
+      ["temperature", targetRequest.temperature === undefined ? undefined : wireNumber(targetRequest.temperature)],
+      ["top_p", targetRequest.topP === undefined ? undefined : wireNumber(targetRequest.topP)],
+      ["stop", targetRequest.stop === undefined ? undefined : wireArray(targetRequest.stop)],
+      ["stream", targetRequest.stream ? true : undefined],
+      ["stream_options", targetRequest.stream ? wireObject([["include_usage", true]]) : undefined],
+      ["tools", hasTools ? wireArray(targetRequest.tools.map(encodeChatTool)) : undefined],
+      ["tool_choice", hasTools ? encodeChatToolChoice(targetRequest.toolChoice) : undefined],
+      ["parallel_tool_calls", hasTools ? targetParallel.value : undefined],
+      ["response_format", encodeChatOutputFormat(targetRequest.outputFormat)],
       ["reasoning_effort", reasoning?.effort],
-      ["metadata", request.metadata],
+      ["metadata", metadata],
     ])
     : wireObject([
       ["model", context.resolvedModel],
       ["messages", wireArray(messages)],
-      ...request.responseBindings.chatPrefixMembers
+      ...targetRequest.responseBindings.chatPrefixMembers
         .filter((member) => member.key !== "parallel_tool_calls")
         .map((member) => [member.key, member.value] as const),
-      ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
-      ["tool_choice", encodeChatToolChoice(request.toolChoice)],
-      ["parallel_tool_calls", targetParallel.value],
+      ["tools", hasTools ? wireArray(targetRequest.tools.map(encodeChatTool)) : undefined],
+      ["tool_choice", hasTools ? encodeChatToolChoice(targetRequest.toolChoice) : undefined],
+      ["parallel_tool_calls", hasTools ? targetParallel.value : undefined],
       ...(budget === undefined ? [] : [[tokenField, wireNumber(budget)] as const]),
-      ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
-      ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
+      ["temperature", targetRequest.temperature === undefined ? undefined : wireNumber(targetRequest.temperature)],
+      ["top_p", targetRequest.topP === undefined ? undefined : wireNumber(targetRequest.topP)],
+      ["response_format", encodeChatOutputFormat(targetRequest.outputFormat)],
       ["reasoning_effort", reasoning?.effort],
-      ["metadata", request.metadata],
+      ["metadata", metadata],
     ]);
-  return encodedRequest(request, body, [...reasoningDegradations, ...targetParallel.degradations]);
+  return encodedRequest(targetRequest, body, [...targetDegradations]);
 }
 
 function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[] {

@@ -6,9 +6,9 @@ import { type ConversionDegradationRule, type EncodedConversionRequest, type Sem
 import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, positiveInteger, requiredArray, requiredString, unsupported, wireArray, wireNumber, wireObject } from "../wire.js";
 import { decodeMessagesImage, encodeMessagesContent } from "./content.js";
 import { decodeMessagesOutputFormat, encodeMessagesOutputConfig } from "./format.js";
-import { decodeMessagesSystem, encodeMessagesSystem, splitMessagesInstructions } from "./instructions.js";
-import { decodeMessagesThinking, mergeReasoning, outputBudget, parallelCallsForTarget, reasoningForTarget, reasoningFromEffort, validateConditionalTargetParameters } from "./limits.js";
-import { carrierState, encodedRequest, MESSAGES_SENSITIVE_EXTENSION_FIELDS, messagesObject, messagesReasoningProjection, optionalDiscriminator, optionalProtocolObject, projectMessagesMembers, requiredCarrier, requireProjection, validateCacheControl, validatedMetadata } from "./projection.js";
+import { collectTargetInstructions, decodeMessagesSystem, encodeMessagesSystem } from "./instructions.js";
+import { decodeMessagesThinking, mergeReasoning, outputBudget, parallelCallsForTarget, reasoningForTarget, reasoningFromEffort } from "./limits.js";
+import { carrierState, applyUnsupportedImageFallback, encodedRequest, MESSAGES_SENSITIVE_EXTENSION_FIELDS, messagesObject, messagesReasoningProjection, metadataForTarget, optionalDiscriminator, optionalProtocolObject, projectMessagesMembers, requiredCarrier, requireProjection, validateCacheControl, validatedMetadata } from "./projection.js";
 import { decodeMessagesToolChoice, decodeMessagesToolResult, decodeMessagesTools, decodeMessagesToolUse, encodeMessagesTool, encodeMessagesToolChoice, messagesParallelToolCalls, parseArgumentsObject, projectSemanticToolRequest } from "./tools.js";
 import { type EncodeContext } from "./types.js";
 
@@ -122,11 +122,16 @@ function decodeMessagesMessage(
     MESSAGES_SENSITIVE_EXTENSION_FIELDS,
   );
   const role = requiredString(oneMember(message, "role", "REQ-M-MESSAGE-ROLE"), "REQ-M-MESSAGE-ROLE");
+  const content = oneMember(message, "content", "REQ-M-MESSAGE-CONTENT");
+  if (role === "system" || role === "developer") {
+    const instructions = decodeMessagesSystem(content, degradations);
+    if (instructions.length > 0) output.push({ type: "message", role, content: instructions });
+    return;
+  }
   if (role !== "user" && role !== "assistant") {
     degradations.add("messages.extensions_omitted");
     return;
   }
-  const content = oneMember(message, "content", "REQ-M-MESSAGE-CONTENT");
   if (typeof content === "string") {
     output.push({ type: "message", role, content: [{ type: "text", text: content }] });
     return;
@@ -248,74 +253,84 @@ export function encodeMessagesRequest(
   if (request.responseBindings !== undefined) {
     unsupported("REQ-R-EXT-TARGET");
   }
-  validateConditionalTargetParameters(request, context.capability, "messages");
-  if (request.temperature !== undefined && request.temperature > 1) {
-    unsupported("REQ-TARGET-M-TEMPERATURE");
-  }
-  if (
-    request.metadata !== undefined
-    && (!isWireJsonObject(request.metadata)
-      || request.metadata.members.some((member) => member.key !== "user_id"))
-  ) {
-    unsupported("REQ-TARGET-M-METADATA");
-  }
-  if (request.outputFormat?.kind === "json_object") {
-    unsupported("REQ-TARGET-M-JSON-OBJECT");
-  }
-  if (request.outputFormat?.kind === "json_schema" && request.outputFormat.description !== undefined) {
-    unsupported("REQ-TARGET-M-FORMAT-DESCRIPTION");
-  }
-  const resolvedReasoning = reasoningForTarget(context.capability, "messages", request.reasoning);
+  const instructionProjection = collectTargetInstructions(request, "messages.extensions_omitted");
+  const projectedRequest = Object.freeze({
+    ...request,
+    instructions: instructionProjection.instructions,
+    items: instructionProjection.items,
+  });
+  const targetRequest = applyUnsupportedImageFallback(
+    projectedRequest,
+    context.capability.capabilities.inputModalities.includes("image"),
+  );
+  const resolvedReasoning = reasoningForTarget(context.capability, "messages", targetRequest.reasoning);
   const targetReasoning = resolvedReasoning.reasoning?.effort === "none"
     ? undefined
     : resolvedReasoning.reasoning?.effort === "minimal"
       ? { effort: "low" as const }
       : resolvedReasoning.reasoning;
-  const targetDegradations = [...resolvedReasoning.degradations];
-  if (resolvedReasoning.reasoning?.effort === "minimal") targetDegradations.push("reasoning.budget_coarsened");
-  const budget = outputBudget(request.maxOutputTokens, context.capability);
-  const targetParallel = parallelCallsForTarget(request, context.capability);
-  targetDegradations.push(...targetParallel.degradations);
-  const split = splitMessagesInstructions(request);
-  const messages = encodeMessagesItems(split.items);
-  if (!messages.some(hasSubstantiveMessagesTurn)) {
-    unsupported("REQ-TARGET-M-EMPTY");
+  const targetDegradations = new Set<ConversionDegradationRule>([
+    ...instructionProjection.degradations,
+    ...resolvedReasoning.degradations,
+  ]);
+  if (targetRequest.outputFormat?.kind === "json_object"
+    || targetRequest.outputFormat?.description !== undefined) {
+    targetDegradations.add("request.option_omitted");
   }
-  if (!hasSubstantiveLeadingMessagesUser(messages)) {
+  if (resolvedReasoning.reasoning?.effort === "minimal") targetDegradations.add("reasoning.budget_coarsened");
+  let budget = outputBudget(targetRequest.maxOutputTokens, context.capability);
+  const maximumBudget = context.capability.maxOutputTokens.value;
+  if (maximumBudget !== null && budget > maximumBudget) {
+    budget = maximumBudget;
+    targetDegradations.add("request.option_omitted");
+  }
+  const targetParallel = parallelCallsForTarget(targetRequest, context.capability);
+  for (const degradation of targetParallel.degradations) targetDegradations.add(degradation);
+  const hasTools = targetRequest.tools.length > 0;
+  if (!hasTools && targetRequest.toolChoice !== undefined) targetDegradations.add("request.option_omitted");
+  if (!hasTools && targetRequest.parallelToolCalls !== undefined) targetDegradations.add("tools.parallel_control_omitted");
+  let targetTemperature = targetRequest.temperature;
+  let targetTopP = targetRequest.topP;
+  if (targetReasoning?.effort !== undefined) {
+    if (targetTemperature !== undefined || targetTopP !== undefined) targetDegradations.add("request.option_omitted");
+    targetTemperature = undefined;
+    targetTopP = undefined;
+  } else if (targetTemperature !== undefined && targetTemperature > 1) {
+    targetTemperature = 1;
+    targetDegradations.add("request.option_omitted");
+  }
+  const messages = encodeMessagesItems(targetRequest.items);
+  if (!messages.some(hasSubstantiveMessagesTurn) || !hasSubstantiveLeadingMessagesUser(messages)) {
     if (messages[0] !== undefined && oneMember(messages[0], "role", "REQ-INTERNAL") === "user") {
       messages[0] = syntheticMessagesLeadingUser();
     } else {
       messages.unshift(syntheticMessagesLeadingUser());
     }
-    targetDegradations.push("messages.leading_user_synthesized");
+    targetDegradations.add("messages.leading_user_synthesized");
   }
+  const metadata = metadataForTarget(targetRequest, "messages", targetDegradations);
   const body = withMessagesCacheBreakpoints(wireObject([
     ["model", context.resolvedModel],
-    ["system", encodeMessagesSystem(split.instructions)],
+    ["system", encodeMessagesSystem(targetRequest.instructions)],
     ["messages", wireArray(messages)],
     ["max_tokens", wireNumber(budget)],
-    ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
-    ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
-    ["stop_sequences", request.stop === undefined ? undefined : wireArray(request.stop)],
-    ["stream", request.stream ? true : undefined],
-    ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeMessagesTool))],
-    ["tool_choice", encodeMessagesToolChoice(request.toolChoice, targetParallel.value)],
-    ["output_config", encodeMessagesOutputConfig(request.outputFormat, targetReasoning)],
-    ["metadata", request.metadata],
+    ["temperature", targetTemperature === undefined ? undefined : wireNumber(targetTemperature)],
+    ["top_p", targetTopP === undefined ? undefined : wireNumber(targetTopP)],
+    ["stop_sequences", targetRequest.stop === undefined ? undefined : wireArray(targetRequest.stop)],
+    ["stream", targetRequest.stream ? true : undefined],
+    ["tools", hasTools ? wireArray(targetRequest.tools.map(encodeMessagesTool)) : undefined],
+    ["tool_choice", hasTools ? encodeMessagesToolChoice(targetRequest.toolChoice, targetParallel.value) : undefined],
+    ["output_config", encodeMessagesOutputConfig(targetRequest.outputFormat, targetReasoning)],
+    ["metadata", metadata],
   ]));
-  return encodedRequest(request, body, targetDegradations);
+  return encodedRequest(targetRequest, body, [...targetDegradations]);
 }
 
 function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObject[] {
   const output: WireJsonObject[] = [];
   for (const item of items) {
     if (item.type === "message") {
-      if (item.role === "system" || item.role === "developer") {
-        if (output.length > 0) {
-          unsupported("REQ-TARGET-M-MIDSTREAM-INSTRUCTION");
-        }
-        continue;
-      }
+      if (item.role === "system" || item.role === "developer") continue;
       pushMessagesRole(output, item.role, item.content.map(encodeMessagesContent));
       continue;
     }
@@ -350,9 +365,6 @@ function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObj
       ["content", wireArray(item.content.map(encodeMessagesContent))],
       ["is_error", item.isError ? true : undefined],
     ])]);
-  }
-  if (output.length === 0) {
-    unsupported("REQ-TARGET-M-EMPTY");
   }
   return output;
 }

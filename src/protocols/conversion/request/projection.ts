@@ -1,9 +1,10 @@
 import { canonicalizeWireJson } from "../../../serialization/canonical_json.js";
 import { isWireJsonArray, isWireJsonObject, memberValues, type WireJson, type WireJsonArray, type WireJsonObject } from "../../../serialization/wire_json.js";
+import { UNSUPPORTED_IMAGE_REPLACEMENT } from "../compatibility_markers.js";
 import { containsReasoningCarrier, type ReasoningCarrierRecord } from "../reasoning_carriers.js";
 import { decodeResponsesReasoningItem } from "../reasoning.js";
 import { projectIndependentOption, projectKnownObject } from "../request_projection.js";
-import { type ConversionDegradationRule, type EncodedConversionRequest, type InferenceProtocol, type SemanticRequest } from "../types.js";
+import { type ConversionDegradationRule, type EncodedConversionRequest, type InferenceProtocol, type SemanticContent, type SemanticRequest } from "../types.js";
 import { encodeWireObject, invalid, oneMember, optionalString, requiredObject, wireArray, wireObject } from "../wire.js";
 
 const MESSAGES_CONTINUATION_FIELDS = new Set(["previous_response_id"]);
@@ -110,6 +111,60 @@ export function independentResultStatus(
   );
   degradations.add("request.option_omitted");
   return status;
+}
+
+export function applyUnsupportedImageFallback(
+  request: Readonly<SemanticRequest>,
+  supportsImages: boolean,
+  preserveAssistantImages = false,
+): Readonly<SemanticRequest> {
+  if (supportsImages) return request;
+  let replaced = false;
+  const replaceContent = (content: readonly SemanticContent[], preserveImages: boolean): readonly SemanticContent[] => (
+    content.map((part): SemanticContent => {
+      if (part.type !== "image" || preserveImages) return part;
+      replaced = true;
+      return { type: "text", text: UNSUPPORTED_IMAGE_REPLACEMENT };
+    })
+  );
+  const instructions = replaceContent(request.instructions, false);
+  const items = request.items.map((item) => {
+    if (item.type === "message") {
+      return {
+        ...item,
+        content: replaceContent(item.content, preserveAssistantImages && item.role === "assistant"),
+      };
+    }
+    if (item.type === "tool_result") {
+      return { ...item, content: replaceContent(item.content, false) };
+    }
+    return item;
+  });
+  if (!replaced) return request;
+  return Object.freeze({
+    ...request,
+    instructions: Object.freeze(instructions),
+    items: Object.freeze(items),
+    degradations: Object.freeze([...request.degradations, "request.option_omitted" as const]),
+  });
+}
+
+export function replaceUnsupportedChatMessageImages(
+  messages: readonly WireJsonObject[],
+): { readonly messages: readonly WireJsonObject[]; readonly replaced: boolean } {
+  let replaced = false;
+  const projected = messages.map((message) => {
+    const content = oneMember(message, "content", "REQ-INTERNAL");
+    if (!isWireJsonArray(content)) return message;
+    const items = content.items.map((part) => {
+      if (!isWireJsonObject(part) || oneMember(part, "type", "REQ-INTERNAL") !== "image_url") return part;
+      if (containsReasoningCarrier(part)) invalid("REQ-TARGET-C-IMAGE");
+      replaced = true;
+      return wireObject([["type", "text"], ["text", UNSUPPORTED_IMAGE_REPLACEMENT]]);
+    });
+    return replaced ? replaceOptionalMember(message, "content", wireArray(items)) : message;
+  });
+  return { messages: projected, replaced };
 }
 
 export function encodedRequest(
@@ -275,6 +330,42 @@ export function validatedMetadata(
     }
   }
   return object;
+}
+
+export function metadataForTarget(
+  request: Readonly<SemanticRequest>,
+  target: InferenceProtocol,
+  degradations: Set<ConversionDegradationRule>,
+): WireJson | undefined {
+  const metadata = request.metadata;
+  if (metadata === undefined) return undefined;
+  if (request.source === "messages" && target !== "messages") {
+    if (containsReasoningCarrier(metadata)) invalid("REQ-TARGET-M-METADATA");
+    degradations.add("request.option_omitted");
+    return undefined;
+  }
+  if (target !== "messages") return metadata;
+  if (!isWireJsonObject(metadata)) {
+    if (containsReasoningCarrier(metadata)) invalid("REQ-TARGET-M-METADATA");
+    degradations.add("request.option_omitted");
+    return undefined;
+  }
+  const userIds = memberValues(metadata, "user_id");
+  const omitted = metadata.members.filter((member, index) => (
+    member.key !== "user_id" || metadata.members.findIndex((candidate) => candidate.key === "user_id") !== index
+  ));
+  for (const member of omitted) {
+    if (containsReasoningCarrier(member.value)) invalid("REQ-TARGET-M-METADATA");
+  }
+  if (omitted.length > 0) degradations.add("request.option_omitted");
+  const userId = userIds[0];
+  if (userId === undefined) return undefined;
+  if (typeof userId !== "string") {
+    if (containsReasoningCarrier(userId)) invalid("REQ-TARGET-M-METADATA");
+    degradations.add("request.option_omitted");
+    return undefined;
+  }
+  return wireObject([["user_id", userId]]);
 }
 
 export function independentMetadata(

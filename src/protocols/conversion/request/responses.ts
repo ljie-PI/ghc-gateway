@@ -8,8 +8,8 @@ import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, pars
 import { decodeResponsesContent, decodeToolResultContent, encodeResponsesContent, encodeResponsesToolResultContent, textContent } from "./content.js";
 import { decodeResponsesOutputFormat, encodeResponsesOutputFormat, sanitizeResponsesOutputFormatMembers } from "./format.js";
 import { decodeResponsesInstructions } from "./instructions.js";
-import { aliasedPositiveInteger, decodeIndependentStreamOptions, parallelCallsForTarget, reasoningForTarget, reasoningFromEffort, validateConditionalTargetParameters, validateSingleChoice } from "./limits.js";
-import { carrierState, encodedRequest, independentMetadata, independentResultStatus, omitPresentationStatus, omitPresentationString, optionalProtocolObject, projectRequestMembers, reasoningProjection, replaceOptionalMember, requiredCarrier, requireProjection, safeIndependentOption, TOOL_SENSITIVE_EXTENSION_FIELDS } from "./projection.js";
+import { aliasedPositiveInteger, decodeIndependentStreamOptions, parallelCallsForTarget, reasoningForTarget, reasoningFromEffort, validateSingleChoice } from "./limits.js";
+import { carrierState, applyUnsupportedImageFallback, encodedRequest, independentMetadata, independentResultStatus, metadataForTarget, omitPresentationStatus, omitPresentationString, optionalProtocolObject, projectRequestMembers, reasoningProjection, replaceOptionalMember, requiredCarrier, requireProjection, safeIndependentOption, TOOL_SENSITIVE_EXTENSION_FIELDS } from "./projection.js";
 import { decodeResponsesToolChoice, decodeResponsesTools, encodeResponsesTool, encodeResponsesToolChoice, projectSemanticToolRequest, validateArgumentsJson } from "./tools.js";
 import { type EncodeContext } from "./types.js";
 
@@ -370,44 +370,60 @@ export function encodeResponsesRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
-  validateConditionalTargetParameters(request, context.capability, "responses");
-  const targetReasoning = reasoningForTarget(context.capability, "responses", request.reasoning);
+  const targetRequest = applyUnsupportedImageFallback(
+    request,
+    context.capability.capabilities.inputModalities.includes("image"),
+    true,
+  );
+  const targetReasoning = reasoningForTarget(context.capability, "responses", targetRequest.reasoning);
   const reasoning = targetReasoning.reasoning;
-  const reasoningDegradations = targetReasoning.degradations;
-  const targetParallel = parallelCallsForTarget(request, context.capability);
-  if (request.stop !== undefined) {
-    unsupported("REQ-TARGET-R-STOP");
-  }
+  const targetDegradations = new Set<ConversionDegradationRule>(targetReasoning.degradations);
+  const targetParallel = parallelCallsForTarget(targetRequest, context.capability);
+  for (const degradation of targetParallel.degradations) targetDegradations.add(degradation);
+  if (targetRequest.stop !== undefined) targetDegradations.add("request.option_omitted");
+  const hasTools = targetRequest.tools.length > 0;
+  if (!hasTools && targetRequest.toolChoice !== undefined) targetDegradations.add("request.option_omitted");
+  if (!hasTools && targetRequest.parallelToolCalls !== undefined) targetDegradations.add("tools.parallel_control_omitted");
+  const metadata = metadataForTarget(targetRequest, "responses", targetDegradations);
   const body = wireObject([
     ["model", context.resolvedModel],
-    ["instructions", textContent(request.instructions)],
-    ["input", wireArray(encodeResponsesItems(request.items))],
-    ["max_output_tokens", request.maxOutputTokens === undefined ? undefined : wireNumber(request.maxOutputTokens)],
-    ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
-    ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
-    ["stream", request.stream ? true : undefined],
-    ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeResponsesTool))],
-    ["tool_choice", encodeResponsesToolChoice(request.toolChoice)],
-    ["parallel_tool_calls", targetParallel.value],
-    ["text", request.outputFormat === undefined
+    ["instructions", textContent(targetRequest.instructions)],
+    ["input", wireArray(encodeResponsesItems(targetRequest.items, targetDegradations))],
+    ["max_output_tokens", targetRequest.maxOutputTokens === undefined ? undefined : wireNumber(targetRequest.maxOutputTokens)],
+    ["temperature", targetRequest.temperature === undefined ? undefined : wireNumber(targetRequest.temperature)],
+    ["top_p", targetRequest.topP === undefined ? undefined : wireNumber(targetRequest.topP)],
+    ["stream", targetRequest.stream ? true : undefined],
+    ["tools", hasTools ? wireArray(targetRequest.tools.map(encodeResponsesTool)) : undefined],
+    ["tool_choice", hasTools ? encodeResponsesToolChoice(targetRequest.toolChoice) : undefined],
+    ["parallel_tool_calls", hasTools ? targetParallel.value : undefined],
+    ["text", targetRequest.outputFormat === undefined
       ? undefined
-      : wireObject([["format", encodeResponsesOutputFormat(request.outputFormat)]])],
+      : wireObject([["format", encodeResponsesOutputFormat(targetRequest.outputFormat)]])],
     ["reasoning", reasoning?.effort === undefined
       ? undefined
       : wireObject([["effort", reasoning.effort]])],
-    ["metadata", request.metadata],
+    ["metadata", metadata],
   ]);
-  return encodedRequest(request, body, [...reasoningDegradations, ...targetParallel.degradations]);
+  return encodedRequest(targetRequest, body, [...targetDegradations]);
 }
 
-function encodeResponsesItems(items: readonly SemanticRequestItem[]): WireJsonObject[] {
+function encodeResponsesItems(
+  items: readonly SemanticRequestItem[],
+  degradations: Set<ConversionDegradationRule>,
+): WireJsonObject[] {
   const output: WireJsonObject[] = [];
   for (const item of items) {
     if (item.type === "message") {
       output.push(wireObject([
         ["type", "message"],
         ["role", item.role],
-        ["content", wireArray(item.content.map((part) => encodeResponsesContent(part, item.role === "assistant")))],
+        ["content", wireArray(item.content.flatMap((part) => {
+          if (item.role === "assistant" && part.type === "image") {
+            degradations.add("request.option_omitted");
+            return [];
+          }
+          return [encodeResponsesContent(part, item.role === "assistant")];
+        }))],
       ]));
     } else if (item.type === "reasoning") {
       if (item.opaqueState?.kind !== "responses_item") unsupported("REQ-TARGET-R-REASONING-STATE");

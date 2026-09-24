@@ -2,8 +2,8 @@ import { isWireJsonArray, isWireJsonObject, type WireJson, type WireJsonObject }
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { isOpenaiStrictSchemaCompatible } from "../strict_schema.js";
 import { type ConversionDegradationRule, type ResponsesToolBindingLedger, type ResponsesToolSourceBinding } from "../types.js";
-import { invalid, unsupported } from "../wire.js";
-import { transformInput, validateInstructionOrdering } from "./responses_extended_tool_bindings.js";
+import { invalid } from "../wire.js";
+import { transformInput } from "./responses_extended_tool_bindings.js";
 import { projectExtendedChatMessages } from "./responses_extended_tool_history.js";
 import { array, canonicalString, immutableWire, looseObject, type MutableState, object, omitMalformedExtended, optionalCopied, optionalExtendedObject, optionalExtendedString, projectExtended, removeMember, replaceMember, requiredArray, requiredString, single, sourceKey } from "./responses_extended_tool_shared.js";
 import { createHash } from "node:crypto";
@@ -56,10 +56,6 @@ export function prepareResponsesExtendedTools(
     return undefined;
   }
   const { state, inputValue, transformedChoice, projection } = decoded;
-  if (single(body, "text", "REQ-R-EXT-TEXT") !== undefined || single(body, "response_format", "REQ-R-EXT-FORMAT") !== undefined) {
-    unsupported("REQ-R-EXT-FORMAT");
-  }
-  validateInstructionOrdering(inputValue);
   const transformedInput = transformInput(state, inputValue);
   const transformedBody: WireJsonObject = Object.freeze({
     kind: "object",
