@@ -549,6 +549,7 @@ describe("model capability registry", () => {
       "responses",
       "chat",
       "mixed",
+      "chat-without-token-field",
     ]);
   });
 

@@ -76,11 +76,10 @@ export class ModelCapabilityRegistry {
   modelsUsableForAgentMapping(
     snapshot: Readonly<CapabilityCatalogSnapshot>,
   ): readonly EffectiveModelCapabilitySnapshot[] {
+    // Chat-only models need no declared token field: resolveChatOutputTokenField always has one.
     return snapshot.models.filter((model) => model.protocols.value !== null
       && model.protocols.value.length > 0
-      && model.defaultOutputTokens.valid
-      && (!model.protocols.value.every((protocol) => protocol === "chat")
-        || model.profile.chatOutputTokenField.value !== null));
+      && model.defaultOutputTokens.valid);
   }
 
   async close(): Promise<void> {

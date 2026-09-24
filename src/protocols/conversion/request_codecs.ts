@@ -1,5 +1,5 @@
 import type { EffectiveModelCapabilitySnapshot } from "../../copilot/capability_registry.js";
-import { chooseOutputTokenBudget, resolveModelReasoningEffort } from "../../copilot/model_capabilities.js";
+import { chooseOutputTokenBudget, resolveChatOutputTokenField, resolveModelReasoningEffort } from "../../copilot/model_capabilities.js";
 import { canonicalizeWireJson } from "../../serialization/canonical_json.js";
 import {
   isWireJsonArray,
@@ -2360,15 +2360,12 @@ function encodeChatRequest(
   const budget = request.source === "messages"
     ? outputBudget(request.maxOutputTokens, context.capability)
     : request.maxOutputTokens;
-  const tokenField = context.capability.profile.chatOutputTokenField.value;
-  if (budget !== undefined && tokenField === null) {
-    unsupported("REQ-TARGET-C-TOKEN-DIALECT");
-  }
+  const tokenField = resolveChatOutputTokenField(context.capability.modelId, context.capability.profile.chatOutputTokenField);
   const body = request.responseBindings === undefined
     ? wireObject([
       ["model", context.resolvedModel],
       ["messages", wireArray(messages)],
-      ...(budget === undefined || tokenField === null ? [] : [[tokenField, wireNumber(budget)] as const]),
+      ...(budget === undefined ? [] : [[tokenField, wireNumber(budget)] as const]),
       ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
       ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
       ["stop", request.stop === undefined ? undefined : wireArray(request.stop)],
@@ -2390,7 +2387,7 @@ function encodeChatRequest(
       ["tools", request.tools.length === 0 ? undefined : wireArray(request.tools.map(encodeChatTool))],
       ["tool_choice", encodeChatToolChoice(request.toolChoice)],
       ["parallel_tool_calls", targetParallel.value],
-      ...(budget === undefined || tokenField === null ? [] : [[tokenField, wireNumber(budget)] as const]),
+      ...(budget === undefined ? [] : [[tokenField, wireNumber(budget)] as const]),
       ["temperature", request.temperature === undefined ? undefined : wireNumber(request.temperature)],
       ["top_p", request.topP === undefined ? undefined : wireNumber(request.topP)],
       ["reasoning_effort", reasoning?.effort],
