@@ -168,7 +168,7 @@ export function decodeResponsesContent(
           { omission: "request.option_omitted", degradations },
         );
         if (assistant && parsed !== undefined && parsed.items.length > 0) {
-          unsupported("REQ-R-ASSISTANT-ANNOTATIONS");
+          degradations.add("request.option_omitted");
         }
         if (parsed === undefined) {
           block = { kind: "object", members: block.members.filter((member) => member.key !== "annotations") };

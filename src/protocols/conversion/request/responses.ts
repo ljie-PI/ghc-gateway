@@ -78,18 +78,17 @@ export function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: Re
     degradations,
   );
   validateSingleChoice(oneMember(semanticBody, "n", "REQ-R-N"), "REQ-R-N", degradations);
-  const background = optionalBoolean(oneMember(semanticBody, "background", "REQ-R-BACKGROUND"), "REQ-R-BACKGROUND");
-  if (background === true) {
-    unsupported("REQ-R-BACKGROUND");
-  }
+  const backgroundValue = oneMember(semanticBody, "background", "REQ-R-BACKGROUND");
+  optionalBoolean(backgroundValue, "REQ-R-BACKGROUND");
+  if (backgroundValue !== undefined) degradations.add("request.option_omitted");
   const previousResponseId = oneMember(semanticBody, "previous_response_id", "REQ-R-PREVIOUS");
   if (previousResponseId !== undefined && previousResponseId !== null) {
-    unsupported("REQ-R-PREVIOUS");
+    if (containsReasoningCarrier(previousResponseId)) invalid("REQ-R-PREVIOUS");
+    degradations.add("continuation.history_omitted");
   }
-  const store = optionalBoolean(oneMember(semanticBody, "store", "REQ-R-STORE"), "REQ-R-STORE");
-  if (store === true) {
-    unsupported("REQ-R-STORE");
-  }
+  const storeValue = oneMember(semanticBody, "store", "REQ-R-STORE");
+  optionalBoolean(storeValue, "REQ-R-STORE");
+  if (storeValue !== undefined) degradations.add("request.option_omitted");
   const items = decodeResponsesInput(oneMember(semanticBody, "input", "REQ-R-INPUT"), degradations, carrierRecords);
   const reasoningValue = oneMember(semanticBody, "reasoning", "REQ-R-REASONING");
   const reasoningObject = reasoningValue === undefined
@@ -244,7 +243,8 @@ function decodeResponsesInput(
       if (role === "assistant") {
         const phase = oneMember(object, "phase", "REQ-R-ASSISTANT-PHASE");
         if (phase !== undefined && phase !== null) {
-          unsupported("REQ-R-ASSISTANT-PHASE");
+          if (containsReasoningCarrier(phase)) invalid("REQ-R-ASSISTANT-PHASE");
+          degradations.add("request.option_omitted");
         }
       }
       output.push({
