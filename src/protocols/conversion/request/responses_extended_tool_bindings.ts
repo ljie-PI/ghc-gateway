@@ -11,7 +11,7 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
   }
   const calls = new Map<string, ResponsesToolSourceBinding>();
   const results = new Set<string>();
-  const omittedCallIds = new Set<string>();
+  const duplicateCallIds = new Set<string>();
   const output: WireJson[] = [];
   for (const inputValue of input.items) {
     let value = inputValue;
@@ -23,13 +23,11 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
     if (type === "custom_tool_call") {
       value = projectExtended(state, value, new Set(["type", "id", "call_id", "name", "input", "status"]), "REQ-R-EXT-CUSTOM-CALL");
       const name = requiredString(single(value, "name", "REQ-R-EXT-CUSTOM-CALL-NAME"), "REQ-R-EXT-CUSTOM-CALL-NAME");
-      const binding = state.bySourceKey.get(sourceKey(undefined, name));
-      if (binding === undefined && state.omittedSourceKeys.has(sourceKey(undefined, name))) {
-        omitExtendedCall(state, value, omittedCallIds);
-        continue;
-      }
-      if (binding === undefined || binding.kind !== "custom") invalid("REQ-R-EXT-MISSING-BINDING");
-      const callId = registerCall(calls, value, binding);
+      const declared = state.bySourceKey.get(sourceKey(undefined, name));
+      const binding = declared?.kind === "custom"
+        ? declared
+        : fallbackBinding(state, "custom", name);
+      const callId = registerCall(state, calls, duplicateCallIds, value, binding);
       const rawInput = requiredString(single(value, "input", "REQ-R-EXT-CUSTOM-CALL-INPUT"), "REQ-R-EXT-CUSTOM-CALL-INPUT", true);
       const itemId = optionalItemId(state, value);
       const status = requestCallStatus(state, single(value, "status", "REQ-R-EXT-CALL-STATUS"));
@@ -51,8 +49,11 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
         if (containsReasoningCarrier(execution)) invalid("REQ-R-EXT-SEARCH-CALL-EXECUTION");
         state.degradations.add("request.option_omitted");
       }
-      const binding = requiredBinding(state, undefined, "tool_search", "tool_search");
-      const callId = registerCall(calls, value, binding);
+      const declared = state.bySourceKey.get(sourceKey(undefined, "tool_search"));
+      const binding = declared?.kind === "tool_search"
+        ? declared
+        : fallbackBinding(state, "tool_search", "tool_search");
+      const callId = registerCall(state, calls, duplicateCallIds, value, binding);
       const argumentsValue = requiredObject(single(value, "arguments", "REQ-R-EXT-SEARCH-CALL-ARGS"), "REQ-R-EXT-SEARCH-CALL-ARGS");
       const itemId = optionalItemId(state, value);
       const status = requestCallStatus(state, single(value, "status", "REQ-R-EXT-CALL-STATUS"));
@@ -76,16 +77,11 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
         "REQ-R-EXT-FUNCTION-CALL-NS",
       );
       const key = sourceKey(namespace, name);
-      const binding = state.bySourceKey.get(key);
-      if (binding === undefined && state.omittedSourceKeys.has(key)) {
-        omitExtendedCall(state, value, omittedCallIds);
-        continue;
-      }
-      if (binding === undefined) invalid("REQ-R-EXT-MISSING-BINDING");
-      if (binding.kind !== "function" && binding.kind !== "namespace") {
-        invalid("REQ-R-EXT-FUNCTION-CALL-BINDING");
-      }
-      const callId = registerCall(calls, value, binding);
+      const declared = state.bySourceKey.get(key);
+      const binding = declared !== undefined && (declared.kind === "function" || declared.kind === "namespace")
+        ? declared
+        : fallbackBinding(state, namespace === undefined ? "function" : "namespace", name, namespace);
+      const callId = registerCall(state, calls, duplicateCallIds, value, binding);
       const argumentsText = requiredString(single(value, "arguments", "REQ-R-EXT-FUNCTION-CALL-ARGS"), "REQ-R-EXT-FUNCTION-CALL-ARGS", true);
       const parsedArguments = parseArguments(argumentsText, "REQ-R-EXT-FUNCTION-CALL-ARGS");
       const itemId = optionalItemId(state, value);
@@ -107,18 +103,19 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
         : new Set(["type", "id", "call_id", "output", "status", "tools"]);
       value = projectExtended(state, value, allowed, "REQ-R-EXT-RESULT");
       const callId = requiredString(single(value, "call_id", "REQ-R-EXT-RESULT-ID"), "REQ-R-EXT-RESULT-ID");
-      if (omittedCallIds.has(callId)) {
-        state.degradations.add("tools.history_omitted");
-        continue;
-      }
-      const binding = calls.get(callId);
-      if (binding === undefined || results.has(callId)) {
-        invalid("REQ-R-EXT-RESULT-BINDING");
-      }
-      if ((type === "custom_tool_call_output") !== (binding.kind === "custom")
-        || (type === "tool_search_output") !== (binding.kind === "tool_search")) {
-        invalid("REQ-R-EXT-RESULT-KIND");
-      }
+      const expectedKind = type === "custom_tool_call_output"
+        ? "custom"
+        : type === "tool_search_output" ? "tool_search" : "function";
+      const declared = calls.get(callId);
+      const matches = declared !== undefined
+        && !duplicateCallIds.has(callId)
+        && !results.has(callId)
+        && (expectedKind === "function"
+          ? declared.kind === "function" || declared.kind === "namespace"
+          : declared.kind === expectedKind);
+      const binding = matches
+        ? declared
+        : fallbackBinding(state, expectedKind, expectedKind === "tool_search" ? "tool_search" : `unbound_${callId}`);
       const resultValue = type === "tool_search_output"
         ? single(value, "tools", "REQ-R-EXT-SEARCH-OUTPUT-TOOLS")
         : single(value, "output", "REQ-R-EXT-RESULT-OUTPUT");
@@ -166,40 +163,38 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
 }
 
 function registerCall(
+  state: Pick<MutableState, "degradations">,
   calls: Map<string, ResponsesToolSourceBinding>,
+  duplicateCallIds: Set<string>,
   value: WireJsonObject,
   binding: ResponsesToolSourceBinding,
 ): string {
   const callId = requiredString(single(value, "call_id", "REQ-R-EXT-CALL-ID"), "REQ-R-EXT-CALL-ID");
   if (calls.has(callId)) {
-    invalid("REQ-R-EXT-DUPLICATE-CALL-ID");
+    duplicateCallIds.add(callId);
+    state.degradations.add("tools.history_omitted");
+  } else {
+    calls.set(callId, binding);
   }
-  calls.set(callId, binding);
   return callId;
 }
 
-function omitExtendedCall(
+function fallbackBinding(
   state: Pick<MutableState, "degradations">,
-  value: WireJsonObject,
-  omittedCallIds: Set<string>,
-): void {
-  const callId = requiredString(single(value, "call_id", "REQ-R-EXT-CALL-ID"), "REQ-R-EXT-CALL-ID");
-  if (omittedCallIds.has(callId)) invalid("REQ-R-EXT-DUPLICATE-CALL-ID");
-  omittedCallIds.add(callId);
-  state.degradations.add("tools.history_omitted");
-}
-
-function requiredBinding(
-  state: MutableState,
-  namespace: string | undefined,
+  kind: ResponsesToolSourceBinding["kind"],
   name: string,
-  kind?: ResponsesToolSourceBinding["kind"],
+  namespace?: string,
 ): ResponsesToolSourceBinding {
-  const binding = state.bySourceKey.get(sourceKey(namespace, name));
-  if (binding === undefined || (kind !== undefined && binding.kind !== kind)) {
+  if ([name, namespace].some((value) => value !== undefined && containsReasoningCarrier(value))) {
     invalid("REQ-R-EXT-MISSING-BINDING");
   }
-  return binding;
+  state.degradations.add("tools.history_omitted");
+  return {
+    kind,
+    chatName: namespace === undefined ? name : `${namespace}__${name}`,
+    sourceName: name,
+    ...(namespace === undefined ? {} : { namespace }),
+  };
 }
 
 function containsMedia(value: WireJson, depth = 0): boolean {

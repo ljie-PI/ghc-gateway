@@ -72,7 +72,6 @@ export function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: Rea
     degradations,
   );
   const projectedTools = projectSemanticToolRequest(
-    "messages",
     items,
     tools,
     toolChoice,

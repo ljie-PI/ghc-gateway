@@ -1,7 +1,7 @@
 import { isWireJsonArray, isWireJsonObject, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { isOpenaiStrictSchemaCompatible } from "../strict_schema.js";
-import { type ConversionDegradationRule, type ResponsesToolBindingLedger, type ResponsesToolSourceBinding } from "../types.js";
+import { ConversionContractError, type ConversionDegradationRule, type ResponsesToolBindingLedger, type ResponsesToolSourceBinding } from "../types.js";
 import { invalid } from "../wire.js";
 import { transformInput } from "./responses_extended_tool_bindings.js";
 import { projectExtendedChatMessages } from "./responses_extended_tool_history.js";
@@ -177,51 +177,57 @@ function addDeclaration(state: MutableState, value: WireJson, namespace?: string
     state.degradations.add("responses.extensions_omitted");
     return undefined;
   }
-  let tool = value;
-  const type = single(tool, "type", "REQ-R-EXT-TOOL-TYPE");
-  if (typeof type !== "string") {
+  try {
+    let tool = value;
+    const type = single(tool, "type", "REQ-R-EXT-TOOL-TYPE");
+    if (typeof type !== "string") {
+      if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-TOOL-TYPE");
+      markOmittedDeclaration(state, tool, namespace);
+      state.degradations.add("responses.extensions_omitted");
+      return undefined;
+    }
+    if (type === "function") {
+      return addFunction(state, tool, namespace);
+    }
+    if (namespace !== undefined) {
+      if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-TOOL-TYPE");
+      markOmittedDeclaration(state, tool, namespace);
+      state.degradations.add("responses.extensions_omitted");
+      return undefined;
+    }
+    if (type === "custom") {
+      return addCustom(state, tool);
+    }
+    if (type === "namespace") {
+      return addNamespace(state, tool);
+    }
+    if (type === "tool_search") {
+      tool = projectExtended(state, tool, new Set(["type"]), "REQ-R-EXT-SEARCH");
+      return addBinding(state, {
+        kind: "tool_search",
+        chatName: "tool_search",
+        sourceName: "tool_search",
+      }, object([
+        ["type", "function"],
+        ["name", "tool_search"],
+        ["description", TOOL_SEARCH_DESCRIPTION],
+        ["parameters", TOOL_SEARCH_SCHEMA],
+        ["strict", false],
+      ]), tool) ? tool : undefined;
+    }
     if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-TOOL-TYPE");
     markOmittedDeclaration(state, tool, namespace);
     state.degradations.add("responses.extensions_omitted");
     return undefined;
-  }
-  if (type === "function") {
-    return addFunction(state, tool, namespace);
-  }
-  if (namespace !== undefined) {
-    if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-TOOL-TYPE");
-    markOmittedDeclaration(state, tool, namespace);
+  } catch (error: unknown) {
+    if (!(error instanceof ConversionContractError) || containsReasoningCarrier(value)) throw error;
+    markOmittedDeclaration(state, value, namespace);
     state.degradations.add("responses.extensions_omitted");
     return undefined;
   }
-  if (type === "custom") {
-    return addCustom(state, tool);
-  }
-  if (type === "namespace") {
-    return addNamespace(state, tool);
-  }
-  if (type === "tool_search") {
-    tool = projectExtended(state, tool, new Set(["type"]), "REQ-R-EXT-SEARCH");
-    addBinding(state, {
-      kind: "tool_search",
-      chatName: "tool_search",
-      sourceName: "tool_search",
-    }, object([
-      ["type", "function"],
-      ["name", "tool_search"],
-      ["description", TOOL_SEARCH_DESCRIPTION],
-      ["parameters", TOOL_SEARCH_SCHEMA],
-      ["strict", false],
-    ]));
-    return tool;
-  }
-  if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-TOOL-TYPE");
-  markOmittedDeclaration(state, tool, namespace);
-  state.degradations.add("responses.extensions_omitted");
-  return undefined;
 }
 
-function addFunction(state: MutableState, tool: WireJsonObject, namespace?: string): WireJsonObject {
+function addFunction(state: MutableState, tool: WireJsonObject, namespace?: string): WireJsonObject | undefined {
   tool = projectExtended(
     state,
     tool,
@@ -235,7 +241,19 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
     new Set(["name", "description", "parameters", "strict"]),
     "REQ-R-EXT-FUNCTION-SHAPE",
   );
-  if (nested !== undefined) tool = replaceMember(tool, "function", shape);
+  const nestedStrict = single(shape, "strict", "REQ-R-EXT-FUNCTION-STRICT");
+  if (nested !== undefined) {
+    const shadowedKeys = nestedStrict === undefined
+      ? ["name", "description", "parameters"] as const
+      : ["name", "description", "parameters", "strict"] as const;
+    for (const key of shadowedKeys) {
+      const shadowed = single(tool, key, "REQ-R-EXT-FUNCTION-SHADOWED");
+      if (shadowed === undefined) continue;
+      if (containsReasoningCarrier(shadowed)) invalid("REQ-R-EXT-FUNCTION-SHADOWED");
+      state.degradations.add("responses.extensions_omitted");
+    }
+    tool = replaceMember(tool, "function", shape);
+  }
   const sourceName = toolName(shape, "REQ-R-EXT-FUNCTION-NAME");
   const description = optionalExtendedString(
     state,
@@ -246,8 +264,7 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
   const parametersObject = optionalExtendedObject(state, parametersValue, "REQ-R-EXT-FUNCTION-SCHEMA");
   const parameters = parametersObject === undefined
     ? object([["type", "object"], ["properties", object([])]])
-    : normalizedParameters(parametersObject);
-  const nestedStrict = single(shape, "strict", "REQ-R-EXT-FUNCTION-STRICT");
+    : normalizedParameters(state, parametersObject);
   const strictValue = nestedStrict === undefined && nested !== undefined
     ? single(tool, "strict", "REQ-R-EXT-FUNCTION-STRICT")
     : nestedStrict;
@@ -256,7 +273,7 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
     : omitMalformedExtended(state, strictValue, "REQ-R-EXT-FUNCTION-STRICT");
   const projectedStrict = strict ?? (isOpenaiStrictSchemaCompatible(parameters) ? true : undefined);
   const chatName = namespace === undefined ? sourceName : projectedNamespaceName(namespace, sourceName);
-  addBinding(state, {
+  return addBinding(state, {
     kind: namespace === undefined ? "function" : "namespace",
     chatName,
     sourceName,
@@ -267,11 +284,10 @@ function addFunction(state: MutableState, tool: WireJsonObject, namespace?: stri
     ...(description === undefined ? [] : [["description", description] as const]),
     ["parameters", parameters],
     ...(projectedStrict === undefined ? [] : [["strict", projectedStrict] as const]),
-  ]));
-  return tool;
+  ]), tool) ? tool : undefined;
 }
 
-function addCustom(state: MutableState, tool: WireJsonObject): WireJsonObject {
+function addCustom(state: MutableState, tool: WireJsonObject): WireJsonObject | undefined {
   tool = projectExtended(state, tool, new Set(["type", "name", "description", "format"]), "REQ-R-EXT-CUSTOM");
   const name = toolName(tool, "REQ-R-EXT-CUSTOM-NAME");
   optionalExtendedString(
@@ -292,6 +308,7 @@ function addCustom(state: MutableState, tool: WireJsonObject): WireJsonObject {
         "REQ-R-EXT-CUSTOM-FORMAT",
       );
       if (single(objectValue, "type", "REQ-R-EXT-CUSTOM-FORMAT-TYPE") !== "text") {
+        if (containsReasoningCarrier(objectValue)) invalid("REQ-R-EXT-CUSTOM-FORMAT-TYPE");
         state.degradations.add("request.option_omitted");
         tool = removeMember(tool, "format");
       } else {
@@ -299,14 +316,13 @@ function addCustom(state: MutableState, tool: WireJsonObject): WireJsonObject {
       }
     }
   }
-  addBinding(state, { kind: "custom", chatName: name, sourceName: name }, object([
+  return addBinding(state, { kind: "custom", chatName: name, sourceName: name }, object([
     ["type", "function"],
     ["name", name],
     ["description", `Original tool definition:\n\`\`\`json\n${canonicalString(tool)}\n\`\`\``],
     ["parameters", CUSTOM_INPUT_SCHEMA],
     ["strict", false],
-  ]));
-  return tool;
+  ]), tool) ? tool : undefined;
 }
 
 function addNamespace(state: MutableState, tool: WireJsonObject): WireJsonObject | undefined {
@@ -317,42 +333,68 @@ function addNamespace(state: MutableState, tool: WireJsonObject): WireJsonObject
     "REQ-R-EXT-NAMESPACE",
   );
   const namespace = toolName(tool, "REQ-R-EXT-NAMESPACE-NAME");
-  optionalExtendedString(
+  const description = optionalExtendedString(
     state,
     single(tool, "description", "REQ-R-EXT-NAMESPACE-DESCRIPTION"),
     "REQ-R-EXT-NAMESPACE-DESCRIPTION",
   );
+  if (description !== undefined) {
+    if (containsReasoningCarrier(description)) invalid("REQ-R-EXT-NAMESPACE-DESCRIPTION");
+    state.degradations.add("responses.extensions_omitted");
+  }
   const tools = single(tool, "tools", "REQ-R-EXT-NAMESPACE-TOOLS");
   const children = single(tool, "children", "REQ-R-EXT-NAMESPACE-CHILDREN");
   if ((tools === undefined) === (children === undefined)) {
-    invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
+    if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
+    state.degradations.add("responses.extensions_omitted");
+    return undefined;
   }
-  const values = requiredArray(tools ?? children, "REQ-R-EXT-NAMESPACE-CHILDREN");
+  const rawValues = tools ?? children;
+  if (!isWireJsonArray(rawValues)) {
+    if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
+    state.degradations.add("responses.extensions_omitted");
+    return undefined;
+  }
+  const values = rawValues;
   if (values.items.length === 0) {
-    invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
+    if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
+    state.degradations.add("responses.extensions_omitted");
+    return undefined;
   }
   const sanitized = values.items.flatMap((child) => {
     const declaration = addDeclaration(state, child, namespace);
     return declaration === undefined ? [] : [declaration];
   });
   if (sanitized.length === 0) {
+    if (containsReasoningCarrier(tool)) invalid("REQ-R-EXT-NAMESPACE-CHILDREN");
     state.degradations.add("responses.extensions_omitted");
     return undefined;
   }
   return replaceMember(tool, tools === undefined ? "children" : "tools", array(sanitized));
 }
 
-function addBinding(state: MutableState, binding: ResponsesToolSourceBinding, tool: WireJsonObject): void {
-  validateChatName(binding.chatName);
+function addBinding(
+  state: MutableState,
+  binding: ResponsesToolSourceBinding,
+  tool: WireJsonObject,
+  source: WireJsonObject,
+): boolean {
   const key = sourceKey(binding.namespace, binding.sourceName);
-  if (state.bySourceKey.has(key) || state.byChatName.has(binding.chatName)) {
-    invalid("REQ-R-EXT-TOOL-COLLISION");
+  if (!isValidChatName(binding.chatName) || state.bySourceKey.has(key) || state.byChatName.has(binding.chatName)) {
+    if (containsReasoningCarrier(source) || containsReasoningCarrier(tool)
+      || [binding.chatName, binding.sourceName, binding.namespace]
+        .some((value) => value !== undefined && containsReasoningCarrier(value))) {
+      invalid("REQ-R-EXT-TOOL-COLLISION");
+    }
+    state.degradations.add("responses.extensions_omitted");
+    return false;
   }
   const frozen = Object.freeze({ ...binding });
   state.bindings.push(frozen);
   state.bySourceKey.set(key, frozen);
   state.byChatName.set(binding.chatName, frozen);
   state.tools.push(tool);
+  return true;
 }
 
 function collectDiscoveredDeclarations(state: MutableState, input: WireJson | undefined): void {
@@ -381,6 +423,7 @@ function transformToolChoice(state: MutableState, value: WireJson | undefined): 
   }
   if (typeof value === "string") {
     if (value === "auto" || value === "none" || value === "required") return value;
+    if (containsReasoningCarrier(value)) invalid("REQ-R-EXT-CHOICE-TYPE");
     state.degradations.add("request.option_omitted");
     return undefined;
   }
@@ -399,6 +442,7 @@ function transformToolChoice(state: MutableState, value: WireJson | undefined): 
   );
   if (type === undefined) return undefined;
   if (type !== "function" && type !== "custom" && type !== "tool_search") {
+    if (containsReasoningCarrier(choice)) invalid("REQ-R-EXT-CHOICE-TYPE");
     state.degradations.add("request.option_omitted");
     return undefined;
   }
@@ -417,11 +461,15 @@ function transformToolChoice(state: MutableState, value: WireJson | undefined): 
     state.degradations.add("request.option_omitted");
     return undefined;
   }
-  if (binding === undefined) invalid("REQ-R-EXT-MISSING-BINDING");
-  if ((type === "custom" && binding.kind !== "custom")
+  if (binding === undefined
+    || (type === "custom" && binding.kind !== "custom")
     || (type === "tool_search" && binding.kind !== "tool_search")
     || (type === "function" && binding.kind !== "function" && binding.kind !== "namespace")) {
-    invalid("REQ-R-EXT-CHOICE-BINDING");
+    if ([name, namespace].some((candidate) => candidate !== undefined && containsReasoningCarrier(candidate))) {
+      invalid("REQ-R-EXT-MISSING-BINDING");
+    }
+    state.degradations.add("request.option_omitted");
+    return undefined;
   }
   return object([["type", "function"], ["name", binding.chatName]]);
 }
@@ -456,7 +504,12 @@ function projectedNamespaceName(namespace: string, name: string): string {
   return `${prefix}${suffix}`;
 }
 
-function normalizedParameters(value: WireJsonObject): WireJsonObject {
+function normalizedParameters(state: Pick<MutableState, "degradations">, value: WireJsonObject): WireJsonObject {
+  const types = value.members.filter((member) => member.key === "type").map((member) => member.value);
+  if (types.length !== 1 || types[0] !== "object") {
+    if (types.some(containsReasoningCarrier)) invalid("REQ-R-EXT-FUNCTION-SCHEMA-TYPE");
+    state.degradations.add("request.option_omitted");
+  }
   return {
     kind: "object",
     members: [
@@ -466,10 +519,8 @@ function normalizedParameters(value: WireJsonObject): WireJsonObject {
   };
 }
 
-function validateChatName(name: string): void {
-  if (!/^[A-Za-z0-9_-]+$/u.test(name) || new TextEncoder().encode(name).byteLength > 64) {
-    invalid("REQ-R-EXT-TOOL-NAME");
-  }
+function isValidChatName(name: string): boolean {
+  return /^[A-Za-z0-9_-]+$/u.test(name) && new TextEncoder().encode(name).byteLength <= 64;
 }
 
 function toolName(value: WireJsonObject, ruleId: string): string {
