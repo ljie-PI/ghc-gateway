@@ -34,7 +34,7 @@ describe("request lifecycle over loopback", () => {
     await gateway.listen();
 
     for (const [route, expectedBody] of [
-      ["/healthz", "{\"status\":\"ok\",\"version\":\"0.1.0\"}"],
+      ["/healthz", "{\"status\":\"ok\",\"version\":\"0.1.1\"}"],
       ["/readyz", "{\"status\":\"ready\"}"],
     ] as const) {
       const response = await fetch(`http://127.0.0.1:${port}${route}`);

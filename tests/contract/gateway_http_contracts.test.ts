@@ -192,7 +192,7 @@ describe("probes and route surface", () => {
       expect(response.headers.get("x-request-id")).toBeNull();
       expect(await response.text()).toBe(expected);
     }
-    expect(VERSION).toBe("0.1.0");
+    expect(VERSION).toBe("0.1.1");
     await gw.close();
     await gw.close();
   });

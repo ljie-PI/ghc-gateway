@@ -353,10 +353,11 @@ describe("official OpenAI Responses SDK", () => {
     let completedName: string | undefined;
     let completedArguments: string | undefined;
     for await (const event of stream) {
-      if (event.type === "response.function_call_arguments.delta") {
+      if (event.type === "response.output_item.added" && event.item.type === "function_call") {
+        completedName = event.item.name;
+      } else if (event.type === "response.function_call_arguments.delta") {
         fragments.push(event.delta);
       } else if (event.type === "response.function_call_arguments.done") {
-        completedName = event.name;
         completedArguments = event.arguments;
       }
     }
@@ -384,11 +385,11 @@ describe("official OpenAI Responses SDK", () => {
     for await (const event of stream) {
       if (event.type === "response.output_item.added" && event.item.type === "function_call") {
         addedCallId = event.item.call_id;
+        expect(event.item.name).toBe("get_weather");
       } else if (event.type === "response.function_call_arguments.delta") {
         argumentDeltas.push(event.delta);
       } else if (event.type === "response.function_call_arguments.done") {
         completedArguments = event.arguments;
-        expect(event.name).toBe("get_weather");
       }
     }
 

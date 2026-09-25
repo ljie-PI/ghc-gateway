@@ -8,7 +8,7 @@ import { assertNode24 } from "./node_version.js";
 import { windowsCmdCommandLine } from "./windows_cmd.js";
 
 const PACKAGE_NAME = "@ljie-pi/ghc-gateway";
-const PACKAGE_VERSION = "0.1.0";
+const PACKAGE_VERSION = "0.1.1";
 
 export interface AdminAssetEvidence {
   readonly path: string;

@@ -576,7 +576,7 @@ export function operationalEvent(
 
 export function status(performance: "healthy" | "degraded"): AdminStatus {
   return {
-    version: "0.1.0",
+    version: "0.1.1",
     uptimeMs: 600000,
     health: "ok",
     performance,

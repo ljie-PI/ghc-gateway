@@ -124,7 +124,7 @@ describe("package entrypoints and toolchain", () => {
   it("exposes the production package identity and entrypoints", async () => {
     const pkg = await readPackageJson();
 
-    expect(VERSION).toBe("0.1.0");
+    expect(VERSION).toBe("0.1.1");
     expect(pkg.name).toBe("@ljie-pi/ghc-gateway");
     expect(pkg.version).toBe(VERSION);
     expect(pkg.main).toBe("./dist/src/main.js");

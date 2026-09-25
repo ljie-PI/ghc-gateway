@@ -315,7 +315,7 @@ describe("production composition", () => {
 
       const status = await adminJson(gateway, "/admin/api/v1/status");
       expect(status.data).toMatchObject({
-        version: "0.1.0",
+        version: "0.1.1",
         uptimeMs: 1234,
         daemon: { managed: true, pid: 4242, startedAt: IDENTITY.createdAt },
       });
