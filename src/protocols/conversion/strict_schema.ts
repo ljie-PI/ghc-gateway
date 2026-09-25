@@ -4,6 +4,7 @@ import {
   isWireJsonObject,
   memberValues,
   type WireJson,
+  type WireJsonArray,
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { containsReasoningCarrier } from "./reasoning_carriers.js";
@@ -110,39 +111,110 @@ export function isOpenaiStrictSchemaCompatible(
 }
 
 export function cleanChatToolSchema(schema: WireJsonObject): { readonly schema: WireJsonObject; readonly changed: boolean } {
-  const result = cleanSchemaValue(schema, true, 0);
-  return { schema: result.value as WireJsonObject, changed: result.changed };
+  return cleanSchemaNode(schema, true, 0);
 }
 
-function cleanSchemaValue(value: WireJson, root: boolean, depth: number): { readonly value: WireJson; readonly changed: boolean } {
+const SCHEMA_CHILD_KEYS = new Set([
+  "additionalItems",
+  "additionalProperties",
+  "contains",
+  "contentSchema",
+  "else",
+  "if",
+  "items",
+  "not",
+  "then",
+  "unevaluatedItems",
+  "unevaluatedProperties",
+]);
+const SCHEMA_ARRAY_KEYS = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+const SCHEMA_MAP_KEYS = new Set([
+  "$defs",
+  "definitions",
+  "dependencies",
+  "dependentSchemas",
+  "patternProperties",
+  "properties",
+]);
+
+function cleanSchemaNode(schema: WireJsonObject, root: boolean, depth: number): { readonly schema: WireJsonObject; readonly changed: boolean } {
   if (depth > 32) invalid("REQ-TARGET-C-TOOL-SCHEMA");
-  if (isWireJsonArray(value)) {
-    let changed = false;
-    const items = value.items.map((item) => { const cleaned = cleanSchemaValue(item, false, depth + 1); changed ||= cleaned.changed; return cleaned.value; });
-    return { value: changed ? { ...value, items } : value, changed };
-  }
-  if (!isWireJsonObject(value)) return { value, changed: false };
   let changed = false;
-  let hasType = false;
-  let hasProperties = false;
+  let sawType = false;
+  let sawProperties = false;
   const members: Array<{ readonly key: string; readonly value: WireJson }> = [];
-  for (const member of value.members) {
+  for (const member of schema.members) {
     if (member.key === "propertyNames" || (member.key === "format" && member.value === "uri")) {
       if (containsReasoningCarrier(member.value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
       changed = true;
       continue;
     }
-    if (member.key === "type") hasType = true;
-    if (member.key === "properties") hasProperties = true;
-    let child = cleanSchemaValue(member.value, false, depth + 1);
-    if (member.key === "properties" && !isWireJsonObject(child.value)) {
-      if (containsReasoningCarrier(child.value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
-      child = { value: { kind: "object", members: [] }, changed: true };
+    let value = member.value;
+    if (member.key === "type") {
+      sawType = true;
+      const objectType = value === "object" || (isWireJsonArray(value) && value.items.includes("object"));
+      if (root && !objectType) {
+        if (containsReasoningCarrier(value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+        value = "object";
+        changed = true;
+      }
+    } else if (SCHEMA_MAP_KEYS.has(member.key)) {
+      if (member.key === "properties") {
+        sawProperties = true;
+        if (!isWireJsonObject(value)) {
+          if (containsReasoningCarrier(value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+          value = { kind: "object", members: [] };
+          changed = true;
+        }
+      }
+      if (isWireJsonObject(value)) {
+        const cleaned = cleanSchemaMap(value, depth);
+        value = cleaned.value;
+        changed ||= cleaned.changed;
+      }
+    } else if (SCHEMA_ARRAY_KEYS.has(member.key) && isWireJsonArray(value)) {
+      const cleaned = cleanSchemaArray(value, depth);
+      value = cleaned.value;
+      changed ||= cleaned.changed;
+    } else if (SCHEMA_CHILD_KEYS.has(member.key)) {
+      if (isWireJsonObject(value)) {
+        const cleaned = cleanSchemaNode(value, false, depth + 1);
+        value = cleaned.schema;
+        changed ||= cleaned.changed;
+      } else if (member.key === "items" && isWireJsonArray(value)) {
+        const cleaned = cleanSchemaArray(value, depth);
+        value = cleaned.value;
+        changed ||= cleaned.changed;
+      }
     }
-    changed ||= child.changed;
-    members.push({ key: member.key, value: child.value });
+    members.push({ key: member.key, value });
   }
-  if (root && !hasType) { members.unshift({ key: "type", value: "object" }); changed = true; }
-  if (root && !hasProperties) { members.push({ key: "properties", value: { kind: "object", members: [] } }); changed = true; }
+  if (root && !sawType) { members.unshift({ key: "type", value: "object" }); changed = true; }
+  if (root && !sawProperties) { members.push({ key: "properties", value: { kind: "object", members: [] } }); changed = true; }
+  return { schema: changed ? Object.freeze({ kind: "object", members: Object.freeze(members) }) : schema, changed };
+}
+
+function cleanSchemaMap(value: WireJsonObject, depth: number): { readonly value: WireJsonObject; readonly changed: boolean } {
+  let changed = false;
+  const members = value.members.map((member) => {
+    if (!isWireJsonObject(member.value)) return member;
+    const cleaned = cleanSchemaNode(member.value, false, depth + 1);
+    changed ||= cleaned.changed;
+    return cleaned.changed ? { key: member.key, value: cleaned.schema } : member;
+  });
   return { value: changed ? Object.freeze({ kind: "object", members: Object.freeze(members) }) : value, changed };
+}
+
+function cleanSchemaArray(
+  value: WireJsonArray,
+  depth: number,
+): { readonly value: WireJsonArray; readonly changed: boolean } {
+  let changed = false;
+  const items = value.items.map((item) => {
+    if (!isWireJsonObject(item)) return item;
+    const cleaned = cleanSchemaNode(item, false, depth + 1);
+    changed ||= cleaned.changed;
+    return cleaned.schema;
+  });
+  return { value: changed ? Object.freeze({ kind: "array", items: Object.freeze(items) }) : value, changed };
 }
