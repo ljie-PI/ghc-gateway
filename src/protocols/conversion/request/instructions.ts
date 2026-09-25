@@ -1,6 +1,6 @@
 import { isWireJsonObject, type WireJson } from "../../../serialization/wire_json.js";
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
-import { type ConversionDegradationRule, type SemanticContent, type SemanticRequest, type SemanticRequestItem } from "../types.js";
+import { ConversionContractError, type ConversionDegradationRule, type SemanticContent, type SemanticRequest, type SemanticRequestItem } from "../types.js";
 import { invalid, oneMember, requiredString, wireArray, wireObject } from "../wire.js";
 import { MESSAGES_SENSITIVE_EXTENSION_FIELDS, optionalDiscriminator, optionalProtocolArray, projectMessagesMembers, validateCacheControl } from "./projection.js";
 
@@ -25,31 +25,38 @@ export function decodeMessagesSystem(
       degradations.add("messages.extensions_omitted");
       return [];
     }
-    const block = item;
-    const projected = projectMessagesMembers(
-      block,
-      new Set(["type", "text", "cache_control"]),
-      "REQ-M-SYSTEM-BLOCK",
-      degradations,
-      MESSAGES_SENSITIVE_EXTENSION_FIELDS,
-    );
-    const type = optionalDiscriminator(
-      oneMember(projected, "type", "REQ-M-SYSTEM-TYPE"),
-      "REQ-M-SYSTEM-TYPE",
-      degradations,
-    );
-    if (type === undefined || type !== "text") {
+    try {
+      const block = item;
+      const projected = projectMessagesMembers(
+        block,
+        new Set(["type", "text", "cache_control"]),
+        "REQ-M-SYSTEM-BLOCK",
+        degradations,
+        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+      );
+      const type = optionalDiscriminator(
+        oneMember(projected, "type", "REQ-M-SYSTEM-TYPE"),
+        "REQ-M-SYSTEM-TYPE",
+        degradations,
+      );
+      if (type === undefined || type !== "text") {
+        if (containsReasoningCarrier(item)) invalid("REQ-M-SYSTEM-BLOCK");
+        degradations.add("messages.extensions_omitted");
+        return [];
+      }
+      if (oneMember(projected, "cache_control", "REQ-M-SYSTEM-CACHE") !== undefined) {
+        validateCacheControl(oneMember(projected, "cache_control", "REQ-M-SYSTEM-CACHE"), degradations);
+        degradations.add("cache.control_omitted");
+      }
+      return [{
+        type: "text",
+        text: requiredString(oneMember(projected, "text", "REQ-M-SYSTEM-TEXT"), "REQ-M-SYSTEM-TEXT", true),
+      } as const];
+    } catch (error: unknown) {
+      if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(item)) throw error;
       degradations.add("messages.extensions_omitted");
       return [];
     }
-    if (oneMember(projected, "cache_control", "REQ-M-SYSTEM-CACHE") !== undefined) {
-      validateCacheControl(oneMember(projected, "cache_control", "REQ-M-SYSTEM-CACHE"), degradations);
-      degradations.add("cache.control_omitted");
-    }
-    return [{
-      type: "text",
-      text: requiredString(oneMember(projected, "text", "REQ-M-SYSTEM-TEXT"), "REQ-M-SYSTEM-TEXT", true),
-    } as const];
   });
 }
 

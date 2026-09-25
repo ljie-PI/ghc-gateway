@@ -2,7 +2,7 @@ import { isWireJsonArray, isWireJsonObject, parseWireJson, serializeWireJson, ty
 import { TOOL_RESULT_ERROR_MARKER, TOOL_RESULT_MEDIA_REPLACEMENT } from "../compatibility_markers.js";
 import { containsReasoningCarrier, isReasoningCarrier } from "../reasoning_carriers.js";
 import { projectIndependentOption } from "../request_projection.js";
-import { type ConversionDegradationRule, type SemanticContent, type SemanticImage } from "../types.js";
+import { ConversionContractError, type ConversionDegradationRule, type SemanticContent, type SemanticImage } from "../types.js";
 import { invalid, oneMember, optionalString, requiredArray, requiredObject, requiredString, unsupported, wireArray, wireObject } from "../wire.js";
 import { MESSAGES_SENSITIVE_EXTENSION_FIELDS, optionalDiscriminator, optionalProtocolObject, projectMessagesMembers, projectRequestMembers, requestObject, safeIndependentOption, validateCacheControl } from "./projection.js";
 
@@ -30,50 +30,60 @@ export function decodeChatContent(
       degradations?.add("chat.extensions_omitted");
       return [];
     }
-    let block = item;
-    const type = optionalDiscriminator(
-      oneMember(block, "type", "REQ-C-CONTENT-TYPE"),
-      "REQ-C-CONTENT-TYPE",
-      degradations ?? new Set(),
-    );
-    if (type === undefined) return [];
-    if (type === "text") {
-      block = projectRequestMembers(
-        block,
-        new Set(["type", "text"]),
-        "REQ-C-TEXT",
-        "chat.extensions_omitted",
+    try {
+      let block = item;
+      const type = optionalDiscriminator(
+        oneMember(block, "type", "REQ-C-CONTENT-TYPE"),
+        "REQ-C-CONTENT-TYPE",
         degradations ?? new Set(),
       );
-      return [{
-        type: "text",
-        text: requiredString(oneMember(block, "text", "REQ-C-TEXT"), "REQ-C-TEXT", true),
-      } as const];
+      if (type === undefined) {
+        if (containsReasoningCarrier(block)) invalid("REQ-C-CONTENT-TYPE");
+        return [];
+      }
+      if (type === "text") {
+        block = projectRequestMembers(
+          block,
+          new Set(["type", "text"]),
+          "REQ-C-TEXT",
+          "chat.extensions_omitted",
+          degradations ?? new Set(),
+        );
+        return [{
+          type: "text",
+          text: requiredString(oneMember(block, "text", "REQ-C-TEXT"), "REQ-C-TEXT", true),
+        } as const];
+      }
+      if (type === "image_url" && !textOnly) {
+        block = projectRequestMembers(
+          block,
+          new Set(["type", "image_url"]),
+          "REQ-C-IMAGE",
+          "chat.extensions_omitted",
+          degradations ?? new Set(),
+        );
+        const image = projectRequestMembers(
+          requestObject(oneMember(block, "image_url", "REQ-C-IMAGE"), "REQ-C-IMAGE"),
+          new Set(["url", "detail"]),
+          "REQ-C-IMAGE",
+          "chat.extensions_omitted",
+          degradations ?? new Set(),
+        );
+        return [imageContent(
+          requiredString(oneMember(image, "url", "REQ-C-IMAGE-URL"), "REQ-C-IMAGE-URL"),
+          optionalString(oneMember(image, "detail", "REQ-C-IMAGE-DETAIL"), "REQ-C-IMAGE-DETAIL"),
+          "REQ-C-IMAGE",
+          degradations,
+        )];
+      }
+      if (containsReasoningCarrier(block)) invalid("REQ-C-CONTENT-TYPE");
+      (degradations ?? new Set()).add("chat.extensions_omitted");
+      return [];
+    } catch (error: unknown) {
+      if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(item)) throw error;
+      (degradations ?? new Set()).add("chat.extensions_omitted");
+      return [];
     }
-    if (type === "image_url" && !textOnly) {
-      block = projectRequestMembers(
-        block,
-        new Set(["type", "image_url"]),
-        "REQ-C-IMAGE",
-        "chat.extensions_omitted",
-        degradations ?? new Set(),
-      );
-      const image = projectRequestMembers(
-        requestObject(oneMember(block, "image_url", "REQ-C-IMAGE"), "REQ-C-IMAGE"),
-        new Set(["url", "detail"]),
-        "REQ-C-IMAGE",
-        "chat.extensions_omitted",
-        degradations ?? new Set(),
-      );
-      return [imageContent(
-        requiredString(oneMember(image, "url", "REQ-C-IMAGE-URL"), "REQ-C-IMAGE-URL"),
-        optionalString(oneMember(image, "detail", "REQ-C-IMAGE-DETAIL"), "REQ-C-IMAGE-DETAIL"),
-        "REQ-C-IMAGE",
-        degradations,
-      )];
-    }
-    (degradations ?? new Set()).add("chat.extensions_omitted");
-    return [];
   });
 }
 
@@ -145,71 +155,81 @@ export function decodeResponsesContent(
       degradations.add("responses.extensions_omitted");
       return [];
     }
-    let block = item;
-    const type = optionalDiscriminator(
-      oneMember(block, "type", "REQ-R-CONTENT-TYPE"),
-      "REQ-R-CONTENT-TYPE",
-      degradations,
-    );
-    if (type === undefined) return [];
-    if (type === "input_text" || type === "output_text" || type === "text") {
-      block = projectRequestMembers(
-        block,
-        new Set(["type", "text", "annotations"]),
-        "REQ-R-TEXT",
-        "responses.extensions_omitted",
+    try {
+      let block = item;
+      const type = optionalDiscriminator(
+        oneMember(block, "type", "REQ-R-CONTENT-TYPE"),
+        "REQ-R-CONTENT-TYPE",
         degradations,
       );
-      const annotations = oneMember(block, "annotations", "REQ-R-TEXT-ANNOTATIONS");
-      if (annotations !== undefined) {
-        const parsed = projectIndependentOption(
-          safeIndependentOption(annotations, "REQ-R-TEXT-ANNOTATIONS"),
-          (candidate) => isWireJsonArray(candidate) ? { kind: "value", value: candidate } : { kind: "malformed" },
-          { omission: "request.option_omitted", degradations },
+      if (type === undefined) {
+        if (containsReasoningCarrier(block)) invalid("REQ-R-CONTENT-TYPE");
+        return [];
+      }
+      if (type === "input_text" || type === "output_text" || type === "text") {
+        block = projectRequestMembers(
+          block,
+          new Set(["type", "text", "annotations"]),
+          "REQ-R-TEXT",
+          "responses.extensions_omitted",
+          degradations,
         );
-        if (assistant && parsed !== undefined && parsed.items.length > 0) {
+        const annotations = oneMember(block, "annotations", "REQ-R-TEXT-ANNOTATIONS");
+        if (annotations !== undefined) {
+          const parsed = projectIndependentOption(
+            safeIndependentOption(annotations, "REQ-R-TEXT-ANNOTATIONS"),
+            (candidate) => isWireJsonArray(candidate) ? { kind: "value", value: candidate } : { kind: "malformed" },
+            { omission: "request.option_omitted", degradations },
+          );
+          if (assistant && parsed !== undefined && parsed.items.length > 0) {
+            degradations.add("request.option_omitted");
+          }
+          if (parsed === undefined) {
+            block = { kind: "object", members: block.members.filter((member) => member.key !== "annotations") };
+          }
           degradations.add("request.option_omitted");
         }
-        if (parsed === undefined) {
-          block = { kind: "object", members: block.members.filter((member) => member.key !== "annotations") };
-        }
-        degradations.add("request.option_omitted");
+        return [{
+          type: "text",
+          text: requiredString(oneMember(block, "text", "REQ-R-TEXT"), "REQ-R-TEXT", true),
+        } as const];
       }
-      return [{
-        type: "text",
-        text: requiredString(oneMember(block, "text", "REQ-R-TEXT"), "REQ-R-TEXT", true),
-      } as const];
+      if (type === "refusal") {
+        block = projectRequestMembers(
+          block,
+          new Set(["type", "refusal"]),
+          "REQ-R-REFUSAL",
+          "responses.extensions_omitted",
+          degradations,
+        );
+        return [{
+          type: "refusal",
+          text: requiredString(oneMember(block, "refusal", "REQ-R-REFUSAL"), "REQ-R-REFUSAL", true),
+        } as const];
+      }
+      if (type === "input_image" && allowImage) {
+        block = projectRequestMembers(
+          block,
+          new Set(["type", "image_url", "detail"]),
+          "REQ-R-IMAGE",
+          "responses.extensions_omitted",
+          degradations,
+        );
+        return [imageContent(
+          requiredString(oneMember(block, "image_url", "REQ-R-IMAGE-URL"), "REQ-R-IMAGE-URL"),
+          optionalString(oneMember(block, "detail", "REQ-R-IMAGE-DETAIL"), "REQ-R-IMAGE-DETAIL"),
+          "REQ-R-IMAGE",
+          degradations,
+        )];
+      }
+      if (containsReasoningCarrier(block)) invalid("REQ-R-CONTENT-TYPE");
+      degradations.add("responses.extensions_omitted");
+      return [];
+    } catch (error: unknown) {
+      if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(item)) throw error;
+      degradations.add("responses.extensions_omitted");
+      return [];
     }
-    if (type === "refusal") {
-      block = projectRequestMembers(
-        block,
-        new Set(["type", "refusal"]),
-        "REQ-R-REFUSAL",
-        "responses.extensions_omitted",
-        degradations,
-      );
-      return [{
-        type: "refusal",
-        text: requiredString(oneMember(block, "refusal", "REQ-R-REFUSAL"), "REQ-R-REFUSAL", true),
-      } as const];
-    }
-    if (type === "input_image" && allowImage) {
-      block = projectRequestMembers(
-        block,
-        new Set(["type", "image_url", "detail"]),
-        "REQ-R-IMAGE",
-        "responses.extensions_omitted",
-        degradations,
-      );
-      return [imageContent(
-        requiredString(oneMember(block, "image_url", "REQ-R-IMAGE-URL"), "REQ-R-IMAGE-URL"),
-        optionalString(oneMember(block, "detail", "REQ-R-IMAGE-DETAIL"), "REQ-R-IMAGE-DETAIL"),
-        "REQ-R-IMAGE",
-        degradations,
-      )];
-    }
-    degradations.add("responses.extensions_omitted");
-    return [];
   });
 }
 
@@ -218,6 +238,7 @@ export function decodeToolResultContent(
   degradations: Set<ConversionDegradationRule>,
   messagesProjection = false,
 ): readonly SemanticContent[] {
+  if (value !== undefined && containsReasoningCarrier(value)) invalid("REQ-TOOL-RESULT-CONTENT");
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (
@@ -453,7 +474,12 @@ export function decodeToolResultContent(
     }
     return { value: { kind: "object", members }, media };
   }
-  const array = requiredArray(value, "REQ-TOOL-RESULT-CONTENT");
+  if (!isWireJsonArray(value)) {
+    if (value !== undefined && containsReasoningCarrier(value)) invalid("REQ-TOOL-RESULT-CONTENT");
+    degradations.add("request.option_omitted");
+    return value === undefined ? [] : [{ type: "text", text: new TextDecoder().decode(serializeWireJson(value)) }];
+  }
+  const array = value;
   return array.items.flatMap((item): readonly SemanticContent[] => {
     const omission = messagesProjection ? "messages.extensions_omitted" : "responses.extensions_omitted";
     if (!isWireJsonObject(item)) {
@@ -551,6 +577,7 @@ export function decodeToolResultContent(
         degradations,
       )];
     }
+    if (containsReasoningCarrier(block)) invalid("REQ-TOOL-RESULT-TYPE");
     degradations.add(omission);
     return [];
   });

@@ -240,8 +240,8 @@ export function validateCacheControl(
   degradations?: Set<ConversionDegradationRule>,
 ): void {
   if (value === undefined) return;
+  if (containsReasoningCarrier(value)) invalid("REQ-M-CACHE-CONTROL");
   if (!isWireJsonObject(value)) {
-    if (containsReasoningCarrier(value)) invalid("REQ-M-CACHE-CONTROL");
     degradations?.add("request.option_omitted");
     return;
   }

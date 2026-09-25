@@ -305,8 +305,8 @@ describe("Anthropic request route", () => {
     }
   });
 
-  it("rejects unknown fields and lossy legacy schema/media behavior before inference", async () => {
-    const { gw, upstream, close } = await anthropicGateway({ expectations: [] });
+  it("degrades unknown fields and lossy legacy schema/media behavior before inference", async () => {
+    const { gw, upstream, capturedRequests, close } = await anthropicGateway();
     try {
       const response = await gw.fetch(anthropicRequest({
         model: "gpt-5",
@@ -314,7 +314,6 @@ describe("Anthropic request route", () => {
         temperature: 0.2,
         top_p: 0.9,
         stop_sequences: ["END"],
-        stream: true,
         system: [
           { type: "text", text: "x-anthropic-billing-header:\n\nbill me elsewhere" },
           { type: "text", text: "second" },
@@ -364,8 +363,12 @@ describe("Anthropic request route", () => {
         output_config: { effort: "max", format: { type: "json_schema" } },
       }));
 
-      expect(response.status).toBe(400);
-      expect(upstream.requests).toEqual([]);
+      expect(response.status).toBe(200);
+      await response.text();
+      expect(upstream.requests).toHaveLength(1);
+      const converted = decodeChatBody(capturedRequests[0] as HttpRequestObservation);
+      expect(converted.tools).toHaveLength(1);
+      expect(JSON.stringify(converted)).not.toContain("context_management");
     } finally {
       await close();
     }

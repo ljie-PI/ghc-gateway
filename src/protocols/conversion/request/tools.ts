@@ -1,4 +1,4 @@
-import { isWireJsonArray, isWireJsonObject, parseWireJson, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
+import { isWireJsonObject, parseWireJson, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { projectToolRequest } from "../request_projection.js";
 import { cleanChatToolSchema, isOpenaiStrictSchemaCompatible } from "../strict_schema.js";
@@ -97,9 +97,7 @@ export function decodeMessagesToolResult(
     degradations.add("cache.control_omitted");
   }
   const rawContent = oneMember(value, "content", "REQ-M-TOOL-RESULT-CONTENT");
-  if (rawContent !== undefined && typeof rawContent !== "string" && !isWireJsonArray(rawContent)) {
-    invalid("REQ-M-TOOL-RESULT-CONTENT");
-  }
+  if (rawContent !== undefined && containsReasoningCarrier(rawContent)) invalid("REQ-M-TOOL-RESULT-CONTENT");
   return {
     type: "tool_result",
     callId: requiredString(
