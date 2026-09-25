@@ -333,7 +333,7 @@ export function syntheticSdkFixtureCatalog(): readonly HttpExpectation[] {
   const schema = { type: "object", properties: { city: { type: "string" } }, required: ["city"] };
   const chatTool = { type: "function", function: { name: "get_weather", description: "Get the weather for a city", parameters: schema } };
   const responseTool = { type: "function", name: "get_weather", description: "Get the weather for a city", parameters: schema, strict: true };
-  const bridgeTool = { type: "function", function: { ...chatTool.function, strict: true } };
+  const bridgeTool = chatTool;
   const anthropicTool = { type: "function", function: { name: "get_weather", description: "Get weather", parameters: schema, strict: false } };
   const chatImage = (text: string, detail = false) => user([
     { type: "text", text }, { type: "image_url", image_url: { url: PNG_DATA_URL, ...(detail ? { detail: "auto" } : {}) } },

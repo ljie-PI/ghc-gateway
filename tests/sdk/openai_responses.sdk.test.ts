@@ -211,7 +211,6 @@ describe("official OpenAI Responses SDK", () => {
           name: "get_weather",
           description: "Get the weather for a city",
           parameters: WEATHER_TOOL.parameters,
-          strict: true,
         },
       }],
     });
@@ -407,7 +406,6 @@ describe("official OpenAI Responses SDK", () => {
           name: "get_weather",
           description: "Get the weather for a city",
           parameters: WEATHER_TOOL.parameters,
-          strict: true,
         },
       }],
     });

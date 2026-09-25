@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
+import type { ReasoningCarrierRecord } from "../../src/protocols/conversion/reasoning_carriers.js";
 import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
 import { PROTOCOL_REQUEST_CODECS } from "../../src/protocols/conversion/request/index.js";
 import type { SemanticRequest } from "../../src/protocols/conversion/types.js";
@@ -718,6 +719,40 @@ describe("representative request mappings", () => {
       "cache.control_omitted",
       "reasoning.budget_coarsened",
     ]);
+  });
+
+  it("accepts Codex reasoning carriers with nullable content", () => {
+    const token = "ghcg-rsn-v1:chat_state:responses:01234567-89ab-4def-8123-456789abcdef";
+    const record: ReasoningCarrierRecord = {
+      token, sourceKind: "chat_state", state: "complete", storedBytes: 1,
+      payload: body({ state: { reasoning_text: "private" } }),
+      projection: body({ type: "reasoning", text: "visible" }),
+    };
+    const decodedRequest = PROTOCOL_REQUEST_CODECS.responses.decode(body({
+      model: "source",
+      input: [{
+        type: "reasoning", id: "rs_1",
+        summary: [{ type: "summary_text", text: "visible" }],
+        content: null, encrypted_content: token,
+      }],
+    }), new Map([[token, record]]));
+
+    expect(decodedRequest.items).toEqual([{
+      type: "reasoning",
+      parts: [{ presentation: "summary", index: 0, text: "visible" }],
+      opaqueState: { kind: "chat_state", state: body({ reasoning_text: "private" }) },
+    }]);
+    expect(decodedRequest.degradations).toEqual(["request.option_omitted", "responses.extensions_omitted"]);
+
+    const malformed = body({
+      model: "source",
+      input: [{
+        type: "reasoning", id: "rs_1",
+        summary: [{ type: "summary_text", text: "visible" }],
+        content: {}, encrypted_content: token,
+      }],
+    });
+    expect(() => PROTOCOL_REQUEST_CODECS.responses.decode(malformed, new Map([[token, record]]))).toThrow();
   });
 
   it("maps Responses to Chat with separate call and item IDs and preserves tool-result binding", () => {

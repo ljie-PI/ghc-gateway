@@ -1,4 +1,4 @@
-import { isWireJsonArray, isWireJsonObject, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
+import { isWireJsonArray, isWireJsonObject, memberValues, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
 import { containsReasoningCarrier, isReasoningCarrier, type ReasoningCarrierRecord } from "../reasoning_carriers.js";
 import { decodeResponsesReasoningItem } from "../reasoning.js";
 import { projectIndependentOption } from "../request_projection.js";
@@ -342,7 +342,7 @@ function decodeResponsesInput(
         if (typeof encrypted === "string" && isReasoningCarrier(encrypted)) {
           const record = requiredCarrier(carrierRecords, encrypted, undefined, "REQ-R-REASONING-STATE");
           const state = carrierState(record, "REQ-R-REASONING-STATE");
-          requireProjection(record, reasoningProjection(object), "REQ-R-REASONING-STATE");
+          requireProjection(record, reasoningProjection(withoutNullableReasoningContent(object)), "REQ-R-REASONING-STATE");
           if (record.sourceKind === "messages_block") {
             output.push({ type: "reasoning", parts: reasoning.parts, opaqueState: { kind: "messages_block", block: state } });
           } else if (record.sourceKind === "chat_state") {
@@ -370,6 +370,12 @@ function decodeResponsesInput(
     }
   }
   return output;
+}
+
+function withoutNullableReasoningContent(item: WireJsonObject): WireJsonObject {
+  const content = memberValues(item, "content");
+  if (content.length !== 1 || content[0] !== null) return item;
+  return { kind: "object", members: item.members.filter((member) => member.key !== "content") };
 }
 
 export function encodeResponsesRequest(
