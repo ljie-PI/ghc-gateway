@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
@@ -12,6 +13,54 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 describe("shared conversion request codecs", () => {
+
+  it.each([
+    ["chat", "94bdd4d3ec76e20ff9cd82c187bacf899d93cadcfc49d7a3f3e7155d9983bcf8"],
+    ["messages", "e2a94e936e0c5916ee38197e8e6d8dd90970a70f9c7205835ce2990cd104fdb3"],
+  ] as const)("flattens streaming Responses extended-tool history for %s", (target, digest) => {
+    const converted = prepareConvertedRequest(
+      "responses",
+      target,
+      body({
+        model: "source",
+        stream: true,
+        input: [
+          { role: "user", content: [{ type: "input_text", text: "use tools" }] },
+          { type: "custom_tool_call", call_id: "call_custom", name: "render", input: "raw" },
+          { type: "custom_tool_call_output", call_id: "call_custom", output: " { \"ok\": true } " },
+          { type: "function_call", call_id: "call_namespace", namespace: "ns", name: "lookup", arguments: "{\"q\":\"x\"}" },
+          { type: "function_call_output", call_id: "call_namespace", output: "{\"ok\":true}" },
+          { type: "tool_search_call", call_id: "call_search", execution: "client", arguments: { query: "mail" } },
+          { type: "tool_search_output", call_id: "call_search", tools: [] },
+        ],
+        tools: [
+          { type: "custom", name: "render", format: { type: "text" } },
+          {
+            type: "namespace",
+            name: "ns",
+            tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+          },
+          { type: "tool_search" },
+        ],
+      }),
+      "target",
+      capability([target]),
+    );
+
+    expect(converted.stream).toBe(true);
+    expect(sha256(converted.bytes)).toBe(digest);
+    const payload = decoded(converted.bytes);
+    const messages = payload.messages as Array<{ role: string; content: unknown; tool_call_id?: string }>;
+    const customResult = target === "chat"
+      ? messages.find((message) => message.role === "tool" && message.tool_call_id === "call_custom")?.content
+      : (messages.find((message) => Array.isArray(message.content)
+        && message.content.some((block) => (block as { tool_use_id?: string }).tool_use_id === "call_custom"))
+        ?.content as Array<{ content?: Array<{ text?: string }> }> | undefined)?.[0]?.content?.[0]?.text;
+    expect(customResult).toBe(" { \"ok\": true } ");
+    expect(converted.responseBindings?.bindings.map((binding) => binding.kind)).toEqual([
+      "custom", "namespace", "tool_search",
+    ]);
+  });
 
   it("uses the configured/default/ceiling/unknown Messages token hierarchy without raising explicit budgets", () => {
     expect(decoded(prepareConvertedRequest(
@@ -203,6 +252,10 @@ describe("shared conversion request codecs", () => {
     ).bytes))).toContain("image_url");
   });
 });
+
+function sha256(value: Uint8Array | string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 function capability(
   protocols: readonly ("chat" | "messages" | "responses")[],

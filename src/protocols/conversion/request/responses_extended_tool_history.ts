@@ -2,6 +2,7 @@ import { GatewayFailureError } from "../../../gateway/failures.js";
 import { isWireJsonArray, isWireJsonObject, memberValues, parseWireJson, type WireJson, type WireJsonObject } from "../../../serialization/wire_json.js";
 import { TOOL_RESULT_ERROR_MARKER, TOOL_RESULT_MEDIA_REPLACEMENT, toolResultMediaReference } from "../compatibility_markers.js";
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
+import { type ConversionDegradationRecorder } from "../degradations.js";
 import { type ConversionDegradationRule, type ResponsesToolBindingLedger, type ResponsesToolSourceBinding, type SemanticResponse, type SemanticResponseItem } from "../types.js";
 import { invalid } from "../wire.js";
 import { array, canonicalString, looksLikeNestedJson, type MutableState, object, single, sourceKey } from "./responses_extended_tool_shared.js";
@@ -9,48 +10,48 @@ import { array, canonicalString, looksLikeNestedJson, type MutableState, object,
 export interface RestoredExtendedToolArguments {
   readonly rawCustomInput?: string;
   readonly toolSearchArguments?: WireJsonObject;
+  readonly degraded: boolean;
 }
 
 export function restoreResponsesExtendedToolArguments(
   kind: ResponsesToolSourceBinding["kind"],
   argumentsJson: string,
-  status: "completed" | "incomplete",
 ): RestoredExtendedToolArguments {
   if (kind === "custom") {
-    if (status === "incomplete") {
-      try {
-        const parsed = parseUpstreamArguments(argumentsJson);
-        const inputs = memberValues(parsed, "input");
-        return {
-          rawCustomInput: inputs.length === 1 && typeof inputs[0] === "string"
-            && parsed.members.every((member) => member.key === "input")
-            ? inputs[0]
-            : argumentsJson,
-        };
-      } catch {
-        return { rawCustomInput: argumentsJson };
+    if (argumentsJson.trim().length === 0) {
+      return { rawCustomInput: "", degraded: false };
+    }
+    try {
+      const parsed = parseUpstreamArguments(argumentsJson);
+      const inputs = memberValues(parsed, "input");
+      if (
+        inputs.length === 1
+        && typeof inputs[0] === "string"
+      ) {
+        return { rawCustomInput: inputs[0], degraded: false };
       }
+    } catch {
+      // Preserve the upstream argument text when it is not the synthetic custom-tool wrapper.
     }
-    const parsed = parseUpstreamArguments(argumentsJson);
-    const inputs = memberValues(parsed, "input");
-    if (inputs.length !== 1 || typeof inputs[0] !== "string" || parsed.members.some((member) => member.key !== "input")) {
-      invalidToolArguments();
-    }
-    return { rawCustomInput: inputs[0] };
+    return { rawCustomInput: argumentsJson, degraded: true };
   }
   if (kind === "tool_search") {
-    return {
-      toolSearchArguments: status === "incomplete"
-        ? incompleteToolSearchArguments(argumentsJson)
-        : parseUpstreamArguments(argumentsJson),
-    };
+    if (argumentsJson.trim().length === 0) {
+      return { toolSearchArguments: object([]), degraded: false };
+    }
+    try {
+      return { toolSearchArguments: parseUpstreamArguments(argumentsJson), degraded: false };
+    } catch {
+      return { toolSearchArguments: object([["query", argumentsJson]]), degraded: true };
+    }
   }
-  return {};
+  return { degraded: false };
 }
 
 export function restoreResponsesExtendedTools(
   response: Readonly<SemanticResponse>,
   ledger: Readonly<ResponsesToolBindingLedger>,
+  degradations?: ConversionDegradationRecorder,
 ): SemanticResponse {
   const callIds = new Set<string>();
   const items = response.items.map((item): SemanticResponseItem => {
@@ -62,16 +63,22 @@ export function restoreResponsesExtendedTools(
     }
     callIds.add(item.callId);
     const matches = ledger.bindings.filter((binding) => binding.chatName === item.name);
-    if (matches.length !== 1) {
+    if (matches.length === 0) {
+      return { ...item, sourceKind: "function", sourceName: item.name };
+    }
+    if (matches.length > 1) {
       invalidUpstream();
     }
     const binding = matches[0] as ResponsesToolSourceBinding;
     if (binding.kind === "custom" || binding.kind === "tool_search") {
+      const restored = restoreResponsesExtendedToolArguments(binding.kind, item.argumentsJson);
+      if (restored.degraded) degradations?.add("request.option_omitted");
       return {
         ...item,
         sourceKind: binding.kind,
         sourceName: binding.sourceName,
-        ...restoreResponsesExtendedToolArguments(binding.kind, item.argumentsJson, response.status),
+        ...(restored.rawCustomInput === undefined ? {} : { rawCustomInput: restored.rawCustomInput }),
+        ...(restored.toolSearchArguments === undefined ? {} : { toolSearchArguments: restored.toolSearchArguments }),
       };
     }
     return {
@@ -90,9 +97,11 @@ interface ExtendedMessageState {
 }
 
 export function projectExtendedChatMessages(body: WireJsonObject, state: MutableState): WireJsonObject[] {
+  const resultKinds = new Map(state.results.map((result) => [result.callId, result.kind]));
   return projectResponsesMessages(
     body,
     (namespace, name) => state.bySourceKey.get(sourceKey(namespace, name))?.chatName,
+    (callId) => resultKinds.get(callId),
     state.degradations,
   );
 }
@@ -100,6 +109,7 @@ export function projectExtendedChatMessages(body: WireJsonObject, state: Mutable
 function projectResponsesMessages(
   body: WireJsonObject,
   resolveChatName: (namespace: string | undefined, name: string) => string | undefined,
+  resolveResultKind: (callId: string) => ResponsesToolSourceBinding["kind"] | undefined,
   degradations: Set<ConversionDegradationRule>,
 ): WireJsonObject[] {
   const messageState: ExtendedMessageState = { output: [], pendingReasoning: [] };
@@ -112,7 +122,7 @@ function projectResponsesMessages(
     messageState.output.push(chatMessage("user", input));
   } else {
     const items = isWireJsonArray(input) ? input.items : input === undefined ? [] : [input];
-    projectExtendedInputItems(items, messageState, resolveChatName, degradations);
+    projectExtendedInputItems(items, messageState, resolveChatName, resolveResultKind, degradations);
   }
   flushPendingReasoning(messageState);
   return mergeSystemMessages(messageState.output);
@@ -122,6 +132,7 @@ function projectExtendedInputItems(
   items: readonly WireJson[],
   state: ExtendedMessageState,
   resolveChatName: (namespace: string | undefined, name: string) => string | undefined,
+  resolveResultKind: (callId: string) => ResponsesToolSourceBinding["kind"] | undefined,
   degradations: Set<ConversionDegradationRule>,
 ): void {
   let calls: WireJsonObject[] = [];
@@ -160,10 +171,13 @@ function projectExtendedInputItems(
       const extracted = type === "function_call_output"
         ? { value: item as WireJson, media: [] as readonly WireJsonObject[] }
         : extractCompatibilityMedia(item);
-      const content = isWireJsonObject(extracted.value)
-        ? projectResponsesToolResultContentForCompatibility(extracted.value)
-        : undefined;
       const callId = compatibilityCallId(item);
+      const content = isWireJsonObject(extracted.value)
+        ? projectResponsesToolResultContentForCompatibility(
+          extracted.value,
+          callId === undefined ? undefined : resolveResultKind(callId),
+        )
+        : undefined;
       if (content !== undefined && callId !== undefined) {
         state.output.push(toolMessage(callId, content));
       }
@@ -480,20 +494,6 @@ function flushPendingReasoning(state: ExtendedMessageState): void {
   state.pendingReasoning.length = 0;
 }
 
-function incompleteToolSearchArguments(value: string): WireJsonObject {
-  if (value.trim().length === 0) {
-    return object([]);
-  }
-  try {
-    return parseUpstreamArguments(value);
-  } catch (error: unknown) {
-    if (error instanceof GatewayFailureError && error.failure.kind === "invalid_tool_arguments") {
-      return object([["query", value]]);
-    }
-    throw error;
-  }
-}
-
 function parseUpstreamArguments(value: string): WireJsonObject {
   try {
     const bytes = new TextEncoder().encode(value);
@@ -529,15 +529,18 @@ function invalidToolArguments(): never {
   });
 }
 
-export function projectResponsesToolResultContentForCompatibility(item: WireJsonObject): string | undefined {
+export function projectResponsesToolResultContentForCompatibility(
+  item: WireJsonObject,
+  sourceKind?: ResponsesToolSourceBinding["kind"],
+): string | undefined {
   const type = compatibilityString(item, "type");
   let content: string;
-  if (type === "function_call_output") {
+  if (type === "function_call_output" || type === "custom_tool_call_output") {
     const value = memberValues(item, "output")[0];
     content = typeof value === "string"
-      ? canonicalJsonStringOrOriginal(value)
+      ? type === "custom_tool_call_output" || sourceKind === "custom" ? value : canonicalJsonStringOrOriginal(value)
       : value === undefined ? "" : canonicalString(value);
-  } else if (type === "custom_tool_call_output" || type === "tool_search_output") {
+  } else if (type === "tool_search_output") {
     content = canonicalString(item);
   } else {
     return undefined;

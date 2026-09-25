@@ -64,6 +64,7 @@ export async function createConvertedStreamResponse(input: {
       nowUnixSeconds: input.nowUnixSeconds,
       previousResponseId: input.previousResponseId,
       degradations: input.plan.request.degradations,
+      responseBindings: input.plan.request.responseBindings,
       measureEvent: performanceObserver === undefined
         ? undefined
         : aggregateEventMeasurements

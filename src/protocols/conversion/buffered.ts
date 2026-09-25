@@ -28,6 +28,7 @@ import { restoreResponsesExtendedTools } from "./request/responses_extended_tool
 import { chatReasoningState, decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import { diagnosticShape } from "./diagnostics.js";
+import { ConversionDegradationCollector } from "./degradations.js";
 
 export interface BufferedConversionContext {
   readonly diagnostics?: RequestDiagnostics | undefined;
@@ -87,10 +88,11 @@ function convertBufferedResponseInternal(
 ): ConvertedBufferedResponse {
   const payload = parseObject(bytes, context.maxBytes);
   context.diagnostics?.shape("upstream_output", () => diagnosticShape(payload));
-  const decoded = decodeBuffered(context.source, payload);
+  const decoded = decodeBuffered(context.source, payload, responseBindings);
+  const degradations = new ConversionDegradationCollector(context.degradations);
   const semantic = responseBindings === undefined
     ? decoded
-    : restoreResponsesExtendedTools(decoded, responseBindings);
+    : restoreResponsesExtendedTools(decoded, responseBindings, degradations);
   context.diagnostics?.set({ protocolStatus: semantic.status });
   validateUniqueCallIds(semantic.items);
   const createdTokens: string[] = [];
@@ -123,7 +125,7 @@ function convertBufferedResponseInternal(
       firstSemantic: semantic.items.length > 0,
       usage: semantic.usage,
       terminal: semantic.status,
-      degradations: context.degradations ?? [],
+      degradations: degradations.values(),
     },
     ...(checkpoint === undefined ? {} : { checkpoint }),
   };
@@ -142,9 +144,13 @@ function validateUniqueCallIds(items: readonly SemanticResponseItem[]): void {
   }
 }
 
-function decodeBuffered(source: InferenceProtocol, payload: WireJsonObject): SemanticResponse {
+function decodeBuffered(
+  source: InferenceProtocol,
+  payload: WireJsonObject,
+  responseBindings?: ConvertedProtocolPlan["request"]["responseBindings"],
+): SemanticResponse {
   if (source === "chat") {
-    return decodeChat(payload);
+    return decodeChat(payload, looseExtendedArgumentNames(responseBindings));
   }
   if (source === "messages") {
     return decodeMessages(payload);
@@ -152,7 +158,18 @@ function decodeBuffered(source: InferenceProtocol, payload: WireJsonObject): Sem
   return decodeResponses(payload);
 }
 
-function decodeChat(payload: WireJsonObject): SemanticResponse {
+function looseExtendedArgumentNames(
+  ledger: ConvertedProtocolPlan["request"]["responseBindings"],
+): ReadonlySet<string> {
+  return new Set(ledger?.bindings
+    .filter((binding) => binding.kind === "custom" || binding.kind === "tool_search")
+    .map((binding) => binding.chatName));
+}
+
+function decodeChat(
+  payload: WireJsonObject,
+  looseArgumentNames: ReadonlySet<string> = new Set<string>(),
+): SemanticResponse {
   const choices = arrayMember(payload, "choices");
   if (choices === undefined || choices.items.length !== 1 || !isWireJsonObject(choices.items[0])) {
     upstreamInvalid();
@@ -221,7 +238,7 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   }
   if (toolCalls !== undefined) {
     for (const value of toolCalls.items) {
-      items.push(decodeChatToolCall(value, completeTools));
+      items.push(decodeChatToolCall(value, completeTools, looseArgumentNames));
     }
   }
   if (finishReason === "tool_calls" && !items.some((item) => item.type === "tool_call")) {
@@ -241,7 +258,11 @@ function decodeChat(payload: WireJsonObject): SemanticResponse {
   };
 }
 
-function decodeChatToolCall(value: WireJson, complete: boolean): SemanticToolCallItem {
+function decodeChatToolCall(
+  value: WireJson,
+  complete: boolean,
+  looseArgumentNames: ReadonlySet<string>,
+): SemanticToolCallItem {
   if (!isWireJsonObject(value)) {
     upstreamInvalid();
   }
@@ -258,7 +279,7 @@ function decodeChatToolCall(value: WireJson, complete: boolean): SemanticToolCal
   if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0 || argumentsJson === undefined) {
     upstreamInvalid();
   }
-  if (complete) {
+  if (complete && !looseArgumentNames.has(name)) {
     validateCompleteArguments(argumentsJson);
   }
   return { type: "tool_call", callId, name, argumentsJson };
@@ -680,6 +701,13 @@ function messagesEnvelope(
   ]);
 }
 
+function responseToolStatus(
+  item: Readonly<SemanticToolCallItem>,
+  responseStatus: "completed" | "incomplete",
+): "completed" | "incomplete" | "in_progress" | "failed" {
+  return item.status ?? (item.sourceKind === undefined ? responseStatus : "completed");
+}
+
 function responsesEnvelope(
   response: Readonly<SemanticResponse>,
   context: Readonly<BufferedConversionContext>,
@@ -725,30 +753,30 @@ function responsesEnvelope(
     } else if (item.sourceKind === "custom") {
       output.push(wireObject([
         ["type", "custom_tool_call"],
-        ["id", item.itemId ?? `fc_${context.createUuid()}`],
+        ["id", item.itemId ?? `ctc_${item.callId}`],
         ["call_id", item.callId],
         ["name", item.sourceName ?? item.name],
-        ["status", response.status],
+        ["status", responseToolStatus(item, response.status)],
         ["input", item.rawCustomInput ?? ""],
       ]));
     } else if (item.sourceKind === "tool_search") {
       output.push(wireObject([
         ["type", "tool_search_call"],
         ["call_id", item.callId],
-        ["status", response.status],
+        ["status", responseToolStatus(item, response.status)],
         ["execution", "client"],
         ["arguments", item.toolSearchArguments],
-        ["id", item.itemId ?? `fc_${context.createUuid()}`],
+        ["id", item.itemId],
       ]));
     } else {
       output.push(wireObject([
         ["type", "function_call"],
-        ["id", item.itemId ?? `fc_${context.createUuid()}`],
+        ["id", item.itemId ?? (item.sourceKind === undefined ? `fc_${context.createUuid()}` : `fc_${item.callId}`)],
         ["call_id", item.callId],
         ["name", item.sourceName ?? item.name],
         ["namespace", item.namespace],
         ["arguments", item.argumentsJson],
-        ["status", response.status],
+        ["status", responseToolStatus(item, response.status)],
       ]));
     }
   }

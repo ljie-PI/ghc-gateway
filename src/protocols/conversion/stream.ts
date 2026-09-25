@@ -15,9 +15,15 @@ import type {
   SemanticStreamEvent,
   SemanticUsage,
   ReasoningCarrierConversionContext,
+  ResponsesToolBindingLedger,
+  ResponsesToolSourceBinding,
 } from "./types.js";
 import { wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
+import {
+  restoreResponsesExtendedToolArguments,
+  type RestoredExtendedToolArguments,
+} from "./request/responses_extended_tool_history.js";
 import type { SemanticReasoningItem } from "./types.js";
 import {
   responseMessageKey,
@@ -39,6 +45,7 @@ export interface StreamConversionContext {
   readonly nowUnixSeconds: () => number;
   readonly previousResponseId?: string | null | undefined;
   readonly degradations?: readonly ConversionDegradationRule[];
+  readonly responseBindings?: ResponsesToolBindingLedger | undefined;
   readonly measureEvent?: (<T>(work: () => T) => T) | undefined;
   readonly flushEventMeasurement?: (() => void) | undefined;
   readonly carrier?: ReasoningCarrierConversionContext | undefined;
@@ -210,7 +217,13 @@ export async function* convertProtocolStream(
       }
       if (event.kind === "tool_done") {
         yield* measuredEvent(context, () => (function* (): Iterable<ConvertedStreamEmission> {
-          const suffix = ledger.finishTool(event.key, event.argumentsJson, event.completed === true);
+          const tool = ledger.tool(event.key);
+          const suffix = ledger.finishTool(
+            event.key,
+            event.argumentsJson,
+            event.completed === true,
+            !allowsLooseExtendedArguments(context.responseBindings, tool.name),
+          );
           if (suffix.length > 0) {
             yield* emitter.toolArgumentsDelta(event.key, suffix);
           }
@@ -225,8 +238,11 @@ export async function* convertProtocolStream(
           invalid();
         }
         terminal = true;
-        if (event.status === "completed") {
-          measuredWork(context, () => ledger.finishOpenTools());
+        if (event.status === "completed" || context.responseBindings !== undefined) {
+          measuredWork(context, () => ledger.finishOpenTools(
+            (name) => event.status === "completed"
+              && !allowsLooseExtendedArguments(context.responseBindings, name),
+          ));
           for (const key of ledger.toolKeys()) {
             yield* measuredEvent(context, () => emitter.toolDone(key, ledger.tool(key).argumentsJson));
           }
@@ -301,6 +317,17 @@ interface StreamEmitter {
     usage: Readonly<SemanticUsage>,
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission>;
+}
+
+interface ResponsesOutputToolState {
+  readonly itemId?: string | undefined;
+  readonly fromExtendedRequest: boolean;
+  readonly callId: string;
+  readonly name: string;
+  readonly outputIndex: number;
+  readonly binding?: ResponsesToolSourceBinding | undefined;
+  restored?: RestoredExtendedToolArguments | undefined;
+  done: boolean;
 }
 
 function createEmitter(context: Readonly<StreamConversionContext>): StreamEmitter {
@@ -1196,13 +1223,7 @@ class ResponsesEmitter implements StreamEmitter {
     textIndex?: number;
     refusalIndex?: number;
   }>();
-  private readonly tools = new Map<string, {
-    readonly itemId: string;
-    readonly callId: string;
-    readonly name: string;
-    readonly outputIndex: number;
-    done: boolean;
-  }>();
+  private readonly tools = new Map<string, ResponsesOutputToolState>();
   private readonly reasoning = new Map<string, {
     readonly id: string;
     readonly outputIndex: number;
@@ -1433,11 +1454,14 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission> {
-    const tool = {
-      itemId: itemId ?? `fc_${this.context.createUuid()}`,
+    const binding = responseToolBinding(this.context.responseBindings, name);
+    const tool: ResponsesOutputToolState = {
+      itemId: responseToolItemId(this.context, binding, callId, itemId),
+      fromExtendedRequest: this.context.responseBindings !== undefined,
       callId,
       name,
       outputIndex: this.nextOutputIndex++,
+      ...(binding === undefined ? {} : { binding }),
       done: false,
     };
     this.tools.set(key, tool);
@@ -1453,6 +1477,10 @@ class ResponsesEmitter implements StreamEmitter {
     if (tool === undefined) {
       invalid();
     }
+    if (tool.binding?.kind === "custom" || tool.binding?.kind === "tool_search") {
+      return;
+    }
+    if (tool.itemId === undefined) invalid();
     yield this.event(wireObject([
       ["type", "response.function_call_arguments.delta"],
       ["sequence_number", wireNumber(this.sequence++)],
@@ -1468,6 +1496,12 @@ class ResponsesEmitter implements StreamEmitter {
       return;
     }
     tool.done = true;
+    if (tool.binding?.kind === "custom" || tool.binding?.kind === "tool_search") {
+      tool.restored = restoreResponsesExtendedToolArguments(tool.binding.kind, argumentsJson);
+      if (tool.restored.degraded) {
+        yield { kind: "degradation", ruleId: "request.option_omitted" };
+      }
+    }
     const completed = responseTool(tool, "completed", argumentsJson);
     this.completed.set(tool.outputIndex, completed);
     yield {
@@ -1479,14 +1513,36 @@ class ResponsesEmitter implements StreamEmitter {
         ...(this.carrierTokens().length === 0 ? {} : { carrierTokens: this.carrierTokens() }),
       },
     };
-    yield this.event(wireObject([
-      ["type", "response.function_call_arguments.done"],
-      ["sequence_number", wireNumber(this.sequence++)],
-      ["item_id", tool.itemId],
-      ["output_index", wireNumber(tool.outputIndex)],
-      ["name", tool.name],
-      ["arguments", argumentsJson],
-    ]));
+    if (tool.binding?.kind === "custom") {
+      if (tool.itemId === undefined) invalid();
+      const input = tool.restored?.rawCustomInput ?? "";
+      if (input.length > 0) {
+        yield this.event(wireObject([
+          ["type", "response.custom_tool_call_input.delta"],
+          ["sequence_number", wireNumber(this.sequence++)],
+          ["item_id", tool.itemId],
+          ["output_index", wireNumber(tool.outputIndex)],
+          ["delta", input],
+        ]));
+      }
+      yield this.event(wireObject([
+        ["type", "response.custom_tool_call_input.done"],
+        ["sequence_number", wireNumber(this.sequence++)],
+        ["item_id", tool.itemId],
+        ["output_index", wireNumber(tool.outputIndex)],
+        ["input", input],
+      ]));
+    } else if (tool.binding?.kind !== "tool_search") {
+      if (tool.itemId === undefined) invalid();
+      yield this.event(wireObject([
+        ["type", "response.function_call_arguments.done"],
+        ["sequence_number", wireNumber(this.sequence++)],
+        ["item_id", tool.itemId],
+        ["output_index", wireNumber(tool.outputIndex)],
+        ["name", tool.binding?.sourceName ?? tool.name],
+        ["arguments", argumentsJson],
+      ]));
+    }
     yield this.itemEvent(
       "response.output_item.done",
       tool.outputIndex,
@@ -1494,11 +1550,13 @@ class ResponsesEmitter implements StreamEmitter {
     );
   }
 
+
   *finish(
     terminal: Extract<SemanticStreamEvent, { readonly kind: "terminal" }>,
     usage: Readonly<SemanticUsage>,
     items: readonly SemanticResponseItem[],
   ): Iterable<ConvertedStreamEmission> {
+    yield* this.prepareExtendedTools(items);
     if (terminal.status === "completed" && this.context.carrier !== undefined) {
       const hasTool = items.some((item) => item.type === "tool_call");
       if (hasTool) {
@@ -1619,6 +1677,19 @@ class ResponsesEmitter implements StreamEmitter {
     }
     const finalType = terminal.status === "completed" ? "response.completed" : "response.incomplete";
     yield this.responseEvent(finalType, terminal.status, output, usage, terminal.finishReason);
+  }
+
+  private *prepareExtendedTools(items: readonly SemanticResponseItem[]): Iterable<ConvertedStreamEmission> {
+    for (const item of items) {
+      if (item.type !== "tool_call" || item.key === undefined) continue;
+      const tool = this.tools.get(item.key);
+      if (tool === undefined || tool.restored !== undefined) continue;
+      if (tool.binding?.kind !== "custom" && tool.binding?.kind !== "tool_search") continue;
+      tool.restored = restoreResponsesExtendedToolArguments(tool.binding.kind, item.argumentsJson);
+      if (tool.restored.degraded) {
+        yield { kind: "degradation", ruleId: "request.option_omitted" };
+      }
+    }
   }
 
   private ensureMessage(key: string) {
@@ -1808,12 +1879,7 @@ function responseOutput(
     }>;
     readonly carrierToken?: string | undefined;
   }>,
-  tools: ReadonlyMap<string, {
-    readonly itemId: string;
-    readonly callId: string;
-    readonly name: string;
-    readonly outputIndex: number;
-  }>,
+  tools: ReadonlyMap<string, ResponsesOutputToolState>,
 ): ReturnType<typeof wireObject>[] {
   const indexed: Array<{ readonly index: number; readonly item: ReturnType<typeof wireObject> }> = [];
   for (const item of items) {
@@ -1842,7 +1908,10 @@ function responseOutput(
     }
     const tool = item.key === undefined ? undefined : tools.get(item.key);
     if (tool !== undefined) {
-      indexed.push({ index: tool.outputIndex, item: responseTool(tool, status, item.argumentsJson) });
+      indexed.push({
+        index: tool.outputIndex,
+        item: responseTool(tool, tool.fromExtendedRequest ? "completed" : status, item.argumentsJson),
+      });
     }
   }
   return indexed.sort((left, right) => left.index - right.index).map((entry) => entry.item);
@@ -1914,18 +1983,74 @@ function responseMessage(
 }
 
 function responseTool(
-  tool: { readonly itemId: string; readonly callId: string; readonly name: string },
+  tool: Readonly<ResponsesOutputToolState>,
   status: "in_progress" | "completed" | "incomplete",
   argumentsJson: string,
 ) {
+  if (tool.binding?.kind === "custom") {
+    const input = status === "in_progress" ? "" : tool.restored?.rawCustomInput ?? argumentsJson;
+    return wireObject([
+      ["type", "custom_tool_call"],
+      ["id", tool.itemId],
+      ["call_id", tool.callId],
+      ["name", tool.binding.sourceName],
+      ["status", status],
+      ["input", input],
+    ]);
+  }
+  if (tool.binding?.kind === "tool_search") {
+    return wireObject([
+      ["type", "tool_search_call"],
+      ["id", tool.itemId],
+      ["call_id", tool.callId],
+      ["status", status],
+      ["execution", "client"],
+      ["arguments", status === "in_progress"
+        ? wireObject([])
+        : tool.restored?.toolSearchArguments ?? wireObject([["query", argumentsJson]])],
+    ]);
+  }
   return wireObject([
     ["type", "function_call"],
     ["id", tool.itemId],
     ["call_id", tool.callId],
-    ["name", tool.name],
+    ["name", tool.binding?.sourceName ?? tool.name],
+    ["namespace", tool.binding?.namespace],
     ["arguments", argumentsJson],
     ["status", status],
   ]);
+}
+
+function allowsLooseExtendedArguments(
+  ledger: Readonly<ResponsesToolBindingLedger> | undefined,
+  chatName: string,
+): boolean {
+  return ledger?.bindings.some((binding) => (
+    binding.chatName === chatName
+    && (binding.kind === "custom" || binding.kind === "tool_search")
+  )) === true;
+}
+
+function responseToolBinding(
+  ledger: Readonly<ResponsesToolBindingLedger> | undefined,
+  chatName: string,
+): ResponsesToolSourceBinding | undefined {
+  if (ledger === undefined) return undefined;
+  const matches = ledger.bindings.filter((binding) => binding.chatName === chatName);
+  if (matches.length > 1) invalid();
+  return matches[0];
+}
+
+function responseToolItemId(
+  context: Readonly<StreamConversionContext>,
+  binding: Readonly<ResponsesToolSourceBinding> | undefined,
+  callId: string,
+  itemId: string | undefined,
+): string | undefined {
+  if (itemId !== undefined) return itemId;
+  if (binding?.kind === "custom") return `ctc_${callId}`;
+  if (binding?.kind === "tool_search") return undefined;
+  return context.responseBindings === undefined ? `fc_${context.createUuid()}` : `fc_${callId}`;
 }
 
 function responseReasoning(
