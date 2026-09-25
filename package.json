@@ -7,6 +7,9 @@
     ".": "./dist/src/main.js",
     "./cli": "./dist/src/cli/main.js"
   },
+  "imports": {
+    "#package": "./package.json"
+  },
   "keywords": [
     "github-copilot",
     "openai",

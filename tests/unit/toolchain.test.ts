@@ -6,7 +6,6 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { VERSION } from "../../src/version.js";
 import { assertNode24, currentNodeMajor } from "../../scripts/tooling/node_version.js";
 import { isAllowedNetworkTarget, isLoopbackHost } from "../../scripts/tooling/ci_network_guard.js";
 
@@ -124,9 +123,7 @@ describe("package entrypoints and toolchain", () => {
   it("exposes the production package identity and entrypoints", async () => {
     const pkg = await readPackageJson();
 
-    expect(VERSION).toBe("0.1.1");
     expect(pkg.name).toBe("@ljie-pi/ghc-gateway");
-    expect(pkg.version).toBe(VERSION);
     expect(pkg.main).toBe("./dist/src/main.js");
     expect(pkg.exports).toEqual({
       ".": "./dist/src/main.js",
