@@ -16,14 +16,14 @@ import type {
   SemanticUsage,
   ReasoningCarrierConversionContext,
   ResponsesToolBindingLedger,
-  ResponsesToolSourceBinding,
 } from "./types.js";
 import { wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
 import {
-  restoreResponsesExtendedToolArguments,
+  resolveResponsesToolRestorationPolicy,
   type RestoredExtendedToolArguments,
-} from "./request/responses_extended_tool_history.js";
+  type ResponsesToolRestorationPolicy,
+} from "./request/responses_extended_tool_restoration.js";
 import type { SemanticReasoningItem } from "./types.js";
 import {
   responseMessageKey,
@@ -222,7 +222,7 @@ export async function* convertProtocolStream(
             event.key,
             event.argumentsJson,
             event.completed === true,
-            !allowsLooseExtendedArguments(context.responseBindings, tool.name),
+            !resolveResponsesToolRestorationPolicy(context.responseBindings, tool.name, invalid).allowsLooseArguments,
           );
           if (suffix.length > 0) {
             yield* emitter.toolArgumentsDelta(event.key, suffix);
@@ -241,7 +241,7 @@ export async function* convertProtocolStream(
         if (event.status === "completed" || context.responseBindings !== undefined) {
           measuredWork(context, () => ledger.finishOpenTools(
             (name) => event.status === "completed"
-              && !allowsLooseExtendedArguments(context.responseBindings, name),
+              && !resolveResponsesToolRestorationPolicy(context.responseBindings, name, invalid).allowsLooseArguments,
           ));
           for (const key of ledger.toolKeys()) {
             yield* measuredEvent(context, () => emitter.toolDone(key, ledger.tool(key).argumentsJson));
@@ -321,11 +321,10 @@ interface StreamEmitter {
 
 interface ResponsesOutputToolState {
   readonly itemId?: string | undefined;
-  readonly fromExtendedRequest: boolean;
   readonly callId: string;
   readonly name: string;
   readonly outputIndex: number;
-  readonly binding?: ResponsesToolSourceBinding | undefined;
+  readonly policy: ResponsesToolRestorationPolicy;
   restored?: RestoredExtendedToolArguments | undefined;
   done: boolean;
 }
@@ -1454,55 +1453,53 @@ class ResponsesEmitter implements StreamEmitter {
   }
 
   *toolStart(key: string, callId: string, name: string, itemId?: string): Iterable<ConvertedStreamEmission> {
-    const binding = responseToolBinding(this.context.responseBindings, name);
+    const policy = resolveResponsesToolRestorationPolicy(this.context.responseBindings, name, invalid);
     const tool: ResponsesOutputToolState = {
-      itemId: responseToolItemId(this.context, binding, callId, itemId),
-      fromExtendedRequest: this.context.responseBindings !== undefined,
+      itemId: policy.itemId(itemId, callId, this.context.createUuid),
       callId,
       name,
       outputIndex: this.nextOutputIndex++,
-      ...(binding === undefined ? {} : { binding }),
+      policy,
       done: false,
     };
     this.tools.set(key, tool);
     yield this.itemEvent(
       "response.output_item.added",
       tool.outputIndex,
-      responseTool(tool, "in_progress", ""),
+      policy.responseItem({
+        itemId: tool.itemId,
+        callId,
+        status: "in_progress",
+        argumentsJson: "",
+      }),
     );
   }
 
   *toolArgumentsDelta(key: string, delta: string): Iterable<ConvertedStreamEmission> {
     const tool = this.tools.get(key);
-    if (tool === undefined) {
-      invalid();
-    }
-    if (tool.binding?.kind === "custom" || tool.binding?.kind === "tool_search") {
-      return;
-    }
+    if (tool === undefined) invalid();
+    if (tool.policy.streamEventFamily !== "function") return;
     if (tool.itemId === undefined) invalid();
-    yield this.event(wireObject([
-      ["type", "response.function_call_arguments.delta"],
-      ["sequence_number", wireNumber(this.sequence++)],
-      ["item_id", tool.itemId],
-      ["output_index", wireNumber(tool.outputIndex)],
-      ["delta", delta],
-    ]));
+    const event = tool.policy.argumentDeltaEvent(tool.itemId, tool.outputIndex, delta, this.sequence++);
+    if (event === undefined) invalid();
+    yield this.event(event);
   }
 
   *toolDone(key: string, argumentsJson: string): Iterable<ConvertedStreamEmission> {
     const tool = this.tools.get(key);
-    if (tool === undefined || tool.done) {
-      return;
-    }
+    if (tool === undefined || tool.done) return;
     tool.done = true;
-    if (tool.binding?.kind === "custom" || tool.binding?.kind === "tool_search") {
-      tool.restored = restoreResponsesExtendedToolArguments(tool.binding.kind, argumentsJson);
-      if (tool.restored.degraded) {
-        yield { kind: "degradation", ruleId: "request.option_omitted" };
-      }
+    tool.restored = tool.policy.restoreArguments(argumentsJson);
+    if (tool.restored.degraded) {
+      yield { kind: "degradation", ruleId: "request.option_omitted" };
     }
-    const completed = responseTool(tool, "completed", argumentsJson);
+    const completed = tool.policy.responseItem({
+      itemId: tool.itemId,
+      callId: tool.callId,
+      status: "completed",
+      argumentsJson,
+      restored: tool.restored,
+    });
     this.completed.set(tool.outputIndex, completed);
     yield {
       kind: "checkpoint",
@@ -1513,35 +1510,17 @@ class ResponsesEmitter implements StreamEmitter {
         ...(this.carrierTokens().length === 0 ? {} : { carrierTokens: this.carrierTokens() }),
       },
     };
-    if (tool.binding?.kind === "custom") {
+    if (tool.policy.streamEventFamily !== "none") {
       if (tool.itemId === undefined) invalid();
-      const input = tool.restored?.rawCustomInput ?? "";
-      if (input.length > 0) {
-        yield this.event(wireObject([
-          ["type", "response.custom_tool_call_input.delta"],
-          ["sequence_number", wireNumber(this.sequence++)],
-          ["item_id", tool.itemId],
-          ["output_index", wireNumber(tool.outputIndex)],
-          ["delta", input],
-        ]));
+      for (const event of tool.policy.argumentDoneEvents({
+        itemId: tool.itemId,
+        outputIndex: tool.outputIndex,
+        argumentsJson,
+        restored: tool.restored,
+        nextSequence: () => this.sequence++,
+      })) {
+        yield this.event(event);
       }
-      yield this.event(wireObject([
-        ["type", "response.custom_tool_call_input.done"],
-        ["sequence_number", wireNumber(this.sequence++)],
-        ["item_id", tool.itemId],
-        ["output_index", wireNumber(tool.outputIndex)],
-        ["input", input],
-      ]));
-    } else if (tool.binding?.kind !== "tool_search") {
-      if (tool.itemId === undefined) invalid();
-      yield this.event(wireObject([
-        ["type", "response.function_call_arguments.done"],
-        ["sequence_number", wireNumber(this.sequence++)],
-        ["item_id", tool.itemId],
-        ["output_index", wireNumber(tool.outputIndex)],
-        ["name", tool.binding?.sourceName ?? tool.name],
-        ["arguments", argumentsJson],
-      ]));
     }
     yield this.itemEvent(
       "response.output_item.done",
@@ -1684,8 +1663,7 @@ class ResponsesEmitter implements StreamEmitter {
       if (item.type !== "tool_call" || item.key === undefined) continue;
       const tool = this.tools.get(item.key);
       if (tool === undefined || tool.restored !== undefined) continue;
-      if (tool.binding?.kind !== "custom" && tool.binding?.kind !== "tool_search") continue;
-      tool.restored = restoreResponsesExtendedToolArguments(tool.binding.kind, item.argumentsJson);
+      tool.restored = tool.policy.restoreArguments(item.argumentsJson);
       if (tool.restored.degraded) {
         yield { kind: "degradation", ruleId: "request.option_omitted" };
       }
@@ -1910,7 +1888,13 @@ function responseOutput(
     if (tool !== undefined) {
       indexed.push({
         index: tool.outputIndex,
-        item: responseTool(tool, tool.fromExtendedRequest ? "completed" : status, item.argumentsJson),
+        item: tool.policy.responseItem({
+          itemId: tool.itemId,
+          callId: tool.callId,
+          status: tool.policy.fromExtendedRequest ? "completed" : status,
+          argumentsJson: item.argumentsJson,
+          restored: tool.restored,
+        }),
       });
     }
   }
@@ -1980,77 +1964,6 @@ function responseMessage(
     ["role", "assistant"],
     ["content", wireArray(content.sort((left, right) => left.index - right.index).map((entry) => entry.part))],
   ]);
-}
-
-function responseTool(
-  tool: Readonly<ResponsesOutputToolState>,
-  status: "in_progress" | "completed" | "incomplete",
-  argumentsJson: string,
-) {
-  if (tool.binding?.kind === "custom") {
-    const input = status === "in_progress" ? "" : tool.restored?.rawCustomInput ?? argumentsJson;
-    return wireObject([
-      ["type", "custom_tool_call"],
-      ["id", tool.itemId],
-      ["call_id", tool.callId],
-      ["name", tool.binding.sourceName],
-      ["status", status],
-      ["input", input],
-    ]);
-  }
-  if (tool.binding?.kind === "tool_search") {
-    return wireObject([
-      ["type", "tool_search_call"],
-      ["id", tool.itemId],
-      ["call_id", tool.callId],
-      ["status", status],
-      ["execution", "client"],
-      ["arguments", status === "in_progress"
-        ? wireObject([])
-        : tool.restored?.toolSearchArguments ?? wireObject([["query", argumentsJson]])],
-    ]);
-  }
-  return wireObject([
-    ["type", "function_call"],
-    ["id", tool.itemId],
-    ["call_id", tool.callId],
-    ["name", tool.binding?.sourceName ?? tool.name],
-    ["namespace", tool.binding?.namespace],
-    ["arguments", argumentsJson],
-    ["status", status],
-  ]);
-}
-
-function allowsLooseExtendedArguments(
-  ledger: Readonly<ResponsesToolBindingLedger> | undefined,
-  chatName: string,
-): boolean {
-  return ledger?.bindings.some((binding) => (
-    binding.chatName === chatName
-    && (binding.kind === "custom" || binding.kind === "tool_search")
-  )) === true;
-}
-
-function responseToolBinding(
-  ledger: Readonly<ResponsesToolBindingLedger> | undefined,
-  chatName: string,
-): ResponsesToolSourceBinding | undefined {
-  if (ledger === undefined) return undefined;
-  const matches = ledger.bindings.filter((binding) => binding.chatName === chatName);
-  if (matches.length > 1) invalid();
-  return matches[0];
-}
-
-function responseToolItemId(
-  context: Readonly<StreamConversionContext>,
-  binding: Readonly<ResponsesToolSourceBinding> | undefined,
-  callId: string,
-  itemId: string | undefined,
-): string | undefined {
-  if (itemId !== undefined) return itemId;
-  if (binding?.kind === "custom") return `ctc_${callId}`;
-  if (binding?.kind === "tool_search") return undefined;
-  return context.responseBindings === undefined ? `fc_${context.createUuid()}` : `fc_${callId}`;
 }
 
 function responseReasoning(

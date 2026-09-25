@@ -25,6 +25,10 @@ import { encodeWireObject, wireArray, wireNumber, wireObject } from "./wire.js";
 import { managedConvertedResponseId } from "./ids.js";
 import { chatCompletionsUsageFromCounters } from "../openai_chat_completions/native.js";
 import { restoreResponsesExtendedTools } from "./request/responses_extended_tool_history.js";
+import {
+  createResponsesToolRestorationPolicy,
+  responsesToolRestorationPolicyForItem,
+} from "./request/responses_extended_tool_restoration.js";
 import { chatReasoningState, decodeChatReasoning, decodeResponsesReasoningItem } from "./reasoning.js";
 import type { RequestDiagnostics } from "../../telemetry/diagnostics.js";
 import { diagnosticShape } from "./diagnostics.js";
@@ -162,7 +166,11 @@ function looseExtendedArgumentNames(
   ledger: ConvertedProtocolPlan["request"]["responseBindings"],
 ): ReadonlySet<string> {
   return new Set(ledger?.bindings
-    .filter((binding) => binding.kind === "custom" || binding.kind === "tool_search")
+    .filter((binding) => createResponsesToolRestorationPolicy(
+      binding,
+      binding.chatName,
+      true,
+    ).allowsLooseArguments)
     .map((binding) => binding.chatName));
 }
 
@@ -750,34 +758,20 @@ function responsesEnvelope(
         ["role", "assistant"],
         ["content", wireArray(content)],
       ]));
-    } else if (item.sourceKind === "custom") {
-      output.push(wireObject([
-        ["type", "custom_tool_call"],
-        ["id", item.itemId ?? `ctc_${item.callId}`],
-        ["call_id", item.callId],
-        ["name", item.sourceName ?? item.name],
-        ["status", responseToolStatus(item, response.status)],
-        ["input", item.rawCustomInput ?? ""],
-      ]));
-    } else if (item.sourceKind === "tool_search") {
-      output.push(wireObject([
-        ["type", "tool_search_call"],
-        ["call_id", item.callId],
-        ["status", responseToolStatus(item, response.status)],
-        ["execution", "client"],
-        ["arguments", item.toolSearchArguments],
-        ["id", item.itemId],
-      ]));
     } else {
-      output.push(wireObject([
-        ["type", "function_call"],
-        ["id", item.itemId ?? (item.sourceKind === undefined ? `fc_${context.createUuid()}` : `fc_${item.callId}`)],
-        ["call_id", item.callId],
-        ["name", item.sourceName ?? item.name],
-        ["namespace", item.namespace],
-        ["arguments", item.argumentsJson],
-        ["status", responseToolStatus(item, response.status)],
-      ]));
+      const policy = responsesToolRestorationPolicyForItem(item);
+      const restored = {
+        degraded: false,
+        ...(item.rawCustomInput === undefined ? {} : { rawCustomInput: item.rawCustomInput }),
+        ...(item.toolSearchArguments === undefined ? {} : { toolSearchArguments: item.toolSearchArguments }),
+      };
+      output.push(policy.responseItem({
+        itemId: policy.itemId(item.itemId, item.callId, context.createUuid),
+        callId: item.callId,
+        status: responseToolStatus(item, response.status),
+        argumentsJson: item.argumentsJson,
+        restored,
+      }));
     }
   }
   const outputResponseId = responseId ?? managedConvertedResponseId(context.source, context.model, context.createUuid());
