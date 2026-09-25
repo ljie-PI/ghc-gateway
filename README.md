@@ -73,6 +73,7 @@ If the selected model is no longer available, use `ghcg models set` to select an
 When the selected model supports the requested API, the request is forwarded unchanged except for the model name, and Copilot validates it.
 
 Converted requests use best-effort protocol mapping like cc-switch: unsupported target options may be omitted or conservatively coerced with content-free degradation diagnostics, while Gateway reasoning state remains fail-closed.
+For converted Chat tools, positional tuple array schemas become homogeneous item schemas; their per-position restrictions cannot be preserved and are reported as a degradation.
 
 ## Configuration
 

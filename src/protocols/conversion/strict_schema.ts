@@ -1,6 +1,7 @@
 import {
   duplicateMemberNames,
   isWireJsonArray,
+  isWireJsonNumber,
   isWireJsonObject,
   memberValues,
   type WireJson,
@@ -8,7 +9,7 @@ import {
   type WireJsonObject,
 } from "../../serialization/wire_json.js";
 import { containsReasoningCarrier } from "./reasoning_carriers.js";
-import { invalid } from "./wire.js";
+import { invalid, wireArray, wireNumber, wireObject } from "./wire.js";
 
 export function isOpenaiStrictSchemaCompatible(
   schema: WireJsonObject,
@@ -191,7 +192,68 @@ function cleanSchemaNode(schema: WireJsonObject, root: boolean, depth: number): 
   }
   if (root && !sawType) { members.unshift({ key: "type", value: "object" }); changed = true; }
   if (root && !sawProperties) { members.push({ key: "properties", value: { kind: "object", members: [] } }); changed = true; }
-  return { schema: changed ? Object.freeze({ kind: "object", members: Object.freeze(members) }) : schema, changed };
+  const projected = projectTupleItems(members);
+  changed ||= projected.changed;
+  return { schema: changed ? Object.freeze({ kind: "object", members: Object.freeze(projected.members) }) : schema, changed };
+}
+
+function projectTupleItems(members: readonly Readonly<{ key: string; value: WireJson }>[]): {
+  readonly members: readonly Readonly<{ key: string; value: WireJson }>[];
+  readonly changed: boolean;
+} {
+  const prefix = members.find((member) => member.key === "prefixItems" && isWireJsonArray(member.value));
+  const legacy = members.find((member) => member.key === "items" && isWireJsonArray(member.value));
+  if (prefix === undefined && legacy === undefined) return { members, changed: false };
+
+  const positional = members.flatMap((member) => (
+    (member.key === "prefixItems" || member.key === "items") && isWireJsonArray(member.value)
+      ? member.value.items : []
+  ));
+  const tail = members.find((member) => member.key === (prefix === undefined ? "additionalItems" : "items")
+    && !isWireJsonArray(member.value))?.value;
+  for (const value of positional) {
+    if (!isWireJsonObject(value) && containsReasoningCarrier(value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+  }
+  if (tail !== undefined && !isWireJsonObject(tail) && containsReasoningCarrier(tail)) {
+    invalid("REQ-TARGET-C-TOOL-SCHEMA");
+  }
+  const choices = positional.filter(isWireJsonObject);
+  if (isWireJsonObject(tail)) choices.push(tail);
+  const unrestricted = tail === undefined || tail === true || positional.includes(true);
+  // A homogeneous item schema cannot enforce tuple positions; retain allowed item shapes when the tail is bounded.
+  const items = unrestricted || choices.length === 0
+    ? wireObject([])
+    : choices.length === 1
+      ? choices[0]!
+      : wireObject([["anyOf", wireArray(choices)]]);
+  const existingMax = members.find((member) => member.key === "maxItems")?.value;
+  const max = isWireJsonNumber(existingMax) ? Number(existingMax.lexeme) : undefined;
+  const cap = tail === false && (max === undefined || !Number.isSafeInteger(max) || max < 0 || max > positional.length);
+  const output: Array<{ key: string; value: WireJson }> = [];
+  let wroteItems = false;
+  let wroteMax = false;
+  for (const member of members) {
+    if (member.key === "prefixItems" || member.key === "items" || (legacy !== undefined && member.key === "additionalItems")) {
+      const retained = ((member.key === "prefixItems" || member.key === "items") && isWireJsonArray(member.value))
+        || (isWireJsonObject(tail) && member.value === tail);
+      if (!retained && containsReasoningCarrier(member.value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+      if (member.key === "prefixItems" || member.key === "items") {
+        if (!wroteItems) output.push({ key: "items", value: items });
+        wroteItems = true;
+      }
+      continue;
+    }
+    if (cap && member.key === "maxItems") {
+      if (containsReasoningCarrier(member.value)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
+      if (!wroteMax) output.push({ key: "maxItems", value: wireNumber(positional.length) });
+      wroteMax = true;
+      continue;
+    }
+    output.push(member);
+  }
+  if (!wroteItems) output.push({ key: "items", value: items });
+  if (cap && !wroteMax) output.push({ key: "maxItems", value: wireNumber(positional.length) });
+  return { members: output, changed: true };
 }
 
 function cleanSchemaMap(value: WireJsonObject, depth: number): { readonly value: WireJsonObject; readonly changed: boolean } {
