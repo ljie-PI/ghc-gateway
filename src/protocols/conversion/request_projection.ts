@@ -253,8 +253,10 @@ export function reconcileProjectedToolControls(input: Readonly<{
   readonly degradations: ConversionDegradationRecorder;
 }>): { readonly toolChoice?: SemanticToolChoice; readonly parallelToolCalls?: boolean } {
   const names = new Set(input.tools.map((tool) => tool.name));
+  const unresolvedNamedChoice = input.toolChoice?.kind === "tool" && !names.has(input.toolChoice.name);
+  if (unresolvedNamedChoice && containsReasoningCarrier(input.toolChoice.name)) invalid("REQ-TOOL-CHOICE-MISSING");
   const toolChoice = (
-    (input.toolChoice?.kind === "tool" && !names.has(input.toolChoice.name))
+    unresolvedNamedChoice
     || (input.toolChoice?.kind === "required" && names.size === 0)
   ) ? undefined : input.toolChoice;
   if (input.toolChoice !== undefined && toolChoice === undefined) input.degradations.add("request.option_omitted");

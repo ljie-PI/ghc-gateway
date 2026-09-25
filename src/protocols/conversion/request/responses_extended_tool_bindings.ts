@@ -127,7 +127,10 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
       }
       const hasMedia = containsMedia(resultValue);
       if (hasMedia) {
-        if (containsReasoningCarrier(resultValue)) invalid("REQ-R-EXT-RESULT-MEDIA");
+        if (
+          containsReasoningCarrier(resultValue)
+          || containsNestedJsonReasoningCarrier(resultValue)
+        ) invalid("REQ-R-EXT-RESULT-MEDIA");
         state.degradations.add("request.option_omitted");
       }
       const status = requestResultStatus(state, single(value, "status", "REQ-R-EXT-RESULT-STATUS"));
@@ -226,6 +229,26 @@ function containsMedia(value: WireJson, depth = 0): boolean {
   const type = single(value, "type", "REQ-R-EXT-MEDIA-TYPE");
   return type === "image" || type === "input_image" || type === "image_url"
     || value.members.some((member) => containsMedia(member.value, depth + 1));
+}
+
+function containsNestedJsonReasoningCarrier(value: WireJson, depth = 0): boolean {
+  if (depth > 32) return true;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!looksLikeNestedJson(trimmed)) return false;
+    try {
+      const bytes = new TextEncoder().encode(trimmed);
+      const parsed = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 64 });
+      return containsReasoningCarrier(parsed) || containsNestedJsonReasoningCarrier(parsed, depth + 1);
+    } catch {
+      return false;
+    }
+  }
+  if (isWireJsonArray(value)) {
+    return value.items.some((item) => containsNestedJsonReasoningCarrier(item, depth + 1));
+  }
+  return isWireJsonObject(value)
+    && value.members.some((member) => containsNestedJsonReasoningCarrier(member.value, depth + 1));
 }
 
 function callBinding(
