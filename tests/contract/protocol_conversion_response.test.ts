@@ -1,13 +1,17 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
+import { convertBufferedPlannedResponse, convertBufferedResponse } from "../../src/protocols/conversion/buffered.js";
 import { convertProtocolStream } from "../../src/protocols/conversion/stream.js";
 import type {
+  ConvertedProtocolPlan,
   ConvertedStreamEmission,
   InferenceProtocol,
+  ResponsesToolBindingLedger,
 } from "../../src/protocols/conversion/types.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const emptyBody = { kind: "object", members: [] } as const;
 
 describe("shared conversion response codecs", () => {
   it("creates one fixed Responses envelope with text and parallel same-name tools", () => {
@@ -154,6 +158,56 @@ describe("shared conversion response codecs", () => {
     )).toThrow();
   });
 
+  it("restores buffered extended tools with cc-switch IDs and fallbacks", () => {
+    const converted = convertBufferedPlannedResponse(encoder.encode(JSON.stringify({
+      choices: [{
+        message: {
+          tool_calls: [
+            { id: "call_custom", type: "function", function: { name: "render", arguments: "{\"input\":\"hello\",\"extra\":1}" } },
+            { id: "call_namespace", type: "function", function: { name: "ns__lookup", arguments: "{\"q\":\"x\"}" } },
+            { id: "call_search", type: "function", function: { name: "tool_search", arguments: "raw-search" } },
+            { id: "call_unknown", type: "function", function: { name: "invented", arguments: "{}" } },
+          ],
+        },
+        finish_reason: "length",
+      }],
+    })), extendedPlan(), {
+      maxBytes: 1_048_576,
+      createUuid: () => "00000000-0000-4000-8000-000000000104",
+      nowUnixSeconds: () => 1_700_000_000,
+    });
+
+    const output = decoded(converted.bytes).output as Array<Record<string, unknown>>;
+    expect(output).toMatchObject([
+      { id: "ctc_call_custom", type: "custom_tool_call", name: "render", input: "hello" },
+      { id: "fc_call_namespace", type: "function_call", name: "lookup", namespace: "ns" },
+      { type: "tool_search_call", arguments: { query: "raw-search" } },
+      { id: "fc_call_unknown", type: "function_call", name: "invented" },
+    ]);
+    expect(output[2]).not.toHaveProperty("id");
+    expect(decoded(converted.bytes).status).toBe("incomplete");
+    expect(output.map((item) => item.status)).toEqual(["completed", "completed", "completed", "completed"]);
+    expect(converted.observations.degradations).toContain("request.option_omitted");
+  });
+
+  it.each([
+    ["chat", chatExtendedStream, "a40adb87aaa0054c60d4c4ec43a89217ef3f9822602e6db2b69b727ec74cdc5e"],
+    ["messages", messagesExtendedStream, "932d8a9da8c4a8a946ce5a21859c01c649dc6c231508aafe1ca2ffdd1fdb8246"],
+  ] as const)("restores the complete ordered extended-tool %s stream", async (source, sourceWire, digest) => {
+    const emissions = await collectStreamWithBindings(
+      source,
+      chunks(encoder.encode(sourceWire())),
+      extendedBindings(),
+    );
+    expect(emissionDigest(emissions)).toBe(digest);
+    expect(emissions.filter((emission) => emission.kind === "degradation")).toEqual(
+      source === "chat" ? [{ kind: "degradation", ruleId: "request.option_omitted" }] : [],
+    );
+    expect(emissions.find((emission) => emission.kind === "terminal")).toEqual({
+      kind: "terminal", terminal: source === "chat" ? "incomplete" : "completed",
+    });
+  });
+
   it("converts a final-only Responses stream to Chat without duplicate snapshots", async () => {
     const response = {
       id: "resp_source",
@@ -275,6 +329,121 @@ function wireText(emissions: readonly ConvertedStreamEmission[]): string {
     .map((item) => decoder.decode(item.bytes))
     .join("");
 }
+
+
+function extendedPlan(): ConvertedProtocolPlan {
+  return {
+    kind: "converted",
+    source: "responses",
+    target: "chat",
+    stream: false,
+    requestModel: "target",
+    request: {
+      body: emptyBody,
+      bytes: encoder.encode("{}"),
+      stream: false,
+      hasVisionInput: false,
+      initiator: "user",
+      messagesBetaFeatures: [],
+      degradations: [],
+      responseBindings: extendedBindings(),
+    },
+  };
+}
+
+function extendedBindings(): ResponsesToolBindingLedger {
+  return {
+    kind: "responses_extended_tools",
+    bindings: [
+      { kind: "custom", chatName: "render", sourceName: "render" },
+      { kind: "namespace", chatName: "ns__lookup", sourceName: "lookup", namespace: "ns" },
+      { kind: "tool_search", chatName: "tool_search", sourceName: "tool_search" },
+    ],
+    calls: [],
+    results: [],
+    chatMessages: [],
+    chatPrefixMembers: [],
+  };
+}
+
+async function collectStreamWithBindings(
+  source: InferenceProtocol,
+  bytes: AsyncIterable<Uint8Array>,
+  responseBindings: ResponsesToolBindingLedger,
+): Promise<ConvertedStreamEmission[]> {
+  const output: ConvertedStreamEmission[] = [];
+  let sequence = 0;
+  const createUuid = () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
+  for await (const emission of convertProtocolStream(bytes, {
+    ...streamContext(source, "responses"),
+    createUuid,
+    responseBindings,
+  })) {
+    output.push(emission);
+  }
+  return output;
+}
+
+
+function emissionDigest(emissions: readonly ConvertedStreamEmission[]): string {
+  const normalized = emissions.map((emission) => emission.kind === "wire"
+    ? { kind: "wire", text: decoder.decode(emission.bytes) }
+    : emission);
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+}
+
+function chatExtendedStream(): string {
+  return [
+    `data: ${JSON.stringify({
+      id: "chatcmpl_extended",
+      choices: [{
+        index: 0,
+        delta: { tool_calls: [
+          { index: 0, id: "call_custom", type: "function", function: { name: "render", arguments: "{\"input\":\"hello\",\"extra\":1}" } },
+          { index: 1, id: "call_namespace", type: "function", function: { name: "ns__lookup", arguments: "{\"q\":\"x\"}" } },
+          { index: 2, id: "call_search", type: "function", function: { name: "tool_search", arguments: "raw-search" } },
+          { index: 3, id: "call_unknown", type: "function", function: { name: "invented", arguments: "{}" } },
+        ] },
+        finish_reason: "length",
+      }],
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join("");
+}
+
+function messagesExtendedStream(): string {
+  const tools = [
+    { index: 0, id: "call_custom", name: "render", arguments: "{\"input\":\"hello\"}" },
+    { index: 1, id: "call_namespace", name: "ns__lookup", arguments: "{\"q\":\"x\"}" },
+    { index: 2, id: "call_search", name: "tool_search", arguments: "{\"query\":\"mail\"}" },
+  ];
+  return [
+    messageEvent("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_extended", type: "message", role: "assistant", model: "source", content: [],
+        stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }),
+    ...tools.flatMap((tool) => [
+      messageEvent("content_block_start", {
+        type: "content_block_start", index: tool.index,
+        content_block: { type: "tool_use", id: tool.id, name: tool.name, input: {} },
+      }),
+      messageEvent("content_block_delta", {
+        type: "content_block_delta", index: tool.index,
+        delta: { type: "input_json_delta", partial_json: tool.arguments },
+      }),
+      messageEvent("content_block_stop", { type: "content_block_stop", index: tool.index }),
+    ]),
+    messageEvent("message_delta", {
+      type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    }),
+    messageEvent("message_stop", { type: "message_stop" }),
+  ].join("");
+}
+
 
 function decoded(bytes: Uint8Array): Record<string, unknown> {
   return JSON.parse(decoder.decode(bytes)) as Record<string, unknown>;

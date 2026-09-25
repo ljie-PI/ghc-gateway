@@ -152,7 +152,10 @@ export function transformInput(state: MutableState, input: WireJson | undefined)
         ...(itemId === undefined ? [] : [["id", itemId] as const]),
         ["call_id", callId],
         ["output", hasMedia ? TOOL_RESULT_MEDIA_REPLACEMENT
-          : type === "function_call_output" ? canonicalResult(resultValue) : canonicalString(sanitized)],
+          : type === "function_call_output" ? canonicalResult(resultValue)
+            : type === "custom_tool_call_output"
+              ? typeof resultValue === "string" ? resultValue : canonicalString(resultValue)
+              : canonicalString(sanitized)],
         ...(status === undefined ? [] : [["status", status] as const]),
       ]));
       continue;

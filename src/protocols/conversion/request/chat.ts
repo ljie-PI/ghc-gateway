@@ -257,9 +257,6 @@ export function encodeChatRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
-  if (request.responseBindings !== undefined && request.stream) {
-    unsupported("REQ-R-EXT-STREAM");
-  }
   const instructionProjection = request.responseBindings === undefined
     ? collectTargetInstructions(request, "chat.extensions_omitted")
     : { instructions: request.instructions, items: request.items, degradations: [] };
@@ -318,6 +315,10 @@ export function encodeChatRequest(
       ...targetRequest.responseBindings.chatPrefixMembers
         .filter((member) => member.key !== "parallel_tool_calls")
         .map((member) => [member.key, member.value] as const),
+      ["stream_options", targetRequest.stream
+        && !targetRequest.responseBindings.chatPrefixMembers.some((member) => member.key === "stream_options")
+        ? wireObject([["include_usage", true]])
+        : undefined],
       ["tools", hasTools ? wireArray(targetRequest.tools.map((tool) => encodeChatTool(tool, targetDegradations))) : undefined],
       ["tool_choice", hasTools ? encodeChatToolChoice(targetRequest.toolChoice) : undefined],
       ["parallel_tool_calls", hasTools ? targetParallel.value : undefined],

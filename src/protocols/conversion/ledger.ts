@@ -230,14 +230,14 @@ export class SemanticItemLedger {
     tool.argumentsJson += delta;
   }
 
-  finishTool(key: string, snapshot?: string, completed = false): string {
+  finishTool(key: string, snapshot?: string, completed = false, validateCompleted = true): string {
     const tool = this.tools.get(key);
     if (tool === undefined) {
       invalid();
     }
     if (tool.done) {
       if (snapshot === undefined || snapshot === tool.argumentsJson) {
-        if (completed) {
+        if (completed && validateCompleted) {
           validateArguments(tool.argumentsJson);
         }
         return "";
@@ -253,16 +253,16 @@ export class SemanticItemLedger {
       this.reserve(suffix);
       tool.argumentsJson = snapshot;
     }
-    if (completed) {
+    if (completed && validateCompleted) {
       validateArguments(tool.argumentsJson);
     }
     tool.done = true;
     return suffix;
   }
 
-  finishOpenTools(): void {
+  finishOpenTools(validateCompleted: (name: string) => boolean = () => true): void {
     for (const tool of this.tools.values()) {
-      validateArguments(tool.argumentsJson);
+      if (validateCompleted(tool.name)) validateArguments(tool.argumentsJson);
       tool.done = true;
     }
   }

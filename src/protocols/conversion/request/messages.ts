@@ -250,9 +250,6 @@ export function encodeMessagesRequest(
   request: Readonly<SemanticRequest>,
   context: Readonly<EncodeContext>,
 ): EncodedConversionRequest {
-  if (request.responseBindings !== undefined) {
-    unsupported("REQ-R-EXT-TARGET");
-  }
   const instructionProjection = collectTargetInstructions(request, "messages.extensions_omitted");
   const projectedRequest = Object.freeze({
     ...request,
