@@ -8,7 +8,6 @@ import type { WireJsonObject } from "../../serialization/wire_json.js";
 import { PROTOCOL_REQUEST_CODECS } from "./request/index.js";
 import { protocolTargets } from "./routing.js";
 import { diagnosticShape } from "./diagnostics.js";
-import { validateSemanticBindings } from "./request_sequence.js";
 import {
   ConversionContractError,
   type ConversionPlanningInput,
@@ -58,7 +57,6 @@ export function planProtocolExecution(input: Readonly<ConversionPlanningInput>):
   let decoded: SemanticRequest;
   try {
     decoded = PROTOCOL_REQUEST_CODECS[input.source].decode(input.body, input.carrierRecords);
-    validateSemanticBindings(decoded);
   } catch (error: unknown) {
     throw contractFailure(error);
   }
@@ -137,7 +135,6 @@ export function prepareConvertedRequest(
 ): EncodedConversionRequest {
   try {
     const decoded = PROTOCOL_REQUEST_CODECS[source].decode(body);
-    validateSemanticBindings(decoded);
     return PROTOCOL_REQUEST_CODECS[target].encode(decoded, { resolvedModel, capability });
   } catch (error: unknown) {
     throw contractFailure(error);

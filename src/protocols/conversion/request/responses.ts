@@ -149,7 +149,6 @@ export function decodeResponsesRequest(body: WireJsonObject, carrierRecords?: Re
   );
   const projectedTools = extended === undefined
     ? projectSemanticToolRequest(
-      "responses",
       items,
       tools,
       toolChoice,

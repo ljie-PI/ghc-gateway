@@ -62,6 +62,98 @@ describe("shared conversion request codecs", () => {
     ]);
   });
 
+  it.each([
+    [
+      "messages", "chat",
+      {
+        model: "source", max_tokens: 8,
+        messages: [
+          { role: "user", content: "start" },
+          { role: "assistant", content: [{ type: "tool_use", id: "call_dup", name: "lookup", input: { q: 1 } }] },
+          { role: "user", content: "interleaved" },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "call_dup", content: "first" }] },
+          { role: "assistant", content: [{ type: "tool_use", id: "call_dup", name: "lookup", input: { q: 2 } }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "call_orphan", content: "orphan" }] },
+          { role: "assistant", content: [{ type: "tool_use", id: "call_open", name: "lookup", input: {} }] },
+        ],
+        tools: [
+          { name: "lookup", input_schema: { type: "object" } },
+          { name: "lookup", input_schema: { type: "object", properties: { duplicate: { type: "boolean" } } } },
+          { description: "missing name", input_schema: {} },
+        ],
+        tool_choice: { type: "tool", name: "missing" },
+      },
+      "a1a8903ee61a0566f6c510f9ff3d20ca193a2911af8f7632bf92cf1ecc4965ac",
+    ],
+    [
+      "responses", "messages",
+      {
+        model: "source",
+        input: [
+          { role: "user", content: "start" },
+          { type: "custom_tool_call", call_id: "call_dup", name: "missing", input: "raw" },
+          { role: "user", content: "interleaved" },
+          { type: "custom_tool_call_output", call_id: "call_dup", output: "first" },
+          { type: "custom_tool_call", call_id: "call_dup", name: "missing", input: "again" },
+          { type: "custom_tool_call_output", call_id: "call_orphan", output: "orphan" },
+          { type: "function_call", call_id: "call_ns", namespace: "ns", name: "lookup", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_ns", output: "ok" },
+          { type: "function_call", call_id: "call_open", name: "open", arguments: "{}" },
+        ],
+        tools: [
+          { type: "custom", name: "render" },
+          { type: "custom", name: "render" },
+          { type: "custom" },
+        ],
+        tool_choice: { type: "custom", name: "missing" },
+      },
+      "f3b4a5999cbe4ccf716623cf3243827daae26998dfd0dacc40612c4e73417264",
+    ],
+  ] as const)("encodes %s to %s tool history best-effort", (source, target, payload, digest) => {
+    const converted = prepareConvertedRequest(source, target, body(payload), "target", capability([target]));
+    expect(sha256(converted.bytes)).toBe(digest);
+    expect(converted.degradations).toContain("request.option_omitted");
+    if (source === "responses") {
+      expect(converted.degradations).toContain("tools.history_omitted");
+      const carrier = "ghcg-rsn-v1:responses_item:chat:01234567-89ab-4def-8123-456789abcdef";
+      const collision = JSON.parse(JSON.stringify(payload)) as { tools: Array<Record<string, unknown>> };
+      collision.tools[1] = { ...collision.tools[1], description: carrier };
+      const namespace = JSON.parse(JSON.stringify(payload)) as { tools: Array<Record<string, unknown>> };
+      namespace.tools.push({
+        type: "namespace", name: "ns", description: carrier,
+        tools: [{ type: "function", name: "valid-child", parameters: { type: "object" } }],
+      });
+      const format = JSON.parse(JSON.stringify(payload)) as { tools: Array<Record<string, unknown>> };
+      format.tools.push({ type: "custom", name: "format-carrier", format: { type: carrier } });
+      const nested = JSON.parse(JSON.stringify(payload)) as { tools: Array<Record<string, unknown>> };
+      nested.tools.push({
+        type: "function", strict: carrier,
+        function: { name: "nested", parameters: { type: "object" }, strict: true },
+      });
+      const schema = JSON.parse(JSON.stringify(payload)) as { tools: Array<Record<string, unknown>> };
+      schema.tools.push({ type: "function", name: "schema-carrier", parameters: { type: carrier } });
+      const choice = { ...JSON.parse(JSON.stringify(payload)), tool_choice: { type: carrier, name: "render" } };
+      const bareChoice = { ...JSON.parse(JSON.stringify(payload)), tool_choice: carrier };
+      for (const unsafe of [collision, namespace, format, nested, schema, choice, bareChoice]) {
+        expect(() => prepareConvertedRequest(source, target, body(unsafe), "target", capability([target]))).toThrow();
+      }
+      expect(() => prepareConvertedRequest("chat", "messages", body({
+        model: "source", messages: [{ role: "user", content: "hi" }], tool_choice: carrier,
+      }), "target", capability(["messages"]))).toThrow();
+      expect(() => prepareConvertedRequest("responses", "messages", body({
+        model: "source", input: "hi",
+        tools: [{ type: "function", name: "lookup", parameters: { type: "object" } }],
+        tool_choice: carrier,
+      }), "target", capability(["messages"]))).toThrow();
+      const duplicateBytes = encoder.encode(
+        `{"model":"source","input":"hi","tools":[{"type":"custom","name":"render"},{"type":"function","name":"schema-carrier","parameters":{"type":"object","type":"${carrier}"}}]}`,
+      );
+      const duplicateType = parseWireJson(duplicateBytes, { maxBytes: duplicateBytes.byteLength, maxDepth: 32 });
+      if (!isWireJsonObject(duplicateType)) throw new Error("expected object");
+      expect(() => prepareConvertedRequest("responses", "messages", duplicateType, "target", capability(["messages"]))).toThrow();
+    }
+  });
+
   it("uses the configured/default/ceiling/unknown Messages token hierarchy without raising explicit budgets", () => {
     expect(decoded(prepareConvertedRequest(
       "responses",

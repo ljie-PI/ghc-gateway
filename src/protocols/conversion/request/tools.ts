@@ -2,7 +2,7 @@ import { isWireJsonArray, isWireJsonObject, parseWireJson, type WireJson, type W
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { projectToolRequest } from "../request_projection.js";
 import { cleanChatToolSchema, isOpenaiStrictSchemaCompatible } from "../strict_schema.js";
-import { type ConversionDegradationRule, type SemanticRequestItem, type SemanticTool, type SemanticToolChoice, type SemanticToolResultItem } from "../types.js";
+import { ConversionContractError, type ConversionDegradationRule, type SemanticRequestItem, type SemanticTool, type SemanticToolChoice, type SemanticToolResultItem } from "../types.js";
 import { invalid, jsonObjectString, oneMember, optionalBoolean, optionalString, requiredObject, requiredString, wireObject } from "../wire.js";
 import { decodeToolResultContent } from "./content.js";
 import { MESSAGES_SENSITIVE_EXTENSION_FIELDS, optionalChoiceString, optionalDiscriminator, optionalProtocolArray, optionalProtocolObject, projectMessagesMembers, projectRequestMembers, requestObject, TOOL_SENSITIVE_EXTENSION_FIELDS, validateCacheControl } from "./projection.js";
@@ -129,32 +129,34 @@ export function decodeChatTools(
       degradations.add("chat.extensions_omitted");
       return [];
     }
-    const tool = projectRequestMembers(
-      item,
-      new Set(["type", "function"]),
-      "REQ-C-TOOL",
-      "chat.extensions_omitted",
-      degradations,
-      TOOL_SENSITIVE_EXTENSION_FIELDS,
-    );
-    const type = optionalDiscriminator(
-      oneMember(tool, "type", "REQ-C-TOOL-TYPE"),
-      "REQ-C-TOOL-TYPE",
-      degradations,
-    );
-    if (type === undefined || type !== "function") {
-      degradations.add("chat.extensions_omitted");
-      return [];
-    }
-    const fn = projectRequestMembers(
-      requestObject(oneMember(tool, "function", "REQ-C-TOOL-FUNCTION"), "REQ-C-TOOL-FUNCTION"),
-      new Set(["name", "description", "parameters", "strict"]),
-      "REQ-C-TOOL-FUNCTION",
-      "chat.extensions_omitted",
-      degradations,
-      TOOL_SENSITIVE_EXTENSION_FIELDS,
-    );
-    return [semanticTool(fn, "parameters", "REQ-C-TOOL", false)];
+    return omitMalformedToolDeclaration(item, degradations, "chat.extensions_omitted", () => {
+      const tool = projectRequestMembers(
+        item,
+        new Set(["type", "function"]),
+        "REQ-C-TOOL",
+        "chat.extensions_omitted",
+        degradations,
+        TOOL_SENSITIVE_EXTENSION_FIELDS,
+      );
+      const type = optionalDiscriminator(
+        oneMember(tool, "type", "REQ-C-TOOL-TYPE"),
+        "REQ-C-TOOL-TYPE",
+        degradations,
+      );
+      if (type === undefined || type !== "function") {
+        degradations.add("chat.extensions_omitted");
+        return [];
+      }
+      const fn = projectRequestMembers(
+        requestObject(oneMember(tool, "function", "REQ-C-TOOL-FUNCTION"), "REQ-C-TOOL-FUNCTION"),
+        new Set(["name", "description", "parameters", "strict"]),
+        "REQ-C-TOOL-FUNCTION",
+        "chat.extensions_omitted",
+        degradations,
+        TOOL_SENSITIVE_EXTENSION_FIELDS,
+      );
+      return [semanticTool(fn, "parameters", "REQ-C-TOOL", false)];
+    });
   });
 }
 
@@ -173,33 +175,35 @@ export function decodeMessagesTools(
       degradations.add("messages.extensions_omitted");
       return [];
     }
-    const tool = projectMessagesMembers(
-      item,
-      new Set(["name", "description", "input_schema", "strict", "type", "cache_control"]),
-      "REQ-M-TOOL",
-      degradations,
-      MESSAGES_SENSITIVE_EXTENSION_FIELDS,
-    );
-    const cacheControl = oneMember(tool, "cache_control", "REQ-M-TOOL-CACHE");
-    if (cacheControl !== undefined) {
-      validateCacheControl(cacheControl, degradations);
-      degradations.add("cache.control_omitted");
-    }
-    const typeValue = oneMember(tool, "type", "REQ-M-TOOL-TYPE");
-    const type = typeValue === undefined
-      ? undefined
-      : optionalDiscriminator(typeValue, "REQ-M-TOOL-TYPE", degradations);
-    if (typeValue !== undefined && type === undefined) return [];
-    if (type !== undefined && type !== "custom") {
-      degradations.add("messages.extensions_omitted");
-      return [];
-    }
-    const decoded = semanticTool(tool, "input_schema", "REQ-M-TOOL", false);
-    if (decoded.strict === true && !isOpenaiStrictSchemaCompatible(decoded.parameters)) {
-      degradations.add("request.option_omitted");
-      return [{ ...decoded, strict: undefined }];
-    }
-    return [decoded];
+    return omitMalformedToolDeclaration(item, degradations, "messages.extensions_omitted", () => {
+      const tool = projectMessagesMembers(
+        item,
+        new Set(["name", "description", "input_schema", "strict", "type", "cache_control"]),
+        "REQ-M-TOOL",
+        degradations,
+        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+      );
+      const cacheControl = oneMember(tool, "cache_control", "REQ-M-TOOL-CACHE");
+      if (cacheControl !== undefined) {
+        validateCacheControl(cacheControl, degradations);
+        degradations.add("cache.control_omitted");
+      }
+      const typeValue = oneMember(tool, "type", "REQ-M-TOOL-TYPE");
+      const type = typeValue === undefined
+        ? undefined
+        : optionalDiscriminator(typeValue, "REQ-M-TOOL-TYPE", degradations);
+      if (typeValue !== undefined && type === undefined) return [];
+      if (type !== undefined && type !== "custom") {
+        degradations.add("messages.extensions_omitted");
+        return [];
+      }
+      const decoded = semanticTool(tool, "input_schema", "REQ-M-TOOL", false);
+      if (decoded.strict === true && !isOpenaiStrictSchemaCompatible(decoded.parameters)) {
+        degradations.add("request.option_omitted");
+        return [{ ...decoded, strict: undefined }];
+      }
+      return [decoded];
+    });
   });
 }
 
@@ -219,36 +223,53 @@ export function decodeResponsesTools(
       degradations.add("responses.extensions_omitted");
       return [];
     }
-    const tool = projectRequestMembers(
-      item,
-      new Set(["type", "name", "description", "parameters", "strict"]),
-      "REQ-R-TOOL",
-      "responses.extensions_omitted",
-      degradations,
-      TOOL_SENSITIVE_EXTENSION_FIELDS,
-    );
-    const type = optionalDiscriminator(
-      oneMember(tool, "type", "REQ-R-TOOL-TYPE"),
-      "REQ-R-TOOL-TYPE",
-      degradations,
-    );
-    if (type === undefined || type !== "function") {
-      degradations.add("responses.extensions_omitted");
-      return [];
-    }
-    const decoded = semanticTool(tool, "parameters", "REQ-R-TOOL");
-    const compatible = isOpenaiStrictSchemaCompatible(decoded.parameters);
-    if (decoded.strict === true && !compatible) {
-      degradations.add("request.option_omitted");
-      return [{ ...decoded, strict: undefined }];
-    }
-    if (decoded.strict !== undefined) return [decoded];
-    if (!compatible) {
-      if (!allowCompatibilityStrictOmission) degradations.add("request.option_omitted");
-      return [decoded];
-    }
-    return [{ ...decoded, strict: true }];
+    return omitMalformedToolDeclaration(item, degradations, "responses.extensions_omitted", () => {
+      const tool = projectRequestMembers(
+        item,
+        new Set(["type", "name", "description", "parameters", "strict"]),
+        "REQ-R-TOOL",
+        "responses.extensions_omitted",
+        degradations,
+        TOOL_SENSITIVE_EXTENSION_FIELDS,
+      );
+      const type = optionalDiscriminator(
+        oneMember(tool, "type", "REQ-R-TOOL-TYPE"),
+        "REQ-R-TOOL-TYPE",
+        degradations,
+      );
+      if (type === undefined || type !== "function") {
+        degradations.add("responses.extensions_omitted");
+        return [];
+      }
+      const decoded = semanticTool(tool, "parameters", "REQ-R-TOOL");
+      const compatible = isOpenaiStrictSchemaCompatible(decoded.parameters);
+      if (decoded.strict === true && !compatible) {
+        degradations.add("request.option_omitted");
+        return [{ ...decoded, strict: undefined }];
+      }
+      if (decoded.strict !== undefined) return [decoded];
+      if (!compatible) {
+        if (!allowCompatibilityStrictOmission) degradations.add("request.option_omitted");
+        return [decoded];
+      }
+      return [{ ...decoded, strict: true }];
+    });
   });
+}
+
+function omitMalformedToolDeclaration(
+  value: WireJsonObject,
+  degradations: Set<ConversionDegradationRule>,
+  omission: ConversionDegradationRule,
+  work: () => readonly SemanticTool[],
+): readonly SemanticTool[] {
+  try {
+    return work();
+  } catch (error: unknown) {
+    if (!(error instanceof ConversionContractError) || containsReasoningCarrier(value)) throw error;
+    degradations.add(omission);
+    return [];
+  }
 }
 
 function semanticTool(
@@ -279,6 +300,7 @@ export function decodeChatToolChoice(
     if (value === "auto" || value === "none" || value === "required") {
       return { kind: value };
     }
+    if (containsReasoningCarrier(value)) invalid("REQ-C-TOOL-CHOICE");
     degradations.add("chat.extensions_omitted");
     return undefined;
   }
@@ -412,6 +434,7 @@ export function decodeResponsesToolChoice(
     if (value === "auto" || value === "none" || value === "required") {
       return { kind: value };
     }
+    if (containsReasoningCarrier(value)) invalid("REQ-R-TOOL-CHOICE");
     degradations.add("responses.extensions_omitted");
     return undefined;
   }
@@ -448,30 +471,14 @@ export function decodeResponsesToolChoice(
 }
 
 export function projectSemanticToolRequest(
-  source: "chat" | "messages" | "responses",
   items: readonly SemanticRequestItem[],
   tools: readonly SemanticTool[],
   toolChoice: SemanticToolChoice | undefined,
   parallelToolCalls: boolean | undefined,
   degradations: Set<ConversionDegradationRule>,
 ) {
-  const callBindings = new Map<string, string | undefined>();
-  for (const item of items) {
-    if (item.type !== "tool_call") continue;
-    callBindings.set(item.callId, callBindings.has(item.callId) ? undefined : item.name);
-  }
   return projectToolRequest({
-    source,
-    candidates: items.map((item) => item.type === "tool_call"
-      ? { kind: "tool_call" as const, callId: item.callId, bindingKey: item.name, item }
-      : item.type === "tool_result"
-        ? {
-          kind: "tool_result" as const,
-          callId: item.callId,
-          bindingKey: callBindings.get(item.callId) ?? `unbound:${item.callId}`,
-          item,
-        }
-        : { kind: "item" as const, item }),
+    items,
     tools,
     toolChoice,
     parallelToolCalls,
