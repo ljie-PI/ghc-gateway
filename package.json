@@ -1,11 +1,14 @@
 {
   "name": "@ljie-pi/ghc-gateway",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local gateway for GitHub Copilot-compatible APIs",
   "main": "./dist/src/main.js",
   "exports": {
     ".": "./dist/src/main.js",
     "./cli": "./dist/src/cli/main.js"
+  },
+  "imports": {
+    "#package": "./package.json"
   },
   "keywords": [
     "github-copilot",
@@ -54,28 +57,28 @@
   "dependencies": {
     "@hono/node-server": "2.1.1",
     "@sinclair/typebox": "0.34.52",
-    "hono": "4.13.4",
+    "hono": "4.13.8",
     "smol-toml": "1.8.0",
-    "undici": "8.10.0"
+    "undici": "8.10.2"
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "0.120.0",
-    "@playwright/test": "1.62.1",
+    "@anthropic-ai/sdk": "0.126.0",
+    "@playwright/test": "1.63.0",
     "@sveltejs/vite-plugin-svelte": "7.3.0",
-    "@types/node": "24.13.3",
+    "@types/node": "24.13.5",
     "@vitest/coverage-v8": "4.1.11",
     "@vitest/ui": "4.1.11",
-    "eslint": "^9.35.0",
+    "eslint": "^9.39.5",
     "eslint-plugin-svelte": "^3.12.4",
-    "globals": "^15.9.0",
-    "openai": "7.5.0",
-    "playwright": "1.62.1",
-    "svelte": "5.56.10",
+    "globals": "^15.15.0",
+    "openai": "7.18.0",
+    "playwright": "1.63.0",
+    "svelte": "5.57.0",
     "svelte-check": "^4.7.6",
-    "tsx": "4.23.12",
+    "tsx": "4.23.13",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.67.1-alpha.29",
-    "vite": "8.2.2",
+    "typescript-eslint": "8.70.1-alpha.25",
+    "vite": "8.3.0",
     "vitest": "4.1.11"
   },
   "engines": {

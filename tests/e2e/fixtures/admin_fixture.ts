@@ -11,6 +11,7 @@ import type {
   AdminStatus,
 } from "../../../web/src/types.js";
 import type { AgentStatus, AgentsView } from "../../../src/agents/types.js";
+import { VERSION } from "../../../src/version.js";
 
 const NOW = "2026-09-03T12:00:00.000Z";
 export const ADMIN_FIXTURE_NOW_MS = Date.parse(NOW);
@@ -576,7 +577,7 @@ export function operationalEvent(
 
 export function status(performance: "healthy" | "degraded"): AdminStatus {
   return {
-    version: "0.1.0",
+    version: VERSION,
     uptimeMs: 600000,
     health: "ok",
     performance,

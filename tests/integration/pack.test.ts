@@ -215,9 +215,9 @@ describe("package evidence", () => {
     expect(dependencies).toEqual([
       "@hono/node-server@2.1.1",
       "@sinclair/typebox@0.34.52",
-      "hono@4.13.4",
+      "hono@4.13.8",
       "smol-toml@1.8.0",
-      "undici@8.10.0",
+      "undici@8.10.2",
     ]);
   });
 

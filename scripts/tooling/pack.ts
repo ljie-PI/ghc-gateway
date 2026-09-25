@@ -4,11 +4,12 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "
 import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import packageMetadata from "#package" with { type: "json" };
 import { assertNode24 } from "./node_version.js";
 import { windowsCmdCommandLine } from "./windows_cmd.js";
 
-const PACKAGE_NAME = "@ljie-pi/ghc-gateway";
-const PACKAGE_VERSION = "0.1.0";
+const PACKAGE_NAME = packageMetadata.name;
+const PACKAGE_VERSION = packageMetadata.version;
 
 export interface AdminAssetEvidence {
   readonly path: string;

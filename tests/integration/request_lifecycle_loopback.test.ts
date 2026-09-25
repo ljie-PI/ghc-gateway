@@ -15,6 +15,7 @@ import { migration as accountsMigration } from "../../src/persistence/migrations
 import { createOpenaiResponsesRoute } from "../../src/protocols/openai_responses/endpoint.js";
 import type { ResponsesHistory } from "../../src/protocols/openai_responses/history.js";
 import type { UsageUpdate } from "../../src/telemetry/recorder.js";
+import { VERSION } from "../../src/version.js";
 import { testModelCapabilityRegistry } from "../contract/model_capability_registry_harness.js";
 
 describe("request lifecycle over loopback", () => {
@@ -34,7 +35,7 @@ describe("request lifecycle over loopback", () => {
     await gateway.listen();
 
     for (const [route, expectedBody] of [
-      ["/healthz", "{\"status\":\"ok\",\"version\":\"0.1.0\"}"],
+      ["/healthz", JSON.stringify({ status: "ok", version: VERSION })],
       ["/readyz", "{\"status\":\"ready\"}"],
     ] as const) {
       const response = await fetch(`http://127.0.0.1:${port}${route}`);

@@ -1,1 +1,3 @@
-export const VERSION = "0.1.0";
+import packageMetadata from "#package" with { type: "json" };
+
+export const VERSION = packageMetadata.version;

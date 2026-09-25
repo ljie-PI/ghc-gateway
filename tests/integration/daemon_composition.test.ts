@@ -32,6 +32,7 @@ import { SqliteResponsesHistory } from "../../src/protocols/openai_responses/his
 import { TelemetryRecorder } from "../../src/telemetry/recorder.js";
 import { DiagnosticRecorder } from "../../src/telemetry/diagnostics.js";
 import { SqliteReasoningCarrierStore } from "../../src/protocols/conversion/reasoning_carriers.js";
+import { VERSION } from "../../src/version.js";
 
 const NOW = Date.parse("2026-09-03T12:00:00.000Z");
 const PORT = 31_419;
@@ -315,7 +316,7 @@ describe("production composition", () => {
 
       const status = await adminJson(gateway, "/admin/api/v1/status");
       expect(status.data).toMatchObject({
-        version: "0.1.0",
+        version: VERSION,
         uptimeMs: 1234,
         daemon: { managed: true, pid: 4242, startedAt: IDENTITY.createdAt },
       });
