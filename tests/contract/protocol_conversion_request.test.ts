@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
+import { cleanChatToolSchema } from "../../src/protocols/conversion/strict_schema.js";
 import {
   isWireJsonObject,
   parseWireJson,
@@ -164,6 +165,19 @@ describe("shared conversion request codecs", () => {
       } } } }],
     });
     expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it("does not discard reasoning carriers from unrestricted tuple schemas", () => {
+    const schema = body({
+      type: "object",
+      properties: {
+        values: {
+          type: "array",
+          prefixItems: [{ const: "ghcg-rsn-v1:chat_state:chat:00000000-0000-4000-8000-000000000000" }],
+        },
+      },
+    });
+    expect(() => cleanChatToolSchema(schema)).toThrow("REQ-TARGET-C-TOOL-SCHEMA");
   });
 
   it("uses UTF-8 byte thresholds only for complete raw tool-result image data URLs", () => {

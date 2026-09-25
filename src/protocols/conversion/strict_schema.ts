@@ -220,6 +220,7 @@ function projectTupleItems(members: readonly Readonly<{ key: string; value: Wire
   const choices = positional.filter(isWireJsonObject);
   if (isWireJsonObject(tail)) choices.push(tail);
   const unrestricted = tail === undefined || tail === true || positional.includes(true);
+  if (unrestricted && choices.some(containsReasoningCarrier)) invalid("REQ-TARGET-C-TOOL-SCHEMA");
   // A homogeneous item schema cannot enforce tuple positions; retain allowed item shapes when the tail is bounded.
   const items = unrestricted || choices.length === 0
     ? wireObject([])
