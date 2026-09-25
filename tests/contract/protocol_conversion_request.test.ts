@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
+import { cleanChatToolSchema } from "../../src/protocols/conversion/strict_schema.js";
 import {
   isWireJsonObject,
   parseWireJson,
@@ -44,6 +45,139 @@ describe("shared conversion request codecs", () => {
       "target",
       capability(["messages"], "max_tokens", null, null),
     ).bytes)).toMatchObject({ max_tokens: 4096 });
+  });
+
+  it("projects nested tuple tool schemas only for converted Chat requests", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        query: {
+          type: "object",
+          properties: {
+            where: {
+              type: "array",
+              items: {
+                type: "array",
+                prefixItems: [{ type: "string" }, { type: "number" }],
+                items: false,
+              },
+            },
+            legacy: {
+              type: "array",
+              items: [{ type: "string" }, { type: "number" }],
+              additionalItems: false,
+            },
+            literal: { const: { prefixItems: [1, 2], items: [3, 4] } },
+          },
+        },
+        prefixItems: { type: "string" },
+      },
+    };
+    const request = body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      max_tokens: 16,
+      tools: [{ name: "ArtifactData", input_schema: schema }],
+    });
+    const chat = prepareConvertedRequest("messages", "chat", request, "target", capability(["chat"]));
+    expect(decoded(chat.bytes).tools).toEqual([{
+      type: "function",
+      function: {
+        name: "ArtifactData",
+        parameters: {
+          type: "object",
+          properties: {
+            query: {
+              type: "object",
+              properties: {
+                where: {
+                  type: "array",
+                  items: {
+                    type: "array",
+                    items: { anyOf: [{ type: "string" }, { type: "number" }] },
+                    maxItems: 2,
+                  },
+                },
+                legacy: {
+                  type: "array",
+                  items: { anyOf: [{ type: "string" }, { type: "number" }] },
+                  maxItems: 2,
+                },
+                literal: { const: { prefixItems: [1, 2], items: [3, 4] } },
+              },
+            },
+            prefixItems: { type: "string" },
+          },
+        },
+        strict: false,
+      },
+    }]);
+    expect(chat.degradations).toContain("request.option_omitted");
+
+    const responses = prepareConvertedRequest("messages", "responses", request, "target", capability(["responses"]));
+    expect(decoded(responses.bytes)).toMatchObject({
+      tools: [{ parameters: schema }],
+    });
+    expect(responses.degradations).not.toContain("request.option_omitted");
+  });
+
+  it("leaves ordinary converted Chat tool schemas unchanged", () => {
+    const schema = { type: "object", properties: { values: { type: "array", items: { type: "string" } } } };
+    const converted = prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "lookup", input_schema: schema }],
+    }), "target", capability(["chat"]));
+
+    expect(decoded(converted.bytes).tools).toEqual([{
+      type: "function",
+      function: { name: "lookup", parameters: schema, strict: false },
+    }]);
+    expect(converted.degradations).toEqual([]);
+  });
+
+  it("keeps existing tuple bounds and permits unrestricted array tails", () => {
+    const converted = prepareConvertedRequest("messages", "chat", body({
+      model: "source",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "lookup", input_schema: {
+        type: "object",
+        properties: {
+          capped: {
+            type: "array",
+            prefixItems: [{ type: "string" }, { type: "number" }],
+            items: false,
+            maxItems: 1,
+          },
+          open: { type: "array", prefixItems: [{ type: "string" }] },
+        },
+      } }],
+    }), "target", capability(["chat"]));
+
+    expect(decoded(converted.bytes)).toMatchObject({
+      tools: [{ function: { parameters: { properties: {
+        capped: {
+          type: "array",
+          items: { anyOf: [{ type: "string" }, { type: "number" }] },
+          maxItems: 1,
+        },
+        open: { type: "array", items: {} },
+      } } } }],
+    });
+    expect(converted.degradations).toContain("request.option_omitted");
+  });
+
+  it("does not discard reasoning carriers from unrestricted tuple schemas", () => {
+    const schema = body({
+      type: "object",
+      properties: {
+        values: {
+          type: "array",
+          prefixItems: [{ const: "ghcg-rsn-v1:chat_state:chat:00000000-0000-4000-8000-000000000000" }],
+        },
+      },
+    });
+    expect(() => cleanChatToolSchema(schema)).toThrow("REQ-TARGET-C-TOOL-SCHEMA");
   });
 
   it("uses UTF-8 byte thresholds only for complete raw tool-result image data URLs", () => {
