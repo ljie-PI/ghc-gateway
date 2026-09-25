@@ -3,50 +3,10 @@ import { isWireJsonArray, isWireJsonObject, memberValues, parseWireJson, type Wi
 import { TOOL_RESULT_ERROR_MARKER, TOOL_RESULT_MEDIA_REPLACEMENT, toolResultMediaReference } from "../compatibility_markers.js";
 import { containsReasoningCarrier } from "../reasoning_carriers.js";
 import { type ConversionDegradationRecorder } from "../degradations.js";
-import { type ConversionDegradationRule, type ResponsesToolBindingLedger, type ResponsesToolSourceBinding, type SemanticResponse, type SemanticResponseItem } from "../types.js";
+import { type ConversionDegradationRule, type ResponsesToolBindingLedger, type ResponsesToolSourceBinding, type SemanticResponse } from "../types.js";
 import { invalid } from "../wire.js";
 import { array, canonicalString, looksLikeNestedJson, type MutableState, object, single, sourceKey } from "./responses_extended_tool_shared.js";
-
-export interface RestoredExtendedToolArguments {
-  readonly rawCustomInput?: string;
-  readonly toolSearchArguments?: WireJsonObject;
-  readonly degraded: boolean;
-}
-
-export function restoreResponsesExtendedToolArguments(
-  kind: ResponsesToolSourceBinding["kind"],
-  argumentsJson: string,
-): RestoredExtendedToolArguments {
-  if (kind === "custom") {
-    if (argumentsJson.trim().length === 0) {
-      return { rawCustomInput: "", degraded: false };
-    }
-    try {
-      const parsed = parseUpstreamArguments(argumentsJson);
-      const inputs = memberValues(parsed, "input");
-      if (
-        inputs.length === 1
-        && typeof inputs[0] === "string"
-      ) {
-        return { rawCustomInput: inputs[0], degraded: false };
-      }
-    } catch {
-      // Preserve the upstream argument text when it is not the synthetic custom-tool wrapper.
-    }
-    return { rawCustomInput: argumentsJson, degraded: true };
-  }
-  if (kind === "tool_search") {
-    if (argumentsJson.trim().length === 0) {
-      return { toolSearchArguments: object([]), degraded: false };
-    }
-    try {
-      return { toolSearchArguments: parseUpstreamArguments(argumentsJson), degraded: false };
-    } catch {
-      return { toolSearchArguments: object([["query", argumentsJson]]), degraded: true };
-    }
-  }
-  return { degraded: false };
-}
+import { resolveResponsesToolRestorationPolicy } from "./responses_extended_tool_restoration.js";
 
 export function restoreResponsesExtendedTools(
   response: Readonly<SemanticResponse>,
@@ -54,39 +14,14 @@ export function restoreResponsesExtendedTools(
   degradations?: ConversionDegradationRecorder,
 ): SemanticResponse {
   const callIds = new Set<string>();
-  const items = response.items.map((item): SemanticResponseItem => {
-    if (item.type !== "tool_call") {
-      return item;
-    }
-    if (callIds.has(item.callId)) {
-      invalidUpstream();
-    }
+  const items = response.items.map((item) => {
+    if (item.type !== "tool_call") return item;
+    if (callIds.has(item.callId)) invalidUpstream();
     callIds.add(item.callId);
-    const matches = ledger.bindings.filter((binding) => binding.chatName === item.name);
-    if (matches.length === 0) {
-      return { ...item, sourceKind: "function", sourceName: item.name };
-    }
-    if (matches.length > 1) {
-      invalidUpstream();
-    }
-    const binding = matches[0] as ResponsesToolSourceBinding;
-    if (binding.kind === "custom" || binding.kind === "tool_search") {
-      const restored = restoreResponsesExtendedToolArguments(binding.kind, item.argumentsJson);
-      if (restored.degraded) degradations?.add("request.option_omitted");
-      return {
-        ...item,
-        sourceKind: binding.kind,
-        sourceName: binding.sourceName,
-        ...(restored.rawCustomInput === undefined ? {} : { rawCustomInput: restored.rawCustomInput }),
-        ...(restored.toolSearchArguments === undefined ? {} : { toolSearchArguments: restored.toolSearchArguments }),
-      };
-    }
-    return {
-      ...item,
-      sourceKind: binding.kind,
-      sourceName: binding.sourceName,
-      ...(binding.namespace === undefined ? {} : { namespace: binding.namespace }),
-    };
+    const policy = resolveResponsesToolRestorationPolicy(ledger, item.name);
+    const restored = policy.restoreArguments(item.argumentsJson);
+    if (restored.degraded) degradations?.add("request.option_omitted");
+    return policy.restoreSemanticItem(item, restored);
   });
   return { ...response, items };
 }
@@ -494,36 +429,9 @@ function flushPendingReasoning(state: ExtendedMessageState): void {
   state.pendingReasoning.length = 0;
 }
 
-function parseUpstreamArguments(value: string): WireJsonObject {
-  try {
-    const bytes = new TextEncoder().encode(value);
-    const parsed = parseWireJson(bytes, { maxBytes: Math.max(1, bytes.byteLength), maxDepth: 32 });
-    if (!isWireJsonObject(parsed)) {
-      invalidToolArguments();
-    }
-    if (parsed.members.some((member, index) => parsed.members.findIndex((other) => other.key === member.key) !== index)) {
-      invalidToolArguments();
-    }
-    return parsed;
-  } catch (error: unknown) {
-    if (error instanceof GatewayFailureError) {
-      throw error;
-    }
-    invalidToolArguments();
-  }
-}
-
 function invalidUpstream(): never {
   throw new GatewayFailureError({
     kind: "invalid_upstream_response",
-    source: "converter",
-    phase: "convert",
-  });
-}
-
-function invalidToolArguments(): never {
-  throw new GatewayFailureError({
-    kind: "invalid_tool_arguments",
     source: "converter",
     phase: "convert",
   });
