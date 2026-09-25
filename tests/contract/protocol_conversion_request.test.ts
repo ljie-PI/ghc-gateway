@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { EffectiveModelCapabilitySnapshot } from "../../src/copilot/capability_registry.js";
 import { prepareConvertedRequest } from "../../src/protocols/conversion/planner.js";
+import { PROTOCOL_REQUEST_CODECS } from "../../src/protocols/conversion/request/index.js";
+import type { SemanticRequest } from "../../src/protocols/conversion/types.js";
 import { cleanChatToolSchema } from "../../src/protocols/conversion/strict_schema.js";
 import {
   isWireJsonObject,
@@ -152,6 +154,107 @@ describe("shared conversion request codecs", () => {
       if (!isWireJsonObject(duplicateType)) throw new Error("expected object");
       expect(() => prepareConvertedRequest("responses", "messages", duplicateType, "target", capability(["messages"]))).toThrow();
     }
+  });
+
+  it.each([
+    [
+      "chat", "messages",
+      { model: "source", messages: [
+        7,
+        { role: "user", content: [{ type: "text", text: 7 }, { type: "other", text: "drop" }, { type: "text", text: "before" }] },
+        { role: "assistant", content: null },
+        { role: "assistant", content: null, tool_calls: [
+          { id: "bad", type: "function", function: { arguments: "{}" } },
+          { id: "good", type: "function", function: { name: "lookup", arguments: "{}" } },
+        ] },
+        { role: "user", content: "after" },
+      ] },
+      "a1ee8c3d34c93e5edd440e9e929bc0459f7e829972c0365bb80ff4034849ca19",
+      ["chat.extensions_omitted"],
+    ],
+    [
+      "messages", "chat",
+      {
+        model: "source", max_tokens: 8, system: [{ type: "text", text: 7 }, { type: "text", text: "system" }],
+        messages: [
+          { role: "assistant", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }] },
+          { role: "user", content: [{ type: "tool_use", id: "wrong", name: "lookup", input: {} }] },
+          { role: "assistant", content: [{ type: "tool_result", tool_use_id: "wrong", content: "drop" }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: 7 }] },
+          { role: "assistant", content: [{ type: "thinking", thinking: "hidden", signature: 7 }] },
+          { role: "user", content: "keep" },
+        ],
+      },
+      "6f68f792500361a7f997818c2e6e14987016ad583669f1f7564a89e1b6102cd9",
+      ["messages.extensions_omitted", "request.option_omitted", "reasoning.presentation_omitted"],
+    ],
+    [
+      "responses", "chat",
+      { model: "source", input: [
+        7,
+        { type: "message", content: [{ type: "input_text", text: "missing role" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: 7 }, { type: "other", text: "drop" }, { type: "input_text", text: "keep" }] },
+      ] },
+      "cd5d63aa5a365cea254b9c70d416ab00761140faf93ce467b9f7d1356a218c67",
+      ["responses.extensions_omitted"],
+    ],
+  ] as const)("decodes malformed %s input best-effort for %s", (source, target, payload, digest, expectedDegradations) => {
+    const converted = prepareConvertedRequest(source, target, body(payload), "target", capability([target]));
+    expect(sha256(converted.bytes)).toBe(digest);
+    expect(converted.degradations).toEqual(expectedDegradations);
+    if (source === "messages") {
+      const carrier = "ghcg-rsn-v1:responses_item:chat:01234567-89ab-4def-8123-456789abcdef";
+      const unsafe = [
+        { model: "source", max_tokens: 8, messages: [{ role: carrier, content: "drop" }] },
+        { model: "source", max_tokens: 8, messages: [{ role: "assistant", content: [{ type: "thinking", thinking: carrier }] }] },
+        { model: "source", max_tokens: 8, messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "call", content: carrier }] }] },
+        { model: "source", max_tokens: 8, system: [{ type: "other", text: carrier }], messages: [{ role: "user", content: "hi" }] },
+        { model: "source", max_tokens: 8, messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: carrier } }] }] },
+        { model: "source", max_tokens: 8, messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral", ttl: carrier } }] }] },
+        { model: "source", max_tokens: 8, messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "call", content: [{ type: "other", text: carrier }] }] }] },
+      ];
+      for (const candidate of unsafe) {
+        expect(() => prepareConvertedRequest("messages", "chat", body(candidate), "target", capability(["chat"]))).toThrow();
+      }
+      expect(() => prepareConvertedRequest("chat", "messages", body({
+        model: "source", messages: [{ role: "other", content: carrier }],
+      }), "target", capability(["messages"]))).toThrow();
+      expect(() => prepareConvertedRequest("chat", "messages", body({
+        model: "source", messages: [{ role: "user", content: [{ text: carrier }] }],
+      }), "target", capability(["messages"]))).toThrow();
+      expect(() => prepareConvertedRequest("chat", "messages", body({
+        model: "source", messages: [{ role: "tool", tool_call_id: "call", content: carrier }],
+      }), "target", capability(["messages"]))).toThrow();
+      for (const input of [
+        [{ type: "message", role: "other", content: carrier }],
+        [{ type: "message", role: "user", content: [{ text: carrier }] }],
+        [{ type: "other", content: carrier }],
+        [{ type: "function_call_output", call_id: "call", output: carrier }],
+        [{ type: "function_call_output", call_id: "call", output: { value: carrier } }],
+      ]) {
+        expect(() => prepareConvertedRequest("responses", "chat", body({ model: "source", input }), "target", capability(["chat"]))).toThrow();
+      }
+    }
+  });
+
+  it.each(["chat", "messages", "responses"] as const)("drops foreign opaque reasoning for %s targets", (target) => {
+    const foreign = target === "chat"
+      ? { kind: "messages_block" as const, block: body({ type: "thinking", thinking: "hidden" }) }
+      : { kind: "chat_state" as const, state: body({ reasoning_opaque: "provider-state" }) };
+    const request: SemanticRequest = {
+      source: "chat", stream: false, instructions: [], tools: [], items: [{
+        type: "reasoning", parts: [{ presentation: "summary", index: 0, text: "visible" }], opaqueState: foreign,
+      }], degradations: [],
+    };
+    const encoded = PROTOCOL_REQUEST_CODECS[target].encode(request, { resolvedModel: "target", capability: capability([target]) });
+    expect(encoded.degradations).toEqual(target === "messages"
+      ? ["reasoning.state_omitted", "messages.leading_user_synthesized"]
+      : ["reasoning.state_omitted"]);
+    const wire = decoder.decode(encoded.bytes);
+    expect(wire).not.toContain(target === "chat" ? "hidden" : "provider-state");
+    if (target === "chat") expect(wire).toContain("\"reasoning_content\":\"visible\"");
+    if (target === "messages") expect(wire).toContain("\"thinking\":\"visible\"");
+    if (target === "responses") expect(wire).not.toContain("visible");
   });
 
   it("uses the configured/default/ceiling/unknown Messages token hierarchy without raising explicit budgets", () => {

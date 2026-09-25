@@ -2,8 +2,8 @@ import { isWireJsonArray, isWireJsonObject, type WireJson, type WireJsonObject }
 import { withMessagesCacheBreakpoints } from "../messages_cache_breakpoints.js";
 import { containsReasoningCarrier, isReasoningCarrier, type ReasoningCarrierRecord } from "../reasoning_carriers.js";
 import { decodeResponsesReasoningItem } from "../reasoning.js";
-import { type ConversionDegradationRule, type EncodedConversionRequest, type SemanticContent, type SemanticRequest, type SemanticRequestItem } from "../types.js";
-import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, positiveInteger, requiredArray, requiredString, unsupported, wireArray, wireNumber, wireObject } from "../wire.js";
+import { ConversionContractError, type ConversionDegradationRule, type EncodedConversionRequest, type SemanticContent, type SemanticRequest, type SemanticRequestItem } from "../types.js";
+import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, positiveInteger, requiredArray, requiredString, wireArray, wireNumber, wireObject } from "../wire.js";
 import { decodeMessagesImage, encodeMessagesContent } from "./content.js";
 import { decodeMessagesOutputFormat, encodeMessagesOutputConfig } from "./format.js";
 import { collectTargetInstructions, decodeMessagesSystem, encodeMessagesSystem } from "./instructions.js";
@@ -41,7 +41,12 @@ export function decodeMessagesRequest(body: WireJsonObject, carrierRecords?: Rea
   const instructions = decodeMessagesSystem(oneMember(body, "system", "REQ-M-SYSTEM"), degradations);
   const items: SemanticRequestItem[] = [];
   for (const value of requiredArray(oneMember(body, "messages", "REQ-M-MESSAGES"), "REQ-M-MESSAGES").items) {
-    decodeMessagesMessage(value, items, degradations, carrierRecords);
+    try {
+      decodeMessagesMessage(value, items, degradations, carrierRecords);
+    } catch (error: unknown) {
+      if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(value)) throw error;
+      degradations.add("messages.extensions_omitted");
+    }
   }
   if (oneMember(body, "top_k", "REQ-M-TOP-K") !== undefined) {
     positiveInteger(oneMember(body, "top_k", "REQ-M-TOP-K"), "REQ-M-TOP-K");
@@ -128,6 +133,7 @@ function decodeMessagesMessage(
     return;
   }
   if (role !== "user" && role !== "assistant") {
+    if (containsReasoningCarrier(message)) invalid("REQ-M-MESSAGE-ROLE");
     degradations.add("messages.extensions_omitted");
     return;
   }
@@ -148,99 +154,115 @@ function decodeMessagesMessage(
       degradations.add("messages.extensions_omitted");
       continue;
     }
-    let block = item;
-    const type = optionalDiscriminator(
-      oneMember(block, "type", "REQ-M-CONTENT-TYPE"),
-      "REQ-M-CONTENT-TYPE",
-      degradations,
-    );
-    if (type === undefined) continue;
-    if (type === "text") {
-      block = projectMessagesMembers(
-        block,
-        new Set(["type", "text", "cache_control"]),
-        "REQ-M-TEXT",
+    try {
+      let block = item;
+      const type = optionalDiscriminator(
+        oneMember(block, "type", "REQ-M-CONTENT-TYPE"),
+        "REQ-M-CONTENT-TYPE",
         degradations,
-        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
       );
-      if (oneMember(block, "cache_control", "REQ-M-TEXT-CACHE") !== undefined) {
-        validateCacheControl(oneMember(block, "cache_control", "REQ-M-TEXT-CACHE"), degradations);
-        degradations.add("cache.control_omitted");
+      if (type === undefined) {
+        if (containsReasoningCarrier(block)) invalid("REQ-M-CONTENT-TYPE");
+        continue;
       }
-      ordinary.push({
-        type: "text",
-        text: requiredString(oneMember(block, "text", "REQ-M-TEXT"), "REQ-M-TEXT", true),
-      });
-      continue;
-    }
-    if (type === "image") {
-      if (role !== "user") {
-        invalid("REQ-M-IMAGE-ROLE");
-      }
-      block = projectMessagesMembers(
-        block,
-        new Set(["type", "source", "cache_control"]),
-        "REQ-M-IMAGE",
-        degradations,
-        MESSAGES_SENSITIVE_EXTENSION_FIELDS,
-      );
-      if (oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE") !== undefined) {
-        validateCacheControl(oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE"), degradations);
-        degradations.add("cache.control_omitted");
-      }
-      const image = decodeMessagesImage(oneMember(block, "source", "REQ-M-IMAGE-SOURCE"), degradations);
-      if (image !== undefined) ordinary.push(image);
-      continue;
-    }
-    flushOrdinary();
-    if (type === "tool_use") {
-      if (role !== "assistant") {
-        invalid("REQ-M-TOOL-USE-ROLE");
-      }
-      output.push(decodeMessagesToolUse(block, degradations));
-      continue;
-    }
-    if (type === "tool_result") {
-      if (role !== "user") {
-        invalid("REQ-M-TOOL-RESULT-ROLE");
-      }
-      output.push(decodeMessagesToolResult(block, degradations));
-      continue;
-    }
-    if (type === "thinking" || type === "redacted_thinking") {
-      if (type === "thinking") {
+      if (type === "text") {
         block = projectMessagesMembers(
           block,
-          new Set(["type", "thinking", "signature"]),
-          "REQ-M-THINKING-BLOCK",
+          new Set(["type", "text", "cache_control"]),
+          "REQ-M-TEXT",
           degradations,
+          MESSAGES_SENSITIVE_EXTENSION_FIELDS,
         );
-        requiredString(oneMember(block, "thinking", "REQ-M-THINKING-TEXT"), "REQ-M-THINKING-TEXT", true);
-        const signature = optionalString(oneMember(block, "signature", "REQ-M-THINKING-SIGNATURE"), "REQ-M-THINKING-SIGNATURE");
-        if (signature !== undefined && isReasoningCarrier(signature)) {
-          const record = requiredCarrier(carrierRecords, signature, "responses_item", "REQ-M-THINKING-SIGNATURE");
-          const state = carrierState(record, "REQ-M-THINKING-SIGNATURE");
-          const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-THINKING-SIGNATURE"));
-          requireProjection(record, messagesReasoningProjection(block), "REQ-M-THINKING-SIGNATURE");
-          output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
-          continue;
+        if (oneMember(block, "cache_control", "REQ-M-TEXT-CACHE") !== undefined) {
+          validateCacheControl(oneMember(block, "cache_control", "REQ-M-TEXT-CACHE"), degradations);
+          degradations.add("cache.control_omitted");
         }
-      } else {
-        block = projectMessagesMembers(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING", degradations);
-        const data = requiredString(oneMember(block, "data", "REQ-M-REDACTED-DATA"), "REQ-M-REDACTED-DATA", true);
-        if (isReasoningCarrier(data)) {
-          const record = requiredCarrier(carrierRecords, data, "responses_item", "REQ-M-REDACTED-DATA");
-          const state = carrierState(record, "REQ-M-REDACTED-DATA");
-          const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-REDACTED-DATA"));
-          requireProjection(record, messagesReasoningProjection(block), "REQ-M-REDACTED-DATA");
-          output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
-          continue;
-        }
+        ordinary.push({
+          type: "text",
+          text: requiredString(oneMember(block, "text", "REQ-M-TEXT"), "REQ-M-TEXT", true),
+        });
+        continue;
       }
-      degradations.add(type === "thinking" ? "reasoning.presentation_omitted" : "reasoning.state_omitted");
-      continue;
+      if (type === "image") {
+        if (role !== "user") {
+          if (containsReasoningCarrier(block)) invalid("REQ-M-IMAGE-ROLE");
+          degradations.add("messages.extensions_omitted");
+          continue;
+        }
+        block = projectMessagesMembers(
+          block,
+          new Set(["type", "source", "cache_control"]),
+          "REQ-M-IMAGE",
+          degradations,
+          MESSAGES_SENSITIVE_EXTENSION_FIELDS,
+        );
+        if (oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE") !== undefined) {
+          validateCacheControl(oneMember(block, "cache_control", "REQ-M-IMAGE-CACHE"), degradations);
+          degradations.add("cache.control_omitted");
+        }
+        const image = decodeMessagesImage(oneMember(block, "source", "REQ-M-IMAGE-SOURCE"), degradations);
+        if (image !== undefined) ordinary.push(image);
+        continue;
+      }
+      flushOrdinary();
+      if (type === "tool_use") {
+        if (role !== "assistant") {
+          if (containsReasoningCarrier(block)) invalid("REQ-M-TOOL-USE-ROLE");
+          degradations.add("messages.extensions_omitted");
+          continue;
+        }
+        output.push(decodeMessagesToolUse(block, degradations));
+        continue;
+      }
+      if (type === "tool_result") {
+        if (role !== "user") {
+          if (containsReasoningCarrier(block)) invalid("REQ-M-TOOL-RESULT-ROLE");
+          degradations.add("messages.extensions_omitted");
+          continue;
+        }
+        output.push(decodeMessagesToolResult(block, degradations));
+        continue;
+      }
+      if (type === "thinking" || type === "redacted_thinking") {
+        if (type === "thinking") {
+          block = projectMessagesMembers(
+            block,
+            new Set(["type", "thinking", "signature"]),
+            "REQ-M-THINKING-BLOCK",
+            degradations,
+          );
+          requiredString(oneMember(block, "thinking", "REQ-M-THINKING-TEXT"), "REQ-M-THINKING-TEXT", true);
+          const signature = optionalString(oneMember(block, "signature", "REQ-M-THINKING-SIGNATURE"), "REQ-M-THINKING-SIGNATURE");
+          if (signature !== undefined && isReasoningCarrier(signature)) {
+            const record = requiredCarrier(carrierRecords, signature, "responses_item", "REQ-M-THINKING-SIGNATURE");
+            const state = carrierState(record, "REQ-M-THINKING-SIGNATURE");
+            const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-THINKING-SIGNATURE"));
+            requireProjection(record, messagesReasoningProjection(block), "REQ-M-THINKING-SIGNATURE");
+            output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
+            continue;
+          }
+        } else {
+          block = projectMessagesMembers(block, new Set(["type", "data"]), "REQ-M-REDACTED-THINKING", degradations);
+          const data = requiredString(oneMember(block, "data", "REQ-M-REDACTED-DATA"), "REQ-M-REDACTED-DATA", true);
+          if (isReasoningCarrier(data)) {
+            const record = requiredCarrier(carrierRecords, data, "responses_item", "REQ-M-REDACTED-DATA");
+            const state = carrierState(record, "REQ-M-REDACTED-DATA");
+            const reasoningItem = decodeResponsesReasoningItem(state, () => invalid("REQ-M-REDACTED-DATA"));
+            requireProjection(record, messagesReasoningProjection(block), "REQ-M-REDACTED-DATA");
+            output.push({ type: "reasoning", parts: reasoningItem.parts, opaqueState: { kind: "responses_item", item: state } });
+            continue;
+          }
+        }
+        if (containsReasoningCarrier(block)) invalid(type === "thinking" ? "REQ-M-THINKING-SIGNATURE" : "REQ-M-REDACTED-DATA");
+        degradations.add(type === "thinking" ? "reasoning.presentation_omitted" : "reasoning.state_omitted");
+        continue;
+      }
+      if (containsReasoningCarrier(block)) invalid("REQ-M-CONTENT-TYPE");
+      degradations.add("messages.extensions_omitted");
+    } catch (error: unknown) {
+      if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(item)) throw error;
+      degradations.add("messages.extensions_omitted");
     }
-    degradations.add("messages.extensions_omitted");
   }
   flushOrdinary();
 }
@@ -295,7 +317,7 @@ export function encodeMessagesRequest(
     targetTemperature = 1;
     targetDegradations.add("request.option_omitted");
   }
-  const messages = encodeMessagesItems(targetRequest.items);
+  const messages = encodeMessagesItems(targetRequest.items, targetDegradations);
   if (!messages.some(hasSubstantiveMessagesTurn) || !hasSubstantiveLeadingMessagesUser(messages)) {
     if (messages[0] !== undefined && oneMember(messages[0], "role", "REQ-INTERNAL") === "user") {
       messages[0] = syntheticMessagesLeadingUser();
@@ -322,7 +344,10 @@ export function encodeMessagesRequest(
   return encodedRequest(targetRequest, body, [...targetDegradations]);
 }
 
-function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObject[] {
+function encodeMessagesItems(
+  items: readonly SemanticRequestItem[],
+  degradations: Set<ConversionDegradationRule>,
+): WireJsonObject[] {
   const output: WireJsonObject[] = [];
   for (const item of items) {
     if (item.type === "message") {
@@ -341,7 +366,12 @@ function encodeMessagesItems(items: readonly SemanticRequestItem[]): WireJsonObj
         }
         continue;
       }
-      if (item.opaqueState.kind !== "messages_block") unsupported("REQ-TARGET-M-REASONING-STATE");
+      if (item.opaqueState.kind !== "messages_block") {
+        degradations.add("reasoning.state_omitted");
+        const text = item.parts.map((part) => part.text).join("");
+        if (text.length > 0) pushMessagesRole(output, "assistant", [wireObject([["type", "thinking"], ["thinking", text]])]);
+        continue;
+      }
       pushMessagesRole(output, "assistant", [item.opaqueState.block]);
       continue;
     }

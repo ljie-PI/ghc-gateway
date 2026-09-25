@@ -3,8 +3,8 @@ import { containsReasoningCarrier, isReasoningCarrier, type ReasoningCarrierReco
 import { decodeResponsesReasoningItem } from "../reasoning.js";
 import { projectIndependentOption } from "../request_projection.js";
 import { prepareResponsesExtendedTools } from "./responses_extended_tools.js";
-import { type ConversionDegradationRule, type EncodedConversionRequest, type SemanticRequest, type SemanticRequestItem } from "../types.js";
-import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, requiredString, unsupported, wireArray, wireNumber, wireObject } from "../wire.js";
+import { ConversionContractError, type ConversionDegradationRule, type EncodedConversionRequest, type SemanticRequest, type SemanticRequestItem } from "../types.js";
+import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, requiredString, wireArray, wireNumber, wireObject } from "../wire.js";
 import { decodeResponsesContent, decodeToolResultContent, encodeResponsesContent, encodeResponsesToolResultContent, textContent } from "./content.js";
 import { decodeResponsesOutputFormat, encodeResponsesOutputFormat, sanitizeResponsesOutputFormatMembers } from "./format.js";
 import { decodeResponsesInstructions } from "./instructions.js";
@@ -218,149 +218,156 @@ function decodeResponsesInput(
       degradations.add("responses.extensions_omitted");
       continue;
     }
-    let object = item;
-    const rawType = oneMember(object, "type", "REQ-R-INPUT-TYPE");
-    if (rawType !== undefined && (typeof rawType !== "string" || rawType.length === 0)) {
-      if (containsReasoningCarrier(object)) invalid("REQ-R-INPUT-TYPE");
-      degradations.add("responses.extensions_omitted");
-      continue;
-    }
-    const type = rawType as string | undefined;
-    if (type === undefined || type === "message") {
-      const role = requiredString(oneMember(object, "role", "REQ-R-MESSAGE-ROLE"), "REQ-R-MESSAGE-ROLE");
-      if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
+    try {
+      let object = item;
+      const rawType = oneMember(object, "type", "REQ-R-INPUT-TYPE");
+      if (rawType !== undefined && (typeof rawType !== "string" || rawType.length === 0)) {
+        if (containsReasoningCarrier(object)) invalid("REQ-R-INPUT-TYPE");
         degradations.add("responses.extensions_omitted");
         continue;
       }
-      object = projectRequestMembers(
-        object,
-        new Set(["type", "id", "role", "content", "status", ...(role === "assistant" ? ["phase"] : [])]),
-        "REQ-R-MESSAGE",
-        "responses.extensions_omitted",
-        degradations,
-      );
-      if (role === "assistant") {
-        const phase = oneMember(object, "phase", "REQ-R-ASSISTANT-PHASE");
-        if (phase !== undefined && phase !== null) {
-          if (containsReasoningCarrier(phase)) invalid("REQ-R-ASSISTANT-PHASE");
-          degradations.add("request.option_omitted");
+      const type = rawType as string | undefined;
+      if (type === undefined || type === "message") {
+        const role = requiredString(oneMember(object, "role", "REQ-R-MESSAGE-ROLE"), "REQ-R-MESSAGE-ROLE");
+        if (role !== "system" && role !== "developer" && role !== "user" && role !== "assistant") {
+          if (containsReasoningCarrier(object)) invalid("REQ-R-MESSAGE-ROLE");
+          degradations.add("responses.extensions_omitted");
+          continue;
         }
+        object = projectRequestMembers(
+          object,
+          new Set(["type", "id", "role", "content", "status", ...(role === "assistant" ? ["phase"] : [])]),
+          "REQ-R-MESSAGE",
+          "responses.extensions_omitted",
+          degradations,
+        );
+        if (role === "assistant") {
+          const phase = oneMember(object, "phase", "REQ-R-ASSISTANT-PHASE");
+          if (phase !== undefined && phase !== null) {
+            if (containsReasoningCarrier(phase)) invalid("REQ-R-ASSISTANT-PHASE");
+            degradations.add("request.option_omitted");
+          }
+        }
+        output.push({
+          type: "message",
+          role,
+          content: decodeResponsesContent(
+            oneMember(object, "content", "REQ-R-MESSAGE-CONTENT"),
+            role === "user",
+            role === "assistant",
+            degradations,
+          ),
+        });
+        omitPresentationString(oneMember(object, "id", "REQ-R-MESSAGE-ID"), degradations);
+        omitPresentationStatus(oneMember(object, "status", "REQ-R-MESSAGE-STATUS"), false, degradations);
+        continue;
       }
-      output.push({
-        type: "message",
-        role,
-        content: decodeResponsesContent(
-          oneMember(object, "content", "REQ-R-MESSAGE-CONTENT"),
-          role === "user",
-          role === "assistant",
+      if (type === "function_call") {
+        object = projectRequestMembers(
+          object,
+          new Set(["type", "id", "call_id", "name", "arguments", "status"]),
+          "REQ-R-FUNCTION-CALL",
+          "responses.extensions_omitted",
           degradations,
-        ),
-      });
-      omitPresentationString(oneMember(object, "id", "REQ-R-MESSAGE-ID"), degradations);
-      omitPresentationStatus(oneMember(object, "status", "REQ-R-MESSAGE-STATUS"), false, degradations);
-      continue;
-    }
-    if (type === "function_call") {
-      object = projectRequestMembers(
-        object,
-        new Set(["type", "id", "call_id", "name", "arguments", "status"]),
-        "REQ-R-FUNCTION-CALL",
-        "responses.extensions_omitted",
-        degradations,
-        TOOL_SENSITIVE_EXTENSION_FIELDS,
-      );
-      const argumentsJson = requiredString(
-        oneMember(object, "arguments", "REQ-R-FUNCTION-ARGS"),
-        "REQ-R-FUNCTION-ARGS",
-        true,
-      );
-      validateArgumentsJson(argumentsJson, "REQ-R-FUNCTION-ARGS");
-      output.push({
-        type: "tool_call",
-        callId: requiredString(
-          oneMember(object, "call_id", "REQ-R-FUNCTION-CALL-ID"),
-          "REQ-R-FUNCTION-CALL-ID",
-        ),
-        name: requiredString(oneMember(object, "name", "REQ-R-FUNCTION-NAME"), "REQ-R-FUNCTION-NAME"),
-        argumentsJson,
-      });
-      omitPresentationString(oneMember(object, "id", "REQ-R-FUNCTION-ITEM-ID"), degradations);
-      omitPresentationStatus(oneMember(object, "status", "REQ-R-ITEM-STATUS"), false, degradations);
-      continue;
-    }
-    if (type === "function_call_output") {
-      object = projectRequestMembers(
-        object,
-        new Set(["type", "id", "call_id", "output", "status"]),
-        "REQ-R-FUNCTION-OUTPUT",
-        "responses.extensions_omitted",
-        degradations,
-        TOOL_SENSITIVE_EXTENSION_FIELDS,
-      );
-      output.push({
-        type: "tool_result",
-        callId: requiredString(
-          oneMember(object, "call_id", "REQ-R-FUNCTION-OUTPUT-ID"),
-          "REQ-R-FUNCTION-OUTPUT-ID",
-        ),
-        content: decodeToolResultContent(
-          oneMember(object, "output", "REQ-R-FUNCTION-OUTPUT-CONTENT"),
+          TOOL_SENSITIVE_EXTENSION_FIELDS,
+        );
+        const argumentsJson = requiredString(
+          oneMember(object, "arguments", "REQ-R-FUNCTION-ARGS"),
+          "REQ-R-FUNCTION-ARGS",
+          true,
+        );
+        validateArgumentsJson(argumentsJson, "REQ-R-FUNCTION-ARGS");
+        output.push({
+          type: "tool_call",
+          callId: requiredString(
+            oneMember(object, "call_id", "REQ-R-FUNCTION-CALL-ID"),
+            "REQ-R-FUNCTION-CALL-ID",
+          ),
+          name: requiredString(oneMember(object, "name", "REQ-R-FUNCTION-NAME"), "REQ-R-FUNCTION-NAME"),
+          argumentsJson,
+        });
+        omitPresentationString(oneMember(object, "id", "REQ-R-FUNCTION-ITEM-ID"), degradations);
+        omitPresentationStatus(oneMember(object, "status", "REQ-R-ITEM-STATUS"), false, degradations);
+        continue;
+      }
+      if (type === "function_call_output") {
+        object = projectRequestMembers(
+          object,
+          new Set(["type", "id", "call_id", "output", "status"]),
+          "REQ-R-FUNCTION-OUTPUT",
+          "responses.extensions_omitted",
           degradations,
-        ),
-        isError: independentResultStatus(
-          oneMember(object, "status", "REQ-R-FUNCTION-OUTPUT-STATUS"),
+          TOOL_SENSITIVE_EXTENSION_FIELDS,
+        );
+        output.push({
+          type: "tool_result",
+          callId: requiredString(
+            oneMember(object, "call_id", "REQ-R-FUNCTION-OUTPUT-ID"),
+            "REQ-R-FUNCTION-OUTPUT-ID",
+          ),
+          content: decodeToolResultContent(
+            oneMember(object, "output", "REQ-R-FUNCTION-OUTPUT-CONTENT"),
+            degradations,
+          ),
+          isError: independentResultStatus(
+            oneMember(object, "status", "REQ-R-FUNCTION-OUTPUT-STATUS"),
+            degradations,
+          ) === "failed",
+        });
+        omitPresentationString(oneMember(object, "id", "REQ-R-FUNCTION-OUTPUT-ITEM-ID"), degradations);
+        continue;
+      }
+      if (type === "reasoning") {
+        object = projectRequestMembers(
+          object,
+          new Set(["type", "id", "status", "summary", "content", "encrypted_content"]),
+          "REQ-R-REASONING-ITEM",
+          "responses.extensions_omitted",
           degradations,
-        ) === "failed",
-      });
-      omitPresentationString(oneMember(object, "id", "REQ-R-FUNCTION-OUTPUT-ITEM-ID"), degradations);
-      continue;
-    }
-    if (type === "reasoning") {
-      object = projectRequestMembers(
-        object,
-        new Set(["type", "id", "status", "summary", "content", "encrypted_content"]),
-        "REQ-R-REASONING-ITEM",
-        "responses.extensions_omitted",
-        degradations,
-      );
-      omitPresentationString(oneMember(object, "id", "REQ-R-REASONING-ID"), degradations);
-      omitPresentationStatus(oneMember(object, "status", "REQ-R-REASONING-STATUS"), false, degradations);
-      const reasoningCore = {
-        kind: "object" as const,
-        members: object.members.filter((member) => member.key !== "id" && member.key !== "status"),
-      };
-      const reasoning = decodeResponsesReasoningItem(
-        reasoningCore,
-        () => invalid("REQ-R-REASONING-ITEM"),
-        false,
-        true,
-        () => degradations.add("responses.extensions_omitted"),
-      );
-      const encrypted = oneMember(object, "encrypted_content", "REQ-R-REASONING-STATE");
-      if (typeof encrypted === "string" && isReasoningCarrier(encrypted)) {
-        const record = requiredCarrier(carrierRecords, encrypted, undefined, "REQ-R-REASONING-STATE");
-        const state = carrierState(record, "REQ-R-REASONING-STATE");
-        requireProjection(record, reasoningProjection(object), "REQ-R-REASONING-STATE");
-        if (record.sourceKind === "messages_block") {
-          output.push({ type: "reasoning", parts: reasoning.parts, opaqueState: { kind: "messages_block", block: state } });
-        } else if (record.sourceKind === "chat_state") {
-          output.push({ type: "reasoning", parts: reasoning.parts, opaqueState: { kind: "chat_state", state } });
-        } else {
-          invalid("REQ-R-REASONING-STATE");
+        );
+        omitPresentationString(oneMember(object, "id", "REQ-R-REASONING-ID"), degradations);
+        omitPresentationStatus(oneMember(object, "status", "REQ-R-REASONING-STATUS"), false, degradations);
+        const reasoningCore = {
+          kind: "object" as const,
+          members: object.members.filter((member) => member.key !== "id" && member.key !== "status"),
+        };
+        const reasoning = decodeResponsesReasoningItem(
+          reasoningCore,
+          () => invalid("REQ-R-REASONING-ITEM"),
+          false,
+          true,
+          () => degradations.add("responses.extensions_omitted"),
+        );
+        const encrypted = oneMember(object, "encrypted_content", "REQ-R-REASONING-STATE");
+        if (typeof encrypted === "string" && isReasoningCarrier(encrypted)) {
+          const record = requiredCarrier(carrierRecords, encrypted, undefined, "REQ-R-REASONING-STATE");
+          const state = carrierState(record, "REQ-R-REASONING-STATE");
+          requireProjection(record, reasoningProjection(object), "REQ-R-REASONING-STATE");
+          if (record.sourceKind === "messages_block") {
+            output.push({ type: "reasoning", parts: reasoning.parts, opaqueState: { kind: "messages_block", block: state } });
+          } else if (record.sourceKind === "chat_state") {
+            output.push({ type: "reasoning", parts: reasoning.parts, opaqueState: { kind: "chat_state", state } });
+          } else {
+            invalid("REQ-R-REASONING-STATE");
+          }
+          continue;
+        }
+        if (reasoning.parts.some((part) => part.text.length > 0)) {
+          output.push({ type: "reasoning", parts: reasoning.parts });
+          if (reasoning.hasOpaqueState) degradations.add("reasoning.state_omitted");
+          continue;
+        }
+        if (reasoning.hasOpaqueState) {
+          degradations.add("reasoning.state_omitted");
         }
         continue;
       }
-      if (reasoning.parts.some((part) => part.text.length > 0)) {
-        output.push({ type: "reasoning", parts: reasoning.parts });
-        if (reasoning.hasOpaqueState) degradations.add("reasoning.state_omitted");
-        continue;
-      }
-      if (reasoning.hasOpaqueState) {
-        degradations.add("reasoning.state_omitted");
-      }
-      continue;
+      if (containsReasoningCarrier(object)) invalid("REQ-R-INPUT-TYPE");
+      degradations.add("responses.extensions_omitted");
+    } catch (error: unknown) {
+      if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(item)) throw error;
+      degradations.add("responses.extensions_omitted");
     }
-    degradations.add("responses.extensions_omitted");
   }
   return output;
 }
@@ -425,7 +432,10 @@ function encodeResponsesItems(
         }))],
       ]));
     } else if (item.type === "reasoning") {
-      if (item.opaqueState?.kind !== "responses_item") unsupported("REQ-TARGET-R-REASONING-STATE");
+      if (item.opaqueState?.kind !== "responses_item") {
+        degradations.add("reasoning.state_omitted");
+        continue;
+      }
       output.push(item.opaqueState.item);
     } else if (item.type === "tool_call") {
       output.push(wireObject([

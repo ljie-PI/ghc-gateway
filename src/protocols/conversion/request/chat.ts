@@ -3,8 +3,8 @@ import { isWireJsonArray, isWireJsonObject, type WireJson, type WireJsonObject }
 import { TOOL_RESULT_MEDIA_REPLACEMENT, toolResultMediaReference } from "../compatibility_markers.js";
 import { containsReasoningCarrier, isReasoningCarrier, type ReasoningCarrierRecord } from "../reasoning_carriers.js";
 import { decodeChatReasoning, decodeResponsesReasoningItem } from "../reasoning.js";
-import { type ConversionDegradationRule, type EncodedConversionRequest, type SemanticImage, type SemanticRequest, type SemanticRequestItem, type SemanticToolResultItem } from "../types.js";
-import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, requiredArray, requiredString, unsupported, wireArray, wireNumber, wireObject } from "../wire.js";
+import { ConversionContractError, type ConversionDegradationRule, type EncodedConversionRequest, type SemanticImage, type SemanticRequest, type SemanticRequestItem, type SemanticToolResultItem } from "../types.js";
+import { finiteNumber, invalid, oneMember, optionalBoolean, optionalString, parseStringList, requiredArray, requiredString, wireArray, wireNumber, wireObject } from "../wire.js";
 import { decodeChatContent, encodeChatContent, encodeChatImage, textContent, toolResultText } from "./content.js";
 import { decodeChatOutputFormat, encodeChatOutputFormat } from "./format.js";
 import { aliasedPositiveInteger, decodeIndependentStreamOptions, outputBudget, parallelCallsForTarget, reasoningForTarget, reasoningFromEffort, validateSingleChoice } from "./limits.js";
@@ -50,7 +50,12 @@ export function decodeChatRequest(body: WireJsonObject, carrierRecords?: Readonl
   const items: SemanticRequestItem[] = [];
   const messages = requiredArray(oneMember(body, "messages", "REQ-C-MESSAGES"), "REQ-C-MESSAGES");
   for (const value of messages.items) {
-    decodeChatMessage(value, items, degradations, carrierRecords);
+    try {
+      decodeChatMessage(value, items, degradations, carrierRecords);
+    } catch (error: unknown) {
+      if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(value)) throw error;
+      degradations.add("chat.extensions_omitted");
+    }
   }
   const reasoning = reasoningFromEffort(
     optionalString(oneMember(body, "reasoning_effort", "REQ-C-REASONING"), "REQ-C-REASONING"),
@@ -214,14 +219,23 @@ function decodeChatMessage(
       "REQ-C-TOOL-CALLS",
       degradations,
     );
+    let decodedCall = false;
     if (calls !== undefined) {
       for (const call of calls.items) {
-        const decoded = decodeChatToolCall(call, degradations);
-        if (decoded !== undefined) output.push(decoded);
+        try {
+          const decoded = decodeChatToolCall(call, degradations);
+          if (decoded !== undefined) {
+            output.push(decoded);
+            decodedCall = true;
+          }
+        } catch (error: unknown) {
+          if (!(error instanceof ConversionContractError) || error.kind !== "invalid_request" || containsReasoningCarrier(call)) throw error;
+          degradations.add("chat.extensions_omitted");
+        }
       }
     }
-    if (combined.length === 0 && calls === undefined && !hasReasoningItems && visibleReasoning.text.length === 0) {
-      invalid("REQ-C-ASSISTANT-EMPTY");
+    if (combined.length === 0 && !decodedCall && !hasReasoningItems && visibleReasoning.text.length === 0) {
+      degradations.add("chat.extensions_omitted");
     }
     return;
   }
@@ -233,6 +247,8 @@ function decodeChatMessage(
       "chat.extensions_omitted",
       degradations,
     );
+    const toolContent = oneMember(message, "content", "REQ-C-TOOL-RESULT-CONTENT");
+    if (toolContent !== undefined && containsReasoningCarrier(toolContent)) invalid("REQ-C-TOOL-RESULT-CONTENT");
     output.push({
       type: "tool_result",
       callId: requiredString(
@@ -240,7 +256,7 @@ function decodeChatMessage(
         "REQ-C-TOOL-RESULT-ID",
       ),
       content: decodeChatContent(
-        oneMember(message, "content", "REQ-C-TOOL-RESULT-CONTENT"),
+        toolContent,
         false,
         false,
         degradations,
@@ -249,6 +265,7 @@ function decodeChatMessage(
     });
     return;
   }
+  if (containsReasoningCarrier(message)) invalid("REQ-C-MESSAGE-ROLE");
   degradations.add("chat.extensions_omitted");
 }
 
@@ -278,7 +295,7 @@ export function encodeChatRequest(
   if (!hasTools && targetRequest.toolChoice !== undefined) targetDegradations.add("request.option_omitted");
   if (!hasTools && targetRequest.parallelToolCalls !== undefined) targetDegradations.add("tools.parallel_control_omitted");
   let messages = targetRequest.responseBindings === undefined
-    ? encodeChatMessages(targetRequest)
+    ? encodeChatMessages(targetRequest, targetDegradations)
     : targetRequest.responseBindings.chatMessages;
   if (targetRequest.responseBindings !== undefined
     && !context.capability.capabilities.inputModalities.includes("image")) {
@@ -331,7 +348,10 @@ export function encodeChatRequest(
   return encodedRequest(targetRequest, body, [...targetDegradations]);
 }
 
-function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[] {
+function encodeChatMessages(
+  request: Readonly<SemanticRequest>,
+  degradations: Set<ConversionDegradationRule>,
+): WireJsonObject[] {
   const output: WireJsonObject[] = [];
   if (request.instructions.length > 0) {
     output.push(wireObject([["role", "system"], ["content", textContent(request.instructions) ?? ""]]));
@@ -368,7 +388,12 @@ function encodeChatMessages(request: Readonly<SemanticRequest>): WireJsonObject[
         }
         continue;
       }
-      if (item.opaqueState.kind !== "chat_state") unsupported("REQ-TARGET-C-REASONING-STATE");
+      if (item.opaqueState.kind !== "chat_state") {
+        degradations.add("reasoning.state_omitted");
+        const text = item.parts.map((part) => part.text).join("");
+        if (text.length > 0) output.push(wireObject([["role", "assistant"], ["content", null], ["reasoning_content", text]]));
+        continue;
+      }
       const last = output.at(-1);
       if (
         last === undefined
